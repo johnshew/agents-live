@@ -305,6 +305,16 @@ class TestUpdateCheck(unittest.TestCase):
         self.assertIn("uv tool upgrade agents-live", notice)
         self.assertIsNone(update_check.consume_notice("1.2.2", now=102))
         self.assertIsNone(update_check.consume_notice("1.2.3", now=102))
+        update_check.refresh(
+            now=200,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "1.2.4"},
+            })),
+        )
+        self.assertIn(
+            "1.2.4 is available",
+            update_check.consume_notice("1.2.2", now=201),
+        )
 
     def test_environment_and_user_config_opt_out(self) -> None:
         os.environ[update_check.NO_CHECK_ENV] = "1"

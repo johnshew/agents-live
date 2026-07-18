@@ -112,11 +112,11 @@ def refresh(
         releases = metadata.get("releases", {})
         if isinstance(releases, dict):
             candidates.extend(releases)
-        stable = [(parsed, str(value)) for value in candidates
-                  if (parsed := _version(value)) is not None]
-        if not stable:
+        stable_versions = [(parsed, str(value)) for value in candidates
+                           if (parsed := _version(value)) is not None]
+        if not stable_versions:
             raise ValueError("no stable semantic version in PyPI metadata")
-        result["latest_version"] = max(stable)[1]
+        result["latest_version"] = max(stable_versions)[1]
     except Exception as exc:
         result["error"] = type(exc).__name__
     return result if _write_cache(result) else None
