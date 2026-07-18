@@ -73,16 +73,18 @@ class _TempProject(unittest.TestCase):
         (agent_dir / f"{name}.md").write_text(body, encoding="utf-8")
 
 
-AGENT_DEFINITION = """---
+TEST_CRON_SCHEDULE = "0 6 * * *"
+AGENT_DEFINITION = f"""---
 description: Smoke fixture. Never delegate to this agent.
 disable-model-invocation: true
 runtime: none
 mode: plan
-schedule: "0 6 * * *"
+schedule: "{TEST_CRON_SCHEDULE}"
 pre-processor: Agents/handlers/prep.py
 ---
 Smoke fixture body.
 """
+FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
 class TestPathsResolver(_TempProject):
@@ -121,7 +123,7 @@ class TestAgentParsing(_TempProject):
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         config = headless.load_agent_config("smoke-fixture")
         self.assertEqual(config.name, "smoke-fixture")
-        self.assertEqual(config.schedule, ["0 6 * * *"])
+        self.assertEqual(config.schedule, [TEST_CRON_SCHEDULE])
 
     def test_unknown_runtime_fails_closed(self) -> None:
         self.write_agent("bad-runtime", AGENT_DEFINITION.replace("runtime: none",
@@ -132,8 +134,50 @@ class TestAgentParsing(_TempProject):
 
 class TestInvocationForms(_TempProject):
     def test_run_invocation_carries_name_token(self) -> None:
-        line = " ".join(headless.run_invocation("t"))
+        line = f"{TEST_CRON_SCHEDULE} cd {self.root} && " + " ".join(
+            headless.run_invocation("t"))
         self.assertTrue(headless.cron_line_matches(line, "t"))
+
+    def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
+        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
+                "--name shared --quiet")
+        watcher = headless.build_reboot_watcher_line("shared")
+        self.assertTrue(headless.cron_line_matches(cron, "shared"))
+        self.assertFalse(headless.cron_line_matches(
+            cron.replace(str(self.root), FOREIGN_REPO), "shared"))
+        with mock.patch.object(
+                headless, "current_crontab_lines",
+                return_value=[watcher.replace(str(self.root), FOREIGN_REPO)]):
+            self.assertEqual(headless.list_reboot_watcher_agent_names(), [])
+
+    def test_crontab_lock_fails_fast_when_busy(self) -> None:
+        with mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}):
+            with headless.crontab_lock():
+                with self.assertRaisesRegex(
+                        headless.AgentsLiveError, "crontab is busy"):
+                    with headless.crontab_lock():
+                        self.fail("contended lock was acquired")
+
+    def test_removal_preserves_foreign_same_named_entries(self) -> None:
+        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
+                "--name shared --quiet")
+        watcher = headless.build_reboot_watcher_line("shared")
+        foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
+        foreign_watcher = watcher.replace(str(self.root), FOREIGN_REPO)
+        with (
+            mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
+            mock.patch.object(
+                headless, "current_crontab_lines",
+                side_effect=[[foreign_cron, cron], [foreign_watcher, watcher]]),
+            mock.patch.object(headless, "install_crontab") as install,
+        ):
+            self.assertTrue(headless.remove_cron_entries("shared"))
+            self.assertTrue(headless.remove_watcher_reboot_line("shared"))
+        self.assertEqual(
+            install.call_args_list,
+            [mock.call([foreign_cron]), mock.call([foreign_watcher])])
 
     def test_reboot_line_round_trips_agent_name(self) -> None:
         line = headless.build_reboot_watcher_line("t")
@@ -150,17 +194,26 @@ class TestMigratePlanning(_TempProject):
 
     def test_stale_line_planned_for_rewrite(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        stale = (f"0 6 * * * cd {self.root} && /usr/bin/uv run --script "
+        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && "
+                 f"/usr/bin/uv run --script "
                  f"{self.root}/old/run.py --name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([stale])
         self.assertIn("smoke-fixture", plan["schedule"])
 
     def test_undefined_agent_is_reported_not_planned(self) -> None:
-        line = (f"0 6 * * * cd {self.root} && uv run --script x.py "
+        line = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script x.py "
                 f"--name ghost-agent --quiet 2>&1")
         plan = migrate.plan_migration([line])
         self.assertEqual(plan["schedule"], {})
         self.assertIn("ghost-agent", plan["missing"])
+
+    def test_foreign_same_named_entries_are_not_migrated(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        foreign = (f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && "
+                   f"agents-live --repo {FOREIGN_REPO} run "
+                   "--name smoke-fixture --quiet 2>&1")
+        plan = migrate.plan_migration([foreign])
+        self.assertEqual(plan, {"schedule": {}, "watcher": {}, "missing": []})
 
 
 class TestAdapterRegistry(unittest.TestCase):

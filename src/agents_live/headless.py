@@ -28,6 +28,7 @@ layer can use it without a dependency cycle.
 """
 from __future__ import annotations
 
+import fcntl
 import glob
 import hashlib
 import json
@@ -42,11 +43,12 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -151,6 +153,8 @@ __all__ = [
     # host trigger state (cron + watchers)
     "current_crontab_lines",
     "install_crontab",
+    "crontab_lock",
+    "crontab_line_belongs_to_repo",
     "cron_line_matches",
     "remove_cron_entries",
     "cron_is_active",
@@ -597,7 +601,8 @@ def run_invocation(name: str) -> list[str]:
     fire time depends on ambient state (§3.4.2 self-contained crontab
     lines). Flat checkout: the classic ``uv run --script run.py`` form
     (retired at the F7 flip via ``migrate``). Both forms carry the
-    ``--name <name>`` token pair that :func:`cron_line_matches` keys on.
+    repo root and ``--name <name>`` tokens that :func:`cron_line_matches`
+    keys on.
     """
     if packaged_execution():
         return [str(cli_shim_path()), "--repo", str(repo_root()),
@@ -628,7 +633,7 @@ def _watcher_reboot_line_matches(line: str, name: str) -> bool:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
-    return any(
+    return crontab_line_belongs_to_repo(line) and any(
         first == "--ensure-watcher" and second == name
         for first, second in zip(tokens, tokens[1:])
     )
@@ -659,6 +664,8 @@ def list_reboot_watcher_agent_names() -> list[str]:
     lines = current_crontab_lines() or []
     names: list[str] = []
     for line in lines:
+        if not crontab_line_belongs_to_repo(line):
+            continue
         agent_name = _reboot_watcher_line_agent_name(line)
         if agent_name is not None:
             names.append(agent_name)
@@ -682,25 +689,27 @@ def install_watcher_reboot_line(name: str) -> str:
     """
     new_line = build_reboot_watcher_line(name)
     path_line = f"PATH={clean_path()}"
-    lines = [line for line in (current_crontab_lines() or [])
-             if not _watcher_reboot_line_matches(line, name)
-             and not line.startswith("PATH=")]
-    lines.insert(0, path_line)
-    lines.append(new_line)
-    install_crontab(lines)
+    with crontab_lock():
+        lines = [line for line in (current_crontab_lines() or [])
+                 if not _watcher_reboot_line_matches(line, name)
+                 and not line.startswith("PATH=")]
+        lines.insert(0, path_line)
+        lines.append(new_line)
+        install_crontab(lines)
     return new_line
 
 
 def remove_watcher_reboot_line(name: str) -> bool:
     """Remove the @reboot respawn line for a watcher. Returns True if removed."""
-    lines = current_crontab_lines()
-    if lines is None:
-        raise AgentsLiveError("crontab is not accessible")
-    filtered = [line for line in lines if not _watcher_reboot_line_matches(line, name)]
-    if len(filtered) == len(lines):
-        return False
-    install_crontab(filtered)
-    return True
+    with crontab_lock():
+        lines = current_crontab_lines()
+        if lines is None:
+            raise AgentsLiveError("crontab is not accessible")
+        filtered = [line for line in lines if not _watcher_reboot_line_matches(line, name)]
+        if len(filtered) == len(lines):
+            return False
+        install_crontab(filtered)
+        return True
 
 
 def ensure_logs_dir() -> Path:
@@ -2501,31 +2510,66 @@ def install_crontab(lines: list[str]) -> None:
         raise AgentsLiveError(stderr) from exc
 
 
-def cron_line_matches(line: str, name: str) -> bool:
-    """Return True if a crontab line carries the exact ``--name <name>`` pair.
+@contextmanager
+def crontab_lock() -> Iterator[None]:
+    """Fail fast if another agents-live process is mutating the user crontab."""
+    state_home = Path(
+        os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    lock_path = state_home / "agents-live" / "crontab.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Never truncate or replace the inode another process may have locked.
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise AgentsLiveError(
+                "crontab is busy; another agents-live process is updating it; retry"
+            ) from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    Exact-token matching prevents an agent name that is a substring of another
-    (e.g. ``todo`` vs ``todo-push``) from matching the wrong entry.
+
+def crontab_line_belongs_to_repo(line: str) -> bool:
+    """Return whether a persisted trigger line names the current repo root."""
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+    root = str(repo_root())
+    return any(
+        first in {"cd", "--repo"} and second == root
+        for first, second in zip(tokens, tokens[1:])
+    )
+
+
+def cron_line_matches(line: str, name: str) -> bool:
+    """Return whether a current-repo line carries exact ``--name <name>``.
+
+    Exact repo and name tokens prevent collisions with other projects and with
+    agent names that are substrings of one another (``todo`` vs ``todo-push``).
     """
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
-    return any(
+    return crontab_line_belongs_to_repo(line) and any(
         first == "--name" and second == name
         for first, second in zip(tokens, tokens[1:])
     )
 
 
 def remove_cron_entries(name: str) -> bool:
-    lines = current_crontab_lines()
-    if lines is None:
-        raise AgentsLiveError("crontab is not accessible")
-    filtered = [line for line in lines if not cron_line_matches(line, name)]
-    if len(filtered) == len(lines):
-        return False
-    install_crontab(filtered)
-    return True
+    with crontab_lock():
+        lines = current_crontab_lines()
+        if lines is None:
+            raise AgentsLiveError("crontab is not accessible")
+        filtered = [line for line in lines if not cron_line_matches(line, name)]
+        if len(filtered) == len(lines):
+            return False
+        install_crontab(filtered)
+        return True
 
 
 def cron_is_active(name: str) -> bool | None:
@@ -2543,7 +2587,7 @@ def _cron_line_agent_name(line: str) -> str | None:
     without knowing the name in advance. Only lines that invoke the run
     script qualify, so unrelated crontab entries are ignored.
     """
-    if "run.py" not in line:
+    if "run.py" not in line or not crontab_line_belongs_to_repo(line):
         return None
     try:
         tokens = shlex.split(line)

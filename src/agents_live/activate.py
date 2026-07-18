@@ -24,6 +24,7 @@ from .headless import (
     AgentConfig,
     AgentsLiveError,
     clean_path,
+    crontab_lock,
     cron_line_matches,
     current_crontab_lines,
     ensure_logs_dir,
@@ -162,11 +163,12 @@ def install_cron_agent(name: str) -> str:
     # entries for sibling agents whose name contains this one (todo vs
     # todo-push), or arbitrary entries when the name appears in the repo
     # or script path.
-    lines = [line for line in (current_crontab_lines() or [])
-             if not cron_line_matches(line, name) and not line.startswith("PATH=")]
-    lines.insert(0, path_line)
-    lines.extend(new_cron_lines)
-    install_crontab(lines)
+    with crontab_lock():
+        lines = [line for line in (current_crontab_lines() or [])
+                 if not cron_line_matches(line, name) and not line.startswith("PATH=")]
+        lines.insert(0, path_line)
+        lines.extend(new_cron_lines)
+        install_crontab(lines)
     return "; ".join(new_cron_lines)
 
 
