@@ -132,8 +132,52 @@ class TestAgentParsing(_TempProject):
 
 class TestInvocationForms(_TempProject):
     def test_run_invocation_carries_name_token(self) -> None:
-        line = " ".join(headless.run_invocation("t"))
+        line = f"0 6 * * * cd {self.root} && " + " ".join(
+            headless.run_invocation("t"))
         self.assertTrue(headless.cron_line_matches(line, "t"))
+
+    def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
+        cron = (f"0 6 * * * cd {self.root} && agents-live run "
+                "--name shared --quiet")
+        watcher = headless.build_reboot_watcher_line("shared")
+        foreign = "/tmp/foreign-agents-live-project"
+        self.assertTrue(headless.cron_line_matches(cron, "shared"))
+        self.assertFalse(headless.cron_line_matches(
+            cron.replace(str(self.root), foreign), "shared"))
+        with mock.patch.object(
+                headless, "current_crontab_lines",
+                return_value=[watcher.replace(str(self.root), foreign)]):
+            self.assertEqual(headless.list_reboot_watcher_agent_names(), [])
+
+    def test_crontab_lock_fails_fast_when_busy(self) -> None:
+        with mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}):
+            with headless.crontab_lock():
+                with self.assertRaisesRegex(
+                        headless.AgentsLiveError, "crontab is busy"):
+                    with headless.crontab_lock():
+                        self.fail("contended lock was acquired")
+
+    def test_removal_preserves_foreign_same_named_entries(self) -> None:
+        cron = (f"0 6 * * * cd {self.root} && agents-live run "
+                "--name shared --quiet")
+        watcher = headless.build_reboot_watcher_line("shared")
+        foreign = "/tmp/foreign-agents-live-project"
+        foreign_cron = cron.replace(str(self.root), foreign)
+        foreign_watcher = watcher.replace(str(self.root), foreign)
+        with (
+            mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
+            mock.patch.object(
+                headless, "current_crontab_lines",
+                side_effect=[[foreign_cron, cron], [foreign_watcher, watcher]]),
+            mock.patch.object(headless, "install_crontab") as install,
+        ):
+            self.assertTrue(headless.remove_cron_entries("shared"))
+            self.assertTrue(headless.remove_watcher_reboot_line("shared"))
+        self.assertEqual(
+            install.call_args_list,
+            [mock.call([foreign_cron]), mock.call([foreign_watcher])])
 
     def test_reboot_line_round_trips_agent_name(self) -> None:
         line = headless.build_reboot_watcher_line("t")
@@ -161,6 +205,14 @@ class TestMigratePlanning(_TempProject):
         plan = migrate.plan_migration([line])
         self.assertEqual(plan["schedule"], {})
         self.assertIn("ghost-agent", plan["missing"])
+
+    def test_foreign_same_named_entries_are_not_migrated(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        foreign = (f"0 6 * * * cd /tmp/foreign-agents-live-project && "
+                   "agents-live --repo /tmp/foreign-agents-live-project run "
+                   "--name smoke-fixture --quiet 2>&1")
+        plan = migrate.plan_migration([foreign])
+        self.assertEqual(plan, {"schedule": {}, "watcher": {}, "missing": []})
 
 
 class TestAdapterRegistry(unittest.TestCase):

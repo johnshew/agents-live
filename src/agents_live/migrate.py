@@ -36,7 +36,6 @@ from .headless import (
     cron_line_matches,
     find_watcher_pid,
     install_watcher_reboot_line,
-    repo_root,
     stop_watcher,
     agent_file_exists,
 )
@@ -61,11 +60,10 @@ def plan_migration(lines: list[str]) -> dict:
     are line lists (old == new entries are omitted)."""
     from . import activate
 
-    repo_marker = str(repo_root())
     schedule_names: set[str] = set()
     watcher_names: set[str] = set()
     for line in lines:
-        if repo_marker not in line:
+        if not headless.crontab_line_belongs_to_repo(line):
             continue
         name = _token_pair_value(line, "--name")
         if name:
@@ -95,7 +93,8 @@ def plan_migration(lines: list[str]) -> dict:
                 plan["missing"].append(name)
             continue
         old = [l for l in lines
-               if _token_pair_value(l, "--ensure-watcher") == name]
+               if headless.crontab_line_belongs_to_repo(l)
+               and _token_pair_value(l, "--ensure-watcher") == name]
         new = [build_reboot_watcher_line(name)]
         if sorted(old) != sorted(new):
             plan["watcher"][name] = (old, new)
