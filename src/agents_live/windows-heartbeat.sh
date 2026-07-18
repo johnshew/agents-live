@@ -9,7 +9,11 @@ if [[ ! -x "$CLI" ]]; then
     echo "windows-heartbeat.sh: agents-live uv shim not found: $CLI" >&2
     exit 1
 fi
+if [[ -z "${WSL_DISTRO_NAME:-}" ]]; then
+    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; run agents-live heartbeat install --distro <name>" >&2
+    exit 1
+fi
 # A legacy task reaches this wrapper after an upgrade. Installing the
 # canonical task verifies its beacon before removing the task currently
 # running this wrapper, so migration needs no manual task deletion.
-exec "$CLI" heartbeat install --distro "${WSL_DISTRO_NAME:?WSL_DISTRO_NAME is not set}"
+exec "$CLI" heartbeat install --distro "$WSL_DISTRO_NAME"

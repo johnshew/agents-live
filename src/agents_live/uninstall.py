@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
 import shutil
 import subprocess
 
@@ -16,11 +18,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         heartbeat.uninstall(args.distro, retain_state=args.retain_state)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        selected = args.distro or "<name>"
+        selected = (
+            args.distro or os.environ.get("WSL_DISTRO_NAME")
+            or "<your-distro-name>")
         print(
             f"error: host cleanup failed; agents-live remains installed: {exc}\n"
             "recovery: "
-            f"uvx agents-live heartbeat uninstall --distro {selected}",
+            "uvx agents-live heartbeat uninstall --distro "
+            f"{shlex.quote(selected)}",
             file=__import__("sys").stderr)
         return 1
     uv = shutil.which("uv")
