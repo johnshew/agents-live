@@ -295,7 +295,10 @@ def main(argv: list[str] | None = None) -> int:
             script, rest = "timeline.py", rest[1:]
         uv = shutil.which("uv") or "uv"
         completed = subprocess.run(
-            [uv, "run", "--script", str(SCRIPT_DIR / script), *rest])
+            [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
+            capture_output=False,
+            check=False,
+        )
         return _finish(completed.returncode, cmd, rest, json_mode=json_mode)
 
     if cmd not in IN_PROCESS:
