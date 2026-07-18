@@ -210,11 +210,13 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
         ):
             self.assertEqual(prereqs.main([]), 0)
+        refresh.assert_called_once()
         status.assert_called_once()
 
     def test_doctor_json_suppresses_cached_update_result(self) -> None:
@@ -225,10 +227,12 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(update_check, "status_text") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
         ):
             self.assertEqual(prereqs.main(["--json"]), 0)
+        refresh.assert_called_once()
         status.assert_not_called()
 
 
