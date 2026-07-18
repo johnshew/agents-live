@@ -144,7 +144,7 @@ def build_cron_lines(name: str) -> list[str]:
     # cron); emit one crontab line per entry. They all carry the same
     # `--name`, so cron_line_matches removes and re-adds them as a group.
     # PATH rides inside each line (§3.4.2 self-contained crontab lines) so
-    # no global PATH= line — which the user or another project may own —
+    # no global PATH= line - which the user or another project may own -
     # ever needs to be touched.
     path_prefix = f"PATH={shlex.quote(clean_path())}"
     return [
@@ -464,7 +464,7 @@ def watch_loop(name: str) -> int:
                 while True:
                     raw = os.read(fd, 8192)
                     if not raw:
-                        # EOF — inotifywait exited
+                        # EOF - inotifywait exited
                         inotify_stderr = ""
                         if process.stderr:
                             try:
@@ -545,7 +545,7 @@ def watch_loop(name: str) -> int:
                 except (BlockingIOError, IOError):
                     break
 
-            # Deduplicate, keep all unique changed files — convert to repo-relative paths
+            # Deduplicate, keep all unique changed files - convert to repo-relative paths
             root = repo_root()
             unique_files = list(dict.fromkeys(changed_files))
             relative_files = []
@@ -556,7 +556,7 @@ def watch_loop(name: str) -> int:
                     relative_files.append(f)
             # Content-hash cascade guard: drop individual files whose
             # content hasn't changed since the last dispatch for this agent.
-            # Only active within CASCADE_WINDOW_SECS of the last dispatch —
+            # Only active within CASCADE_WINDOW_SECS of the last dispatch -
             # outside the window, every event dispatches (so touch works).
             cached = _load_watch_hashes(name)
             cached_hashes: dict[str, str] = cached.get("files", {})
@@ -575,7 +575,7 @@ def watch_loop(name: str) -> int:
                     else:
                         actually_changed.append(f)
                 else:
-                    # Can't hash (deleted/unreadable) — keep it in the batch
+                    # Can't hash (deleted/unreadable) - keep it in the batch
                     actually_changed.append(f)
 
             if hash_skipped:
@@ -672,7 +672,7 @@ def activate_watcher(name: str) -> int:
     ensure_logs_dir()
     if packaged_execution():
         # Packaged install: activate.py is a package module (relative
-        # imports), so it cannot run as a standalone uv script — re-enter
+        # imports), so it cannot run as a standalone uv script - re-enter
         # through the CLI shim, mirroring ensure_watcher_invocation().
         loop_argv = [str(cli_shim_path()), "--repo", str(repo_root()),
                      "start", "--watch-loop", name]
@@ -691,7 +691,7 @@ def activate_watcher(name: str) -> int:
 
     time.sleep(1)
     if process.poll() is not None:
-        # Process died — capture stderr and log it
+        # Process died - capture stderr and log it
         stderr_text = ""
         if process.stderr:
             stderr_text = process.stderr.read().strip()
@@ -704,7 +704,7 @@ def activate_watcher(name: str) -> int:
             f"watcher process exited immediately with status {process.returncode}"
             + (f": {stderr_text[:200]}" if stderr_text else ""))
 
-    # Process is alive — close our end of the pipe.
+    # Process is alive - close our end of the pipe.
     # watch_loop has already redirected sys.stderr to StringIO,
     # so nothing writes to fd2 after startup.
     if process.stderr:

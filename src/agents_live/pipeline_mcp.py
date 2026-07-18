@@ -1,4 +1,4 @@
-"""Pipeline MCP — schema-validated side channel for agents-live pipelines.
+"""Pipeline MCP - schema-validated side channel for agents-live pipelines.
 
 In-process MCP server that exposes a tiny path-addressed surface:
 ``put(path, value)`` and ``get(path)``. All three pipeline
@@ -7,11 +7,11 @@ over localhost HTTP and exchange JSON values keyed by path.
 
 Reserved ``$``-suffixed sub-paths attach metadata to the parent path:
 
-  * ``/<path>/$schema`` — binds a JSON Schema to ``<path>``. Value must
+  * ``/<path>/$schema`` - binds a JSON Schema to ``<path>``. Value must
     be a JSON object. Discriminator:
 
       * If ``$ref`` is a key, the object must be exactly ``{"$ref":
-        "/path/to/schema"}`` — a one-hop reference to another stored
+        "/path/to/schema"}`` - a one-hop reference to another stored
         schema document. The target must itself be a direct schema
         (no chained ``$ref``).
       * Otherwise the object IS the schema (meta-validated against the
@@ -92,9 +92,9 @@ class PipelineMcp:
     """In-process pipeline-MCP server.
 
     Surface:
-      * ``put(path, value)`` — store ``value`` (any JSON-serialisable
+      * ``put(path, value)`` - store ``value`` (any JSON-serialisable
         type) at ``path`` (must start with ``/``). Latest write wins.
-      * ``get(path)`` — read the latest value at ``path``. Returns
+      * ``get(path)`` - read the latest value at ``path``. Returns
         ``{"ok": False, "error": "missing"}`` if no value has been put.
 
     Liveness convention: write and read ``/ping`` (e.g.
@@ -298,7 +298,7 @@ class PipelineMcp:
             If ``$ref`` is a key, follow it exactly once; the target must
             be a direct schema (no chained ``$ref``). Otherwise the
             object IS the schema. A host-seeded (frozen) binding may only
-            reference a host-seeded document — otherwise an agent could
+            reference a host-seeded document - otherwise an agent could
             supply the forward-declared target itself and validate
             against a schema of its own choosing (PKG-001).
             """

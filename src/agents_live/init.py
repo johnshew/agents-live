@@ -114,7 +114,7 @@ def _install_payload(source: Path, dest: Path) -> None:
     failure (disk full, Ctrl-C) never destroys an existing install.
     During the swap, VERSION moves last: a payload interrupted mid-swap
     has no VERSION marker, keeps comparing as stale, and the next
-    install/upgrade completes it — it can never masquerade as current.
+    install/upgrade completes it - it can never masquerade as current.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(

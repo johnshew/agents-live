@@ -6,6 +6,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: drop the user-facing repository alias; `repos add <path>` registers a
+  repository under its directory name, and `repos default` / `repos remove`
+  accept either the path or that name.
 - fix: make release readiness explicit by integrating changelog maintenance,
   enforcing the minimum semantic version bump implied by release notes, using
   portable artifact inspection, and verifying the exact published PyPI version.

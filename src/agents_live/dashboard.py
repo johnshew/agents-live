@@ -717,17 +717,15 @@ def build_page() -> None:
     ui.timer(600.0, _refresh_views)
 
 
-def build_all_repos_page() -> None:
-    """Read-only registered-repository view; no lifecycle actions are exposed."""
-    ui.dark_mode().auto()
+def _all_repos_rows() -> list[dict]:
     payload = repos.collect_status()
     rows = []
     for item in payload["repos"]:
         if "error" in item:
             rows.append({
                 "identity": f"{item['name']}/error",
-                "repo": item["name"], "name": "—", "state": "error",
-                "runtime": "—", "detail": item["error"],
+                "repo": item["name"], "name": "-", "state": "error",
+                "runtime": "-", "detail": item["error"],
             })
             continue
         for agent in item["result"].get("agents", []):
@@ -737,12 +735,20 @@ def build_all_repos_page() -> None:
                 "state": agent.get("state", "?"),
                 "runtime": agent.get("runtime", "?"), "detail": item["path"],
             })
+    return rows
+
+
+def build_all_repos_page() -> None:
+    """Read-only registered-repository view; no lifecycle actions are exposed."""
+    ui.dark_mode().auto()
+    rows = _all_repos_rows()
+    selection = {"value": "All"}
 
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
-        ui.label("All registered repositories — read only").classes(
+        ui.label("All registered repositories (read only)").classes(
             "text-sm text-gray-500")
-    aliases = ["All", *(item["name"] for item in payload["repos"])]
+    names = sorted({row["repo"] for row in rows})
     table = ui.table(
         columns=[
             {"name": "repo", "label": "Repository", "field": "repo", "sortable": True},
@@ -754,13 +760,28 @@ def build_all_repos_page() -> None:
         rows=rows, row_key="identity",
     ).classes("w-full")
 
-    def select_repo(event) -> None:
-        selected = event.value
+    def apply_filter() -> None:
+        selected = selection["value"]
         table.rows = rows if selected == "All" else [
             row for row in rows if row["repo"] == selected]
         table.update()
 
-    ui.select(aliases, value="All", label="Repository", on_change=select_repo)
+    def select_repo(event) -> None:
+        selection["value"] = event.value
+        apply_filter()
+
+    def refresh() -> None:
+        nonlocal rows
+        rows = _all_repos_rows()
+        apply_filter()
+
+    with ui.row().classes("items-center gap-4"):
+        ui.select(["All", *names], value="All", label="Repository",
+                  on_change=select_repo)
+        ui.button("Refresh", on_click=refresh)
+    # Same cadence as the single-repo page: the view tracks reality
+    # instead of freezing at process start.
+    ui.timer(600.0, refresh)
     ui.label(
         "Select one repository with `agents-live --repo NAME dashboard` "
         "to enable actions."

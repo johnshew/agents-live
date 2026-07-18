@@ -232,7 +232,7 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     file no longer exists; stale entries are ``.py`` script references
     that no longer exist on disk (§4 migration concern: pre-cutover
     ``uv run .../scripts/...`` lines) and agents-live lines pinned to a
-    project root that no longer exists (a moved or deleted checkout —
+    project root that no longer exists (a moved or deleted checkout -
     repo-scoped matching can never tear those down, so doctor is the
     only place they surface)."""
     try:
@@ -257,7 +257,7 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
             continue
         # The crontab is host-global; only lines referencing THIS repo
         # are this project's concern (another project's agents are not
-        # orphans here) — except lines whose pinned root no longer
+        # orphans here) - except lines whose pinned root no longer
         # exists at all, which no project can ever match or remove.
         if not crontab_line_belongs_to_repo(stripped):
             try:

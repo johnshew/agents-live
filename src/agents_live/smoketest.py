@@ -327,7 +327,7 @@ def cleanup() -> tuple[list[str], list[str]]:
     """Idempotently remove every host resource a framework smoketest can own.
 
     Returns ``(residue, diagnostics)``. ``residue`` lists resources verified
-    to have survived cleanup — the only thing that can break the next run and
+    to have survived cleanup - the only thing that can break the next run and
     the only thing that should fail a verdict. ``diagnostics`` records cleanup
     commands that errored or timed out on the way; when the residue checks
     come back clean those carry no information about system state.
@@ -682,7 +682,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"  Agent output from log ({len(cron_output.encode('utf-8'))} bytes)")
         cron_json = json.loads(cron_output)
         if cron_json.get("magic") != "xyzzy":
-            fail("Agent output missing magic:xyzzy — JSON may be truncated or wrong")
+            fail("Agent output missing magic:xyzzy - JSON may be truncated or wrong")
         print("  Valid JSON with magic:xyzzy verified")
         if not trigger_file.is_file():
             fail("Handler did not write trigger file")
@@ -738,11 +738,11 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Trigger file: OK")
         cron_log = logs_root() / f"{cron_name}.log"
         if not cron_log.is_file():
-            fail("Agent log missing — run.py should have created it")
+            fail("Agent log missing - run.py should have created it")
         print(f"  Agent log: {cron_log.name} exists")
         watcher_log_file = logs_root() / f"{watcher_name}.log"
         if not watcher_log_file.is_file():
-            fail("Watcher log missing — watcher should have created it")
+            fail("Watcher log missing - watcher should have created it")
         print(f"  Watcher log: {watcher_log_file.name} exists")
         print("  Logs: OK")
         table_output = run_status()

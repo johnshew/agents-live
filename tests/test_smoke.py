@@ -127,23 +127,52 @@ class TestRepositoryRegistry(_TempProject):
             os.environ["XDG_CONFIG_HOME"] = self._saved_config_home
         super().tearDown()
 
-    def test_alias_and_default_store_normalized_absolute_path(self) -> None:
-        repos._add(str(self.root / "."), "life")
-        repos._set_default("life")
+    def test_add_and_default_store_normalized_absolute_path(self) -> None:
+        repos._add(str(self.root / "."))
+        repos._set_default(str(self.root))
         registry = repos.load()
-        self.assertEqual(registry["repos"], {"life": str(self.root)})
-        self.assertEqual(paths.resolve_root("life"), self.root)
+        self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
+        self.assertEqual(registry["default_repo"], self.root.name)
+        self.assertEqual(paths.resolve_root(self.root.name), self.root)
 
-    def test_add_derives_alias_from_directory_name(self) -> None:
+    def test_add_registers_under_directory_name(self) -> None:
         repos._add(str(self.root))
         registry = repos.load()
         self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
 
-    def test_add_rejects_underivable_alias_with_hint(self) -> None:
+    def test_add_rejects_underivable_directory_name(self) -> None:
         odd = self.root / "-leading-dash"
         odd.mkdir()
-        with self.assertRaisesRegex(ValueError, "pass an explicit alias"):
+        with self.assertRaisesRegex(ValueError, "must start with an alphanumeric"):
             repos._add(str(odd))
+
+    def test_add_rejects_duplicate_path_and_duplicate_name(self) -> None:
+        repos._add(str(self.root))
+        with self.assertRaisesRegex(ValueError, "already registered as"):
+            repos._add(str(self.root / "."))
+        clash = self.root / "nested" / self.root.name
+        clash.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            repos._add(str(clash))
+
+    def test_default_and_remove_accept_name_or_path(self) -> None:
+        other = self.root / "other-repo"
+        other.mkdir()
+        repos._add(str(self.root))
+        repos._add(str(other))
+        repos._set_default(str(other))
+        self.assertEqual(repos.load()["default_repo"], "other-repo")
+        repos._set_default(self.root.name)
+        repos._remove(str(other))
+        self.assertNotIn("other-repo", repos.load()["repos"])
+        with self.assertRaisesRegex(ValueError, "not a registered repository"):
+            repos._remove(str(other))
+
+    def test_cli_registers_and_defaults_by_path(self) -> None:
+        self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        self.assertEqual(repos.main(["default", str(self.root)]), 0)
+        registry = repos.load()
+        self.assertEqual(registry["default_repo"], self.root.name)
 
     def test_help_action_prints_usage(self) -> None:
         stdout = io.StringIO()
@@ -152,8 +181,8 @@ class TestRepositoryRegistry(_TempProject):
         self.assertIn("Manage registered repositories", stdout.getvalue())
 
     def test_local_marker_wins_over_default(self) -> None:
-        repos._add(str(self.root), "default")
-        repos._set_default("default")
+        repos._add(str(self.root))
+        repos._set_default(str(self.root))
         os.environ.pop(paths.ENV_VAR, None)
         with tempfile.TemporaryDirectory() as local_tmp:
             local = Path(local_tmp).resolve()
@@ -167,9 +196,24 @@ class TestRepositoryRegistry(_TempProject):
             finally:
                 os.chdir(saved)
 
+    def test_registered_name_wins_over_cwd_directory(self) -> None:
+        # A plain --repo name that is registered must mean the registry
+        # entry, even when a same-named directory exists under CWD.
+        repos._add(str(self.root))
+        saved = Path.cwd()
+        with tempfile.TemporaryDirectory() as outside:
+            decoy = Path(outside) / self.root.name
+            decoy.mkdir()
+            try:
+                os.chdir(outside)
+                self.assertEqual(
+                    paths.resolve_root(self.root.name), self.root)
+            finally:
+                os.chdir(saved)
+
     def test_default_is_last_resort(self) -> None:
-        repos._add(str(self.root), "life")
-        repos._set_default("life")
+        repos._add(str(self.root))
+        repos._set_default(str(self.root))
         os.environ.pop(paths.ENV_VAR, None)
         with tempfile.TemporaryDirectory() as outside:
             saved = Path.cwd()
@@ -184,7 +228,7 @@ class TestRepositoryRegistry(_TempProject):
     def test_unavailable_default_fails_actionably(self) -> None:
         missing = self.root / "gone"
         missing.mkdir()
-        repos._add(str(missing), "gone")
+        repos._add(str(missing))
         repos._set_default("gone")
         missing.rmdir()
         with self.assertRaisesRegex(ValueError, "registered repo 'gone'"):

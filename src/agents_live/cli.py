@@ -106,7 +106,10 @@ NAME_SUGAR = {"run", "start", "stop", "teardown"}
 
 DOCS_URL = "https://github.com/johnshew/agents-live"
 ALL_REPOS_COMMANDS = frozenset({"status", "doctor", "prereqs", "dashboard"})
-DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"upgrade", "migrate"})
+# `run` executes an agent, so silently targeting the registry default
+# would be invisible mutation; `upgrade` is NO_ROOT_REQUIRED and never
+# reaches the notice block, so listing it here would be dead weight.
+DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"run", "migrate"})
 
 
 def _usage() -> str:

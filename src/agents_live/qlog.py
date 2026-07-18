@@ -196,7 +196,7 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str]) -> None:
 
     # Optional derived column: render `changed_files` as a compact
     # basename list when the inferred type is actually a LIST. (Skipped
-    # if the column is absent or scalar — the lambda would otherwise
+    # if the column is absent or scalar - the lambda would otherwise
     # fail to bind.)
     changed_files_type = next(
         (dtype for name, dtype, *_ in raw_cols if name == "changed_files"),

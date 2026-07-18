@@ -61,11 +61,18 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     logs and state to a location later code would create.
     """
     if explicit is not None:
-        if isinstance(explicit, str) and _is_alias_candidate(explicit):
-            candidate = Path(explicit).expanduser()
-            if not candidate.is_dir():
-                from . import repos
-                return repos.resolve_alias(explicit)
+        if isinstance(explicit, str) and _is_name_candidate(explicit):
+            # The registry is consulted FIRST: a plain name that is a
+            # registered repo always means that repository, never a
+            # same-named directory that happens to exist under the
+            # caller's CWD (which would make the target flip with CWD).
+            from . import repos
+            if explicit in repos.load()["repos"]:
+                return repos.resolve_name(explicit)
+            if not Path(explicit).expanduser().is_dir():
+                raise ValueError(
+                    f"repo {explicit!r} is not registered; run "
+                    "`agents-live repos list`")
         return _validated_root(explicit, source="explicit argument")
 
     global _cached_default_root, _cached_default_source
@@ -98,6 +105,20 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     )
 
 
+def local_root() -> Path | None:
+    """The env-var or marker resolution WITHOUT the registry default.
+
+    The project the caller is actually inside (or explicitly selected),
+    if any. The one shared answer for callers that must not fall back to
+    the configured default repository (e.g. upgrade's target discovery).
+    Raises ValueError when the env var is set but invalid.
+    """
+    env_value = os.environ.get(ENV_VAR, "").strip()
+    if env_value:
+        return _validated_root(env_value, source=ENV_VAR)
+    return _walk_for_marker(Path.cwd())
+
+
 def clear_cache() -> None:
     """Reset the cached default resolution (tests only)."""
     global _cached_default_root, _cached_default_source
@@ -110,7 +131,7 @@ def resolution_source() -> str | None:
     return _cached_default_source
 
 
-def _is_alias_candidate(value: str) -> bool:
+def _is_name_candidate(value: str) -> bool:
     return bool(value) and not any(
         separator in value for separator in (os.sep, os.altsep) if separator
     ) and value not in (".", "..") and not value.startswith("~")

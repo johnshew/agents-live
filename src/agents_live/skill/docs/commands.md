@@ -576,12 +576,11 @@ agents-live doctor --all-repos       # host once + each registered project
 agents-live dashboard --all-repos    # read-only repository selector
 
 # User repository registry
-agents-live repos add ~/repos/<target-project>        # alias defaults to the directory name
-agents-live repos add ~/repos/<target-project> work   # or pass an explicit alias
+agents-live repos add ~/repos/<target-project>        # registered under its directory name
 agents-live repos list
-agents-live repos default life
-agents-live --repo life status
-agents-live repos remove work
+agents-live repos default ~/repos/<target-project>    # accepts a path or the directory name
+agents-live --repo <target-project> status
+agents-live repos remove ~/repos/<target-project>
 
 # Smoketest (validates full chain for each agent)
 agents-live smoketest --runtime claude
@@ -595,13 +594,14 @@ The user registry is
 `$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
 the platform-neutral fallback is `~/.config/agents-live/config.toml`.
 `repos add` requires an existing directory and stores its normalized absolute
-path under the given alias, defaulting to the directory name. Duplicate
-aliases, malformed configuration, unavailable paths, and removing the current
-default fail with an actionable error.
+path under the directory's name; `repos default` and `repos remove` accept
+either that path or the name. Duplicate registrations, malformed
+configuration, unavailable paths, and removing the current default fail with
+an actionable error.
 
 Targets resolve in this order:
 
-1. explicit `--repo` path or registered alias;
+1. explicit `--repo` path or registered name;
 2. `AGENTS_LIVE_REPO` process/session override;
 3. nearest `.agents-live.toml` or `[tool.agents-live]` marker;
 4. markerless-git adoption for interactive `run` and `start`;

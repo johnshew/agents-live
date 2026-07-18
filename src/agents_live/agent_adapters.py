@@ -52,7 +52,7 @@ PIPELINE_COPILOT_DEFAULT_TOOLS = ["pipeline"]
 class _FamilyBehavior:
     """Behavior shared by every adapter of one family.
 
-    The base class declares the contract only — there is deliberately no
+    The base class declares the contract only - there is deliberately no
     permissive default implementation for flag building.
     """
 

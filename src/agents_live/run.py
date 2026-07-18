@@ -10,7 +10,7 @@ and inotify watchers installed by ``activate.py`` both run
 ``uv run --script run.py --name <agent>`` (watchers add
 ``--changed-files``), and ``cli.py run <name>`` dispatches here too.
 
-It is a thin orchestrator over the ``headless.py`` library — the
+It is a thin orchestrator over the ``headless.py`` library - the
 sequencing lives here, the machinery lives there:
 
 1. pre-dispatch ownership gate (``ownership.py``: skip or abstain if
@@ -115,7 +115,7 @@ def build_prompt_text(prompt_path: Path, changed_files: list[str] | None) -> str
 
     Reads the prompt file and extracts everything after the YAML frontmatter,
     passing it directly via ``-p`` so the agent doesn't need a tool call to
-    read its own instructions — avoiding potential tool_use/tool_result
+    read its own instructions - avoiding potential tool_use/tool_result
     conversation-history mismatches.
     """
     body = extract_prompt_body(prompt_path.read_text(encoding="utf-8"))
@@ -304,7 +304,7 @@ def main() -> int:
         # --- Agent or post-processor-only ---
         if not has_agent:
             if not config.post_processor:
-                # Pre-processor-only pipeline — nothing more to do.
+                # Pre-processor-only pipeline - nothing more to do.
                 if not config.pre_processor:
                     raise AgentsLiveError("agent: none requires a pre-processor or post-processor")
                 duration_s = round(time.monotonic() - start_time, 1)
@@ -402,7 +402,7 @@ def main() -> int:
         duration_s = round(time.monotonic() - start_time, 1)
         # Classify the error for structured triage by self-healing agents.
         # The category rides on the exception type (AgentsLiveError
-        # subclasses in headless.py), not message text — a crash whose
+        # subclasses in headless.py), not message text - a crash whose
         # stderr detail happens to contain "timed out" stays agent_error.
         msg = str(exc)
         error_category = exc.category

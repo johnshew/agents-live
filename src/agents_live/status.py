@@ -1,8 +1,8 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["PyYAML"]
-# ///
+"""Agent status listing (single-repo table/JSON and all-repos views).
+
+A package module (relative imports): runs via ``agents-live status``,
+never as a standalone ``uv run --script`` target.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,22 +14,22 @@ from typing import Any
 
 import subprocess
 
-from .headless import AgentsLiveError, agent_details, list_agents, load_agent_config
+from .headless import (
+    AgentsLiveError, agent_details, list_agents, load_agent_config, logs_root,
+)
 from . import repos
 from . import preflight
 
-LOGS_DIR = Path("Agents/logs")
 
-
-def _last_run_times(name: str) -> tuple[str, str]:
+def _last_run_times(name: str, log_dir: Path) -> tuple[str, str]:
     """Return (last_ok, last_error) as '-Xd HH:MM' relative strings.
 
     Scans the agent's log file for phase=done entries.
     Returns '-' if no matching entry found.
     """
-    log_file = LOGS_DIR / f"{name}.log"
+    log_file = log_dir / f"{name}.log"
     if not log_file.is_file():
-        return ("—", "—")
+        return ("-", "-")
 
     last_ok_ts: str | None = None
     last_err_ts: str | None = None
@@ -58,10 +58,10 @@ def _format_ago(ts: str | None, now: datetime) -> str:
     """Format an ISO timestamp as a human-friendly relative string.
 
     Examples: -1s, -4m, -1h, -59m, -2d 16h, -5d 1h
-    Uses at most two significant units. Returns '—' if no timestamp.
+    Uses at most two significant units. Returns '-' if no timestamp.
     """
     if not ts:
-        return "—"
+        return "-"
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         total_seconds = int((now - dt).total_seconds())
@@ -81,6 +81,20 @@ def _format_ago(ts: str | None, now: datetime) -> str:
         return "?"
 
 
+def _agent_log_location(agent: dict[str, Any]) -> tuple[str, Path]:
+    """(log file base name, log directory) for an agent row.
+
+    All-repos rows carry ``repoPath`` and an ``alias/name`` display name;
+    their logs live in the child repo. Single-repo rows use the resolved
+    project's log directory (never the CWD - `--repo` runs from anywhere).
+    """
+    name = agent["name"]
+    if agent.get("repoPath"):
+        base = name.split("/", 1)[1] if "/" in name else name
+        return base, Path(agent["repoPath"]) / "Agents" / "logs"
+    return name, logs_root()
+
+
 def format_table(agents: list[dict[str, Any]]) -> str:
     headers = ["NAME", "TYPE", "SCHEDULE/WATCH", "RUNTIME", "MODE", "STATE", "OWNER", "LAST OK", "LAST ERR"]
     rows: list[list[str]] = []
@@ -89,14 +103,14 @@ def format_table(agents: list[dict[str, Any]]) -> str:
     for agent in agents:
         name = agent["name"]
         if name not in run_times:
-            run_times[name] = _last_run_times(name)
+            run_times[name] = _last_run_times(*_agent_log_location(agent))
     for agent in agents:
         trigger_states = agent.get("triggerStates", {})
         last_ok, last_err = run_times[agent["name"]]
-        owner_val = agent.get("owner") or "—"
+        owner_val = agent.get("owner") or "-"
         is_owner = agent.get("isOwner")
         owner_cell = owner_val if is_owner is None else (
-            f"{owner_val} *" if is_owner and owner_val not in ("—", "*") else owner_val
+            f"{owner_val} *" if is_owner and owner_val not in ("-", "*") else owner_val
         )
         first_row = True
         for ttype, tvalue in _trigger_lines(agent):
@@ -122,7 +136,7 @@ def format_table(agents: list[dict[str, Any]]) -> str:
 
 
 def _trigger_lines(agent: dict[str, Any]) -> list[tuple[str, str]]:
-    """Return (type_label, trigger_value) tuples — one per trigger."""
+    """Return (type_label, trigger_value) tuples - one per trigger."""
     lines: list[tuple[str, str]] = []
     sched = agent.get("schedule")
     if sched:

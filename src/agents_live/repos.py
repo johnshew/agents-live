@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
-_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_COLLECT_WORKERS = 4
 
 
 def config_path() -> Path:
@@ -36,17 +43,17 @@ def load() -> dict:
     if not isinstance(repos, dict):
         raise ValueError(f"repository registry {path}: [repos] must be a table")
     normalized: dict[str, str] = {}
-    for alias, value in repos.items():
-        if not isinstance(alias, str) or not _ALIAS.fullmatch(alias):
-            raise ValueError(f"repository registry {path}: invalid alias {alias!r}")
+    for name, value in repos.items():
+        if not isinstance(name, str) or not _NAME.fullmatch(name):
+            raise ValueError(f"repository registry {path}: invalid repo name {name!r}")
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
-                f"repository registry {path}: path for {alias!r} must be a string")
+                f"repository registry {path}: path for {name!r} must be a string")
         repo = Path(value).expanduser()
         if not repo.is_absolute():
             raise ValueError(
-                f"repository registry {path}: path for {alias!r} must be absolute")
-        normalized[alias] = str(repo.resolve())
+                f"repository registry {path}: path for {name!r} must be absolute")
+        normalized[name] = str(repo.resolve())
     if default is not None and (
             not isinstance(default, str) or default not in normalized):
         raise ValueError(
@@ -54,12 +61,12 @@ def load() -> dict:
     return {"repos": normalized, "default_repo": default}
 
 
-def resolve_alias(alias: str) -> Path:
+def resolve_name(name: str) -> Path:
     registry = load()
-    if alias not in registry["repos"]:
+    if name not in registry["repos"]:
         raise ValueError(
-            f"repo alias {alias!r} is not registered; run `agents-live repos list`")
-    return _validated_path(registry["repos"][alias], alias)
+            f"repo {name!r} is not registered; run `agents-live repos list`")
+    return _validated_path(registry["repos"][name], name)
 
 
 def default_root() -> Path | None:
@@ -68,9 +75,14 @@ def default_root() -> Path | None:
     return None if alias is None else _validated_path(registry["repos"][alias], alias)
 
 
-def entries() -> list[tuple[str, str, str | None]]:
-    """Return alias/path/error rows, preserving unavailable repositories."""
-    registry = load()
+def entries(registry: dict | None = None) -> list[tuple[str, str, str | None]]:
+    """Return name/path/error rows, preserving unavailable repositories.
+
+    Pass an already-loaded *registry* to avoid a second read (two reads
+    can observe different file states if another process writes between
+    them)."""
+    if registry is None:
+        registry = load()
     rows = []
     for alias, value in sorted(registry["repos"].items()):
         try:
@@ -88,6 +100,23 @@ def _validated_path(value: str | Path, alias: str) -> Path:
         raise ValueError(
             f"registered repo {alias!r} is not an existing directory: {path}")
     return path
+
+
+@contextmanager
+def _registry_lock() -> Iterator[None]:
+    """Serialize load-modify-write registry mutations across processes.
+
+    Without it, two concurrent ``repos add`` calls each rewrite the file
+    from their own snapshot and the last rename silently drops the other
+    repo."""
+    lock_path = config_path().parent / ".config.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _write(registry: dict) -> None:
@@ -117,48 +146,80 @@ def _write(registry: dict) -> None:
         raise
 
 
-def _add(value: str, alias: str | None = None) -> None:
+def _add(value: str) -> None:
     path = Path(value).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"repo path is not an existing directory: {path}")
-    derived = alias is None
-    if derived:
-        alias = path.name
-    if not _ALIAS.fullmatch(alias):
-        hint = "; pass an explicit alias" if derived else ""
+    name = path.name
+    if not _NAME.fullmatch(name):
         raise ValueError(
-            f"repo alias {alias!r} must start with an alphanumeric character "
-            f"and contain only letters, numbers, '.', '_', or '-'{hint}")
-    registry = load()
-    if alias in registry["repos"]:
-        raise ValueError(f"repo alias {alias!r} is already registered")
-    registry["repos"][alias] = str(path)
-    _write(registry)
+            f"cannot register {path}: the directory name must start with an "
+            "alphanumeric character and contain only letters, numbers, "
+            "'.', '_', or '-'")
+    with _registry_lock():
+        registry = load()
+        for existing, registered in registry["repos"].items():
+            if registered == str(path):
+                raise ValueError(f"{path} is already registered as {existing!r}")
+        if name in registry["repos"]:
+            raise ValueError(
+                f"a repo named {name!r} is already registered "
+                f"({registry['repos'][name]}); remove it first")
+        registry["repos"][name] = str(path)
+        _write(registry)
 
 
-def _set_default(alias: str) -> None:
-    registry = load()
-    if alias not in registry["repos"]:
-        raise ValueError(f"repo alias {alias!r} is not registered")
-    _validated_path(registry["repos"][alias], alias)
-    registry["default_repo"] = alias
-    _write(registry)
+def _resolve_ref(registry: dict, ref: str) -> str:
+    """Map a registered name or repository path to its registry name."""
+    if ref in registry["repos"]:
+        return ref
+    candidate = str(Path(ref).expanduser().resolve())
+    for name, value in registry["repos"].items():
+        if value == candidate:
+            return name
+    raise ValueError(
+        f"{ref!r} is not a registered repository path or name; "
+        "run `agents-live repos list`")
 
 
-def _remove(alias: str) -> None:
-    registry = load()
-    if alias not in registry["repos"]:
-        raise ValueError(f"repo alias {alias!r} is not registered")
-    if registry["default_repo"] == alias:
-        raise ValueError(
-            f"repo alias {alias!r} is the default; choose another default first")
-    del registry["repos"][alias]
-    _write(registry)
+def _set_default(ref: str) -> None:
+    with _registry_lock():
+        registry = load()
+        name = _resolve_ref(registry, ref)
+        _validated_path(registry["repos"][name], name)
+        registry["default_repo"] = name
+        _write(registry)
+
+
+def _remove(ref: str) -> None:
+    with _registry_lock():
+        registry = load()
+        name = _resolve_ref(registry, ref)
+        if registry["default_repo"] == name:
+            raise ValueError(
+                f"repo {name!r} is the default; choose another default first")
+        del registry["repos"][name]
+        _write(registry)
+
+
+def _cli_base() -> list[str]:
+    """argv prefix for spawning the CLI in a child process.
+
+    The module form matches the code currently running, but only works
+    where ``agents_live`` is importable; the dashboard runs from an
+    isolated ``uv run --script`` environment where it is not, so fall
+    back to the installed shim there.
+    """
+    if importlib.util.find_spec("agents_live") is not None:
+        return [sys.executable, "-m", "agents_live.cli"]
+    shim = shutil.which("agents-live") or str(
+        Path.home() / ".local" / "bin" / "agents-live")
+    return [shim]
 
 
 def _child_json(alias: str, path: str, command: str) -> dict:
     completed = subprocess.run(
-        [sys.executable, "-m", "agents_live.cli", "--repo", path, command, "--json"],
+        [*_cli_base(), "--repo", path, command, "--json"],
         capture_output=True, text=True, check=False,
     )
     try:
@@ -173,19 +234,36 @@ def _child_json(alias: str, path: str, command: str) -> dict:
     }
 
 
+def _collect_children(command: str) -> list[dict]:
+    """One child result per registered repo, in registry order.
+
+    Children are independent read-only subprocesses; running them
+    concurrently keeps ``--all-repos`` latency at the slowest child
+    instead of the sum."""
+    rows = entries()
+    with ThreadPoolExecutor(max_workers=_COLLECT_WORKERS) as pool:
+        futures = {
+            alias: pool.submit(_child_json, alias, path, command)
+            for alias, path, error in rows if not error
+        }
+        results = []
+        for alias, path, error in rows:
+            if error:
+                results.append(
+                    {"name": alias, "path": path, "ok": False, "error": error})
+            else:
+                results.append(futures[alias].result())
+    return results
+
+
 def collect_status() -> dict:
-    results = []
-    for alias, path, error in entries():
-        if error:
-            results.append({"name": alias, "path": path, "ok": False, "error": error})
-            continue
-        item = _child_json(alias, path, "status")
+    results = _collect_children("status")
+    for item in results:
         if "result" in item:
             for agent in item["result"].get("agents", []):
-                agent["repo"] = alias
-                agent["repoPath"] = path
-                agent["name"] = f"{alias}/{agent['name']}"
-        results.append(item)
+                agent["repo"] = item["name"]
+                agent["repoPath"] = item["path"]
+                agent["name"] = f"{item['name']}/{agent['name']}"
     return {"ok": all(item["ok"] for item in results), "repos": results}
 
 
@@ -195,7 +273,7 @@ def collect_doctor() -> dict:
         env.pop("AGENTS_LIVE_REPO", None)
         env["XDG_CONFIG_HOME"] = empty
         host_run = subprocess.run(
-            [sys.executable, "-m", "agents_live.cli", "--json", "doctor"],
+            [*_cli_base(), "--json", "doctor"],
             cwd=empty, env=env, capture_output=True, text=True, check=False,
         )
     try:
@@ -203,18 +281,13 @@ def collect_doctor() -> dict:
     except json.JSONDecodeError:
         host = {"ok": False, "error": host_run.stderr.strip() or host_run.stdout.strip()}
     host_names = {check["name"] for check in host.get("checks", [])}
-    results = []
-    for alias, path, error in entries():
-        if error:
-            results.append({"name": alias, "path": path, "ok": False, "error": error})
-            continue
-        item = _child_json(alias, path, "doctor")
+    results = _collect_children("doctor")
+    for item in results:
         if "result" in item:
             item["result"]["checks"] = [
                 check for check in item["result"].get("checks", [])
                 if check.get("name") not in host_names
             ]
-        results.append(item)
     ok = bool(host.get("ok")) and all(item["ok"] for item in results)
     return {"ok": ok, "host": host, "repos": results}
 
@@ -224,30 +297,29 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("list", help="List registered repositories")
     add = subparsers.add_parser("add", help="Register a repository")
-    add.add_argument("path", help="Repository root directory")
     add.add_argument(
-        "alias", nargs="?",
-        help="Registry alias (default: the directory name)")
+        "path",
+        help="Repository root directory (registered under its directory name)")
     default = subparsers.add_parser("default", help="Set the fallback repository")
-    default.add_argument("alias")
+    default.add_argument("repo", help="Registered repository path or name")
     remove = subparsers.add_parser("remove", help="Remove a registered repository")
-    remove.add_argument("alias")
+    remove.add_argument("repo", help="Registered repository path or name")
     subparsers.add_parser("help", help="Show this help message")
     args = parser.parse_args(argv)
     try:
         if args.action == "help":
             parser.print_help()
         elif args.action == "add":
-            _add(args.path, args.alias)
+            _add(args.path)
         elif args.action == "default":
-            _set_default(args.alias)
+            _set_default(args.repo)
         elif args.action == "remove":
-            _remove(args.alias)
+            _remove(args.repo)
         else:
             registry = load()
             if not registry["repos"]:
                 print("No repositories registered")
-            for alias, path, error in entries():
+            for alias, path, error in entries(registry):
                 marker = " (default)" if alias == registry["default_repo"] else ""
                 suffix = f" [unavailable: {error}]" if error else ""
                 print(f"{alias}{marker}\t{path}{suffix}")

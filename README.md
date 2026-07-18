@@ -99,15 +99,15 @@ the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
 `~/.config/agents-live/config.toml`):
 
 ```bash
-agents-live repos add ~/repos/<target-project>   # alias defaults to the directory name
-agents-live repos default life
-agents-live --repo life status
+agents-live repos add ~/repos/<target-project>   # registered under its directory name
+agents-live repos default ~/repos/<target-project>
+agents-live --repo <target-project> status       # directory name also works
 agents-live status --all-repos
 agents-live doctor --all-repos
 agents-live dashboard --all-repos   # read-only repository selector
 ```
 
-Selection precedence is explicit `--repo` path or alias,
+Selection precedence is explicit `--repo` path or registered name,
 `AGENTS_LIVE_REPO`, the nearest local marker, markerless-git adoption for
 `run`/`start`, then the configured default. A default never overrides the
 current project. Aggregate commands are read-only; lifecycle mutations always

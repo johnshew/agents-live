@@ -28,22 +28,22 @@ never silently run everything locally.
 
 Public API (see ``__all__``):
 
-* ``WILDCARD`` — the ``"*"`` value.
-* ``OwnershipUnavailableError`` — registry mode declared but the
+* ``WILDCARD`` - the ``"*"`` value.
+* ``OwnershipUnavailableError`` - registry mode declared but the
   registry (or its backend) is missing/malformed; callers must abstain,
   never assume local.
-* ``mode()`` / ``local_only()`` — declared mode ("registry" | "local").
-* ``registry_available()`` — whether a registry backend is installed
+* ``mode()`` / ``local_only()`` - declared mode ("registry" | "local").
+* ``registry_available()`` - whether a registry backend is installed
   (gate multi-host bootstrap on this before declaring registry mode).
-* ``current_host()`` — ``hostname -s``, lowercased.
-* ``load_owners(rate_limit_secs=60)`` — registry mode: the backend's
+* ``current_host()`` - ``hostname -s``, lowercased.
+* ``load_owners(rate_limit_secs=60)`` - registry mode: the backend's
     pulled, strictly validated ``{agent_name: owner}`` mapping; local
   mode: ``{}`` (nothing is owned elsewhere by definition; no file read,
   no network).
-* ``set_owner(name, owner)`` / ``remove_owner(name)`` — registry
+* ``set_owner(name, owner)`` / ``remove_owner(name)`` - registry
   mutations via the backend; raise ``OwnershipUnavailableError`` when
   no backend is installed.
-* ``registry_file_exists()`` — bootstrap check for the first
+* ``registry_file_exists()`` - bootstrap check for the first
   ``--transfer-to`` (False when no backend is installed).
 
 See ``.claude/skills/agents-live/docs/commands.md`` for the operator

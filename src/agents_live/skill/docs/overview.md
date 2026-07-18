@@ -103,7 +103,7 @@ updates the cache. Checks never install updates in the background. Run
 `agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
 release and then refresh managed skill payloads using the newly installed CLI.
 
-Repositories used from outside their working tree can be registered by alias
+Repositories used from outside their working tree can be registered by path
 under `$XDG_CONFIG_HOME/agents-live/config.toml` (normally
 `~/.config/agents-live/config.toml`). Explicit selection and local project
 markers take precedence over the optional default. `status --all-repos`,

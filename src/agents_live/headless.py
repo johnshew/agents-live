@@ -5,7 +5,7 @@
 # ///
 """Shared library for the agents-live runtime. NOT an entry point.
 
-Despite the name, this module is never executed directly — it has no
+Despite the name, this module is never executed directly - it has no
 ``main()`` and no CLI. It is the common library imported by every
 executable in the skill (``run.py``, ``activate.py``, ``status.py``,
 ``teardown.py``, ``prereqs.py``, ``smoketest.py``, ``dashboard.py``):
@@ -110,7 +110,7 @@ MAX_LOG_FIELD_LENGTH = MAX_RAW_OUTPUT_LOG_LENGTH
 COPILOT_OUTPUT_MAX_LINES = 100
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# The public API — exactly what the consumer scripts (run.py, activate.py,
+# The public API - exactly what the consumer scripts (run.py, activate.py,
 # status.py, teardown.py, prereqs.py, smoketest.py, dashboard.py) import.
 # Everything else in this module is underscore-private implementation.
 __all__ = [
@@ -841,7 +841,7 @@ class EventLog:
 
     Binds the log path plus fields every event shares (typically
     ``agent_name=``) once, so per-run call sites stop threading them through
-    every call — run.py previously hand-rolled exactly this binding as
+    every call - run.py previously hand-rolled exactly this binding as
     ``tlog``/``tlog_start``/``tlog_end`` closures. The module-level
     :func:`log_event` family remains the writer (and the API for one-off
     callers); this class is its run-scoped face, and the natural seed of
@@ -893,7 +893,7 @@ def extract_prompt_body(text: str) -> str:
 
     If the file has no valid frontmatter (missing opening ``---``, fewer than
     3 lines, or no closing ``---``), the entire text is returned stripped.
-    This is intentional — the caller receives usable prompt content regardless
+    This is intentional - the caller receives usable prompt content regardless
     of whether frontmatter is present.
     """
     lines = text.splitlines()
@@ -1301,7 +1301,7 @@ def _resolve_agent_config(config: AgentConfig) -> AgentConfig:
     # run.py) resolve at the boundary, and the inner builders
     # (_build_agent_command, _build_agent_env, _run_handler, run_pre_processor)
     # call this defensively for direct/test callers. The marker makes the
-    # defensive call free — no .vscode/mcp.json re-read, no re-entrancy
+    # defensive call free - no .vscode/mcp.json re-read, no re-entrancy
     # hazard to keep idempotent by hand.
     if config.resolved:
         return config
@@ -1747,7 +1747,7 @@ def _parse_claude_json_output(raw_output: str) -> tuple[str, dict[str, str | Non
 
     Returns ``(result_text, usage_dict)`` where *usage_dict* has the same keys
     as ``_parse_usage_stats()``.  Falls through gracefully if the JSON is
-    malformed — returns the raw output string and empty usage.
+    malformed - returns the raw output string and empty usage.
     """
     usage: dict[str, str | None] = {
         "model": None, "tokens_in": None, "tokens_out": None,
@@ -2111,7 +2111,7 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
             # Both timeout shapes land here: subprocess.run raises
             # TimeoutExpired (with partial output attached); the PTY and
             # streaming runners raise AgentTimeoutError. Non-timeout
-            # AgentsLiveErrors propagate to the caller — classification
+            # AgentsLiveErrors propagate to the caller - classification
             # is by exception type, not message text, so a crash whose
             # stderr happens to contain "timed out" is no longer retried
             # on the timeout budget.
@@ -2474,7 +2474,7 @@ def _run_handler(config: AgentConfig, input_text: str | None, *, changed_files: 
 
 
 def run_post_processor(config: AgentConfig, input_text: str | None, *, changed_files: list[str] | None = None) -> str:
-    """Alias for _run_handler — runs the post-processor (or handler) script."""
+    """Alias for _run_handler - runs the post-processor (or handler) script."""
     return _run_handler(config, input_text, changed_files=changed_files)
 
 
@@ -2564,11 +2564,11 @@ def install_crontab(lines: list[str]) -> None:
 @contextmanager
 def crontab_lock() -> Iterator[None]:
     """Fail fast if another agents-live process is mutating the user crontab."""
-    from .heartbeat import state_dir  # noqa: PLC0415 — stdlib-only module
+    from .heartbeat import state_dir  # noqa: PLC0415 - stdlib-only module
 
     # One resolver for the host state dir: heartbeat.state_dir() applies
     # expanduser() to XDG_STATE_HOME, and heartbeat.uninstall cleans up
-    # this lock file — a second inline resolution here would drift.
+    # this lock file - a second inline resolution here would drift.
     lock_path = state_dir() / "crontab.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # Never truncate or replace the inode another process may have locked.
@@ -2639,8 +2639,8 @@ def _cron_line_agent_name(line: str) -> str | None:
 
     The inverse of :func:`cron_line_matches`: extracts the ``--name`` token
     without knowing the name in advance. Only lines that invoke agents-live
-    qualify — the flat ``run.py`` script form or the packaged shim form
-    (basename ``agents-live``, never substring) — so unrelated crontab
+    qualify - the flat ``run.py`` script form or the packaged shim form
+    (basename ``agents-live``, never substring) - so unrelated crontab
     entries are ignored.
     """
     if not crontab_line_belongs_to_repo(line):
@@ -2690,7 +2690,7 @@ def _watcher_argv_is_agents_live(args: list[str]) -> bool:
     """True if an argv list belongs to an agents-live watch loop host.
 
     Flat checkout: ``... activate.py --watch-loop <name>``. Packaged:
-    ``... <bin>/agents-live --repo <root> start --watch-loop <name>`` —
+    ``... <bin>/agents-live --repo <root> start --watch-loop <name>`` -
     matched on the executable's basename, never substring, so a
     ``--repo`` path like ``.../agents-live-test`` cannot false-positive.
     """

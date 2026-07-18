@@ -13,15 +13,15 @@ import sys
 from pathlib import Path
 
 from . import init, paths, repos
+from .spawn import find_uv
 
 
 def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
-    selected = os.environ.get(paths.ENV_VAR, "").strip()
-    if selected:
-        return [("selected project", paths.resolve_root())], []
+    local = paths.local_root()
+    if os.environ.get(paths.ENV_VAR, "").strip():
+        return [("selected project", local)], []
 
     targets: dict[Path, str] = {}
-    local = paths._walk_for_marker(Path.cwd())
     if local is not None:
         targets[local] = "current project"
 
@@ -47,17 +47,28 @@ def _refresh_payload(root: Path) -> None:
 
 
 def _upgrade_runtime() -> int:
-    uv = shutil.which("uv") or "uv"
+    try:
+        uv = find_uv()
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return subprocess.run(
         [uv, "tool", "install", "--force", "agents-live@latest"], check=False,
     ).returncode
 
 
 def _refresh_with_installed_cli(root: Path) -> int:
-    executable = shutil.which("agents-live")
-    if executable is None:
+    # cli_shim_path prefers the entry point beside the interpreter (the
+    # uv tool env), so a freshly installed shim is found even when
+    # ~/.local/bin is not on PATH yet.
+    from .headless import AgentsLiveError, cli_shim_path  # noqa: PLC0415
+
+    try:
+        executable = str(cli_shim_path())
+    except AgentsLiveError as exc:
         print(
-            "error: agents-live executable not found after runtime upgrade",
+            f"error: agents-live executable not found after runtime "
+            f"upgrade: {exc}",
             file=sys.stderr,
         )
         return 1
@@ -89,7 +100,9 @@ def main() -> int:
     try:
         targets, errors = _targets()
     except (OSError, ValueError) as exc:
-        print(f"error: cannot read repository registry: {exc}", file=sys.stderr)
+        # The message already names its source (registry file vs an
+        # invalid AGENTS_LIVE_REPO); no prefix that could mislabel it.
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
     for error in errors:
