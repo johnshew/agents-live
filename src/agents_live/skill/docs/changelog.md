@@ -24,6 +24,12 @@ razor15 per the F7 runbook).
   directory while Task Scheduler reported success. The repo root can
   now be passed as the first argument; packaged Task Scheduler
   registrations must pin it (`... -- bash <script> <repo>`).
+- fix: doctor's "Windows heartbeat configured" check pinned the
+  flat-checkout script paths, so it false-PASSed a doomed flat
+  registration after migration and flagged correct packaged ones. It
+  now expects the scripts installed beside the package - following the
+  layout: flat, site-packages, or editable - and requires the repo to
+  be pinned in the task action.
 
 ## 0.1.4 - 2026-07-18
 

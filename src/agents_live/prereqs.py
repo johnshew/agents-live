@@ -187,12 +187,21 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
         problems.append("task disabled")
     if not execute.endswith("/wscript.exe") and execute != "wscript.exe":
         problems.append(f"unexpected executable: {task.get('Execute') or '(none)'}")
-    if "/.claude/skills/agents-live/scripts/run-hidden.vbs" not in arguments:
-        problems.append("action does not reference the current run-hidden.vbs")
-    expected_heartbeat = str(
-        REPO / ".claude/skills/agents-live/scripts/windows-heartbeat.sh")
-    if expected_heartbeat.lower() not in arguments:
-        problems.append("action does not reference this repo's windows-heartbeat.sh")
+    # Expected scripts are the ones installed beside this module, so the
+    # check follows the layout (flat checkout, site-packages, editable)
+    # instead of pinning the flat-checkout path - which false-PASSed a
+    # doomed flat registration after migration and flagged correct
+    # packaged ones.
+    scripts_dir = Path(__file__).resolve().parent
+    if str(scripts_dir / "run-hidden.vbs").lower() not in arguments:
+        problems.append("action does not reference the installed run-hidden.vbs")
+    if str(scripts_dir / "windows-heartbeat.sh").lower() not in arguments:
+        problems.append("action does not reference the installed windows-heartbeat.sh")
+    # Flat, the script path itself sits inside the repo; packaged, the
+    # explicit repo argument must be pinned (the walk-up default would
+    # drop the beacon into the uv tool directory).
+    if str(REPO).lower() not in arguments:
+        problems.append("action does not pin this repo for windows-heartbeat.sh")
     if str(task.get("Interval") or "").upper() != "PT5M":
         interval = task.get("Interval") or "(none)"
         problems.append(f"repetition is {interval}, expected PT5M")
