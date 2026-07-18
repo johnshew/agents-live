@@ -241,9 +241,20 @@ def _collect_children(command: str) -> list[dict]:
     concurrently keeps ``--all-repos`` latency at the slowest child
     instead of the sum."""
     rows = entries()
+
+    def one(alias: str, path: str) -> dict:
+        try:
+            return _child_json(alias, path, command)
+        except Exception as exc:  # noqa: BLE001 - isolate per-repo failures
+            # A child that cannot even launch (missing shim, fork
+            # failure) is that repository's error row, never a reason to
+            # abort the whole aggregate.
+            return {"name": alias, "path": path, "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
     with ThreadPoolExecutor(max_workers=_COLLECT_WORKERS) as pool:
         futures = {
-            alias: pool.submit(_child_json, alias, path, command)
+            alias: pool.submit(one, alias, path)
             for alias, path, error in rows if not error
         }
         results = []

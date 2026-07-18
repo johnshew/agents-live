@@ -48,6 +48,8 @@ def _strip_jsonc(text: str) -> str:
             i += 2
             while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
                 i += 1
+            if i + 1 >= n:
+                raise McpConfigError("unterminated /* */ comment")
             i += 2
             continue
         out.append(ch)
@@ -107,8 +109,17 @@ def load_mcp_servers(root: Path) -> dict[str, Any]:
         raise McpConfigError(f"cannot read {path}: {exc}") from exc
     try:
         data = json.loads(_strip_trailing_commas(_strip_jsonc(text)))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, McpConfigError) as exc:
         raise McpConfigError(
             f"{path} is not valid JSONC: {exc}; fix the file (agents "
             "would otherwise run without their MCP definitions)") from exc
-    return data.get("mcpServers") or data.get("servers") or {}
+    if not isinstance(data, dict):
+        raise McpConfigError(
+            f"{path}: top-level value must be a JSON object, "
+            f"not {type(data).__name__}")
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    if not isinstance(servers, dict):
+        raise McpConfigError(
+            f"{path}: mcpServers/servers must be a JSON object, "
+            f"not {type(servers).__name__}")
+    return servers

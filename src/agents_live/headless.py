@@ -643,24 +643,34 @@ def run_invocation(name: str) -> list[str]:
     repo root and ``--name <name>`` tokens that :func:`cron_line_matches`
     keys on.
     """
-    if packaged_execution():
-        return [str(cli_shim_path()), "--repo", str(repo_root()),
-                "run", "--name", name, "--quiet"]
-    uv = shutil.which("uv") or "uv"
-    return [uv, "run", "--script", str(RUN_SCRIPT_PATH),
-            "--name", name, "--quiet"]
+    return cli_invocation("run", "--name", name, "--quiet",
+                          flat_script=RUN_SCRIPT_PATH)
 
 
 def ensure_watcher_invocation(name: str) -> list[str]:
     """argv persisted into the @reboot respawn line for *name*'s watcher.
     Both forms carry the ``--ensure-watcher <name>`` token pair the
     matchers key on."""
+    return cli_invocation("start", "--ensure-watcher", name,
+                          flat_script=ACTIVATE_SCRIPT_PATH)
+
+
+def cli_invocation(subcommand: str, *args: str, flat_script: Path) -> list[str]:
+    """argv that re-enters the CLI for *subcommand* in the current layout.
+
+    THE single builder for persisted and spawned invocations (the copies
+    it replaced were patched one-by-one across 0.1.3-0.1.6 and drifted).
+    Packaged: the pinned shim with an explicit ``--repo`` (§3.4.2
+    self-contained invocations; these exact tokens are what
+    cron_line_matches and the watcher matchers key on). Flat checkout:
+    ``uv run --script`` on *flat_script*, whose flags carry the
+    subcommand semantics themselves.
+    """
     if packaged_execution():
         return [str(cli_shim_path()), "--repo", str(repo_root()),
-                "start", "--ensure-watcher", name]
+                subcommand, *args]
     uv = shutil.which("uv") or "uv"
-    return [uv, "run", "--script", str(ACTIVATE_SCRIPT_PATH),
-            "--ensure-watcher", name]
+    return [uv, "run", "--script", str(flat_script), *args]
 
 
 def _watcher_reboot_line_matches(line: str, name: str) -> bool:

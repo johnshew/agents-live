@@ -24,6 +24,7 @@ from .headless import (
     AgentConfig,
     AgentsLiveError,
     clean_path,
+    cli_invocation,
     crontab_lock,
     cron_line_matches,
     current_crontab_lines,
@@ -37,8 +38,6 @@ from .headless import (
     load_agent_config,
     log_event,
     logs_root,
-    packaged_execution,
-    cli_shim_path,
     remove_cron_entries,
     remove_watcher_reboot_line,
     repo_root,
@@ -670,16 +669,8 @@ def activate_watcher(name: str) -> int:
         stop_watcher(name)
 
     ensure_logs_dir()
-    if packaged_execution():
-        # Packaged install: activate.py is a package module (relative
-        # imports), so it cannot run as a standalone uv script - re-enter
-        # through the CLI shim, mirroring ensure_watcher_invocation().
-        loop_argv = [str(cli_shim_path()), "--repo", str(repo_root()),
-                     "start", "--watch-loop", name]
-    else:
-        uv = shutil.which("uv") or "uv"
-        loop_argv = [uv, "run", "--script", str(SCRIPT_PATH),
-                     "--watch-loop", name]
+    loop_argv = cli_invocation("start", "--watch-loop", name,
+                               flat_script=SCRIPT_PATH)
     with open("/dev/null", "w") as devnull:
         process = subprocess.Popen(
             loop_argv,

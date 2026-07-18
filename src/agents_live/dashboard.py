@@ -265,10 +265,8 @@ _CLI_SUBCOMMAND = {
 
 def _script_argv(script: str, args: list[str]) -> list[str]:
     """argv for one lifecycle action, for either layout."""
-    if headless.packaged_execution():
-        return [str(headless.cli_shim_path()), "--repo", str(REPO_ROOT),
-                _CLI_SUBCOMMAND[script], *args]
-    return ["uv", "run", str(SCRIPTS_DIR / script), *args]
+    return headless.cli_invocation(
+        _CLI_SUBCOMMAND[script], *args, flat_script=SCRIPTS_DIR / script)
 
 
 def _run_script(script: str, args: list[str],

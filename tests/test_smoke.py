@@ -257,6 +257,28 @@ class TestRepositoryRegistry(_TempProject):
             payload["repos"][0]["result"]["agents"][0]["name"], "life/shared")
         self.assertIn("error", payload["repos"][1])
 
+    def test_child_launch_failure_becomes_error_row(self) -> None:
+        # A child that cannot even spawn is that repo's error row; it
+        # must never abort the whole aggregate.
+        def fake_child(alias: str, path: str, command: str) -> dict:
+            if alias == "boom":
+                raise FileNotFoundError("agents-live shim missing")
+            return {"name": alias, "path": path, "ok": True,
+                    "result": {"agents": []}}
+
+        with (
+            mock.patch.object(
+                repos, "entries",
+                return_value=[("boom", "/boom", None), ("ok", "/ok", None)],
+            ),
+            mock.patch.object(repos, "_child_json", side_effect=fake_child),
+        ):
+            payload = repos.collect_status()
+        self.assertFalse(payload["ok"])
+        by_name = {item["name"]: item for item in payload["repos"]}
+        self.assertIn("shim missing", by_name["boom"]["error"])
+        self.assertTrue(by_name["ok"]["ok"])
+
     def test_agent_directories_cannot_escape_repository(self) -> None:
         with self.assertRaisesRegex(ValueError, "repo-relative"):
             paths.validated_agent_directories(self.root, ["/tmp/agents"])
@@ -520,9 +542,15 @@ class TestInvocationForms(_TempProject):
         servers = loader.load_mcp_servers(self.root)
         self.assertEqual(servers["custom"]["command"], "npx")
         self.assertEqual(servers["custom"]["args"], ["-y", "custom-mcp"])
-        (config_dir / "mcp.json").write_text("{broken", encoding="utf-8")
-        with self.assertRaises(loader.McpConfigError):
-            loader.load_mcp_servers(self.root)
+        for malformed in (
+            "{broken",
+            '[{"command": "npx"}]',          # top-level array
+            '{"servers": {} /* unterminated',  # unterminated block comment
+            '{"servers": ["not", "a", "table"]}',
+        ):
+            (config_dir / "mcp.json").write_text(malformed, encoding="utf-8")
+            with self.assertRaises(loader.McpConfigError):
+                loader.load_mcp_servers(self.root)
 
     def test_status_treats_missing_crontab_as_empty_not_sandbox(self) -> None:
         # PKG-005: a fresh user has no crontab; that is not a sandbox.
