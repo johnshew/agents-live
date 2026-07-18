@@ -573,17 +573,9 @@ def collect() -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check agents-live prerequisites.")
     parser.add_argument("--json", action="store_true", help="Emit a JSON summary")
-    parser.add_argument(
-        "--refresh-updates", action="store_true",
-        help="Refresh the cached PyPI release check",
-    )
     args = parser.parse_args(argv)
     json_mode = args.json or preflight.json_mode()
-    refresh_updates = args.refresh_updates and not json_mode
     updates_disabled = update_check.disabled()
-
-    if refresh_updates and not updates_disabled:
-        update_check.refresh()
 
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]
@@ -621,10 +613,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"OK (required checks pass); {len(optional_failures)} optional missing: {names}")
     else:
         print("OK: all checks pass.")
-    if updates_disabled and (update_check.interactive() or refresh_updates):
-        print("\nUpdate check: disabled")
-    elif update_check.interactive() or refresh_updates:
-        print(f"\n{update_check.status_text()}")
+    if update_check.interactive():
+        status = "Update check: disabled" if updates_disabled else update_check.status_text()
+        print(f"\n{status}")
     return 0 if ok else 1
 
 

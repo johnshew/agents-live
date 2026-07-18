@@ -202,7 +202,7 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
-    def test_doctor_explicit_refresh_displays_cached_result(self) -> None:
+    def test_interactive_doctor_displays_cached_update_result(self) -> None:
         import importlib
         prereqs = importlib.import_module(
             f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
@@ -211,14 +211,14 @@ class TestCliContract(_TempProject):
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "disabled", return_value=False),
-            mock.patch.object(update_check, "refresh") as refresh,
-            mock.patch.object(update_check, "status_text", return_value="Update check: current"),
-            mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch.object(
+                update_check, "status_text", return_value="Update check: current") as status,
+            mock.patch.object(update_check, "interactive", return_value=True),
         ):
-            self.assertEqual(prereqs.main(["--refresh-updates"]), 0)
-        refresh.assert_called_once()
+            self.assertEqual(prereqs.main([]), 0)
+        status.assert_called_once()
 
-    def test_doctor_json_suppresses_explicit_update_refresh(self) -> None:
+    def test_doctor_json_suppresses_cached_update_result(self) -> None:
         import importlib
         prereqs = importlib.import_module(
             f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
@@ -226,12 +226,10 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
-            mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(update_check, "status_text") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
         ):
-            self.assertEqual(prereqs.main(["--json", "--refresh-updates"]), 0)
-        refresh.assert_not_called()
+            self.assertEqual(prereqs.main(["--json"]), 0)
         status.assert_not_called()
 
 
