@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-18
+
 - fix: refuse to modify the crontab when it cannot be read. A transient
   read failure during activation previously installed a fresh table
   containing only the new entries, silently wiping the user's personal
