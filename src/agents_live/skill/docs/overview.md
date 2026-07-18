@@ -102,6 +102,13 @@ package-index request metadata; it does not include project or agent data.
 updates the cache. Install an available release with `uv tool upgrade
 agents-live`. Agents Live never updates itself.
 
+Repositories used from outside their working tree can be registered by alias
+under `$XDG_CONFIG_HOME/agents-live/config.toml` (normally
+`~/.config/agents-live/config.toml`). Explicit selection and local project
+markers take precedence over the optional default. `status --all-repos`,
+`doctor --all-repos`, and `dashboard --all-repos` provide repo-qualified,
+read-only views; lifecycle actions remain scoped to one selected repository.
+
 After upgrading, run `agents-live --repo <project> upgrade` to refresh the
 optional installed skill payload. `doctor` reports a package and payload
 version mismatch and recommends this command. `init` remains the first-time

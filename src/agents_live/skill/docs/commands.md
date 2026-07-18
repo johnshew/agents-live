@@ -559,12 +559,55 @@ agents-live start my-agent --yes                 # take over from another host (
 agents-live status                   # human-readable table
 agents-live status --json            # all agents as JSON
 agents-live status --json my-agent   # single agent as JSON
+agents-live status --all-repos       # repo-qualified, read-only aggregate
+agents-live doctor --all-repos       # host once + each registered project
+agents-live dashboard --all-repos    # read-only repository selector
+
+# User repository registry
+agents-live repos add life ~/repos/life
+agents-live repos list
+agents-live repos default life
+agents-live --repo life status
+agents-live repos remove work
 
 # Smoketest (validates full chain for each agent)
 agents-live smoketest --runtime claude
 agents-live smoketest --runtime copilot
 agents-live smoketest --runtime "agency copilot"
 ```
+
+### Repository selection
+
+The user registry is
+`$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
+the platform-neutral fallback is `~/.config/agents-live/config.toml`.
+`repos add` requires an existing directory and stores its normalized absolute
+path. Duplicate aliases, malformed configuration, unavailable paths, and
+removing the current default fail with an actionable error.
+
+Targets resolve in this order:
+
+1. explicit `--repo` path or registered alias;
+2. `AGENTS_LIVE_REPO` process/session override;
+3. nearest `.agents-live.toml` or `[tool.agents-live]` marker;
+4. markerless-git adoption for interactive `run` and `start`;
+5. configured default repository.
+
+A default never redirects a command away from a local marker. Mutating commands
+print the selected path when they use the default. Cron, watcher, and spawned
+commands continue to persist an absolute `--repo` path.
+
+`status --all-repos` and `doctor --all-repos` isolate each repository in a
+child process, qualify agent identities as `repo/agent`, and report an invalid
+repository without hiding healthy peers. Aggregate doctor runs host checks once
+and project checks once per valid repository; its exit status is nonzero when a
+required host/project check or repository validation fails. The aggregate
+dashboard can filter registered repositories but exposes no actions. Select one
+repository explicitly to run, start, stop, teardown, migrate, claim, or repair.
+
+`agent_directories` remains a within-repository discovery setting. Entries must
+be relative and may not escape through `..` or symlinks; register another
+repository instead of pointing this setting outside the selected root.
 
 ### Multi-machine agent ownership
 

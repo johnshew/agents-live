@@ -24,9 +24,8 @@ lifecycle operation is a subcommand:
     cli.py logs [timeline] [...]     query logs (qlog.py / timeline.py)
     cli.py dashboard [...]           interactive control panel (dashboard.py)
 
-Global flag: ``--repo <path>`` (before the subcommand) pins the project
-root; it must be an existing directory. Without it, resolution follows
-paths.py (AGENTS_LIVE_REPO env, then marker walk-up from CWD).
+Global flag: ``--repo <path-or-alias>`` (before the subcommand) pins the
+project root. Without it, resolution follows paths.py.
 
 ``run``/``start``/``stop``/``teardown`` accept the agent name positionally
 (``cli.py run foo`` == ``cli.py run --name foo``).
@@ -72,11 +71,12 @@ IN_PROCESS = {
     "migrate": "migrate",
     "heartbeat": "heartbeat",
     "uninstall": "uninstall",
+    "repos": "repos",
 }
 
 # init DEFINES the project root (creates the marker); it must not be
 # gated on resolving one.
-NO_ROOT_REQUIRED = frozenset({"init", "heartbeat", "uninstall"})
+NO_ROOT_REQUIRED = frozenset({"init", "heartbeat", "uninstall", "repos"})
 MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
@@ -106,6 +106,8 @@ SUBPROCESS = {
 NAME_SUGAR = {"run", "start", "stop", "teardown"}
 
 DOCS_URL = "https://github.com/johnshew/agents-live"
+ALL_REPOS_COMMANDS = frozenset({"status", "doctor", "prereqs", "dashboard"})
+DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"upgrade", "migrate"})
 
 
 def _usage() -> str:
@@ -130,11 +132,12 @@ def _usage() -> str:
         "                      canonical invocation form\n"
         "  heartbeat           run or manage the WSL host heartbeat\n"
         "  uninstall           remove host integrations, then the uv tool\n"
+        "  repos               manage registered repositories\n"
         "  dashboard           interactive control panel\n\n"
         "global flags:\n"
         "  --json              machine-readable output and error envelopes\n"
-        "  --repo PATH         pin the project root (else AGENTS_LIVE_REPO\n"
-        "                      or marker walk-up from the current directory)\n"
+        "  --repo PATH|ALIAS   pin a path or registered repository (else\n"
+        "                      AGENTS_LIVE_REPO, local marker, then default)\n"
         "  --version           show the installed version and exit\n\n"
         f"docs: {DOCS_URL}\n"
         f"  commands reference  {blob}/commands.md\n"
@@ -253,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args[0] == "--repo":
             if len(args) < 2:
-                print("error: --repo requires a path", file=sys.stderr)
+                print("error: --repo requires a path or alias", file=sys.stderr)
                 return 2
             try:
                 root = paths.resolve_root(args[1])
@@ -275,11 +278,22 @@ def main(argv: list[str] | None = None) -> int:
         return _finish(0, "help", [], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
+    all_repos = "--all-repos" in rest
+    if all_repos and cmd not in ALL_REPOS_COMMANDS:
+        print(f"error: {cmd} does not support --all-repos; select one repository",
+              file=sys.stderr)
+        return 2
 
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module.
-    if cmd not in NO_ROOT_REQUIRED:
+    if cmd not in NO_ROOT_REQUIRED and not all_repos:
+        if (
+            cmd in AUTO_MARKER
+            and not os.environ.get(paths.ENV_VAR, "").strip()
+            and paths._walk_for_marker(Path.cwd()) is None
+        ):
+            _adopt_git_root(cmd)
         try:
             paths.resolve_root()
         except ValueError as exc:
@@ -293,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
                     "no_project_root", "project-root", cmd, str(exc)),
                     json_mode=json_mode)
                 return 2
+        if (
+            paths.resolution_source() == "default"
+            and cmd in DEFAULT_NOTICE_COMMANDS
+        ):
+            print(f"agents-live: using default repo {paths.resolve_root()}",
+                  file=sys.stderr)
 
     rest = _apply_name_sugar(cmd, rest)
 

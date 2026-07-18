@@ -99,7 +99,8 @@ Agents/                              # runtime artifacts
 │   └── approach.md
 └── scripts/
     ├── cli.py                   # agents-live command dispatcher
-    ├── paths.py                 # repo-root/state resolution (explicit arg -> env -> marker walk)
+    ├── paths.py                 # root resolution (explicit -> env -> marker -> default)
+    ├── repos.py                 # XDG registry + isolated read-only aggregation
     ├── headless.py              # shared helper (env, flags, frontmatter parsing)
     ├── activate.py              # start cron or watcher (auto-detects type)
     ├── run.py                   # execute an agent once with verbose output
@@ -108,6 +109,14 @@ Agents/                              # runtime artifacts
     ├── status.py                # list all agents + state (--json for structured output)
     └── smoketest.py             # end-to-end validation (all agents)
 ```
+
+Each process still operates on one immutable repository root. The user-level
+XDG registry only selects that root. Multi-repository status, doctor, and
+dashboard collection invokes the existing per-repository collectors in isolated
+child processes, qualifies identities, and preserves partial failures.
+Mutations never aggregate, and persisted trigger/spawn invocations always pin a
+normalized absolute root. Additional `agent_directories` are repository-relative
+and cannot escape the selected root, including through symlinks.
 
 ### Prompt frontmatter (source of truth)
 

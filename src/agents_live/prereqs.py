@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from . import paths
 from . import preflight
 from . import update_check
+from . import repos
 from .paths import resolve_root
 
 try:
@@ -206,8 +207,12 @@ def _config_state() -> tuple[bool, str]:
         config = paths.load_config(REPO)
     except ValueError as exc:
         return False, str(exc)
-    missing = [d for d in config.get("agent_directories", [])
-               if not (REPO / str(d)).is_dir()]
+    try:
+        directories = paths.validated_agent_directories(
+            REPO, config.get("agent_directories", []))
+    except ValueError as exc:
+        return False, str(exc)
+    missing = [str(d.relative_to(REPO)) for d in directories if not d.is_dir()]
     if missing:
         return False, f"declared agent directories missing: {', '.join(missing)}"
     return True, f"config: {source.name}"
@@ -589,8 +594,23 @@ def collect() -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check agents-live prerequisites.")
     parser.add_argument("--json", action="store_true", help="Emit a JSON summary")
+    parser.add_argument(
+        "--all-repos", action="store_true",
+        help="Run host checks once and project checks for every registered repo")
     args = parser.parse_args(argv)
     json_mode = args.json or preflight.json_mode()
+
+    if args.all_repos:
+        payload = repos.collect_doctor()
+        if json_mode:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Host checks: {'PASS' if payload['host'].get('ok') else 'FAIL'}")
+            for item in payload["repos"]:
+                state = "PASS" if item["ok"] else "FAIL"
+                detail = f": {item['error']}" if "error" in item else ""
+                print(f"  [{state}] {item['name']} ({item['path']}){detail}")
+        return 0 if payload["ok"] else 1
 
     try:
         update_check.refresh()
