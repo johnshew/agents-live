@@ -1,5 +1,5 @@
 ---
-title: Agents Live Overview and Positioning
+title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
 ms.date: 2026-07-15
 ms.topic: overview
@@ -93,8 +93,9 @@ agents-live teardown file-notes    # clean up - remove its triggers
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local
 mode, all defaults). `agents-live init` is optional - run it to install
-the conversational skill, seed the agent directories, or declare more
-complex (multi-host) configuration. `stop` pauses an agent without
+the conversational `/agents-live` skill (itself optional support for
+the CLI), seed the agent directories, or declare more complex
+(multi-host) configuration. `stop` pauses an agent without
 removing it, so the full lifecycle is
 `create -> run -> start -> stop`. `teardown` is an alias for `stop`; both
 remove triggers while preserving the agent definition. An optional
@@ -250,11 +251,13 @@ Two artifacts, one source of truth:
    in the same package. `init` installs the vendored skill and seeds the
    agent directories; `doctor` (read-only) verifies the install and
    environment.
-2. **The skill as a thin layer over the CLI**, vendored in the package:
-   SKILL.md keeps the conversational surface (make existing agents live,
-   debug runs, trace pipelines) and drives
+2. **The skill as a thin, optional layer over the CLI**, vendored in
+   the package: SKILL.md keeps the conversational surface (make
+   existing agents live, debug runs, trace pipelines) and drives
    `agents-live <cmd>`. Installed as a Claude Code skill by `init`;
-   the same doc serves Copilot via AGENTS.md.
+   the same doc serves Copilot via AGENTS.md. The skill is optional
+   support for the CLI — everything it does is an ordinary
+   `agents-live` command, and the CLI is fully usable without it.
 
 The public repo is the source of truth for all framework code. Private
 deployments (this one included) consume released versions and extend

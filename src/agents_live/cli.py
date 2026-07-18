@@ -103,7 +103,7 @@ DOCS_URL = "https://github.com/johnshew/agents-live"
 def _usage() -> str:
     # Doc links pinned per §3.5 (repin from main to the release tag at
     # packaging time, Phase 4).
-    blob = f"{DOCS_URL}/blob/v0.1.1/src/agents_live/skill/docs"
+    blob = f"{DOCS_URL}/blob/v0.1.2/src/agents_live/skill/docs"
     return (
         "usage: agents-live [--json] [--repo PATH] <command> [args]\n\n"
         "commands:\n"

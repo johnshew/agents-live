@@ -4,6 +4,19 @@ Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
+## 0.1.2 - 2026-07-18
+
+Documentation corrections; no code changes.
+
+- docs: the release README is sourced from a maintained file next to
+  SKILL.md (distilled from the overview: positioning, a live-agent
+  frontmatter example, the plan/pipeline/write ladder, footprint, and
+  honest limits) instead of a heredoc in the release assembler.
+- docs: the README and overview state that the `/agents-live` skill is
+  optional support for the CLI -- every flow it drives is an ordinary
+  `agents-live` command, and the CLI is fully usable without it.
+- docs: overview title simplified to "Agents Live Overview".
+
 ## 0.1.1 - 2026-07-18
 
 Documentation corrections; no code changes.
