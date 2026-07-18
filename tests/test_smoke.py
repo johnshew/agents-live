@@ -14,6 +14,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 """
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import io
 import json
@@ -241,7 +242,31 @@ class TestAdapterRegistry(unittest.TestCase):
 
 class TestCliContract(_TempProject):
     def test_help_exits_zero(self) -> None:
-        self.assertEqual(cli.main(["--help"]), 0)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(cli.main(["--help"]), 0)
+        self.assertIn("--version", stdout.getvalue())
+
+    def test_version_matches_installed_metadata_outside_repository(self) -> None:
+        saved = Path.cwd()
+        os.environ.pop(paths.ENV_VAR, None)
+        paths.clear_cache()
+        with tempfile.TemporaryDirectory() as outside:
+            try:
+                os.chdir(outside)
+                with (
+                    mock.patch.object(paths, "resolve_root") as resolve_root,
+                    mock.patch.object(update_check, "interactive") as interactive,
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                ):
+                    self.assertEqual(cli.main(["--version"]), 0)
+            finally:
+                os.chdir(saved)
+        self.assertEqual(
+            stdout.getvalue(),
+            f"agents-live {importlib.metadata.version('agents-live')}\n",
+        )
+        resolve_root.assert_not_called()
+        interactive.assert_not_called()
 
     def test_unknown_command_exits_two(self) -> None:
         self.assertEqual(cli.main(["frobnicate"]), 2)
