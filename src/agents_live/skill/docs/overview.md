@@ -1,7 +1,7 @@
 ---
 title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: overview
 ---
 
@@ -90,10 +90,22 @@ agents-live start file-notes       # activate it unattended
 agents-live teardown file-notes    # clean up - remove its triggers
 ```
 
-Check for and install a newer PyPI release with `uv tool upgrade
-agents-live`. After upgrading, run `agents-live --repo <project> init` to
-refresh the optional installed skill payload; `doctor` reports a package and
-payload version mismatch.
+On interactive terminal invocations, agents-live checks PyPI for a newer
+stable release at most once every 24 hours and caches the result under
+`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). The refresh
+runs in the background; network and cache failures never affect the command.
+No check runs for scheduled/internal, quiet, JSON, piped, or redirected
+commands. This request sends only ordinary package-index request metadata; it
+does not include project or agent data. Disable it with
+`AGENTS_LIVE_NO_UPDATE_CHECK=1` or `update_check = false` in
+`$XDG_CONFIG_HOME/agents-live/config.toml`. View the cached result with
+`agents-live doctor`, refresh explicitly with
+`agents-live doctor --refresh-updates`, and install an available release with
+`uv tool upgrade agents-live`. Agents Live never updates itself.
+
+After upgrading, run `agents-live --repo <project> init` to refresh the
+optional installed skill payload; `doctor` reports a package and payload
+version mismatch.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

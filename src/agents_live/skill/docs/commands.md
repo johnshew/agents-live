@@ -165,6 +165,13 @@ converges stale crontab entries, then running the
 `agents-live-health-check` agent once re-verifies and refreshes the
 beacon.
 
+For interactive terminal use, `doctor` also displays the cached PyPI update
+result. Run `agents-live doctor --refresh-updates` to refresh it explicitly.
+This only writes the user cache under `$XDG_CACHE_HOME/agents-live/`; it does
+not change the project or install an update. Set
+`AGENTS_LIVE_NO_UPDATE_CHECK=1`, or put `update_check = false` in
+`$XDG_CONFIG_HOME/agents-live/config.toml`, to disable update requests.
+
 ### Checks to perform
 
 1. **Platform**: Confirm running on Linux under WSL, not native Windows.
