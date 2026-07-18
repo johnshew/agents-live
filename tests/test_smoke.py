@@ -217,6 +217,23 @@ class TestMigratePlanning(_TempProject):
         plan = migrate.plan_migration([foreign])
         self.assertEqual(plan, {"schedule": {}, "watcher": {}, "missing": []})
 
+    def test_health_check_ignores_foreign_watcher_entries(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        foreign_repo = f"{self.root}-foreign"
+        crontab = "\n".join([
+            f"@reboot cd {foreign_repo} && agents-live --repo {foreign_repo} "
+            "start --ensure-watcher missing",
+            f"@reboot cd {self.root} && agents-live --repo {self.root} "
+            "start --ensure-watcher smoke-fixture",
+        ])
+        completed = subprocess.CompletedProcess(
+            ["crontab", "-l"], 0, stdout=crontab, stderr="")
+        with (
+            mock.patch.object(prereqs, "REPO", self.root),
+            mock.patch.object(prereqs.subprocess, "run", return_value=completed),
+        ):
+            self.assertEqual(prereqs._crontab_inconsistencies(), ([], []))
+
 
 class TestAdapterRegistry(unittest.TestCase):
     def test_public_adapters_present(self) -> None:
@@ -381,6 +398,52 @@ class TestCliContract(_TempProject):
             self.assertEqual(prereqs.main(["--json"]), 0)
         refresh.assert_called_once()
         status.assert_not_called()
+
+    def test_doctor_json_flag_positions_are_equivalent(self) -> None:
+        def invoke(argv: list[str]) -> dict:
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": ""}),
+                mock.patch.object(prereqs, "collect", return_value=[]),
+                mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+                mock.patch.object(update_check, "refresh"),
+                mock.patch("sys.stdout", stdout),
+            ):
+                self.assertEqual(cli.main(argv), 0)
+            return json.loads(stdout.getvalue())
+
+        self.assertEqual(
+            invoke(["--json", "doctor"]),
+            invoke(["doctor", "--json"]),
+        )
+
+
+class TestTimeline(_TempProject):
+    def test_bare_timeline_keeps_valid_rows_among_invalid_rows(self) -> None:
+        log = self.root / "Agents" / "logs" / "mixed.log"
+        rows = [
+            {"log_schema": 5, "ts": "2026-07-18T20:00:00Z",
+             "agent_name": "valid-agent", "phase": "done", "status": "ok"},
+            {"log_schema": 4, "ts": "2026-07-18T19:00:00Z",
+             "agent_name": "legacy-agent"},
+        ]
+        log.write_text(
+            "\n".join([json.dumps(row) for row in rows] + ["not-json", "[]"]),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [str(headless.cli_shim_path()), "logs", "timeline"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Timeline (all agents, last 50)", result.stdout)
+        self.assertIn("valid-agent", result.stdout)
+        self.assertNotIn("legacy-agent", result.stdout)
+        self.assertIn("skipped 3 malformed or pre-v5 rows", result.stderr)
 
 
 class TestUpdateCheck(unittest.TestCase):

@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: scope schedule, watcher, migration, and health-check crontab matching
+  to the current repository, so projects sharing a user crontab cannot
+  cross-report, remove, rewrite, or reject one another's entries.
+- fix: honor `--json` before or after `doctor`; both forms now emit the same
+  machine-readable result.
+- fix: bare `agents-live logs timeline` now shows the last 50 events across
+  all agents, and malformed or pre-v5 rows are skipped with a warning rather
+  than aborting valid neighboring events.
 - feat: add best-effort PyPI update notifications for interactive CLI use.
   Ordinary commands refresh a shared cache in the background when it is one
   hour old and display each available stable release once; `doctor` always

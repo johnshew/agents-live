@@ -1,7 +1,7 @@
 ---
 title: Agents Live Log Diagnostics
 description: Log inventory and correlated diagnostic procedures for Agents Live agents
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: troubleshooting
 ---
 
@@ -182,6 +182,9 @@ Filters: `--agent`, `--since`, `--until`, `--phase`, `--status`, `--trigger`,
 ### logs timeline
 
 ```bash
+# Last 50 events across all agents
+agents-live logs timeline
+
 # Timeline for a specific agent
 agents-live logs timeline my-agent --since 2026-05-01T12:00
 
@@ -196,4 +199,3 @@ agents-live logs timeline --all --since 2026-05-01T16:00
 
 Deployment-specific pipeline entry points (pre-processors, parsers,
 post-processors) belong in your per-agent log inventory.
-
