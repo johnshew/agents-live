@@ -6,6 +6,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: add best-effort PyPI update notifications for interactive CLI use.
+  Ordinary commands refresh a shared cache in the background when it is one
+  hour old and display each available stable release once; `doctor` always
+  performs a fresh check and reports its status. Network, cache, and metadata
+  failures never block the requested command, and agents-live never updates
+  itself.
 - feat: add `agents-live upgrade` as the explicit post-package-upgrade
   workflow for refreshing a project's managed skill payload. Doctor now
   recommends it when package and payload versions differ; `init` keeps its
