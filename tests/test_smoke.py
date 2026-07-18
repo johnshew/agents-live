@@ -264,14 +264,13 @@ class TestCliContract(_TempProject):
                         f"agents-live "
                         f"{importlib.metadata.version('agents-live')}\n",
                     )
+                    resolve_root.assert_not_called()
+                    interactive.assert_not_called()
         finally:
             os.chdir(saved)
             if selected_root is not None:
                 os.environ[paths.ENV_VAR] = selected_root
             paths.clear_cache()
-        resolve_root.assert_not_called()
-        interactive.assert_not_called()
-
     def test_unknown_command_exits_two(self) -> None:
         self.assertEqual(cli.main(["frobnicate"]), 2)
 
