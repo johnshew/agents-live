@@ -725,12 +725,14 @@ def build_all_repos_page() -> None:
     for item in payload["repos"]:
         if "error" in item:
             rows.append({
+                "identity": f"{item['name']}/error",
                 "repo": item["name"], "name": "—", "state": "error",
                 "runtime": "—", "detail": item["error"],
             })
             continue
         for agent in item["result"].get("agents", []):
             rows.append({
+                "identity": agent["name"],
                 "repo": item["name"], "name": agent["name"],
                 "state": agent.get("state", "?"),
                 "runtime": agent.get("runtime", "?"), "detail": item["path"],
@@ -749,7 +751,7 @@ def build_all_repos_page() -> None:
             {"name": "runtime", "label": "Runtime", "field": "runtime"},
             {"name": "detail", "label": "Repository path / error", "field": "detail"},
         ],
-        rows=rows, row_key="repo-name",
+        rows=rows, row_key="identity",
     ).classes("w-full")
 
     def select_repo(event) -> None:
