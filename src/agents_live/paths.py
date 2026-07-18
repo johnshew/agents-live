@@ -8,6 +8,7 @@ Resolution order:
 3. Walk up from CWD to the nearest directory containing a marker:
    ``.agents-live.toml``, or ``pyproject.toml`` with a
    ``[tool.agents-live]`` table.
+4. The default repository in the user-level XDG registry.
 
 No fallback beyond that: with no explicit root, no env var, and no
 marker on the walk, resolution fails loudly (the Phase 1 acceptance
@@ -47,6 +48,7 @@ PYPROJECT_TABLE = "agents-live"  # [tool.agents-live]
 MARKERS = (CONFIG_DOTFILE, f"{PYPROJECT} with [tool.{PYPROJECT_TABLE}]")
 
 _cached_default_root: Path | None = None
+_cached_default_source: str | None = None
 
 
 def resolve_root(explicit: str | Path | None = None) -> Path:
@@ -59,32 +61,59 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     logs and state to a location later code would create.
     """
     if explicit is not None:
+        if isinstance(explicit, str) and _is_alias_candidate(explicit):
+            candidate = Path(explicit).expanduser()
+            if not candidate.is_dir():
+                from . import repos
+                return repos.resolve_alias(explicit)
         return _validated_root(explicit, source="explicit argument")
 
-    global _cached_default_root
+    global _cached_default_root, _cached_default_source
     if _cached_default_root is not None:
         return _cached_default_root
 
     env_value = os.environ.get(ENV_VAR, "").strip()
     if env_value:
         _cached_default_root = _validated_root(env_value, source=ENV_VAR)
+        _cached_default_source = "environment"
         return _cached_default_root
 
     marked = _walk_for_marker(Path.cwd())
     if marked is not None:
         _cached_default_root = marked
+        _cached_default_source = "marker"
+        return _cached_default_root
+
+    from . import repos
+    default = repos.default_root()
+    if default is not None:
+        _cached_default_root = default
+        _cached_default_source = "default"
         return _cached_default_root
 
     raise ValueError(
         f"no project root found: no {ENV_VAR} set, no --repo given, and no "
-        f"marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents"
+        f"marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents, "
+        "and no default repo configured"
     )
 
 
 def clear_cache() -> None:
     """Reset the cached default resolution (tests only)."""
-    global _cached_default_root
+    global _cached_default_root, _cached_default_source
     _cached_default_root = None
+    _cached_default_source = None
+
+
+def resolution_source() -> str | None:
+    """Source used by the cached implicit resolution."""
+    return _cached_default_source
+
+
+def _is_alias_candidate(value: str) -> bool:
+    return bool(value) and not any(
+        separator in value for separator in (os.sep, os.altsep) if separator
+    ) and value not in (".", "..") and not value.startswith("~")
 
 
 def _validated_root(value: str | Path, *, source: str) -> Path:
@@ -172,3 +201,25 @@ def load_config(root: Path | None = None) -> dict:
                 f"project config unreadable: {dotfile}: {exc}") from exc
     table = _pyproject_table(base / PYPROJECT, on_error="raise")
     return table if table is not None else {}
+
+
+def validated_agent_directories(root: Path, values: object) -> list[Path]:
+    """Validate configured directories remain within *root*."""
+    if not isinstance(values, list):
+        raise ValueError("agent_directories must be a list of repo-relative paths")
+    base = root.resolve()
+    result = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("agent_directories entries must be non-empty strings")
+        relative = Path(value)
+        if relative.is_absolute():
+            raise ValueError(f"agent_directories entry must be repo-relative: {value}")
+        resolved = (base / relative).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(
+                f"agent_directories entry escapes the repository: {value}") from exc
+        result.append(resolved)
+    return result

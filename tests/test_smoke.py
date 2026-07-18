@@ -29,7 +29,7 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, heartbeat, init, migrate,
-        ownership, paths, prereqs, spawn, uninstall, update_check, upgrade,
+        ownership, paths, prereqs, repos, spawn, uninstall, update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -44,6 +44,7 @@ except ImportError:  # flat checkout layout
     import ownership
     import paths
     import prereqs
+    import repos
     import spawn
     import update_check
     import upgrade
@@ -106,6 +107,101 @@ class TestPathsResolver(_TempProject):
             self.assertEqual(paths.resolve_root(), self.root)
         finally:
             os.chdir(saved)
+
+
+class TestRepositoryRegistry(_TempProject):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config_home = self.root / "config-home"
+        self._saved_config_home = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.config_home)
+
+    def tearDown(self) -> None:
+        if self._saved_config_home is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._saved_config_home
+        super().tearDown()
+
+    def test_alias_and_default_store_normalized_absolute_path(self) -> None:
+        repos._add("life", str(self.root / "."))
+        repos._set_default("life")
+        registry = repos.load()
+        self.assertEqual(registry["repos"], {"life": str(self.root)})
+        self.assertEqual(paths.resolve_root("life"), self.root)
+
+    def test_local_marker_wins_over_default(self) -> None:
+        repos._add("default", str(self.root))
+        repos._set_default("default")
+        os.environ.pop(paths.ENV_VAR, None)
+        with tempfile.TemporaryDirectory() as local_tmp:
+            local = Path(local_tmp).resolve()
+            (local / ".agents-live.toml").write_text("", encoding="utf-8")
+            saved = Path.cwd()
+            try:
+                os.chdir(local)
+                paths.clear_cache()
+                self.assertEqual(paths.resolve_root(), local)
+                self.assertEqual(paths.resolution_source(), "marker")
+            finally:
+                os.chdir(saved)
+
+    def test_default_is_last_resort(self) -> None:
+        repos._add("life", str(self.root))
+        repos._set_default("life")
+        os.environ.pop(paths.ENV_VAR, None)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                self.assertEqual(paths.resolve_root(), self.root)
+                self.assertEqual(paths.resolution_source(), "default")
+            finally:
+                os.chdir(saved)
+
+    def test_unavailable_default_fails_actionably(self) -> None:
+        missing = self.root / "gone"
+        missing.mkdir()
+        repos._add("gone", str(missing))
+        repos._set_default("gone")
+        missing.rmdir()
+        with self.assertRaisesRegex(ValueError, "registered repo 'gone'"):
+            repos.default_root()
+
+    def test_status_aggregation_qualifies_names_and_keeps_errors(self) -> None:
+        with (
+            mock.patch.object(
+                repos, "entries",
+                return_value=[
+                    ("life", "/life", None),
+                    ("gone", "/gone", "registered repo 'gone' is unavailable"),
+                ],
+            ),
+            mock.patch.object(
+                repos, "_child_json",
+                return_value={
+                    "name": "life", "path": "/life", "ok": True,
+                    "result": {"agents": [{"name": "shared", "state": "inactive"}]},
+                },
+            ),
+        ):
+            payload = repos.collect_status()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            payload["repos"][0]["result"]["agents"][0]["name"], "life/shared")
+        self.assertIn("error", payload["repos"][1])
+
+    def test_agent_directories_cannot_escape_repository(self) -> None:
+        with self.assertRaisesRegex(ValueError, "repo-relative"):
+            paths.validated_agent_directories(self.root, ["/tmp/agents"])
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            paths.validated_agent_directories(self.root, ["../agents"])
+        with tempfile.TemporaryDirectory() as outside:
+            link = self.root / "linked-agents"
+            link.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                paths.validated_agent_directories(self.root, ["linked-agents"])
 
 
 class TestOwnershipKernel(_TempProject):
@@ -326,6 +422,12 @@ class TestCliContract(_TempProject):
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("error: unknown command 'frobnicate'", stderr.getvalue())
         self.assertIn("usage: agents-live", stderr.getvalue())
+
+    def test_mutating_command_rejects_all_repos(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            self.assertEqual(cli.main(["start", "--all-repos"]), 2)
+        self.assertIn("select one repository", stderr.getvalue())
 
     def test_upgrade_dispatches_for_selected_project(self) -> None:
         stdout = io.StringIO()

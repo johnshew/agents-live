@@ -53,18 +53,25 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if (SCRIPTS_DIR / "__init__.py").is_file():
     if str(SCRIPTS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
-    from agents_live import headless, ownership  # noqa: E402
+    from agents_live import headless, ownership, repos  # noqa: E402
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
     import headless  # noqa: E402
     import ownership  # noqa: E402
+    import repos  # noqa: E402
 from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
 
-REPO_ROOT = headless.repo_root()
-LOGS_DIR = REPO_ROOT / "Agents" / "logs"
-HEALTH_OK_PATH = REPO_ROOT / "Agents" / "data" / "health.ok"
+try:
+    REPO_ROOT = headless.repo_root()
+except ValueError:
+    REPO_ROOT = None
+LOGS_DIR = REPO_ROOT / "Agents" / "logs" if REPO_ROOT else Path("Agents/logs")
+HEALTH_OK_PATH = (
+    REPO_ROOT / "Agents" / "data" / "health.ok"
+    if REPO_ROOT else Path("Agents/data/health.ok")
+)
 # The health-check worker is scheduled hourly; allow a little slack before
 # treating the beacon as stale (a missed run shouldn't flap the header).
 HEALTH_STALE_MINUTES = 70
@@ -710,6 +717,54 @@ def build_page() -> None:
     ui.timer(600.0, _refresh_views)
 
 
+def build_all_repos_page() -> None:
+    """Read-only registered-repository view; no lifecycle actions are exposed."""
+    ui.dark_mode().auto()
+    payload = repos.collect_status()
+    rows = []
+    for item in payload["repos"]:
+        if "error" in item:
+            rows.append({
+                "repo": item["name"], "name": "—", "state": "error",
+                "runtime": "—", "detail": item["error"],
+            })
+            continue
+        for agent in item["result"].get("agents", []):
+            rows.append({
+                "repo": item["name"], "name": agent["name"],
+                "state": agent.get("state", "?"),
+                "runtime": agent.get("runtime", "?"), "detail": item["path"],
+            })
+
+    with ui.row().classes("w-full items-center gap-4"):
+        ui.label("Agents Live").classes("text-xl font-semibold")
+        ui.label("All registered repositories — read only").classes(
+            "text-sm text-gray-500")
+    aliases = ["All", *(item["name"] for item in payload["repos"])]
+    table = ui.table(
+        columns=[
+            {"name": "repo", "label": "Repository", "field": "repo", "sortable": True},
+            {"name": "name", "label": "Agent", "field": "name", "sortable": True},
+            {"name": "state", "label": "State", "field": "state", "sortable": True},
+            {"name": "runtime", "label": "Runtime", "field": "runtime"},
+            {"name": "detail", "label": "Repository path / error", "field": "detail"},
+        ],
+        rows=rows, row_key="repo-name",
+    ).classes("w-full")
+
+    def select_repo(event) -> None:
+        selected = event.value
+        table.rows = rows if selected == "All" else [
+            row for row in rows if row["repo"] == selected]
+        table.update()
+
+    ui.select(aliases, value="All", label="Repository", on_change=select_repo)
+    ui.label(
+        "Select one repository with `agents-live --repo NAME dashboard` "
+        "to enable actions."
+    ).classes("text-sm text-gray-500")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -725,9 +780,15 @@ def main() -> None:
         help="Auto-restart when dashboard.py changes",
     )
     parser.add_argument("--port", type=int, default=8231)
+    parser.add_argument(
+        "--all-repos", action="store_true",
+        help="Show a read-only view of all registered repositories")
     args = parser.parse_args()
 
-    build_page()
+    if args.all_repos:
+        build_all_repos_page()
+    else:
+        build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
     ui.run(
         host="127.0.0.1",

@@ -15,6 +15,7 @@ from typing import Any
 import subprocess
 
 from .headless import AgentsLiveError, agent_details, list_agents, load_agent_config
+from . import repos
 
 LOGS_DIR = Path("Agents/logs")
 
@@ -157,8 +158,29 @@ def _in_sandbox() -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", dest="json_mode", action="store_true")
+    parser.add_argument(
+        "--all-repos", action="store_true",
+        help="Read status from every registered repository")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args()
+
+    if args.all_repos:
+        if args.name:
+            parser.error("--all-repos cannot be combined with an agent name")
+        payload = repos.collect_status()
+        if args.json_mode:
+            print(json.dumps(payload, indent=2))
+        else:
+            if not payload["repos"]:
+                print("No repositories registered")
+            for item in payload["repos"]:
+                print(f"\nRepository {item['name']} ({item['path']})")
+                if "error" in item:
+                    print(f"  ERROR: {item['error']}")
+                    continue
+                agents = item["result"].get("agents", [])
+                print(format_table(agents) if agents else "  No agents configured")
+        return 0 if payload["ok"] else 1
 
     if _in_sandbox():
         print(

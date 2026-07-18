@@ -460,23 +460,20 @@ def clean_path() -> str:
 # Agent directory resolution (multi-directory support)
 # ---------------------------------------------------------------------------
 
-def _load_agent_directories_config() -> list[str]:
+def _load_agent_directories_config() -> list[Path]:
     """Read additional agent directories from the project config
     (``paths.load_config`` - root ``.agents-live.toml`` or the
     ``[tool.agents-live]`` pyproject table).
 
-    Returns the raw list of repo-relative directory strings from the
-    config's ``agent_directories`` key. Returns ``[]`` if there is no
-    config, no ``agent_directories`` entry, or the config is unreadable
-    (agent discovery falls back to the default directory).
+    Returns validated paths contained by the repository. Invalid or escaping
+    entries fail closed rather than extending discovery outside the project.
     """
     try:
-        dirs = paths.load_config(repo_root()).get("agent_directories", [])
-    except ValueError:
-        return []
-    if isinstance(dirs, list):
-        return [str(d) for d in dirs if d]
-    return []
+        root = repo_root()
+        dirs = paths.load_config(root).get("agent_directories", [])
+        return paths.validated_agent_directories(root, dirs)
+    except ValueError as exc:
+        raise AgentsLiveError(str(exc)) from exc
 
 
 def agents_dir() -> Path:
@@ -542,8 +539,7 @@ def _all_agent_dirs() -> list[Path]:
     root = repo_root()
     dirs: list[Path] = [root / "Agents"]
     seen = {dirs[0].resolve()}
-    for rel in _load_agent_directories_config():
-        p = root / rel
+    for p in _load_agent_directories_config():
         resolved = p.resolve()
         if resolved not in seen and p.is_dir():
             dirs.append(p)
