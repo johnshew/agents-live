@@ -12,6 +12,8 @@ from pathlib import Path
 
 TASK_PREFIX = "Agents Live Heartbeat"
 LEGACY_TASK = "WSL Heartbeat"
+LEGACY_ACTION_TOKENS = (
+    "windows-heartbeat.sh", "site-packages", "python3.", "--repo")
 
 
 def state_dir() -> Path:
@@ -39,6 +41,13 @@ def current_distro(distro: str | None = None) -> str:
 
 def stable_cli_path() -> Path:
     return Path.home() / ".local" / "bin" / "agents-live"
+
+
+def task_arguments(distro: str, cli_path: Path | None = None) -> str:
+    return subprocess.list2cmdline([
+        "-d", current_distro(distro), "--exec",
+        str(cli_path or stable_cli_path()), "heartbeat",
+    ])
 
 
 def run_once() -> int:
@@ -98,7 +107,7 @@ def _task_exists(name: str) -> bool:
 
 def _register_task(distro: str, cli_path: Path) -> None:
     name = task_name(distro)
-    arguments = f'-d "{distro}" --exec "{cli_path}" heartbeat'
+    arguments = task_arguments(distro, cli_path)
     script = (
         f"$action=New-ScheduledTaskAction -Execute 'wsl.exe' "
         f"-Argument {_ps_quote(arguments)};"

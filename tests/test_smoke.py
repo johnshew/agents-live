@@ -535,11 +535,11 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertIn("uvx agents-live heartbeat uninstall", stderr.getvalue())
 
     def test_doctor_accepts_stable_distro_task(self) -> None:
+        cli_shim_path = self.shim
         task = {
             "Enabled": True,
             "Execute": "wsl.exe",
-            "Arguments": (
-                f'-d "Ubuntu" --exec "{self.shim}" heartbeat'),
+            "Arguments": heartbeat.task_arguments("Ubuntu", cli_shim_path),
             "Interval": "PT5M",
         }
         with mock.patch.object(
@@ -556,11 +556,21 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("requires migration", note)
 
-    def test_compatibility_wrapper_auto_migrates_without_repo_discovery(self) -> None:
+    def test_compatibility_wrapper_executes_automatic_migration(self) -> None:
         wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
-        content = wrapper.read_text(encoding="utf-8")
-        self.assertIn("heartbeat install --distro", content)
-        self.assertNotIn("REPO_DIR", content)
+        invocation = self.root / "invocation"
+        self.shim.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {invocation}\n",
+            encoding="utf-8")
+        completed = subprocess.run(
+            ["bash", str(wrapper), "/ignored/legacy/repo"],
+            env={**os.environ, "HOME": str(self.home),
+                 "WSL_DISTRO_NAME": "Ubuntu"},
+            capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            invocation.read_text(encoding="utf-8"),
+            "heartbeat install --distro Ubuntu\n")
 
 
 class TestTimeline(_TempProject):

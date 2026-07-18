@@ -180,13 +180,10 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
         problems.append("task disabled")
     if not execute.endswith("/wsl.exe") and execute != "wsl.exe":
         problems.append(f"unexpected executable: {task.get('Execute') or '(none)'}")
-    if f'-d "{distro}"'.lower() not in arguments:
-        problems.append(f"action does not select distro {distro}")
-    expected_cli = str(heartbeat.stable_cli_path()).lower()
-    if expected_cli not in arguments or " heartbeat" not in arguments:
+    expected_arguments = heartbeat.task_arguments(distro).lower()
+    if arguments != expected_arguments:
         problems.append("action does not use the stable agents-live CLI shim")
-    stale_tokens = ("windows-heartbeat.sh", "site-packages", "python3.", "--repo")
-    if any(token in arguments for token in stale_tokens):
+    if any(token in arguments for token in heartbeat.LEGACY_ACTION_TOKENS):
         problems.append("action pins a legacy package, Python, or project path")
     if str(task.get("Interval") or "").upper() != "PT5M":
         interval = task.get("Interval") or "(none)"
