@@ -166,6 +166,11 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
     except RuntimeError as exc:
         if "PowerShell interop is unavailable" in str(exc):
             return None
+        if "cannot determine the WSL distro" in str(exc):
+            # sshd/cron/systemd sessions inside WSL have no
+            # WSL_DISTRO_NAME; the task cannot be probed from here, which
+            # is not evidence it is misconfigured.
+            return None
         return False, str(exc)
     except (OSError, subprocess.TimeoutExpired):
         return None

@@ -2514,9 +2514,12 @@ def install_crontab(lines: list[str]) -> None:
 @contextmanager
 def crontab_lock() -> Iterator[None]:
     """Fail fast if another agents-live process is mutating the user crontab."""
-    state_home = Path(
-        os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
-    lock_path = state_home / "agents-live" / "crontab.lock"
+    from .heartbeat import state_dir  # noqa: PLC0415 — stdlib-only module
+
+    # One resolver for the host state dir: heartbeat.state_dir() applies
+    # expanduser() to XDG_STATE_HOME, and heartbeat.uninstall cleans up
+    # this lock file — a second inline resolution here would drift.
+    lock_path = state_dir() / "crontab.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # Never truncate or replace the inode another process may have locked.
     with lock_path.open("a", encoding="utf-8") as lock_file:

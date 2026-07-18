@@ -16,19 +16,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--distro")
     parser.add_argument("--retain-state", action="store_true")
     args = parser.parse_args(argv)
-    try:
-        heartbeat.uninstall(args.distro, retain_state=args.retain_state)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        selected = (
-            args.distro or os.environ.get("WSL_DISTRO_NAME")
-            or "<your-distro-name>")
-        print(
-            f"error: host cleanup failed; agents-live remains installed: {exc}\n"
-            "recovery: "
-            "uvx agents-live heartbeat uninstall --distro "
-            f"{shlex.quote(selected)}",
-            file=sys.stderr)
-        return 1
+    if heartbeat.is_wsl():
+        try:
+            heartbeat.uninstall(args.distro, retain_state=args.retain_state)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            selected = (
+                args.distro or os.environ.get("WSL_DISTRO_NAME")
+                or "<your-distro-name>")
+            print(
+                f"error: host cleanup failed; agents-live remains installed: {exc}\n"
+                "recovery: "
+                "uvx agents-live heartbeat uninstall --distro "
+                f"{shlex.quote(selected)}",
+                file=sys.stderr)
+            return 1
+    else:
+        # Non-WSL hosts have no Windows heartbeat task to remove; a hard
+        # dependency here would make uninstall impossible off WSL.
+        print("no WSL host integrations to remove; uninstalling the tool")
     uv = shutil.which("uv")
     if not uv:
         print(

@@ -31,6 +31,15 @@ def task_name(distro: str) -> str:
     return f"{TASK_PREFIX} ({distro})"
 
 
+def is_wsl() -> bool:
+    """True when running inside WSL (the only host with Windows-side
+    heartbeat integrations)."""
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except OSError:
+        return False
+
+
 def current_distro(distro: str | None = None) -> str:
     selected = (distro or os.environ.get("WSL_DISTRO_NAME", "")).strip()
     if not selected:
@@ -152,6 +161,15 @@ def _wait_for_fresh_beacon(previous_mtime: float | None, timeout: float = 20) ->
 
 def install(distro: str | None = None) -> None:
     selected = current_distro(distro)
+    env_distro = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if env_distro and selected != env_distro:
+        # The install verifies via beacon_path() and stable_cli_path(),
+        # both of which live in the *current* distro's filesystem; a
+        # cross-distro install would register the task and then always
+        # time out waiting for a beacon written somewhere else.
+        raise RuntimeError(
+            f"--distro {selected!r} does not match the current distro "
+            f"{env_distro!r}; run the install inside {selected!r}")
     cli_path = stable_cli_path()
     if not cli_path.is_file() or not os.access(cli_path, os.X_OK):
         raise RuntimeError(
@@ -181,7 +199,8 @@ def uninstall(distro: str | None = None, *, retain_state: bool = False) -> None:
     if _task_exists(name):
         _unregister_task(name)
     if not retain_state:
-        for path in (beacon_path(), state_dir() / "heartbeat.log"):
+        for path in (beacon_path(), state_dir() / "heartbeat.log",
+                     state_dir() / "crontab.lock"):
             path.unlink(missing_ok=True)
         try:
             state_dir().rmdir()

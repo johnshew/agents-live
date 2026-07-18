@@ -766,6 +766,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
 
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
+            mock.patch.object(heartbeat, "is_wsl", return_value=True),
             mock.patch.object(
                 heartbeat, "uninstall", side_effect=RuntimeError("denied")),
             mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
@@ -774,6 +775,34 @@ class TestWindowsHeartbeat(unittest.TestCase):
             self.assertEqual(uninstall.main(["--distro", "Ubuntu"]), 1)
         uv_uninstall.assert_not_called()
         self.assertIn("uvx agents-live heartbeat uninstall", stderr.getvalue())
+
+    def test_tool_uninstall_skips_host_cleanup_off_wsl(self) -> None:
+        completed = subprocess.CompletedProcess(["uv"], 0)
+        with (
+            mock.patch.object(heartbeat, "is_wsl", return_value=False),
+            mock.patch.object(heartbeat, "uninstall") as host_cleanup,
+            mock.patch.object(uninstall.shutil, "which",
+                              return_value="/usr/bin/uv"),
+            mock.patch.object(uninstall.subprocess, "run",
+                              return_value=completed) as uv_uninstall,
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(uninstall.main([]), 0)
+        host_cleanup.assert_not_called()
+        uv_uninstall.assert_called_once_with(
+            ["/usr/bin/uv", "tool", "uninstall", "agents-live"], check=False)
+
+    def test_install_refuses_cross_distro_target(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            heartbeat.install("Debian")
+
+    def test_uninstall_removes_crontab_lock(self) -> None:
+        directory = heartbeat.state_dir()
+        directory.mkdir(parents=True)
+        (directory / "crontab.lock").touch()
+        with mock.patch.object(heartbeat, "_task_exists", return_value=False):
+            heartbeat.uninstall()
+        self.assertFalse((directory / "crontab.lock").exists())
 
     def test_doctor_accepts_stable_distro_task(self) -> None:
         cli_shim_path = self.shim
