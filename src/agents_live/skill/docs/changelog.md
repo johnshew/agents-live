@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 0.1.6 - 2026-07-18
+
 - fix: the framework smoketest executed lifecycle modules as script
   files (`sys.executable .../status.py` and friends), which dies in a
   packaged install on their relative imports - the last flat-invocation
