@@ -1386,11 +1386,11 @@ class TestInstallSkill(_TempProject):
         self.assertEqual(errors, ["gone: path is unavailable"])
 
     def test_default_upgrade_refreshes_with_newly_installed_cli(self) -> None:
-        target = Path("/repos/life")
+        target = Path("/repos/example")
         with (
             mock.patch.object(upgrade, "_upgrade_runtime", return_value=0) as runtime,
             mock.patch.object(
-                upgrade, "_targets", return_value=([("life", target)], [])),
+                upgrade, "_targets", return_value=([("example", target)], [])),
             mock.patch.object(
                 upgrade, "_refresh_with_installed_cli", return_value=0) as refresh,
             mock.patch.object(init, "install_skill") as install,

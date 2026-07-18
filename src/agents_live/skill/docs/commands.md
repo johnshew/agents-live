@@ -576,8 +576,8 @@ agents-live doctor --all-repos       # host once + each registered project
 agents-live dashboard --all-repos    # read-only repository selector
 
 # User repository registry
-agents-live repos add ~/repos/life        # alias defaults to the directory name
-agents-live repos add ~/repos/life work   # or pass an explicit alias
+agents-live repos add ~/repos/<target-project>        # alias defaults to the directory name
+agents-live repos add ~/repos/<target-project> work   # or pass an explicit alias
 agents-live repos list
 agents-live repos default life
 agents-live --repo life status

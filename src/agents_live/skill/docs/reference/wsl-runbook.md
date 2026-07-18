@@ -19,7 +19,7 @@ echo "=== WSL uptime ===" && uptime
 echo "=== p9io errors (should be 0) ===" && dmesg 2>/dev/null | grep -c "p9io"
 echo "=== SIGTERMs (should be 0) ===" && dmesg 2>/dev/null | grep -c "SIGTERM"
 echo "=== Cron ===" && systemctl is-active cron
-echo "=== Recent task runs ===" && cd ~/repos/life && agents-live logs --limit 3
+echo "=== Recent task runs ===" && cd ~/repos/<target-project> && agents-live logs --limit 3
 echo "=== Interop ===" && (cmd.exe /c "echo OK" 2>/dev/null || echo "BROKEN")
 '
 ```
@@ -75,7 +75,7 @@ is needed.
 wsl -d Ubuntu --cd ~ -e bash -lc 'systemctl is-active cron && echo "cron OK" || sudo systemctl start cron'
 
 # 2. Check task health (what the hourly health-check does)
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc '
   agents-live status --json 2>/dev/null | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -88,12 +88,12 @@ for t in data.get(\"tasks\", []):
 '
 
 # 3. Repair missing watcher or cron registrations when status shows drift
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc '
   agents-live start --all 2>&1
 '
 
 # 4. Run a quick smoketest to verify MCP connectivity
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc '
   timeout 60 agents-live run smoketest-mcp-personal 2>&1
 '
 ```
@@ -102,13 +102,13 @@ wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
 
 ```bash
 # Handler path (direct stdio MCP call, no agent)
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc '
   timeout 30 uv run --script Agents/handlers/smoketest-mcp-work-prep.py 2>&1
 '
 # Should output: {"skip": false, "handler_result": "PASS", ...}
 
 # Full agent path (spawns copilot CLI with MCP)
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc '
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc '
   timeout 180 agents-live run smoketest-mcp-work 2>&1
 '
 # Should output: SMOKETEST_RESULT: PASS - both paths working
@@ -145,13 +145,13 @@ If interop is missing after a config change or WSL update:
 
 ```bash
 # Recent correlated events for a specific task
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc 'agents-live logs timeline smoketest-mcp-work --limit 20'
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs timeline smoketest-mcp-work --limit 20'
 
 # Run artifacts (stdout, stderr, transcripts)
-wsl -d Ubuntu --cd ~ -e bash -lc 'ls -lt ~/repos/life/Agents/logs/runs/smoketest-mcp-work-*.* | head -5'
+wsl -d Ubuntu --cd ~ -e bash -lc 'ls -lt ~/repos/<target-project>/Agents/logs/runs/smoketest-mcp-work-*.* | head -5'
 
 # Errors across all tasks in last hour
-wsl -d Ubuntu --cd ~/repos/life -e bash -lc 'agents-live logs --errors --since 1h --limit 10'
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs --errors --since 1h --limit 10'
 ```
 
 ## Known failure modes and fixes

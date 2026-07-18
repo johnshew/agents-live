@@ -42,8 +42,8 @@ validation matrix.
 Use the editable project environment when testing code in this repository:
 
 ```bash
-uv run --with-editable . agents-live --repo ~/repos/life doctor
-uv run --with-editable . agents-live --repo ~/repos/life dashboard --dev
+uv run --with-editable . agents-live --repo ~/repos/<target-project> doctor
+uv run --with-editable . agents-live --repo ~/repos/<target-project> dashboard --dev
 ```
 
 These commands execute the current checkout without replacing the user-level
@@ -51,7 +51,7 @@ tool. From another repository, bare `agents-live` executes the version
 installed by uv:
 
 ```bash
-agents-live --repo ~/repos/life doctor
+agents-live --repo ~/repos/<target-project> doctor
 uv tool list
 agents-live upgrade
 ```

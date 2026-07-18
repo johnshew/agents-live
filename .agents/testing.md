@@ -49,9 +49,9 @@ Exercise source behavior against a configured project by keeping `--repo`
 explicit:
 
 ```bash
-uv run --with-editable . agents-live --repo ~/repos/life doctor
-uv run --with-editable . agents-live --repo ~/repos/life status
-uv run --with-editable . agents-live --repo ~/repos/life dashboard --help
+uv run --with-editable . agents-live --repo ~/repos/<target-project> doctor
+uv run --with-editable . agents-live --repo ~/repos/<target-project> status
+uv run --with-editable . agents-live --repo ~/repos/<target-project> dashboard --help
 uv run --with-editable . agents-live repos list
 uv run --with-editable . agents-live status --all-repos
 uv run --with-editable . agents-live doctor --all-repos
@@ -59,7 +59,7 @@ uv run --with-editable . agents-live dashboard --all-repos --help
 ```
 
 Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
-or initialize agents in `~/repos/life` unless that operational change is part
+or initialize agents in `~/repos/<target-project>` unless that operational change is part
 of the test.
 
 ## Validate the built wheel
@@ -72,8 +72,8 @@ uv build
 version="$(uv version --short)"
 wheel="dist/agents_live-${version}-py3-none-any.whl"
 uvx --from "$wheel" agents-live --help
-uvx --from "$wheel" agents-live --repo ~/repos/life doctor
-uvx --from "$wheel" agents-live --repo ~/repos/life dashboard --help
+uvx --from "$wheel" agents-live --repo ~/repos/<target-project> doctor
+uvx --from "$wheel" agents-live --repo ~/repos/<target-project> dashboard --help
 uvx --from "$wheel" agents-live repos list
 uvx --from "$wheel" agents-live status --all-repos
 ```
@@ -95,9 +95,9 @@ Show the installed version and run the same read-only checks consumers use:
 
 ```bash
 uv tool list
-agents-live --repo ~/repos/life doctor
-agents-live --repo ~/repos/life status
-agents-live --repo ~/repos/life dashboard --help
+agents-live --repo ~/repos/<target-project> doctor
+agents-live --repo ~/repos/<target-project> status
+agents-live --repo ~/repos/<target-project> dashboard --help
 ```
 
 Check PyPI and upgrade when a newer version is available:
@@ -105,7 +105,7 @@ Check PyPI and upgrade when a newer version is available:
 ```bash
 agents-live upgrade
 uv tool list
-agents-live --repo ~/repos/life doctor
+agents-live --repo ~/repos/<target-project> doctor
 ```
 
 `upgrade` reinstalls the latest stable uv-managed runtime, then refreshes
@@ -157,7 +157,7 @@ version="$(uv version --short)"
 uvx --refresh --from "agents-live==$version" agents-live --version
 agents-live upgrade
 uv tool list
-agents-live --repo ~/repos/life doctor
+agents-live --repo ~/repos/<target-project> doctor
 ```
 
 The isolated exact-version check plus `--refresh` avoids a false negative while

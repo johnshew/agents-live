@@ -1,8 +1,8 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.12"
-# ///
-"""Upgrade the runtime and refresh managed project skill payloads."""
+"""Upgrade the runtime and refresh managed project skill payloads.
+
+A package module (relative imports): runs via ``agents-live upgrade``,
+never as a standalone ``uv run --script`` target.
+"""
 from __future__ import annotations
 
 import argparse

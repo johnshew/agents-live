@@ -66,6 +66,9 @@ PATH_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Home directory",  re.compile(r"/home/[a-z][a-z0-9_-]+/(?!runner/)")),
     ("Windows user",    re.compile(r"C:\\Users\\[A-Za-z][A-Za-z0-9_-]+\\")),
     ("macOS user",      re.compile(r"/Users/[A-Za-z][A-Za-z0-9_-]+/")),
+    # Tilde forms bypass the absolute-path patterns above; the
+    # maintainer's personal project checkout must never ship.
+    ("Personal repo path", re.compile(r"\brepos/life\b")),
 ]
 
 # Patterns that indicate personal information (names, emails)
