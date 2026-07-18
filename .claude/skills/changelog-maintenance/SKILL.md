@@ -61,14 +61,22 @@ substance, not one per commit.
 ### 2. Check what's already logged
 
 Read the `## Unreleased` section and compare against the commit list.
-Entries here tend to be written at commit time by the developer, so
-expect the section to be mostly current; the common gap is a PR that
-merged without touching the changelog.
+Entries for hand-authored commits tend to be written at commit time by
+the developer. Agent-authored PRs (Copilot, cloud agents) never touch
+the changelog - assume every merged PR since the last release needs an
+entry unless you find one already covering it.
 
 ### 3. Write entries
 
+Don't write entries from commit subjects alone - agent-authored PRs in
+particular carry terse implementation-level subjects. Read the diff
+first; `src/agents_live/skill/docs/` changes usually state the
+user-visible behavior directly and are the best source for the entry's
+wording.
+
 Match the existing format - conventional-commit-style bullets, wrapped
-to the file's line width, most significant first:
+to the file's line width. Keep fixes before feats (matching the
+existing section), most significant first within each group:
 
 ```markdown
 - fix: scope crontab matching to the current repository, so projects
@@ -84,7 +92,9 @@ Rules:
   the implementation diff. One entry per logical change.
 - No commit hashes - the git history is the audit trail. Cite a GitHub
   issue as `(#N)` only when the entry closes a tracked issue and the
-  link aids the reader.
+  link aids the reader. Beware: the `(#N)` in a merged PR's commit
+  subject is the **PR** number, not the issue - map to the tracking
+  issue via `gh issue list --state closed` before citing.
 - Internal-only refactors with no behavior change are optional; log
   them as `chore:` only when they change how contributors work.
 
