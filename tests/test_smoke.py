@@ -302,6 +302,58 @@ class TestInvocationForms(_TempProject):
         line = headless.build_reboot_watcher_line("t")
         self.assertIn("--ensure-watcher", line)
 
+    def test_persisted_lines_carry_inline_path(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        with mock.patch.object(activate, "_validate_handler_paths"):
+            cron_lines = activate.build_cron_lines("smoke-fixture")
+        watcher_line = headless.build_reboot_watcher_line("smoke-fixture")
+        for line in [*cron_lines, watcher_line]:
+            self.assertIn("PATH=", line)
+        self.assertTrue(
+            headless.cron_line_matches(cron_lines[0], "smoke-fixture"))
+        self.assertTrue(headless._watcher_reboot_line_matches(
+            watcher_line, "smoke-fixture"))
+
+    def test_install_refuses_unreadable_crontab(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        with (
+            mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
+            mock.patch.object(headless, "current_crontab_lines",
+                              return_value=None),
+            mock.patch.object(activate, "current_crontab_lines",
+                              return_value=None),
+            mock.patch.object(headless, "install_crontab") as h_install,
+            mock.patch.object(activate, "install_crontab") as a_install,
+            mock.patch.object(activate, "_validate_handler_paths"),
+        ):
+            with self.assertRaisesRegex(
+                    headless.AgentsLiveError, "not accessible"):
+                headless.install_watcher_reboot_line("smoke-fixture")
+            with self.assertRaisesRegex(
+                    headless.AgentsLiveError, "not accessible"):
+                activate.install_cron_agent("smoke-fixture")
+        h_install.assert_not_called()
+        a_install.assert_not_called()
+
+    def test_install_preserves_user_path_and_foreign_lines(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        user_path = "PATH=/custom/bin:/usr/bin"
+        foreign = (f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && agents-live "
+                   f"--repo {FOREIGN_REPO} run --name other --quiet 2>&1")
+        with (
+            mock.patch.dict(
+                os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
+            mock.patch.object(activate, "current_crontab_lines",
+                              return_value=[user_path, foreign]),
+            mock.patch.object(activate, "install_crontab") as install,
+            mock.patch.object(activate, "_validate_handler_paths"),
+        ):
+            activate.install_cron_agent("smoke-fixture")
+        installed = install.call_args[0][0]
+        self.assertIn(user_path, installed)
+        self.assertIn(foreign, installed)
+
 
 class TestMigratePlanning(_TempProject):
     def test_canonical_lines_are_no_op(self) -> None:

@@ -232,7 +232,9 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     if completed.returncode != 0:
-        return [], []  # empty crontab: consistent by definition
+        if "no crontab for" in (completed.stderr or ""):
+            return [], []  # no crontab yet: consistent by definition
+        return None  # unreadable is not the same as empty: skip, don't vouch
     try:
         from .headless import crontab_line_belongs_to_repo  # noqa: PLC0415
     except Exception:

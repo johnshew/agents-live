@@ -53,6 +53,19 @@ uv run --script tools/release.py --publish --yes          # publish prepared
 - **The backlog lives in GitHub issues, not in-tree docs.** Check
   `gh issue list` before starting work; file new findings as issues
   and reference them from commits (`Fixes #N` closes on merge).
+- **Never hand-parse runtime logs.** Use `agents-live logs` and
+  `agents-live logs timeline` - they correlate events across log
+  files and agent transcripts. Reading `Agents/logs/*.log` directly
+  has repeatedly led to wrong conclusions.
+- **Never `git checkout`, `git reset`, or `git stash` tracked
+  files.** Other agents run concurrently in this checkout and may
+  have uncommitted work; re-edit the file instead.
+- **No backward-compatibility shims.** Clean break, migrate all
+  consumers; ask the developer before adding any compat code.
+- **Keep agent memory to pointers.** Canonical facts live in the
+  repo and GitHub issues; a memory entry holds only a pointer to
+  that home, never the content itself.
+- No em dashes; no emojis or icons unless the developer asks.
 
 ## Structure
 

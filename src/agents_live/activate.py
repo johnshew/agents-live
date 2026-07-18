@@ -143,8 +143,13 @@ def build_cron_lines(name: str) -> list[str]:
     # An agent may declare several schedules (e.g. "@reboot" plus an hourly
     # cron); emit one crontab line per entry. They all carry the same
     # `--name`, so cron_line_matches removes and re-adds them as a group.
+    # PATH rides inside each line (§3.4.2 self-contained crontab lines) so
+    # no global PATH= line — which the user or another project may own —
+    # ever needs to be touched.
+    path_prefix = f"PATH={shlex.quote(clean_path())}"
     return [
-        f"{sched} cd {shlex.quote(str(repo))} && {shlex.join(run_command)} 2>&1"
+        f"{sched} cd {shlex.quote(str(repo))} && {path_prefix} "
+        f"{shlex.join(run_command)} 2>&1"
         for sched in config.schedule
     ]
 
@@ -156,7 +161,6 @@ def install_cron_agent(name: str) -> str:
     _validate_handler_paths(config)
 
     ensure_logs_dir()
-    path_line = f"PATH={clean_path()}"
     new_cron_lines = build_cron_lines(name)
 
     # Exact --name token matching: a plain substring test would also drop
@@ -164,9 +168,13 @@ def install_cron_agent(name: str) -> str:
     # todo-push), or arbitrary entries when the name appears in the repo
     # or script path.
     with crontab_lock():
-        lines = [line for line in (current_crontab_lines() or [])
-                 if not cron_line_matches(line, name) and not line.startswith("PATH=")]
-        lines.insert(0, path_line)
+        lines = current_crontab_lines()
+        if lines is None:
+            # Never treat an unreadable crontab as empty: install_crontab
+            # replaces the whole table, which would wipe every entry the
+            # read failed to see.
+            raise AgentsLiveError("crontab is not accessible")
+        lines = [line for line in lines if not cron_line_matches(line, name)]
         lines.extend(new_cron_lines)
         install_crontab(lines)
     return "; ".join(new_cron_lines)

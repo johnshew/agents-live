@@ -671,25 +671,30 @@ def list_reboot_watcher_agent_names() -> list[str]:
 def build_reboot_watcher_line(name: str) -> str:
     """The canonical @reboot respawn line for *name*'s watcher in the
     current execution context. Shared by activation and `migrate`'s
-    convergence check."""
+    convergence check. PATH rides inside the line (§3.4.2 self-contained
+    crontab lines) so no shared ``PATH=`` line is needed."""
     return (f"@reboot cd {shlex.quote(str(repo_root()))} && "
+            f"PATH={shlex.quote(clean_path())} "
             f"{shlex.join(ensure_watcher_invocation(name))} 2>&1")
 
 
 def install_watcher_reboot_line(name: str) -> str:
     """Install the @reboot respawn line for a watcher (idempotent).
 
-    Replaces any existing line for this agent, preserves the crontab ``PATH=``
-    line, and leaves every other entry (including the agent's own run.py
-    schedule lines) untouched.
+    Replaces any existing line for this agent and leaves every other entry
+    (including the agent's own run.py schedule lines and any user-authored
+    ``PATH=`` line) untouched.
     """
     new_line = build_reboot_watcher_line(name)
-    path_line = f"PATH={clean_path()}"
     with crontab_lock():
-        lines = [line for line in (current_crontab_lines() or [])
-                 if not _watcher_reboot_line_matches(line, name)
-                 and not line.startswith("PATH=")]
-        lines.insert(0, path_line)
+        lines = current_crontab_lines()
+        if lines is None:
+            # Never treat an unreadable crontab as empty: install_crontab
+            # replaces the whole table, which would wipe every entry the
+            # read failed to see.
+            raise AgentsLiveError("crontab is not accessible")
+        lines = [line for line in lines
+                 if not _watcher_reboot_line_matches(line, name)]
         lines.append(new_line)
         install_crontab(lines)
     return new_line
