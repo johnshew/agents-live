@@ -210,7 +210,8 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
-            mock.patch.object(update_check, "refresh") as refresh,
+            mock.patch.object(
+                update_check, "refresh", side_effect=RuntimeError) as refresh,
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
@@ -287,11 +288,13 @@ class TestUpdateCheck(unittest.TestCase):
         popen.assert_called_once()
 
     def test_legacy_opt_outs_do_not_suppress_check(self) -> None:
-        os.environ["AGENTS_LIVE_NO_UPDATE_CHECK"] = "1"
         config = Path(os.environ["XDG_CONFIG_HOME"]) / "agents-live" / "config.toml"
         config.parent.mkdir(parents=True)
         config.write_text("update_check = false\n", encoding="utf-8")
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_NO_UPDATE_CHECK": "1"}),
+            mock.patch.object(update_check.subprocess, "Popen") as popen,
+        ):
             update_check.launch_if_stale(now=100)
         popen.assert_called_once()
 

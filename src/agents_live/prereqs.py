@@ -576,7 +576,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     json_mode = args.json or preflight.json_mode()
 
-    update_check.refresh()
+    try:
+        update_check.refresh()
+    except Exception:
+        pass
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]
     optional_failures = [c for c in checks if not c["required"] and not c["ok"]]
