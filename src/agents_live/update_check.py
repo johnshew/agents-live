@@ -84,6 +84,12 @@ def refresh(
         "checked_at": checked_at,
         "latest_version": None,
     }
+    # A refresh replaces the cache wholesale; carry the notice marker
+    # forward so an already-announced release is not re-announced after
+    # every hourly check (the notice is once per release, not per check).
+    previous = _read_cache()
+    if previous is not None and "notified_for" in previous:
+        result["notified_for"] = previous["notified_for"]
     try:
         request = urllib.request.Request(
             PYPI_URL, headers={"Accept": "application/json", "User-Agent": "agents-live"}
@@ -134,10 +140,10 @@ def consume_notice(installed: str = __version__, *, now: float | None = None) ->
         installed_semver is None
         or latest_semver is None
         or latest_semver <= installed_semver
-        or cache.get("notified_for") == cache["checked_at"]
+        or cache.get("notified_for") == latest
     ):
         return None
-    cache["notified_for"] = cache["checked_at"]
+    cache["notified_for"] = latest
     if not _write_cache(cache):
         return None
     return (

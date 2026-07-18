@@ -1010,7 +1010,7 @@ class TestUpdateCheck(unittest.TestCase):
         path.write_text("{not json", encoding="utf-8")
         self.assertIsNone(update_check.cached_result())
 
-    def test_available_notice_is_emitted_once_per_check(self) -> None:
+    def test_available_notice_is_emitted_once_per_release(self) -> None:
         update_check.refresh(
             now=100,
             opener=mock.Mock(return_value=self._response({
@@ -1021,6 +1021,16 @@ class TestUpdateCheck(unittest.TestCase):
         self.assertIn("agents-live upgrade", notice)
         self.assertIsNone(update_check.consume_notice("1.2.2", now=102))
         self.assertIsNone(update_check.consume_notice("1.2.3", now=102))
+        # An hourly re-check that finds the SAME release must not
+        # re-announce it: the notice is once per release, not per check.
+        update_check.refresh(
+            now=150,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "1.2.3"},
+            })),
+        )
+        self.assertIsNone(update_check.consume_notice("1.2.2", now=151))
+        # A genuinely new release announces again.
         update_check.refresh(
             now=200,
             opener=mock.Mock(return_value=self._response({
