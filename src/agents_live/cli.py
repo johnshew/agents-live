@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,6 +48,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from . import paths
 from . import preflight
+from . import update_check
+from . import __version__
 
 # Host-mutating subcommands run the static capability preflight first
 # (proposal §3.6). Read-only commands never preflight - they must work
@@ -134,6 +137,22 @@ def _apply_name_sugar(cmd: str, rest: list[str]) -> list[str]:
     if cmd in NAME_SUGAR and rest and not rest[0].startswith("-"):
         return ["--name", rest[0], *rest[1:]]
     return rest
+
+
+def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
+    if (
+        cmd not in ("doctor", "prereqs")
+        and not json_mode
+        and "--json" not in rest
+        and "--quiet" not in rest
+        and update_check.interactive()
+        and not update_check.disabled()
+    ):
+        notice = update_check.consume_notice(__version__)
+        update_check.launch_if_stale()
+        if notice:
+            print(f"\n{notice}", file=sys.stderr)
+    return code
 
 
 def _git_root(start: Path) -> Path | None:
@@ -240,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args or args[0] in ("-h", "--help", "help"):
         print(_usage())
-        return 0
+        return _finish(0, "help", [], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
 
@@ -275,7 +294,9 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "logs" and rest and rest[0] == "timeline":
             script, rest = "timeline.py", rest[1:]
         uv = shutil.which("uv") or "uv"
-        os.execvp(uv, [uv, "run", "--script", str(SCRIPT_DIR / script), *rest])
+        completed = subprocess.run(
+            [uv, "run", "--script", str(SCRIPT_DIR / script), *rest])
+        return _finish(completed.returncode, cmd, rest, json_mode=json_mode)
 
     if cmd not in IN_PROCESS:
         print(f"error: unknown command '{cmd}'\n\n{_usage()}", file=sys.stderr)
@@ -290,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     module = importlib.import_module(module_name)
     sys.argv = [f"agents-live {cmd}", *rest]
     try:
-        return module.main()
+        code = module.main()
+        return _finish(code, cmd, rest, json_mode=json_mode)
     except Exception as exc:
         # Layer-2 safety net: a typed error that escapes a subcommand's
         # own handling still leaves as the envelope, never a traceback.

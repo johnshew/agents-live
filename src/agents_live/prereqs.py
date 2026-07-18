@@ -34,6 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from . import paths
+from . import preflight
+from . import update_check
 from .paths import resolve_root
 
 REPO = resolve_root()
@@ -571,14 +573,22 @@ def collect() -> list[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check agents-live prerequisites.")
     parser.add_argument("--json", action="store_true", help="Emit a JSON summary")
+    parser.add_argument(
+        "--refresh-updates", action="store_true",
+        help="Refresh the cached PyPI release check",
+    )
     args = parser.parse_args()
+    json_mode = args.json or preflight.json_mode()
+
+    if args.refresh_updates and not json_mode and not update_check.disabled():
+        update_check.refresh()
 
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]
     optional_failures = [c for c in checks if not c["required"] and not c["ok"]]
     ok = not required_failures
 
-    if args.json:
+    if json_mode:
         print(json.dumps({
             "ok": ok,
             "host": _hostname(),
@@ -609,6 +619,8 @@ def main() -> int:
         print(f"OK (required checks pass); {len(optional_failures)} optional missing: {names}")
     else:
         print("OK: all checks pass.")
+    if update_check.interactive() or (args.refresh_updates and not json_mode):
+        print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
 
 

@@ -1,0 +1,221 @@
+"""Best-effort, cached PyPI release checks for interactive CLI use."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable
+
+from . import __version__
+
+CACHE_INTERVAL = 24 * 60 * 60
+NETWORK_TIMEOUT = 1.0
+NO_CHECK_ENV = "AGENTS_LIVE_NO_UPDATE_CHECK"
+PYPI_URL = "https://pypi.org/pypi/agents-live/json"
+_SEMVER = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?$"
+)
+
+
+def cache_path() -> Path:
+    root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return root / "agents-live" / "update-check.json"
+
+
+def config_path() -> Path:
+    root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return root / "agents-live" / "config.toml"
+
+
+def disabled() -> bool:
+    if os.environ.get(NO_CHECK_ENV) == "1":
+        return True
+    try:
+        with config_path().open("rb") as handle:
+            config = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return config.get("update_check") is False
+
+
+def interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()
+
+
+def _version(value: object) -> tuple[int, int, int] | None:
+    match = _SEMVER.fullmatch(str(value))
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
+def _read_cache() -> dict[str, Any] | None:
+    try:
+        value = json.loads(cache_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("checked_at"), (int, float)):
+        return None
+    return value
+
+
+def _write_cache(value: dict[str, Any]) -> bool:
+    path = cache_path()
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        return True
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def cached_result() -> dict[str, Any] | None:
+    return _read_cache()
+
+
+def _is_fresh(cache: dict[str, Any] | None, now: float) -> bool:
+    return cache is not None and now - float(cache["checked_at"]) < CACHE_INTERVAL
+
+
+def refresh(
+    *,
+    now: float | None = None,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any] | None:
+    """Refresh the cache synchronously. All failures are recorded and suppressed."""
+    checked_at = time.time() if now is None else now
+    result: dict[str, Any] = {
+        "checked_at": checked_at,
+        "latest_version": None,
+    }
+    try:
+        request = urllib.request.Request(
+            PYPI_URL, headers={"Accept": "application/json", "User-Agent": "agents-live"}
+        )
+        with opener(request, timeout=NETWORK_TIMEOUT) as response:
+            metadata = json.load(response)
+        candidates = [metadata.get("info", {}).get("version")]
+        releases = metadata.get("releases", {})
+        if isinstance(releases, dict):
+            candidates.extend(releases)
+        stable = [(parsed, str(value)) for value in candidates
+                  if (parsed := _version(value)) is not None]
+        if not stable:
+            raise ValueError("no stable semantic version in PyPI metadata")
+        result["latest_version"] = max(stable)[1]
+    except Exception as exc:
+        result["error"] = type(exc).__name__
+    return result if _write_cache(result) else None
+
+
+def _lock_path() -> Path:
+    return cache_path().with_suffix(".lock")
+
+
+def _claim_refresh() -> bool:
+    lock = _lock_path()
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(str(time.time()))
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime > CACHE_INTERVAL:
+                lock.unlink()
+                return _claim_refresh()
+        except OSError:
+            pass
+        return False
+    except OSError:
+        return False
+
+
+def launch_if_stale(*, now: float | None = None) -> None:
+    """Start a detached refresh without delaying the requested command."""
+    current = time.time() if now is None else now
+    if disabled() or _is_fresh(_read_cache(), current) or not _claim_refresh():
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "agents_live.update_check", "--background-refresh"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        try:
+            _lock_path().unlink()
+        except OSError:
+            pass
+
+
+def consume_notice(installed: str = __version__, *, now: float | None = None) -> str | None:
+    current = time.time() if now is None else now
+    cache = _read_cache()
+    if not _is_fresh(cache, current):
+        return None
+    assert cache is not None
+    latest = cache.get("latest_version")
+    if (
+        _version(installed) is None
+        or _version(latest) is None
+        or _version(latest) <= _version(installed)
+        or cache.get("notified_for") == cache["checked_at"]
+    ):
+        return None
+    cache["notified_for"] = cache["checked_at"]
+    if not _write_cache(cache):
+        return None
+    return (
+        f"agents-live {installed} is installed; {latest} is available.\n"
+        "Upgrade with: uv tool upgrade agents-live"
+    )
+
+
+def status_text(installed: str = __version__) -> str:
+    if disabled():
+        return "Update check: disabled"
+    cache = _read_cache()
+    if cache is None:
+        return "Update check: never completed"
+    latest = cache.get("latest_version")
+    if _version(latest) is None:
+        return f"Update check: last attempt failed ({cache.get('error', 'invalid metadata')})"
+    if _version(installed) is not None and _version(latest) > _version(installed):
+        return (
+            f"Update check: agents-live {installed} installed; {latest} available\n"
+            "  Upgrade with: uv tool upgrade agents-live"
+        )
+    return f"Update check: agents-live {installed} is current (latest: {latest})"
+
+
+def _background_refresh() -> int:
+    result = None
+    try:
+        result = refresh()
+    finally:
+        if result is not None:
+            try:
+                _lock_path().unlink()
+            except OSError:
+                pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_background_refresh())
