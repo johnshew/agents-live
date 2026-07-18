@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the framework smoketest executed lifecycle modules as script
+  files (`sys.executable .../status.py` and friends), which dies in a
+  packaged install on their relative imports - the last flat-invocation
+  holdout, surfaced by razor15's first post-flip health check failing
+  at "3/13 verify status". All twelve call sites now share a
+  layout-aware argv helper: `-m agents_live.<module>` packaged, the
+  sibling script file flat. A vestigial flat-era `sys.path` insert
+  before the spawn-module step is removed.
+
 ## 0.1.5 - 2026-07-18
 
 Packaged dashboard and Windows heartbeat fixes, plus guarded release

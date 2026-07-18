@@ -33,10 +33,18 @@ from .headless import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ACTIVATE_SCRIPT = SCRIPT_DIR / "activate.py"
-RUN_SCRIPT = SCRIPT_DIR / "run.py"
-STATUS_SCRIPT = SCRIPT_DIR / "status.py"
-TEARDOWN_SCRIPT = SCRIPT_DIR / "teardown.py"
+
+
+def _module_argv(module: str) -> list[str]:
+    """argv prefix that executes one lifecycle module in either layout.
+
+    Packaged, the module files cannot be run as scripts (their relative
+    imports need the package), so re-enter via ``-m``; flat, they are
+    plain top-level scripts beside this file.
+    """
+    if __package__:
+        return [sys.executable, "-m", f"{__package__}.{module}"]
+    return [sys.executable, str(SCRIPT_DIR / f"{module}.py")]
 SMOKETEST_LOCK_PATH = repo_root() / "Agents" / "data" / "smoketest-framework.lock"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
@@ -159,7 +167,7 @@ def fail(message: str) -> None:
 
 def run_status(*args: str) -> str:
     completed = subprocess.run(
-        [sys.executable, str(STATUS_SCRIPT), *args],
+        [*_module_argv("status"), *args],
         cwd=repo_root(),
         capture_output=True,
         text=True,
@@ -172,7 +180,7 @@ def run_status(*args: str) -> str:
 
 def run_agent(name: str, changed_file: str | None = None) -> str:
     """Execute an agent via run.py and return its stdout."""
-    cmd = [sys.executable, str(RUN_SCRIPT), "--name", name]
+    cmd = [*_module_argv("run"), "--name", name]
     if changed_file:
         cmd.extend(["--changed-file", changed_file])
     completed = subprocess.run(
@@ -336,7 +344,7 @@ def cleanup() -> tuple[list[str], list[str]]:
     for name in SMOKETEST_AGENT_NAMES:
         try:
             result = subprocess.run(
-                [sys.executable, str(TEARDOWN_SCRIPT), "--name", name],
+                [*_module_argv("teardown"), "--name", name],
                 cwd=repo_root(), check=False, capture_output=True, text=True,
                 timeout=CLEANUP_COMMAND_TIMEOUT_S,
             )
@@ -652,7 +660,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         if not shutil.which("inotifywait"):
             fail("inotifywait not found. Install with: sudo apt install inotify-tools")
         activate_result = subprocess.run(
-            [sys.executable, str(ACTIVATE_SCRIPT), "--name", watcher_name],
+            [*_module_argv("activate"), "--name", watcher_name],
             cwd=repo_root(), capture_output=True, text=True, check=False,
         )
         if activate_result.returncode != 0:
@@ -945,7 +953,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         )
         # Cleanup pipeline test artifacts
         subprocess.run(
-            [sys.executable, str(TEARDOWN_SCRIPT), "--name", pipeline_name],
+            [*_module_argv("teardown"), "--name", pipeline_name],
             cwd=repo_root(), check=False, capture_output=True, text=True,
         )
         (agents_dir() / f"{pipeline_name}.md").unlink(missing_ok=True)
@@ -958,7 +966,6 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # - find_uv() resolves the binary in any context
         # - spawn_agent() launches a detached child (start_new_session)
         #   that survives the caller and completes
-        sys.path.insert(0, str(SCRIPT_DIR))
         from .spawn import find_uv, spawn_agent
 
         uv_path = find_uv()
@@ -1023,7 +1030,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Cleanup spawn test artifacts
         spawn_result_file.unlink(missing_ok=True)
-        subprocess.run([sys.executable, str(TEARDOWN_SCRIPT), "--name", spawn_agent_name],
+        subprocess.run([*_module_argv("teardown"), "--name", spawn_agent_name],
                        cwd=repo_root(), check=False, capture_output=True, text=True)
         (agents_dir() / f"{spawn_agent_name}.md").unlink(missing_ok=True)
         print("  Spawn module (detached dispatch): PASS")
@@ -1079,7 +1086,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Activate the watcher
         activate_result = subprocess.run(
-            [sys.executable, str(ACTIVATE_SCRIPT), "--name", debounce_name],
+            [*_module_argv("activate"), "--name", debounce_name],
             cwd=repo_root(), capture_output=True, text=True, check=False,
         )
         if activate_result.returncode != 0:
@@ -1153,7 +1160,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Cleanup debounce test
         stop_watcher(debounce_name)
-        subprocess.run([sys.executable, str(TEARDOWN_SCRIPT), "--name", debounce_name],
+        subprocess.run([*_module_argv("teardown"), "--name", debounce_name],
                        cwd=repo_root(), check=False, capture_output=True, text=True)
         (agents_dir() / f"{debounce_name}.md").unlink(missing_ok=True)
         debounce_trigger.unlink(missing_ok=True)
@@ -1163,9 +1170,9 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         current_step = "13/13 teardown"
         print("[13/13] Tearing down test agents...")
         stop_watcher(watcher_name)
-        subprocess.run([sys.executable, str(TEARDOWN_SCRIPT), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([sys.executable, str(TEARDOWN_SCRIPT), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([sys.executable, str(TEARDOWN_SCRIPT), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("teardown"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("teardown"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("teardown"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, text=True)
         # Teardown only stops scheduling; remove smoketest files ourselves
         for name in (cron_name, watcher_name, preprocessor_name):
             prompt = agents_dir() / f"{name}.md"
