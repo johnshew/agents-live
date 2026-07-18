@@ -278,7 +278,11 @@ class TestUpdateCheck(unittest.TestCase):
         popen.assert_not_called()
 
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
-            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL)
+            update_check.launch_if_stale(now=100 + 60 * 60 - 1)
+        popen.assert_not_called()
+
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100 + 60 * 60)
         popen.assert_called_once()
 
     def test_offline_and_malformed_metadata_are_cached_failures(self) -> None:

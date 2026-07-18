@@ -61,7 +61,7 @@ uv tool install agents-live   # or: uv tool install <path-to-wheel>
 ```
 
 On interactive terminal invocations, agents-live checks PyPI for a newer
-stable release when its shared cached result is missing or 24 hours old. The
+stable release when its shared cached result is missing or one hour old. The
 result is stored under
 `$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). For ordinary
 commands, the refresh runs in the background and is skipped for
