@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-live"
+version = "0.1.0"
+description = "Take your agents live: cron and file-watch dispatch, safety wrappers, and operations for standard agent definitions"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["PyYAML", "mcp[cli]", "jsonschema"]
+
+[project.scripts]
+agents-live = "agents_live.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/johnshew/agents-live"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agents_live"]

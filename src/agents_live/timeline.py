@@ -1,0 +1,287 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""timeline - correlated view of agents-live processing events.
+
+Backend for ``cli.py logs timeline``. Reads all JSONL logs in
+Agents/logs/ (and optionally Exercise/data/log/) and merges adjacent
+info+status entries into single readable lines.
+
+Works for any agent: exercise, taskflow, flagged-email, todo, etc.
+
+Deliberately ZERO third-party dependencies (unlike its sibling
+``qlog.py``, which needs DuckDB): this is the diagnostics tool of last
+resort, so it must run in a sandbox with no network and no wheel cache
+(see backlog "OpenTelemetry" note and the 2026-06 sandbox-safe
+changelog entry). Keep it stdlib-only.
+
+Usage:
+    uv run --script .claude/skills/agents-live/scripts/timeline.py exercise-state-update --since 2026-05-01T12:00
+    uv run --script .claude/skills/agents-live/scripts/timeline.py --all --since 2026-05-01T16:00
+    uv run --script .claude/skills/agents-live/scripts/timeline.py flagged-email --last 30
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+from paths import resolve_root
+
+REPO = resolve_root()
+LOGS_DIR = REPO / "Agents" / "logs"
+EXERCISE_LOGS = REPO / "Exercise" / "data" / "log"
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Correlated timeline of agents-live processing events",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  timeline.py exercise-state-update --since 2026-05-01T12:00
+  timeline.py LMCO --since 2026-05-01T16:48:00
+  timeline.py --all --since 2026-05-01T16:00 --last 100
+  timeline.py flagged-email-triage --last 20""",
+    )
+    p.add_argument("filter", nargs="?", help="Agent name or content substring (case-insensitive)")
+    p.add_argument("--all", action="store_true", help="Show all agents (no filter)")
+    p.add_argument("--since", help="Start time (ISO-8601 UTC)")
+    p.add_argument("--last", type=int, default=50, help="Last N events (default 50)")
+    p.add_argument("--logs", nargs="*", help="Specific log files to read (default: all in Agents/logs/)")
+    return p.parse_args()
+
+
+def find_log_files(specific: list[str] | None) -> list[Path]:
+    """Find all relevant JSONL log files."""
+    if specific:
+        return [Path(f) for f in specific if Path(f).exists()]
+    files = sorted(LOGS_DIR.glob("*.log")) if LOGS_DIR.exists() else []
+    if EXERCISE_LOGS.exists():
+        files.extend(sorted(EXERCISE_LOGS.glob("*.log")))
+    return files
+
+
+def load_jsonl(path: Path, text_filter: str | None, since: str | None) -> list[dict]:
+    """Load JSONL log, filtering by content substring and time."""
+    entries = []
+    if not path.exists():
+        return entries
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("log_schema") != 5 or not d.get("agent_name"):
+                raise ValueError(
+                    f"{path}: expected schema v5 row with agent_name")
+            if since and d.get("ts", "") < since:
+                continue
+            if text_filter and text_filter.lower() not in json.dumps(d).lower():
+                continue
+            entries.append(d)
+    return entries
+
+
+def extract_message(entry: dict) -> str:
+    """Extract the most useful human-readable message from a log entry."""
+    msg = entry.get("message", "")
+    if msg:
+        # Collapse multi-line into semicolons, strip common handler prefixes
+        lines = [l.strip() for l in msg.split("\n") if l.strip()]
+        lines = [re.sub(r"^\[[\w-]+\]\s*", "", l) for l in lines]
+        lines = [l for l in lines if l]
+        return "; ".join(lines)
+
+    if entry.get("summary"):
+        return entry["summary"]
+    if entry.get("output") and len(entry["output"]) < 200:
+        return entry["output"][:150]
+    return ""
+
+
+def format_duration(d: float | None) -> str:
+    if d is None:
+        return ""
+    if d < 1:
+        return f"{d*1000:.0f}ms"
+    if d < 60:
+        return f"{d:.1f}s"
+    return f"{d/60:.1f}m"
+
+
+def phase_icon(phase: str, status: str | None) -> str:
+    """Text label for phase/status."""
+    if status == "error":
+        return "FAIL"
+    if status == "skipped":
+        return "SKIP"
+    icons = {
+        "watcher": "WATCH",
+        "start": "START",
+        "pre-processor": "PREP",
+        "agent": "AGENT",
+        "post-processor": "POST",
+        "done": "DONE",
+        "handler": "APPLY",
+        "activate": "ACTIV",
+    }
+    return icons.get(phase, phase.upper()[:5])
+
+
+def print_timeline(events: list[dict]) -> None:
+    """Print a formatted timeline.
+
+    Merges phase info-level detail entries with their corresponding
+    status entries for a compact one-line-per-event view.
+    """
+    if not events:
+        print("  (no events found)")
+        return
+
+    # Merge: info-level entries (message detail) with their adjacent
+    # status entries (ok/error + duration).
+    merged = []
+    i = 0
+    while i < len(events):
+        ev = events[i]
+        # Is this an info-only entry (has message, no status)?
+        if ev.get("message") and not ev.get("status"):
+            matched = False
+            for j in (i + 1, i - 1):
+                if 0 <= j < len(events):
+                    other = events[j]
+                    if (other.get("ts") == ev.get("ts")
+                            and other.get("agent_name") == ev.get("agent_name")
+                            and other.get("phase") == ev.get("phase")
+                            and other.get("status")):
+                        other.setdefault("_detail", "")
+                        other["_detail"] = extract_message(ev)
+                        matched = True
+                        break
+            if not matched:
+                merged.append(ev)
+            i += 1
+            continue
+
+        merged.append(ev)
+        i += 1
+
+    # Print
+    print()
+    previous_agent_name = None
+    for ev in merged:
+        ts = ev.get("ts", "")[:19]
+        ts_display = ts.replace("T", " ")
+
+        agent_name = ev.get("agent_name", "?")
+        phase = ev.get("phase", "?")
+        status = ev.get("status", "")
+        dur = ev.get("duration_s")
+        changed = ev.get("changed_files", [])
+        icon = phase_icon(phase, status)
+
+        # Visual separator on agent change
+        if agent_name != previous_agent_name and previous_agent_name is not None:
+            print()
+        previous_agent_name = agent_name
+
+        # Build detail
+        parts = []
+
+        if status and status not in ("start", "ok", "error", "skipped"):
+            parts.append(f"[{status}]")
+
+        if dur is not None:
+            parts.append(f"({format_duration(dur)})")
+
+        if changed:
+            files_str = ", ".join(Path(f).name for f in changed[:3])
+            if len(changed) > 3:
+                files_str += f" +{len(changed)-3}"
+            parts.append(f"files=[{files_str}]")
+
+        detail_msg = ev.get("_detail") or extract_message(ev)
+        if detail_msg:
+            parts.append(detail_msg)
+
+        if ev.get("tokens_in"):
+            parts.append(f"tokens={ev['tokens_in']}in/{ev['tokens_out']}out")
+        if ev.get("premium_requests"):
+            parts.append(f"reqs={ev['premium_requests']}")
+
+        if phase == "done" and ev.get("summary") and ev["summary"] not in (detail_msg or ""):
+            parts.append(ev["summary"])
+
+        detail = " ".join(parts)
+        max_detail = 130
+        if len(detail) > max_detail:
+            detail = detail[:max_detail] + "..."
+
+        print(f"  {ts_display}  {icon:<6} {agent_name:<20} {detail}")
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.filter and not args.all:
+        print("Error: specify a filter string or --all", file=sys.stderr)
+        sys.exit(1)
+
+    text_filter = args.filter if not args.all else None
+    log_files = find_log_files(args.logs)
+
+    # Load all matching entries from all log files
+    all_entries: list[dict] = []
+    for log_file in log_files:
+        all_entries.extend(load_jsonl(log_file, text_filter, args.since))
+
+    # Sort by timestamp
+    all_entries.sort(key=lambda e: e.get("ts", ""))
+
+    # Trim to last N
+    if len(all_entries) > args.last:
+        all_entries = all_entries[-args.last:]
+
+    # Print header
+    filter_desc = f"filter={args.filter}" if args.filter else "all agents"
+    since_desc = f" since {args.since}" if args.since else ""
+    print(f"\nTimeline ({filter_desc}{since_desc}, last {args.last})")
+    print("=" * 80)
+
+    # Deduplicate and skip redundant sub-phase start entries
+    seen = set()
+    deduped = []
+    for ev in all_entries:
+        phase = ev.get("phase", "")
+        status = ev.get("status", "")
+        key = (ev.get("ts", ""), ev.get("agent_name", ""), phase, status)
+        if key in seen:
+            continue
+        seen.add(key)
+        if status == "start" and phase in ("pre-processor", "agent", "post-processor"):
+            continue
+        deduped.append(ev)
+
+    print_timeline(deduped)
+
+    # Summary stats
+    done_entries = [e for e in deduped if e.get("phase") == "done"]
+    if done_entries:
+        print(f"\n{'─' * 80}")
+        ok = sum(1 for e in done_entries if e.get("status") == "ok")
+        err = sum(1 for e in done_entries if e.get("status") == "error")
+        skip = sum(1 for e in done_entries if e.get("status") == "skipped")
+        total_dur = sum(e.get("duration_s", 0) for e in done_entries if e.get("duration_s"))
+        print(f"  Runs: {len(done_entries)} ({ok} ok, {err} error, {skip} skipped) | Total time: {format_duration(total_dur)}")
+    print()
+
+
+if __name__ == "__main__":
+    main()

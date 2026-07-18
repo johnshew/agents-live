@@ -1,0 +1,7 @@
+dist/
+.venv/
+__pycache__/
+*.egg-info/
+uv.lock
+Agents/logs/*
+!Agents/logs/.gitkeep
