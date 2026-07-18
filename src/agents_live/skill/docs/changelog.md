@@ -6,17 +6,97 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- feat: drop the user-facing repository alias; `repos add <path>` registers a
-  repository under its directory name, and `repos default` / `repos remove`
-  accept either the path or that name.
+- fix: refuse to modify the crontab when it cannot be read. A transient
+  read failure during activation previously installed a fresh table
+  containing only the new entries, silently wiping the user's personal
+  cron jobs and every other project's triggers.
+- fix: stop managing a global crontab `PATH=` line. Each persisted
+  agents-live entry now carries its own inline `PATH`, so user-authored
+  and other projects' `PATH=` lines are never deleted or overwritten.
+- fix: validate agent `schedule:` frontmatter as strict cron syntax
+  (five fields or an `@keyword`), so a crafted schedule can no longer
+  smuggle shell commands or extra lines into the installed crontab.
+- fix: enforce the documented repository-relative contract for
+  `watchPath` and pre/post-processors; paths that resolve outside the
+  repository root (including via `..` or symlinks) are rejected, so an
+  agent definition cannot watch external data or execute code outside
+  the project.
+- fix: freeze host-seeded pipeline MCP paths. The agent-facing `put`
+  can no longer rebind a seeded `$schema` (or supply a forward-declared
+  schema document) and thereby validate its own output against a
+  schema of its choosing.
+- fix: parse `.vscode/mcp.json` as real JSONC - inline and block
+  comments and trailing commas now load correctly - and fail closed
+  with a typed error on any malformed or non-object document instead
+  of silently running agents without their MCP server definitions.
+- fix: scope watcher process matching to the current repository, so
+  same-named watchers in different projects are no longer cross-reported
+  or cross-killed by `stop`, `teardown`, `status`, or orphan pruning.
+- fix: recognize packaged-shim cron lines during agent enumeration, so
+  orphan pruning and runtime listings see cron-scheduled agents on
+  packaged installs again (previously only flat-layout `run.py` lines
+  qualified).
+- fix: surface crontab entries pinned to a moved or deleted project
+  root in `doctor` (repo-scoped matching can never remove them), treat
+  an unreadable crontab as a skipped check rather than a passing one,
+  and report a fresh user's missing crontab as an empty table instead
+  of a restricted sandbox in `status`.
+- fix: keep the legacy Windows heartbeat wrapper doing the actual
+  keep-alive work (systemd poke and beacon write) before attempting
+  migration, and treat a failed migration as a warning; hosts with
+  PowerShell interop disabled no longer stop heart-beating entirely.
+- fix: refuse `heartbeat install --distro` for a distro other than the
+  current one (the beacon verification reads the current distro's
+  filesystem, so cross-distro installs always failed half-applied), and
+  skip the doctor heartbeat check instead of failing it in sessions
+  without `WSL_DISTRO_NAME` (sshd, cron, systemd).
+- fix: make `agents-live uninstall` usable on non-WSL hosts by skipping
+  the Windows heartbeat cleanup there instead of failing before the uv
+  tool could be removed.
+- fix: stage skill-payload installs and refreshes so an interrupted
+  copy can neither destroy an existing payload nor leave a partial one
+  that reports itself current.
+- fix: announce an available release once per release instead of after
+  every hourly background check, and read `--version` from the same
+  version source the update check and doctor use.
+- fix: accept `--version` in any position among the global flags, exit
+  cleanly on Ctrl-C during `logs` and `dashboard`, and map a
+  signal-killed delegated command to the conventional 128+signal exit
+  status.
+- fix: resolve status LAST OK / LAST ERR columns from the selected
+  project's log directory instead of the caller's working directory,
+  and from each child repository in `--all-repos` views.
+- fix: a registered repository name passed to `--repo` now always
+  selects the registry entry, never a same-named directory under the
+  caller's current directory; registry mutations are serialized by a
+  lock so concurrent `repos` commands cannot drop each other's writes;
+  a child repository that fails to launch becomes that repository's
+  error row instead of aborting the whole `--all-repos` aggregate.
+- fix: run `--all-repos` child collection concurrently, refresh the
+  read-only all-repos dashboard periodically instead of freezing at
+  process start, and route its child processes through the installed
+  CLI shim where the package is not importable.
+- fix: harden `upgrade` for minimal-PATH contexts (uv and the freshly
+  installed shim are found via the same search paths cron uses) and
+  report an invalid `AGENTS_LIVE_REPO` as what it is instead of a
+  registry error.
+- fix: print the "using default repo" notice for `run`, which executes
+  an agent and previously targeted the configured default silently.
 - fix: make release readiness explicit by integrating changelog maintenance,
   enforcing the minimum semantic version bump implied by release notes, using
   portable artifact inspection, and verifying the exact published PyPI version.
+- feat: drop the user-facing repository alias; `repos add <path>` registers a
+  repository under its directory name, and `repos default` / `repos remove`
+  accept either the path or that name.
 - feat: make `agents-live upgrade` reinstall the latest uv-managed runtime
   without requiring project context, then refresh managed skill payloads from
   the newly installed CLI across the current and registered repositories;
   explicit `--repo`, `--runtime-only`, and `--skills-only` options constrain
   the workflow.
+- chore: run the pre-release audit inside the PyPI publish workflow so a
+  manually dispatched tag can never publish an unaudited artifact, and
+  teach the audit to catch tilde-form personal paths (the shipped docs
+  now use a generic `<target-project>` placeholder).
 
 ## 0.2.0 - 2026-07-18
 
