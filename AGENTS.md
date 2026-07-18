@@ -43,6 +43,9 @@ uv run --script tools/pre-release-audit.py               # release audit
 - **`Agents/` is runtime, not source.** Handlers and logs there
   support local use of the tool; package behavior lives under
   `src/agents_live/`.
+- **The backlog lives in GitHub issues, not in-tree docs.** Check
+  `gh issue list` before starting work; file new findings as issues
+  and reference them from commits (`Fixes #N` closes on merge).
 
 ## Structure
 

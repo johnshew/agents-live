@@ -43,6 +43,12 @@ uv run --script tools/pre-release-audit.py
   `src/agents_live/skill/docs/overview.md`.
 - Minimal diffs; match the style of the surrounding code and docs.
 
+## Backlog
+
+Pending work is tracked as GitHub issues on this repo (`gh issue
+list`), deliberately not as in-tree docs. File bugs and design
+questions there; reference them from commit messages (`Fixes #N`).
+
 ## Upstream note
 
 This tree matches the assembled release layout described in
