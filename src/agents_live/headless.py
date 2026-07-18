@@ -2583,6 +2583,20 @@ def _find_all_watcher_pids(name: str) -> list[int]:
     return _find_watcher_pids_ps(name)
 
 
+def _watcher_argv_is_agents_live(args: list[str]) -> bool:
+    """True if an argv list belongs to an agents-live watch loop host.
+
+    Flat checkout: ``... activate.py --watch-loop <name>``. Packaged:
+    ``... <bin>/agents-live --repo <root> start --watch-loop <name>`` —
+    matched on the executable's basename, never substring, so a
+    ``--repo`` path like ``.../agents-live-test`` cannot false-positive.
+    """
+    return any(
+        "activate.py" in arg or Path(arg).name == "agents-live"
+        for arg in args
+    )
+
+
 def _is_watcher_cmdline(args: list[str], name: str) -> bool:
     """Return True if an argv list is the watch loop for exactly this agent.
 
@@ -2590,7 +2604,7 @@ def _is_watcher_cmdline(args: list[str], name: str) -> bool:
     name that is a substring of another (``todo`` vs ``todo-push``) never
     matches the wrong watcher.
     """
-    if not any("activate.py" in arg for arg in args):
+    if not _watcher_argv_is_agents_live(args):
         return False
     return any(
         first == "--watch-loop" and second == name
@@ -2651,9 +2665,10 @@ def _watcher_cmdline_agent_name(args: list[str]) -> str | None:
     """Return the watched agent name from a watcher argv list, else None.
 
     The inverse of :func:`_is_watcher_cmdline`: a watch loop runs
-    ``activate.py --watch-loop <name>``.
+    ``activate.py --watch-loop <name>`` (flat checkout) or
+    ``agents-live ... start --watch-loop <name>`` (packaged).
     """
-    if not any("activate.py" in arg for arg in args):
+    if not _watcher_argv_is_agents_live(args):
         return None
     for first, second in zip(args, args[1:]):
         if first == "--watch-loop":

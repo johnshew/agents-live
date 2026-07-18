@@ -36,6 +36,8 @@ from .headless import (
     load_agent_config,
     log_event,
     logs_root,
+    packaged_execution,
+    cli_shim_path,
     remove_cron_entries,
     remove_watcher_reboot_line,
     repo_root,
@@ -170,7 +172,7 @@ def install_cron_agent(name: str) -> str:
 
 # --- Watcher dispatch ---
 
-def _dispatch_run_once(name: str, changed_files: list[str], uv: str) -> None:
+def _dispatch_run_once(name: str, changed_files: list[str]) -> None:
     """Run run.py for a watcher dispatch, blocking until it completes.
 
     Captures stdout/stderr to per-run files and logs the exit code so a
@@ -186,12 +188,7 @@ def _dispatch_run_once(name: str, changed_files: list[str], uv: str) -> None:
     dispatch_started = time.monotonic()
     with open(out_path, "w") as out_f, open(err_path, "w") as err_f:
         proc = subprocess.Popen(
-            [
-                uv, "run", "--script", str(RUN_ONCE_PATH),
-                "--name", name,
-                "--changed-files", all_files_json,
-                "--quiet",
-            ],
+            [*run_invocation(name), "--changed-files", all_files_json],
             cwd=repo_root(),
             stdout=out_f,
             stderr=err_f,
@@ -416,7 +413,7 @@ def watch_loop(name: str) -> int:
             log_event(config.agent_log, level="info", phase="watcher",
                       message=f"debounce window expired ({reason}): "
                               f"dispatching {len(files)} file(s)")
-            _dispatch_run_once(name, files, shutil.which("uv") or "uv")
+            _dispatch_run_once(name, files)
 
         def _drop_debounce(reason: str) -> None:
             """Discard pending debounced files on deliberate shutdown."""
@@ -625,8 +622,6 @@ def watch_loop(name: str) -> int:
                           window_secs=FIRE_RATE_WINDOW_SECS)
                 return 1
 
-            uv = shutil.which("uv") or "uv"
-
             if config.debounce:
                 # Layer-2 debounce: accumulate this batch and (re)start the
                 # quiet window. Dispatch happens at the top of the loop when
@@ -641,7 +636,7 @@ def watch_loop(name: str) -> int:
                                   f"({len(debounce_files)} file(s) accumulated)")
             else:
                 # Immediate dispatch (default).
-                _dispatch_run_once(name, actually_changed, uv)
+                _dispatch_run_once(name, actually_changed)
     except SystemExit:
         raise
     except Exception:
@@ -665,10 +660,19 @@ def activate_watcher(name: str) -> int:
         stop_watcher(name)
 
     ensure_logs_dir()
-    uv = shutil.which("uv") or "uv"
+    if packaged_execution():
+        # Packaged install: activate.py is a package module (relative
+        # imports), so it cannot run as a standalone uv script — re-enter
+        # through the CLI shim, mirroring ensure_watcher_invocation().
+        loop_argv = [str(cli_shim_path()), "--repo", str(repo_root()),
+                     "start", "--watch-loop", name]
+    else:
+        uv = shutil.which("uv") or "uv"
+        loop_argv = [uv, "run", "--script", str(SCRIPT_PATH),
+                     "--watch-loop", name]
     with open("/dev/null", "w") as devnull:
         process = subprocess.Popen(
-            [uv, "run", "--script", str(SCRIPT_PATH), "--watch-loop", name],
+            loop_argv,
             cwd=repo_root(),
             stdout=devnull,
             stderr=subprocess.PIPE,

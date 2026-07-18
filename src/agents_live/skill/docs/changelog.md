@@ -4,6 +4,25 @@ Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
+## 0.1.3 - 2026-07-18
+
+Packaged watcher fixes (found by greenfield validation of a
+`uv tool install` deployment; the flat-checkout layout was unaffected).
+
+- fix: `start` on a watcher agent in a packaged install spawned the
+  watch loop via the flat-checkout `uv run --script activate.py` form,
+  which dies instantly on the package's relative imports. The packaged
+  form now re-enters through the CLI shim
+  (`agents-live --repo <root> start --watch-loop <name>`), mirroring
+  the existing `@reboot` respawn invocation.
+- fix: watcher dispatch reuses `run_invocation()` instead of a
+  hardcoded `uv run --script run.py` argv, so dispatch works in both
+  layouts.
+- fix: the watcher process matchers behind `status`, `stop`, and
+  `doctor` required `activate.py` in the argv, so packaged watch loops
+  showed as stopped and could not be stopped. A shared discriminator
+  now also matches the CLI shim by exact basename.
+
 ## 0.1.2 - 2026-07-18
 
 Documentation corrections; no code changes.
