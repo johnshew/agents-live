@@ -272,11 +272,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             paths.resolve_root()
         except ValueError as exc:
-            markerless_ok = (
+            allow_markerless_invocation = (
                 cmd in MARKERLESS_ALLOWED
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
-            if not markerless_ok and (
+            if not allow_markerless_invocation and (
                     cmd not in AUTO_MARKER or _adopt_git_root(cmd) is None):
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),

@@ -471,7 +471,8 @@ def collect() -> list[dict]:
     if not project_checks:
         return checks
 
-    assert REPO is not None
+    if REPO is None:
+        return checks
     add("Agents/ directory", (REPO / "Agents").is_dir(), True, "repo layout issue")
     add("Agents/handlers/ directory", (REPO / "Agents" / "handlers").is_dir(), True,
         "repo layout issue")
