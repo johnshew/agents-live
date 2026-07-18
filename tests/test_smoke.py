@@ -242,6 +242,7 @@ class TestUpdateCheck(unittest.TestCase):
         root = Path(self._tmp.name)
         self._env = mock.patch.dict(os.environ, {
             "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_CONFIG_HOME": str(root / "config"),
         })
         self._env.start()
 
@@ -283,6 +284,15 @@ class TestUpdateCheck(unittest.TestCase):
 
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
             update_check.launch_if_stale(now=100 + 60 * 60)
+        popen.assert_called_once()
+
+    def test_legacy_opt_outs_do_not_suppress_check(self) -> None:
+        os.environ["AGENTS_LIVE_NO_UPDATE_CHECK"] = "1"
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "agents-live" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("update_check = false\n", encoding="utf-8")
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100)
         popen.assert_called_once()
 
     def test_offline_and_malformed_metadata_are_cached_failures(self) -> None:
