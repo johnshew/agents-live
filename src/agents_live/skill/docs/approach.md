@@ -1,7 +1,7 @@
 ---
 title: Agents Live Architecture
 description: Architecture and runtime contracts for agents-live triggered agents
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: concept
 ---
 
@@ -522,6 +522,9 @@ Filters: `--agent`, `--since`, `--until`, `--phase`, `--status`, `--trigger`,
 across all log files with phase icons (WATCH/START/PREP/AGENT/POST/DONE/FAIL/SKIP).
 
 ```bash
+# Last 50 events across all agents
+agents-live logs timeline
+
 # Timeline for a specific agent
 agents-live logs timeline exercise-state-update --since 2026-05-01T12:00
 
@@ -587,4 +590,3 @@ contract with `--all --check-schema`.
 | [reference/wsl-runbook.md](reference/wsl-runbook.md) | WSL operational runbook: debugging, restarting, verifying |
 | [reference/cascade-modeling.md](reference/cascade-modeling.md) | Methodology for proving watcher cascades terminate |
 | [reference/session-transcript-capture.md](reference/session-transcript-capture.md) | Research on session transcript capture |
-

@@ -18,6 +18,7 @@ resort, so it must run in a sandbox with no network and no wheel cache
 changelog entry). Keep it stdlib-only.
 
 Usage:
+    uv run --script .claude/skills/agents-live/scripts/timeline.py
     uv run --script .claude/skills/agents-live/scripts/timeline.py exercise-state-update --since 2026-05-01T12:00
     uv run --script .claude/skills/agents-live/scripts/timeline.py --all --since 2026-05-01T16:00
     uv run --script .claude/skills/agents-live/scripts/timeline.py flagged-email --last 30
@@ -39,9 +40,11 @@ EXERCISE_LOGS = REPO / "Exercise" / "data" / "log"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Correlated timeline of agents-live processing events",
+        description="Correlated timeline of agents-live processing events "
+                    "(defaults to all agents)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
+  timeline.py
   timeline.py exercise-state-update --since 2026-05-01T12:00
   timeline.py LMCO --since 2026-05-01T16:48:00
   timeline.py --all --since 2026-05-01T16:00 --last 100
@@ -68,9 +71,10 @@ def find_log_files(specific: list[str] | None) -> list[Path]:
 def load_jsonl(path: Path, text_filter: str | None, since: str | None) -> list[dict]:
     """Load JSONL log, filtering by content substring and time."""
     entries = []
+    skipped = 0
     if not path.exists():
         return entries
-    with open(path) as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -78,15 +82,41 @@ def load_jsonl(path: Path, text_filter: str | None, since: str | None) -> list[d
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
+                skipped += 1
                 continue
-            if d.get("log_schema") != 5 or not d.get("agent_name"):
-                raise ValueError(
-                    f"{path}: expected schema v5 row with agent_name")
+            if (not isinstance(d, dict)
+                    or d.get("log_schema") != 5
+                    or not isinstance(d.get("agent_name"), str)
+                    or not d["agent_name"]
+                    or not isinstance(d.get("ts", ""), str)
+                    or not isinstance(d.get("phase", ""), str)
+                    or any(
+                        d.get(field) is not None
+                        and not isinstance(d[field], str)
+                        for field in ("status", "message", "summary", "output")
+                    )
+                    or (
+                        d.get("duration_s") is not None
+                        and not isinstance(d["duration_s"], (int, float))
+                    )
+                    or not isinstance(d.get("changed_files", []), list)
+                    or not all(
+                        isinstance(item, str)
+                        for item in d.get("changed_files", [])
+                    )):
+                skipped += 1
+                continue
             if since and d.get("ts", "") < since:
                 continue
             if text_filter and text_filter.lower() not in json.dumps(d).lower():
                 continue
             entries.append(d)
+    if skipped:
+        print(
+            f"warning: {path}: skipped {skipped} malformed or pre-v5 "
+            f"row{'s' if skipped != 1 else ''}",
+            file=sys.stderr,
+        )
     return entries
 
 
@@ -213,7 +243,8 @@ def print_timeline(events: list[dict]) -> None:
             parts.append(detail_msg)
 
         if ev.get("tokens_in"):
-            parts.append(f"tokens={ev['tokens_in']}in/{ev['tokens_out']}out")
+            parts.append(
+                f"tokens={ev['tokens_in']}in/{ev.get('tokens_out', '?')}out")
         if ev.get("premium_requests"):
             parts.append(f"reqs={ev['premium_requests']}")
 
@@ -230,10 +261,6 @@ def print_timeline(events: list[dict]) -> None:
 
 def main() -> None:
     args = parse_args()
-    if not args.filter and not args.all:
-        print("Error: specify a filter string or --all", file=sys.stderr)
-        sys.exit(1)
-
     text_filter = args.filter if not args.all else None
     log_files = find_log_files(args.logs)
 

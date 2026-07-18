@@ -252,9 +252,12 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
         return None
     if completed.returncode != 0:
         return [], []  # empty crontab: consistent by definition
+    try:
+        from .headless import crontab_line_belongs_to_repo  # noqa: PLC0415
+    except Exception:
+        return None
     referenced: set[str] = set()
     script_paths: set[str] = set()
-    repo_str = str(REPO)
     for line in completed.stdout.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -262,7 +265,7 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
         # The crontab is host-global; only lines referencing THIS repo
         # are this project's concern (another project's agents are not
         # orphans here).
-        if repo_str not in stripped:
+        if not crontab_line_belongs_to_repo(stripped):
             continue
         tokens = stripped.split()
         for index, token in enumerate(tokens):

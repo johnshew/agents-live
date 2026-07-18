@@ -99,7 +99,7 @@ not the user-facing contract.
 | `dashboard` | `agents-live dashboard --dev` |
 | `logs [name]` | `agents-live logs [name] [--errors] [--all] [--limit 50]` |
 | `logs query` | `agents-live logs [--agent name] [--errors] [--all] [--since T] [--slow N]` |
-| `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` |
+| `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
 | `doctor` / `prereqs` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
