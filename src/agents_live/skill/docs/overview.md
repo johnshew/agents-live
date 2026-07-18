@@ -91,16 +91,15 @@ agents-live teardown file-notes    # clean up - remove its triggers
 ```
 
 On interactive terminal invocations, agents-live checks PyPI for a newer
-stable release at most once every 24 hours and caches the result under
+stable release when its shared cached result is missing or 24 hours old. The
+result is stored under
 `$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). The refresh
 runs in the background; network and cache failures never affect the command.
 No check runs for scheduled/internal, quiet, JSON, piped, or redirected
 commands. This request sends only ordinary package-index request metadata; it
-does not include project or agent data. Disable it with
-`AGENTS_LIVE_NO_UPDATE_CHECK=1` or `update_check = false` in
-`$XDG_CONFIG_HOME/agents-live/config.toml`. View the cached result with
-`agents-live doctor`, and install an available release with `uv tool upgrade
-agents-live`. Agents Live never updates itself.
+does not include project or agent data. View the cached result with `agents-live
+doctor`, and install an available release with `uv tool upgrade agents-live`.
+Agents Live never updates itself.
 
 After upgrading, run `agents-live --repo <project> init` to refresh the
 optional installed skill payload; `doctor` reports a package and payload

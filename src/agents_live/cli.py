@@ -146,7 +146,6 @@ def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
         and "--json" not in rest
         and "--quiet" not in rest
         and update_check.interactive()
-        and not update_check.disabled()
     ):
         notice = update_check.consume_notice(__version__)
         update_check.launch_if_stale()
