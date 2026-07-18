@@ -130,8 +130,9 @@ re-run.
 5. **Bootstrap the health beacon.** `agents-live run
    agents-live-health-check` -- writes `Agents/data/health.ok`. Until
    this runs the beacon is missing and the dashboard reads "unhealthy".
-6. **(WSL only) Register the Windows heartbeat.** Keeps WSL alive so cron
-   fires when the machine is idle -- see
+6. **(WSL only) Register one distro-level Windows heartbeat.** Run
+   `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"` so cron fires
+   when the machine is idle -- see
    [windows-heartbeat.md](windows-heartbeat.md). Without it, cron only runs
    while a WSL session is open.
 7. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
@@ -327,10 +328,10 @@ is already current. Use `init` for first-time project layout and setup.
 
 16. **Windows heartbeat scheduled task** (WSL only): Keeps WSL alive so cron
       fires continuously. Without it, WSL auto-terminates after ~8 seconds of
-      idle and all scheduled agents stop. Doctor verifies that `heartbeat.ok` is
-      less than 10 minutes old. When Windows PowerShell interop is available, it
-      also verifies that the `WSL Heartbeat` task is enabled, runs the current
-      agents-live scripts, and repeats every 5 minutes.
+      idle and all scheduled agents stop. Doctor verifies that the shared XDG
+      state `heartbeat.ok` is less than 10 minutes old. When Windows PowerShell
+      interop is available, it also verifies that the distro-scoped task is
+      enabled, invokes the stable uv CLI shim, and repeats every 5 minutes.
     ```bash
       agents-live doctor
     ```
@@ -344,7 +345,9 @@ is already current. Use `init` for first-time project layout and setup.
     > Would you like to set it up? (See install instructions in
     > `.claude/skills/agents-live/docs/windows-heartbeat.md`)
 
-    Fix: Follow the install steps in [docs/windows-heartbeat.md](windows-heartbeat.md).
+    Fix: Run `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"`;
+    this also migrates legacy repo/package-pinned tasks after verifying the new
+    beacon. See [docs/windows-heartbeat.md](windows-heartbeat.md).
 
 ### Output format
 

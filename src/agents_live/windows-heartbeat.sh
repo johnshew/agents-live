@@ -2,51 +2,18 @@
 # windows-heartbeat.sh - Keep WSL alive so cron-based Agents Live agents keep running.
 # Called by Windows Task Scheduler every 5 minutes.
 #
-# Usage: windows-heartbeat.sh [REPO_DIR]
+# Compatibility wrapper for legacy scheduled tasks.
 #
-# Writes Agents/data/heartbeat.ok on each successful run so the health check
-# and dashboard can confirm the Windows scheduler is working.
-#
-# REPO_DIR must be passed explicitly in a packaged install: the
-# walk-up default only holds in the flat checkout, where this script
-# lives at .claude/skills/agents-live/scripts/ inside the repo. From
-# site-packages it resolves to the uv tool directory and the beacon
-# lands there, invisible to the health check.
-
-REPO_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-LOG_DIR="$REPO_DIR/Agents/logs"
-LOG_FILE="$LOG_DIR/heartbeat.log"
-DATA_DIR="$REPO_DIR/Agents/data"
-HEARTBEAT_OK="$DATA_DIR/heartbeat.ok"
-
-mkdir -p "$LOG_DIR" "$DATA_DIR"
-
-log() {
-    local ts
-    ts="$(date -Is)"
-    echo "$ts $1" >> "$LOG_FILE"
-}
-
-# Battery awareness: skip if on battery and WSL was poked < 10 min ago
-on_battery() {
-    grep -q "Discharging" /sys/class/power_supply/BAT*/status 2>/dev/null
-}
-
-STAMP="/tmp/life-heartbeat-stamp"
-
-if on_battery; then
-    last=$(stat -c %Y "$STAMP" 2>/dev/null || echo 0)
-    now=$(date +%s)
-    if (( now - last < 600 )); then
-        exit 0
-    fi
+CLI="$HOME/.local/bin/agents-live"
+if [[ ! -x "$CLI" ]]; then
+    echo "windows-heartbeat.sh: agents-live uv shim not found: $CLI" >&2
+    exit 1
 fi
-
-# Keep systemd alive so cron jobs fire
-systemctl --user status > /dev/null 2>&1
-touch "$STAMP"
-
-# Write health beacon
-echo "alive $(date '+%Y-%m-%d %H:%M %Z')" > "$HEARTBEAT_OK"
-
-log "heartbeat: WSL alive"
+if [[ -z "${WSL_DISTRO_NAME:-}" ]]; then
+    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; run agents-live heartbeat install --distro <name> (replace <name> with a distro from wsl.exe -l -q)" >&2
+    exit 1
+fi
+# A legacy task reaches this wrapper after an upgrade. Installing the
+# canonical task verifies its beacon before removing the task currently
+# running this wrapper, so migration needs no manual task deletion.
+exec "$CLI" heartbeat install --distro "$WSL_DISTRO_NAME"
