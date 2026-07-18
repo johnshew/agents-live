@@ -14,6 +14,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import importlib.util
 import io
@@ -124,14 +125,31 @@ class TestRepositoryRegistry(_TempProject):
         super().tearDown()
 
     def test_alias_and_default_store_normalized_absolute_path(self) -> None:
-        repos._add("life", str(self.root / "."))
+        repos._add(str(self.root / "."), "life")
         repos._set_default("life")
         registry = repos.load()
         self.assertEqual(registry["repos"], {"life": str(self.root)})
         self.assertEqual(paths.resolve_root("life"), self.root)
 
+    def test_add_derives_alias_from_directory_name(self) -> None:
+        repos._add(str(self.root))
+        registry = repos.load()
+        self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
+
+    def test_add_rejects_underivable_alias_with_hint(self) -> None:
+        odd = self.root / "-leading-dash"
+        odd.mkdir()
+        with self.assertRaisesRegex(ValueError, "pass an explicit alias"):
+            repos._add(str(odd))
+
+    def test_help_action_prints_usage(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(repos.main(["help"]), 0)
+        self.assertIn("Manage registered repositories", stdout.getvalue())
+
     def test_local_marker_wins_over_default(self) -> None:
-        repos._add("default", str(self.root))
+        repos._add(str(self.root), "default")
         repos._set_default("default")
         os.environ.pop(paths.ENV_VAR, None)
         with tempfile.TemporaryDirectory() as local_tmp:
@@ -147,7 +165,7 @@ class TestRepositoryRegistry(_TempProject):
                 os.chdir(saved)
 
     def test_default_is_last_resort(self) -> None:
-        repos._add("life", str(self.root))
+        repos._add(str(self.root), "life")
         repos._set_default("life")
         os.environ.pop(paths.ENV_VAR, None)
         with tempfile.TemporaryDirectory() as outside:
@@ -163,7 +181,7 @@ class TestRepositoryRegistry(_TempProject):
     def test_unavailable_default_fails_actionably(self) -> None:
         missing = self.root / "gone"
         missing.mkdir()
-        repos._add("gone", str(missing))
+        repos._add(str(missing), "gone")
         repos._set_default("gone")
         missing.rmdir()
         with self.assertRaisesRegex(ValueError, "registered repo 'gone'"):

@@ -117,17 +117,21 @@ def _write(registry: dict) -> None:
         raise
 
 
-def _add(alias: str, value: str) -> None:
-    if not _ALIAS.fullmatch(alias):
-        raise ValueError(
-            "repo alias must start with an alphanumeric character and contain "
-            "only letters, numbers, '.', '_', or '-'")
-    registry = load()
-    if alias in registry["repos"]:
-        raise ValueError(f"repo alias {alias!r} is already registered")
+def _add(value: str, alias: str | None = None) -> None:
     path = Path(value).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"repo path is not an existing directory: {path}")
+    derived = alias is None
+    if derived:
+        alias = path.name
+    if not _ALIAS.fullmatch(alias):
+        hint = "; pass an explicit alias" if derived else ""
+        raise ValueError(
+            f"repo alias {alias!r} must start with an alphanumeric character "
+            f"and contain only letters, numbers, '.', '_', or '-'{hint}")
+    registry = load()
+    if alias in registry["repos"]:
+        raise ValueError(f"repo alias {alias!r} is already registered")
     registry["repos"][alias] = str(path)
     _write(registry)
 
@@ -220,16 +224,21 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("list", help="List registered repositories")
     add = subparsers.add_parser("add", help="Register a repository")
-    add.add_argument("alias")
-    add.add_argument("path")
+    add.add_argument("path", help="Repository root directory")
+    add.add_argument(
+        "alias", nargs="?",
+        help="Registry alias (default: the directory name)")
     default = subparsers.add_parser("default", help="Set the fallback repository")
     default.add_argument("alias")
     remove = subparsers.add_parser("remove", help="Remove a registered repository")
     remove.add_argument("alias")
+    subparsers.add_parser("help", help="Show this help message")
     args = parser.parse_args(argv)
     try:
-        if args.action == "add":
-            _add(args.alias, args.path)
+        if args.action == "help":
+            parser.print_help()
+        elif args.action == "add":
+            _add(args.path, args.alias)
         elif args.action == "default":
             _set_default(args.alias)
         elif args.action == "remove":

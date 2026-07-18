@@ -96,7 +96,7 @@ the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
 `~/.config/agents-live/config.toml`):
 
 ```bash
-agents-live repos add life ~/repos/life
+agents-live repos add ~/repos/life   # alias defaults to the directory name
 agents-live repos default life
 agents-live --repo life status
 agents-live status --all-repos

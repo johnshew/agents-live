@@ -564,7 +564,8 @@ agents-live doctor --all-repos       # host once + each registered project
 agents-live dashboard --all-repos    # read-only repository selector
 
 # User repository registry
-agents-live repos add life ~/repos/life
+agents-live repos add ~/repos/life        # alias defaults to the directory name
+agents-live repos add ~/repos/life work   # or pass an explicit alias
 agents-live repos list
 agents-live repos default life
 agents-live --repo life status
@@ -582,8 +583,9 @@ The user registry is
 `$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
 the platform-neutral fallback is `~/.config/agents-live/config.toml`.
 `repos add` requires an existing directory and stores its normalized absolute
-path. Duplicate aliases, malformed configuration, unavailable paths, and
-removing the current default fail with an actionable error.
+path under the given alias, defaulting to the directory name. Duplicate
+aliases, malformed configuration, unavailable paths, and removing the current
+default fail with an actionable error.
 
 Targets resolve in this order:
 
