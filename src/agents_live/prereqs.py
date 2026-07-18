@@ -570,14 +570,14 @@ def collect() -> list[dict]:
     return checks
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check agents-live prerequisites.")
     parser.add_argument("--json", action="store_true", help="Emit a JSON summary")
     parser.add_argument(
         "--refresh-updates", action="store_true",
         help="Refresh the cached PyPI release check",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     json_mode = args.json or preflight.json_mode()
     refresh_updates = args.refresh_updates and not json_mode
     updates_disabled = update_check.disabled()
