@@ -613,9 +613,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("OK: all checks pass.")
     if update_check.interactive():
-        updates_disabled = update_check.disabled()
-        status = "Update check: disabled" if updates_disabled else update_check.status_text()
-        print(f"\n{status}")
+        print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
 
 

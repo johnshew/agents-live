@@ -210,7 +210,6 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
-            mock.patch.object(update_check, "disabled", return_value=False),
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
@@ -239,10 +238,8 @@ class TestUpdateCheck(unittest.TestCase):
         root = Path(self._tmp.name)
         self._env = mock.patch.dict(os.environ, {
             "XDG_CACHE_HOME": str(root / "cache"),
-            "XDG_CONFIG_HOME": str(root / "config"),
         })
         self._env.start()
-        os.environ.pop(update_check.NO_CHECK_ENV, None)
 
     def tearDown(self) -> None:
         self._env.stop()
@@ -261,7 +258,11 @@ class TestUpdateCheck(unittest.TestCase):
         self.assertEqual(result["latest_version"], "1.10.0")
         opener.assert_called_once()
 
-    def test_fresh_cache_prevents_network_launch(self) -> None:
+    def test_cache_timestamp_controls_network_launch(self) -> None:
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100)
+        popen.assert_called_once()
+
         update_check.refresh(
             now=100,
             opener=mock.Mock(return_value=self._response({
@@ -271,6 +272,10 @@ class TestUpdateCheck(unittest.TestCase):
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
             update_check.launch_if_stale(now=101)
         popen.assert_not_called()
+
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL)
+        popen.assert_called_once()
 
     def test_offline_and_malformed_metadata_are_cached_failures(self) -> None:
         offline = update_check.refresh(
@@ -313,18 +318,6 @@ class TestUpdateCheck(unittest.TestCase):
             "1.2.4 is available",
             update_check.consume_notice("1.2.2", now=201),
         )
-
-    def test_environment_and_user_config_opt_out(self) -> None:
-        os.environ[update_check.NO_CHECK_ENV] = "1"
-        self.assertTrue(update_check.disabled())
-        os.environ.pop(update_check.NO_CHECK_ENV)
-        config = update_check.config_path()
-        config.parent.mkdir(parents=True)
-        config.write_text("update_check = false\n", encoding="utf-8")
-        self.assertTrue(update_check.disabled())
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
-            update_check.launch_if_stale(now=100)
-        popen.assert_not_called()
 
     def test_cli_suppresses_noninteractive_quiet_and_json_checks(self) -> None:
         with (

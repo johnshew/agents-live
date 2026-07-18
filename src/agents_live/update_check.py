@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import time
-import tomllib
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -16,7 +15,6 @@ from . import __version__
 
 CACHE_INTERVAL = 24 * 60 * 60
 NETWORK_TIMEOUT = 1.0
-NO_CHECK_ENV = "AGENTS_LIVE_NO_UPDATE_CHECK"
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"
 # Stable SemVer only: the absent ``-prerelease`` production deliberately
 # rejects alpha, beta, and release-candidate metadata.
@@ -28,22 +26,6 @@ _STABLE_SEMVER = re.compile(
 def cache_path() -> Path:
     root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return root / "agents-live" / "update-check.json"
-
-
-def config_path() -> Path:
-    root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return root / "agents-live" / "config.toml"
-
-
-def disabled() -> bool:
-    if os.environ.get(NO_CHECK_ENV) == "1":
-        return True
-    try:
-        with config_path().open("rb") as handle:
-            config = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    return config.get("update_check") is False
 
 
 def interactive() -> bool:
@@ -122,51 +104,21 @@ def refresh(
     return result if _write_cache(result) else None
 
 
-def _lock_path() -> Path:
-    return cache_path().with_suffix(".lock")
-
-
-def _claim_refresh(now: float) -> bool:
-    lock = _lock_path()
-    for attempt in range(2):
-        try:
-            lock.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(descriptor, "w") as handle:
-                handle.write(str(now))
-            return True
-        except FileExistsError:
-            if attempt:
-                return False
-            try:
-                if now - lock.stat().st_mtime <= CACHE_INTERVAL:
-                    return False
-                lock.unlink(missing_ok=True)
-            except OSError:
-                return False
-        except OSError:
-            return False
-    return False
-
-
 def launch_if_stale(*, now: float | None = None) -> None:
     """Start a detached refresh without delaying the requested command."""
     current = time.time() if now is None else now
-    if disabled() or _is_fresh(_read_cache(), current) or not _claim_refresh(current):
+    if _is_fresh(_read_cache(), current):
         return
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "agents_live.update_check", "--background-refresh"],
+            [sys.executable, "-m", "agents_live.update_check"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
     except OSError:
-        try:
-            _lock_path().unlink()
-        except OSError:
-            pass
+        pass
 
 
 def consume_notice(installed: str = __version__, *, now: float | None = None) -> str | None:
@@ -195,8 +147,6 @@ def consume_notice(installed: str = __version__, *, now: float | None = None) ->
 
 
 def status_text(installed: str = __version__) -> str:
-    if disabled():
-        return "Update check: disabled"
     cache = _read_cache()
     if cache is None:
         return "Update check: never completed"
@@ -214,15 +164,7 @@ def status_text(installed: str = __version__) -> str:
 
 
 def _background_refresh() -> int:
-    result = None
-    try:
-        result = refresh()
-    finally:
-        if result is not None:
-            try:
-                _lock_path().unlink()
-            except OSError:
-                pass
+    refresh()
     return 0
 
 
