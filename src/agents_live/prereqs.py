@@ -579,8 +579,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     json_mode = args.json or preflight.json_mode()
+    refresh_updates = args.refresh_updates and not json_mode
 
-    if args.refresh_updates and not json_mode and not update_check.disabled():
+    if refresh_updates and not update_check.disabled():
         update_check.refresh()
 
     checks = collect()
@@ -619,7 +620,7 @@ def main() -> int:
         print(f"OK (required checks pass); {len(optional_failures)} optional missing: {names}")
     else:
         print("OK: all checks pass.")
-    if update_check.interactive() or (args.refresh_updates and not json_mode):
+    if update_check.interactive() or refresh_updates:
         print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
 

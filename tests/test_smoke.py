@@ -214,7 +214,7 @@ class TestCliContract(_TempProject):
             mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(update_check, "status_text", return_value="Update check: current"),
             mock.patch.object(update_check, "interactive", return_value=False),
-            mock.patch.object(sys, "argv", ["agents-live doctor", "--refresh-updates"]),
+            mock.patch.object(sys, "argv", ["agents-live", "--refresh-updates"]),
         ):
             self.assertEqual(prereqs.main(), 0)
         refresh.assert_called_once()
@@ -231,7 +231,7 @@ class TestCliContract(_TempProject):
             mock.patch.object(update_check, "status_text") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
             mock.patch.object(sys, "argv", [
-                "agents-live doctor", "--json", "--refresh-updates"]),
+                "agents-live", "--json", "--refresh-updates"]),
         ):
             self.assertEqual(prereqs.main(), 0)
         refresh.assert_not_called()

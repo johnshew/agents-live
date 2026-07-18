@@ -135,7 +135,7 @@ def _claim_refresh() -> bool:
     except FileExistsError:
         try:
             if time.time() - lock.stat().st_mtime > CACHE_INTERVAL:
-                lock.unlink()
+                lock.unlink(missing_ok=True)
                 return _claim_refresh()
         except OSError:
             pass
@@ -171,10 +171,12 @@ def consume_notice(installed: str = __version__, *, now: float | None = None) ->
         return None
     assert cache is not None
     latest = cache.get("latest_version")
+    installed_semver = _version(installed)
+    latest_semver = _version(latest)
     if (
-        _version(installed) is None
-        or _version(latest) is None
-        or _version(latest) <= _version(installed)
+        installed_semver is None
+        or latest_semver is None
+        or latest_semver <= installed_semver
         or cache.get("notified_for") == cache["checked_at"]
     ):
         return None
