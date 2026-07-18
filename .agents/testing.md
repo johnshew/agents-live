@@ -3,6 +3,23 @@ title: Testing Agents Live Locally and as an Installed Tool
 description: Runbook for separating source, wheel, and published-tool validation
 ---
 
+## What deserves a test
+
+The smoke suite is the backbone: it drives the full chain (create,
+frontmatter, dispatch, watcher detect, teardown) against temp
+projects. Add a focused test beside it only when a failure would be
+high-impact and either silent or combinatorial beyond what the smoke
+suite can enumerate (flag matrices, format parsing, error
+classification clear that bar).
+
+Do not add unit tests against internal function signatures or for
+small one-caller helpers - they freeze implementation details
+(function names, call shapes, cache invariants) and catch nothing the
+smoke suite doesn't. Delete such tests rather than porting them
+through refactors. Every infrastructure change should name the
+cheapest executable check that can falsify it before running the
+broader suite.
+
 ## Test boundaries
 
 Keep these execution modes distinct. A passing editable-source command does

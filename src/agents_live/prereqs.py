@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -223,9 +224,12 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     crontab, or None when the crontab is unreadable (check skipped).
 
     Orphans are ``--name``/``--ensure-watcher`` references whose agent
-    file no longer exists; stale paths are ``.py`` script references
+    file no longer exists; stale entries are ``.py`` script references
     that no longer exist on disk (§4 migration concern: pre-cutover
-    ``uv run .../scripts/...`` lines)."""
+    ``uv run .../scripts/...`` lines) and agents-live lines pinned to a
+    project root that no longer exists (a moved or deleted checkout —
+    repo-scoped matching can never tear those down, so doctor is the
+    only place they surface)."""
     try:
         completed = subprocess.run(
             ["crontab", "-l"], capture_output=True, text=True, timeout=10)
@@ -241,14 +245,29 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
         return None
     referenced: set[str] = set()
     script_paths: set[str] = set()
+    missing_roots: set[str] = set()
     for line in completed.stdout.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         # The crontab is host-global; only lines referencing THIS repo
         # are this project's concern (another project's agents are not
-        # orphans here).
+        # orphans here) — except lines whose pinned root no longer
+        # exists at all, which no project can ever match or remove.
         if not crontab_line_belongs_to_repo(stripped):
+            try:
+                foreign_tokens = shlex.split(stripped)
+            except ValueError:
+                foreign_tokens = stripped.split()
+            shaped = any(t in ("--name", "--ensure-watcher")
+                         for t in foreign_tokens)
+            root = next(
+                (second for first, second in
+                 zip(foreign_tokens, foreign_tokens[1:])
+                 if first in ("cd", "--repo")),
+                None)
+            if shaped and root and not Path(root).is_dir():
+                missing_roots.add(root)
             continue
         tokens = stripped.split()
         for index, token in enumerate(tokens):
@@ -268,6 +287,8 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
                 name for name in referenced
                 if name not in existing and not name.startswith("_"))
     stale = sorted(p for p in script_paths if not Path(p).is_file())
+    stale.extend(f"{root} (project root moved or deleted)"
+                 for root in sorted(missing_roots))
     return orphans, stale
 
 
@@ -512,7 +533,8 @@ def collect() -> list[dict]:
             note += f"crontab references missing script(s): {joined}"
         add("crontab entries match agent files", not orphans and not stale, False,
             "run `migrate` for stale script paths; teardown removed agent(s) "
-            "for orphans",
+            "for orphans; edit with `crontab -e` for entries from a moved "
+            "or deleted project root",
             note=note or "no orphaned or stale entries")
 
     # Watcher self-heal coverage (commands.md check 13): a running watcher

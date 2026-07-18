@@ -2585,15 +2585,20 @@ def _cron_line_agent_name(line: str) -> str | None:
     """Return the agent name carried by an Agents Live cron line, else None.
 
     The inverse of :func:`cron_line_matches`: extracts the ``--name`` token
-    without knowing the name in advance. Only lines that invoke the run
-    script qualify, so unrelated crontab entries are ignored.
+    without knowing the name in advance. Only lines that invoke agents-live
+    qualify — the flat ``run.py`` script form or the packaged shim form
+    (basename ``agents-live``, never substring) — so unrelated crontab
+    entries are ignored.
     """
-    if "run.py" not in line or not crontab_line_belongs_to_repo(line):
+    if not crontab_line_belongs_to_repo(line):
         return None
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
+    if not any("run.py" in token or Path(token).name == "agents-live"
+               for token in tokens):
+        return None
     for first, second in zip(tokens, tokens[1:]):
         if first == "--name":
             return second
@@ -2642,14 +2647,33 @@ def _watcher_argv_is_agents_live(args: list[str]) -> bool:
     )
 
 
+def _watcher_argv_belongs_to_repo(args: list[str]) -> bool:
+    """True if a watcher argv is pinned to the current repo root.
+
+    The process-side counterpart of :func:`crontab_line_belongs_to_repo`:
+    packaged loops carry an explicit ``--repo <root>``, flat loops carry
+    the loop script's path inside the repo. An argv pinned to another
+    root never matches, so same-named watchers in different projects are
+    never cross-reported or cross-killed.
+    """
+    root = str(repo_root())
+    for first, second in zip(args, args[1:]):
+        if first == "--repo":
+            return second == root
+    return any(arg == root or arg.startswith(root + os.sep) for arg in args)
+
+
 def _is_watcher_cmdline(args: list[str], name: str) -> bool:
-    """Return True if an argv list is the watch loop for exactly this agent.
+    """Return True if an argv list is the watch loop for exactly this agent
+    in exactly this repo.
 
     Requires the exact adjacent pair ``["--watch-loop", name]`` so an agent
     name that is a substring of another (``todo`` vs ``todo-push``) never
     matches the wrong watcher.
     """
     if not _watcher_argv_is_agents_live(args):
+        return False
+    if not _watcher_argv_belongs_to_repo(args):
         return False
     return any(
         first == "--watch-loop" and second == name
@@ -2711,9 +2735,13 @@ def _watcher_cmdline_agent_name(args: list[str]) -> str | None:
 
     The inverse of :func:`_is_watcher_cmdline`: a watch loop runs
     ``activate.py --watch-loop <name>`` (flat checkout) or
-    ``agents-live ... start --watch-loop <name>`` (packaged).
+    ``agents-live ... start --watch-loop <name>`` (packaged). Scoped to
+    the current repo so another project's same-named watchers are not
+    enumerated as this project's.
     """
     if not _watcher_argv_is_agents_live(args):
+        return None
+    if not _watcher_argv_belongs_to_repo(args):
         return None
     for first, second in zip(args, args[1:]):
         if first == "--watch-loop":

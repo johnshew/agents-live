@@ -336,6 +336,57 @@ class TestInvocationForms(_TempProject):
         h_install.assert_not_called()
         a_install.assert_not_called()
 
+    def test_watcher_matching_is_scoped_to_current_repo(self) -> None:
+        packaged = ["/home/u/.local/bin/agents-live", "--repo", str(self.root),
+                    "start", "--watch-loop", "shared"]
+        foreign = ["/home/u/.local/bin/agents-live", "--repo", FOREIGN_REPO,
+                   "start", "--watch-loop", "shared"]
+        flat = ["uv", "run", "--script",
+                f"{self.root}/scripts/activate.py", "--watch-loop", "shared"]
+        self.assertTrue(headless._is_watcher_cmdline(packaged, "shared"))
+        self.assertTrue(headless._is_watcher_cmdline(flat, "shared"))
+        self.assertFalse(headless._is_watcher_cmdline(foreign, "shared"))
+        self.assertEqual(
+            headless._watcher_cmdline_agent_name(packaged), "shared")
+        self.assertIsNone(headless._watcher_cmdline_agent_name(foreign))
+
+    def test_packaged_cron_lines_are_enumerable(self) -> None:
+        packaged = (f"{TEST_CRON_SCHEDULE} cd {self.root} && "
+                    f"/home/u/.local/bin/agents-live --repo {self.root} "
+                    "run --name foo --quiet 2>&1")
+        flat = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script "
+                f"{self.root}/scripts/run.py --name bar --quiet 2>&1")
+        unrelated = f"{TEST_CRON_SCHEDULE} cd {self.root} && /usr/bin/backup"
+        self.assertEqual(headless._cron_line_agent_name(packaged), "foo")
+        self.assertEqual(headless._cron_line_agent_name(flat), "bar")
+        self.assertIsNone(headless._cron_line_agent_name(unrelated))
+
+    def test_doctor_flags_lines_from_missing_project_roots(self) -> None:
+        gone = f"{self.root}-deleted"
+        crontab = "\n".join([
+            f"{TEST_CRON_SCHEDULE} cd {gone} && agents-live --repo {gone} "
+            "run --name lost --quiet 2>&1",
+            f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && /usr/bin/backup",
+        ])
+        completed = subprocess.CompletedProcess(
+            ["crontab", "-l"], 0, stdout=crontab, stderr="")
+        with (
+            mock.patch.object(prereqs, "REPO", self.root),
+            mock.patch.object(prereqs.subprocess, "run",
+                              return_value=completed),
+        ):
+            orphans, stale = prereqs._crontab_inconsistencies()
+        self.assertEqual(orphans, [])
+        self.assertEqual(stale, [f"{gone} (project root moved or deleted)"])
+
+    def test_doctor_skips_unreadable_crontab(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["crontab", "-l"], 1, stdout="",
+            stderr="crontab: error: cannot open crontab")
+        with mock.patch.object(prereqs.subprocess, "run",
+                               return_value=completed):
+            self.assertIsNone(prereqs._crontab_inconsistencies())
+
     def test_install_preserves_user_path_and_foreign_lines(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         user_path = "PATH=/custom/bin:/usr/bin"
@@ -389,6 +440,10 @@ class TestMigratePlanning(_TempProject):
     def test_health_check_ignores_foreign_watcher_entries(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         foreign_repo = f"{self.root}-foreign"
+        # The foreign project exists on disk: its entries are its own
+        # business (only lines from MISSING roots are ever flagged).
+        Path(foreign_repo).mkdir()
+        self.addCleanup(shutil.rmtree, foreign_repo, ignore_errors=True)
         crontab = "\n".join([
             f"@reboot cd {foreign_repo} && agents-live --repo {foreign_repo} "
             "start --ensure-watcher missing",
