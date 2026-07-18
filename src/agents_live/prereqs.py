@@ -38,7 +38,14 @@ from . import preflight
 from . import update_check
 from .paths import resolve_root
 
-REPO = resolve_root()
+try:
+    REPO = resolve_root()
+except ValueError:
+    REPO = None
+
+
+def _project_checks_enabled() -> bool:
+    return REPO is not None and paths.config_source(REPO) is not None
 
 
 def _has(cmd: str) -> bool:
@@ -396,12 +403,58 @@ def _package_checks() -> list[tuple[str, bool, bool, str, str]] | None:
 def collect() -> list[dict]:
     """Run every check; return a list of result dicts."""
     checks: list[dict] = []
+    project_checks = _project_checks_enabled()
 
     def add(name: str, ok: bool, required: bool, fix: str, note: str = "") -> None:
         checks.append({
             "name": name, "ok": ok, "required": required,
             "fix": fix, "note": note,
         })
+
+    def add_host_runtime_checks() -> None:
+        add("node", _has("node"), False, "install Node.js (e.g. nvm install --lts)")
+        add("npm", _has("npm"), False, "install Node.js (e.g. nvm install --lts)")
+        if _is_wsl():
+            add("node is WSL-native (not /mnt/c interop)",
+                _node_is_wsl_native(), False,
+                ". ~/.nvm/nvm.sh && nvm use node  "
+                "(ensure ~/.nvm precedes /mnt/c in PATH)",
+                note="Windows-interop node writes MSAL tokens to the Windows "
+                     "keychain; MCP logins won't populate ~/.config/ms365-mcp")
+
+        host = _hostname()
+        needed = _agent_cli_needed_by_host(host) if project_checks else {}
+
+        def agent_note(keyword: str, default: str) -> str:
+            if not project_checks:
+                return f"agent requirements unavailable until init; {default}"
+            buckets = needed.get(keyword, {})
+            owned = buckets.get("owned", [])
+            unclaimed = buckets.get("unclaimed", [])
+            parts = []
+            if owned:
+                parts.append(
+                    f"needed for agents owned by this host: {', '.join(owned)}")
+            if unclaimed:
+                parts.append("needed for unclaimed agents any host may run: "
+                             f"{', '.join(unclaimed)}")
+            if parts:
+                return "; ".join(parts)
+            return (f"not required on this host (no owned agents use {keyword}); "
+                    f"{default}")
+
+        add("claude CLI", _has("claude"), False,
+            "npm i -g @anthropic-ai/claude-code",
+            note=agent_note(
+                "claude", "skip if this host never runs claude/agency claude agents"))
+        add("copilot CLI", _has("copilot"), False, "npm i -g @github/copilot",
+            note=agent_note(
+                "copilot", "skip if this host never runs copilot/agency copilot agents"))
+        add("agency CLI", _has("agency"), False,
+            "curl -sSfL https://aka.ms/InstallTool.sh | sh -s agency",
+            note=agent_note(
+                "agency", "skip if this host has no Microsoft-account/network "
+                          "access, or no owned agents use agency"))
 
     add("uv", _has("uv"), True,
         "curl -LsSf https://astral.sh/uv/install.sh | sh")
@@ -413,6 +466,13 @@ def collect() -> list[dict]:
     add("inotifywait", _has("inotifywait"), True,
         "sudo apt install inotify-tools",
         note="required for file-watcher agents (note-index, todo-index, ...)")
+    add_host_runtime_checks()
+
+    if not project_checks:
+        return checks
+
+    if REPO is None:
+        return checks
     add("Agents/ directory", (REPO / "Agents").is_dir(), True, "repo layout issue")
     add("Agents/handlers/ directory", (REPO / "Agents" / "handlers").is_dir(), True,
         "repo layout issue")
@@ -513,14 +573,7 @@ def collect() -> list[dict]:
                 "format against the installed copilot CLI (convergence "
                 "risk 1)", note=probe_note)
 
-    add("node", _has("node"), False, "install Node.js (e.g. nvm install --lts)")
-    add("npm", _has("npm"), False, "install Node.js (e.g. nvm install --lts)")
     if _is_wsl():
-        add("node is WSL-native (not /mnt/c interop)", _node_is_wsl_native(), False,
-            ". ~/.nvm/nvm.sh && nvm use node  (ensure ~/.nvm precedes /mnt/c in PATH)",
-            note="Windows-interop node writes MSAL tokens to the Windows keychain; "
-                 "MCP logins won't populate ~/.config/ms365-mcp")
-
         heartbeat = REPO / "Agents" / "data" / "heartbeat.ok"
         if heartbeat.is_file():
             heartbeat_age_min = (time.time() - heartbeat.stat().st_mtime) / 60
@@ -542,31 +595,6 @@ def collect() -> list[dict]:
                 ".claude/skills/agents-live/docs/windows-heartbeat.md",
                 note=config_note)
 
-    host = _hostname()
-    needed = _agent_cli_needed_by_host(host)
-
-    def _agent_note(keyword: str, default: str) -> str:
-        buckets = needed.get(keyword, {})
-        owned = buckets.get("owned", [])
-        unclaimed = buckets.get("unclaimed", [])
-        parts = []
-        if owned:
-            parts.append(f"needed for agents owned by this host: {', '.join(owned)}")
-        if unclaimed:
-            parts.append("needed for unclaimed agents any host may run: "
-                         f"{', '.join(unclaimed)}")
-        if parts:
-            return "; ".join(parts)
-        return f"not required on this host (no owned agents use {keyword}); {default}"
-
-    add("claude CLI", _has("claude"), False, "npm i -g @anthropic-ai/claude-code",
-        note=_agent_note("claude", "skip if this host never runs claude/agency claude agents"))
-    add("copilot CLI", _has("copilot"), False, "npm i -g @github/copilot",
-        note=_agent_note("copilot", "skip if this host never runs copilot/agency copilot agents"))
-    add("agency CLI", _has("agency"), False,
-        "curl -sSfL https://aka.ms/InstallTool.sh | sh -s agency",
-        note=_agent_note("agency", "skip if this host has no Microsoft-account/network "
-                                    "access, or no owned agents use agency"))
     return checks
 
 
@@ -580,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         update_check.refresh()
     except OSError:
         pass
+    project_checks = _project_checks_enabled()
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]
     optional_failures = [c for c in checks if not c["required"] and not c["ok"]]
@@ -589,12 +618,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "ok": ok,
             "host": _hostname(),
+            "project_checks": {
+                "status": "run" if project_checks else "skipped",
+                "reason": None if project_checks else "project not initialized",
+            },
             "checks": checks,
         }, indent=2))
         return 0 if ok else 1
 
     host = _hostname()
     print(f"Prerequisites for agents-live (host: {host}):\n")
+    if not project_checks:
+        print("  Project checks skipped until `agents-live init` creates a "
+              "project config.\n")
     for c in checks:
         if c["ok"]:
             mark = "PASS"

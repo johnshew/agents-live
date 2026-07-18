@@ -74,6 +74,7 @@ IN_PROCESS = {
 # init DEFINES the project root (creates the marker); it must not be
 # gated on resolving one.
 NO_ROOT_REQUIRED = frozenset({"init"})
+MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 # inside a git repository that has no marker write the minimal local-mode
@@ -271,7 +272,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             paths.resolve_root()
         except ValueError as exc:
-            if cmd not in AUTO_MARKER or _adopt_git_root(cmd) is None:
+            allow_markerless_invocation = (
+                cmd in MARKERLESS_ALLOWED
+                and not os.environ.get(paths.ENV_VAR, "").strip()
+            )
+            if not allow_markerless_invocation and (
+                    cmd not in AUTO_MARKER or _adopt_git_root(cmd) is None):
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),
                     json_mode=json_mode)
