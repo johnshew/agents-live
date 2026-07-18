@@ -1,7 +1,7 @@
 ---
 title: Agents Live Windows Heartbeat
 description: Keep WSL available for scheduled Agents Live agents with Windows Task Scheduler
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: how-to
 ---
 
@@ -14,94 +14,98 @@ every 5 minutes from Windows Task Scheduler.
 
 ## How it works
 
-1. **Windows Task Scheduler** runs `run-hidden.vbs` every 5 minutes.
-2. `run-hidden.vbs` silently launches `wsl.exe -- bash .../windows-heartbeat.sh`.
-3. The script touches systemd to keep WSL alive and writes `Agents/data/heartbeat.ok`.
+One task per WSL distro runs this action every five minutes:
+
+```text
+wsl.exe -d <distro> --exec /home/<user>/.local/bin/agents-live heartbeat
+```
+
+The distro argument selects the host runtime. The uv-managed shim selects the
+currently installed agents-live version without pinning a checkout,
+`site-packages`, or a Python-minor-version directory. There is deliberately no
+project binding: one host heartbeat serves every Agents Live project in that
+distro.
+
+The command writes `heartbeat.ok` and `heartbeat.log` under
+`${XDG_STATE_HOME:-~/.local/state}/agents-live/`. Repository discovery is never
+used. Missing state directories are created; an unknown distro or missing
+stable CLI shim makes installation fail clearly.
 
 ## Health check
 
-The agents-live health check (hourly cron) verifies `heartbeat.ok` is
-less than 10 minutes old. If stale or missing, it logs a warning.
+`agents-live doctor` verifies the shared beacon is less than 10 minutes old.
 
-Run `agents-live doctor` for an out-of-band check. It verifies both recent
-end-to-end execution through `heartbeat.ok` and, when Windows PowerShell
-interop is available, the registered task's enabled state, script paths, and
-five-minute repetition interval. This catches stale paths even while a marker
-from an earlier successful run is still fresh.
+It also verifies the current distro's task is enabled, repeats every five
+minutes, and invokes the stable shim through `wsl.exe`. Checkout,
+`site-packages`, Python-versioned, project-pinned, and legacy `WSL Heartbeat`
+actions produce a migration recommendation.
 
 ## Diagnosing
 
 ```powershell
 # 1. Is the task registered?
-Get-ScheduledTask -TaskName "WSL Heartbeat" -ErrorAction SilentlyContinue
+$distro = "Ubuntu"
+$task = "Agents Live Heartbeat ($distro)"
+Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
 
 # 2. Is it enabled?
-Get-ScheduledTask -TaskName "WSL Heartbeat" | Select-Object State
+Get-ScheduledTask -TaskName $task | Select-Object State
 
 # 3. When did it last run?
-Get-ScheduledTaskInfo -TaskName "WSL Heartbeat" | Select-Object LastRunTime, LastTaskResult
+Get-ScheduledTaskInfo -TaskName $task | Select-Object LastRunTime, LastTaskResult
 
 # 4. Check from WSL side
-cat ~/repos/your-repo/Agents/data/heartbeat.ok
-stat ~/repos/your-repo/Agents/data/heartbeat.ok
-tail ~/repos/your-repo/Agents/logs/heartbeat.log
+cat "${XDG_STATE_HOME:-$HOME/.local/state}/agents-live/heartbeat.ok"
+tail "${XDG_STATE_HOME:-$HOME/.local/state}/agents-live/heartbeat.log"
 ```
 
 ## Installing the scheduled task
 
-Run in an **elevated PowerShell** (Admin):
-
-In a packaged install, point the task at the scripts inside the
-installed package — never at a repo checkout, whose copies can move or
-be deleted — and pass the repo root as the script's argument (the
-walk-up default only resolves the repo in the flat checkout). Find the
-packaged copies with:
+Install agents-live as a uv tool, then register the current distro:
 
 ```bash
-find ~/.local/share/uv/tools/agents-live -name windows-heartbeat.sh -o -name run-hidden.vbs
+uv tool install agents-live
+agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
 ```
 
-```powershell
-# Adjust distro name, user, repo, and Python version for your machine
-# (the site-packages segment embeds the Python minor version — re-run
-# the find above and re-register after interpreter upgrades):
-$vbsPath = "\\wsl.localhost\Ubuntu\home\you\.local\share\uv\tools\agents-live\lib\python3.13\site-packages\agents_live\run-hidden.vbs"
-$shPath  = "/home/you/.local/share/uv/tools/agents-live/lib/python3.13/site-packages/agents_live/windows-heartbeat.sh"
-$repo    = "/home/you/repos/your-repo"
+Registration is idempotent. It replaces a stale canonical action, starts the
+new task, and waits for a fresh global beacon. Only after that verification
+succeeds does it remove the legacy `WSL Heartbeat` task. If verification fails,
+the legacy task remains. Upgraded copies of the temporary
+`windows-heartbeat.sh` compatibility wrapper perform this migration
+automatically when an old task next invokes them and its old path still
+resolves. If a checkout, environment, or Python path was already removed,
+`doctor` identifies the stale action and the same install command repairs it.
 
-$action  = New-ScheduledTaskAction -Execute "wscript.exe" `
-    -Argument "`"$vbsPath`" `"wsl.exe -d Ubuntu -- bash $shPath $repo`""
-
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 5)
-
-$settings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
-
-Register-ScheduledTask -TaskName "WSL Heartbeat" `
-    -Action $action -Trigger $trigger -Settings $settings `
-    -Description "Keep WSL alive for Agents Live agents" `
-    -RunLevel Limited
-```
-
-Omitting `-RepetitionDuration` repeats indefinitely. Do **not** pass
-`([TimeSpan]::MaxValue)` -- Task Scheduler rejects the resulting
-`P99999999DT23H59M59S` XML with "value which is incorrectly formatted or out
-of range".
+Editable development may exercise
+`uv run --with-editable . agents-live heartbeat`, but an editable checkout must
+not be persisted in Task Scheduler. Production registration requires the
+executable `~/.local/bin/agents-live` uv shim. Package and Python upgrades can
+therefore replace the shim's target without changing the task.
 
 ## Removing the scheduled task
 
-```powershell
-Unregister-ScheduledTask -TaskName "WSL Heartbeat" -Confirm:$false
+```bash
+agents-live heartbeat uninstall --distro "$WSL_DISTRO_NAME"
 ```
+
+This removes only the selected distro's task and the generated beacon/log.
+Pass `--retain-state` to keep those files; unrelated files in the state
+directory are always preserved.
+
+To remove both host integration and the uv tool, use `agents-live uninstall
+[--retain-state]`. The package is removed only after Windows cleanup succeeds.
+If `uv tool uninstall agents-live` was run first and left an orphaned task:
+
+```bash
+uvx agents-live heartbeat uninstall --distro <name>
+```
+
+Tasks never self-delete merely because the Linux shim is temporarily missing.
+This supports normal upgrades and repairs; `doctor` reports the orphan.
 
 ## Limitations
 
 - Does **not** prevent Modern Standby shutdown. When Windows sleeps, Task
   Scheduler stops and WSL is terminated. On wake, WSL restarts on first
   access and the heartbeat resumes.
-- Battery-aware: if on battery, the script skips if WSL was poked in the
-  last 10 minutes (reduces wake-ups).

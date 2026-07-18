@@ -102,6 +102,8 @@ not the user-facing contract.
 | `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
 | `doctor` / `prereqs` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
+| `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
+| `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
 | `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
 

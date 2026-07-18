@@ -28,8 +28,8 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, agent_adapters, cli, headless, init, migrate, ownership,
-        paths, prereqs, spawn, update_check, upgrade,
+        activate, agent_adapters, cli, headless, heartbeat, init, migrate,
+        ownership, paths, prereqs, spawn, uninstall, update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -38,6 +38,7 @@ except ImportError:  # flat checkout layout
     import agent_adapters
     import cli
     import headless
+    import heartbeat
     import init
     import migrate
     import ownership
@@ -46,6 +47,7 @@ except ImportError:  # flat checkout layout
     import spawn
     import update_check
     import upgrade
+    import uninstall
 
 
 class _TempProject(unittest.TestCase):
@@ -306,6 +308,13 @@ class TestCliContract(_TempProject):
                 os.environ[paths.ENV_VAR] = selected_root
             paths.clear_cache()
 
+    def test_heartbeat_works_outside_repository(self) -> None:
+        os.environ.pop(paths.ENV_VAR, None)
+        paths.clear_cache()
+        with mock.patch.object(heartbeat, "run_once", return_value=0) as run:
+            self.assertEqual(cli.main(["heartbeat"]), 0)
+        run.assert_called_once_with()
+
     def test_unknown_command_exits_two(self) -> None:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -416,6 +425,142 @@ class TestCliContract(_TempProject):
             invoke(["--json", "doctor"]),
             invoke(["doctor", "--json"]),
         )
+
+
+class TestWindowsHeartbeat(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.home = self.root / "home"
+        self.state = self.root / "state"
+        self.shim = self.home / ".local" / "bin" / "agents-live"
+        self.shim.parent.mkdir(parents=True)
+        self.shim.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.shim.chmod(0o755)
+        self.env = mock.patch.dict(os.environ, {
+            "HOME": str(self.home),
+            "XDG_STATE_HOME": str(self.state),
+            "WSL_DISTRO_NAME": "Ubuntu",
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_execution_uses_shared_state_outside_projects(self) -> None:
+        with mock.patch.object(heartbeat.subprocess, "run"):
+            self.assertEqual(heartbeat.run_once(), 0)
+        self.assertTrue((self.state / "agents-live" / "heartbeat.ok").is_file())
+        self.assertTrue((self.state / "agents-live" / "heartbeat.log").is_file())
+
+    def test_install_migrates_legacy_only_after_fresh_beacon(self) -> None:
+        with (
+            mock.patch.object(heartbeat, "_task_exists", return_value=True),
+            mock.patch.object(heartbeat, "_register_task") as register,
+            mock.patch.object(heartbeat, "_start_task") as start,
+            mock.patch.object(heartbeat, "_wait_for_fresh_beacon",
+                              return_value=True),
+            mock.patch.object(heartbeat, "_unregister_task") as unregister,
+        ):
+            heartbeat.install()
+        register.assert_called_once_with("Ubuntu", self.shim)
+        start.assert_called_once_with("Agents Live Heartbeat (Ubuntu)")
+        unregister.assert_called_once_with("WSL Heartbeat")
+
+    def test_task_identity_is_scoped_per_distro(self) -> None:
+        self.assertEqual(
+            heartbeat.task_name("Ubuntu"), "Agents Live Heartbeat (Ubuntu)")
+        self.assertEqual(
+            heartbeat.task_name("Debian"), "Agents Live Heartbeat (Debian)")
+
+    def test_failed_migration_preserves_legacy_task(self) -> None:
+        with (
+            mock.patch.object(heartbeat, "_task_exists", return_value=True),
+            mock.patch.object(heartbeat, "_register_task"),
+            mock.patch.object(heartbeat, "_start_task"),
+            mock.patch.object(heartbeat, "_wait_for_fresh_beacon",
+                              return_value=False),
+            mock.patch.object(heartbeat, "_unregister_task") as unregister,
+            self.assertRaisesRegex(RuntimeError, "left unchanged"),
+        ):
+            heartbeat.install()
+        unregister.assert_not_called()
+
+    def test_install_uninstall_round_trip_targets_same_distro_task(self) -> None:
+        with (
+            mock.patch.object(
+                heartbeat, "_task_exists", side_effect=[False, True]),
+            mock.patch.object(heartbeat, "_register_task"),
+            mock.patch.object(heartbeat, "_start_task"),
+            mock.patch.object(heartbeat, "_wait_for_fresh_beacon",
+                              return_value=True),
+            mock.patch.object(heartbeat, "_unregister_task") as unregister,
+        ):
+            heartbeat.install("Ubuntu")
+            heartbeat.uninstall("Ubuntu", retain_state=True)
+        unregister.assert_called_once_with("Agents Live Heartbeat (Ubuntu)")
+
+    def test_uninstall_removes_generated_state_only(self) -> None:
+        directory = heartbeat.state_dir()
+        directory.mkdir(parents=True)
+        heartbeat.beacon_path().write_text("alive\n", encoding="utf-8")
+        (directory / "heartbeat.log").write_text("log\n", encoding="utf-8")
+        unrelated = directory / "unrelated.json"
+        unrelated.write_text("{}\n", encoding="utf-8")
+        with (
+            mock.patch.object(heartbeat, "_task_exists", return_value=True),
+            mock.patch.object(heartbeat, "_unregister_task") as unregister,
+        ):
+            heartbeat.uninstall()
+        unregister.assert_called_once_with("Agents Live Heartbeat (Ubuntu)")
+        self.assertTrue(unrelated.is_file())
+        self.assertFalse(heartbeat.beacon_path().exists())
+
+    def test_retain_state_keeps_generated_files(self) -> None:
+        directory = heartbeat.state_dir()
+        directory.mkdir(parents=True)
+        heartbeat.beacon_path().write_text("alive\n", encoding="utf-8")
+        with mock.patch.object(heartbeat, "_task_exists", return_value=False):
+            heartbeat.uninstall(retain_state=True)
+        self.assertTrue(heartbeat.beacon_path().is_file())
+
+    def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
+        with (
+            mock.patch.object(
+                heartbeat, "uninstall", side_effect=RuntimeError("denied")),
+            mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
+            mock.patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            self.assertEqual(uninstall.main(["--distro", "Ubuntu"]), 1)
+        uv_uninstall.assert_not_called()
+        self.assertIn("uvx agents-live heartbeat uninstall", stderr.getvalue())
+
+    def test_doctor_accepts_stable_distro_task(self) -> None:
+        task = {
+            "Enabled": True,
+            "Execute": "wsl.exe",
+            "Arguments": (
+                f'-d "Ubuntu" --exec "{self.shim}" heartbeat'),
+            "Interval": "PT5M",
+        }
+        with mock.patch.object(
+                heartbeat, "task_configuration", return_value=(task, False)):
+            self.assertEqual(
+                prereqs._windows_heartbeat_config(),
+                (True, "enabled; distro Ubuntu; stable CLI shim; "
+                       "repeats every 5 min"))
+
+    def test_doctor_recommends_migration_for_legacy_task(self) -> None:
+        with mock.patch.object(
+                heartbeat, "task_configuration", return_value=(None, True)):
+            ok, note = prereqs._windows_heartbeat_config()
+        self.assertFalse(ok)
+        self.assertIn("requires migration", note)
+
+    def test_compatibility_wrapper_auto_migrates_without_repo_discovery(self) -> None:
+        wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
+        content = wrapper.read_text(encoding="utf-8")
+        self.assertIn("heartbeat install --distro", content)
+        self.assertNotIn("REPO_DIR", content)
 
 
 class TestTimeline(_TempProject):

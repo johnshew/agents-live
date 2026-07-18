@@ -70,11 +70,13 @@ IN_PROCESS = {
     "init": "init",
     "upgrade": "upgrade",
     "migrate": "migrate",
+    "heartbeat": "heartbeat",
+    "uninstall": "uninstall",
 }
 
 # init DEFINES the project root (creates the marker); it must not be
 # gated on resolving one.
-NO_ROOT_REQUIRED = frozenset({"init"})
+NO_ROOT_REQUIRED = frozenset({"init", "heartbeat", "uninstall"})
 MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
@@ -126,6 +128,8 @@ def _usage() -> str:
         "  upgrade             refresh the project skill payload\n"
         "  migrate             converge cron/watcher entries to the\n"
         "                      canonical invocation form\n"
+        "  heartbeat           run or manage the WSL host heartbeat\n"
+        "  uninstall           remove host integrations, then the uv tool\n"
         "  dashboard           interactive control panel\n\n"
         "global flags:\n"
         "  --json              machine-readable output and error envelopes\n"

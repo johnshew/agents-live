@@ -157,65 +157,44 @@ def _python_312_resolvable() -> bool:
 
 def _windows_heartbeat_config() -> tuple[bool, str] | None:
     """Validate the Windows Task Scheduler heartbeat when interop is available."""
-    powershell = shutil.which("powershell.exe")
-    if not powershell:
-        candidate = Path(
-            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
-        if candidate.is_file():
-            powershell = str(candidate)
-    if not powershell:
-        return None
-
-    command = (
-        "$task = Get-ScheduledTask -TaskName 'WSL Heartbeat' "
-        "-ErrorAction Stop; "
-        "[pscustomobject]@{Enabled=$task.Settings.Enabled;"
-        "Execute=$task.Actions[0].Execute;"
-        "Arguments=$task.Actions[0].Arguments;"
-        "Interval=$task.Triggers[0].Repetition.Interval} | "
-        "ConvertTo-Json -Compress"
-    )
     try:
-        completed = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True, text=True, timeout=15)
+        from . import heartbeat
+        task, legacy = heartbeat.task_configuration()
+        distro = heartbeat.current_distro()
+    except RuntimeError as exc:
+        if "PowerShell interop is unavailable" in str(exc):
+            return None
+        return False, str(exc)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if completed.returncode != 0:
-        detail = completed.stderr.strip().splitlines()
-        return False, detail[0][:200] if detail else "scheduled task not found"
-    try:
-        task = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        return False, "Task Scheduler returned unreadable configuration"
+    if task is None:
+        note = f"task {heartbeat.task_name(distro)!r} not found"
+        if legacy:
+            note += f"; legacy {heartbeat.LEGACY_TASK!r} requires migration"
+        return False, note
 
     execute = str(task.get("Execute") or "").replace("\\", "/").lower()
     arguments = str(task.get("Arguments") or "").replace("\\", "/").lower()
     problems: list[str] = []
     if task.get("Enabled") is not True:
         problems.append("task disabled")
-    if not execute.endswith("/wscript.exe") and execute != "wscript.exe":
+    if not execute.endswith("/wsl.exe") and execute != "wsl.exe":
         problems.append(f"unexpected executable: {task.get('Execute') or '(none)'}")
-    # Expected scripts are the ones installed beside this module, so the
-    # check follows the layout (flat checkout, site-packages, editable)
-    # instead of pinning the flat-checkout path - which false-PASSed a
-    # doomed flat registration after migration and flagged correct
-    # packaged ones.
-    scripts_dir = Path(__file__).resolve().parent
-    if str(scripts_dir / "run-hidden.vbs").lower() not in arguments:
-        problems.append("action does not reference the installed run-hidden.vbs")
-    if str(scripts_dir / "windows-heartbeat.sh").lower() not in arguments:
-        problems.append("action does not reference the installed windows-heartbeat.sh")
-    # Flat, the script path itself sits inside the repo; packaged, the
-    # explicit repo argument must be pinned (the walk-up default would
-    # drop the beacon into the uv tool directory).
-    if str(REPO).lower() not in arguments:
-        problems.append("action does not pin this repo for windows-heartbeat.sh")
+    if f'-d "{distro}"'.lower() not in arguments:
+        problems.append(f"action does not select distro {distro}")
+    expected_cli = str(heartbeat.stable_cli_path()).lower()
+    if expected_cli not in arguments or " heartbeat" not in arguments:
+        problems.append("action does not use the stable agents-live CLI shim")
+    stale_tokens = ("windows-heartbeat.sh", "site-packages", "python3.", "--repo")
+    if any(token in arguments for token in stale_tokens):
+        problems.append("action pins a legacy package, Python, or project path")
     if str(task.get("Interval") or "").upper() != "PT5M":
         interval = task.get("Interval") or "(none)"
         problems.append(f"repetition is {interval}, expected PT5M")
+    if legacy:
+        problems.append(f"legacy {heartbeat.LEGACY_TASK!r} task requires migration")
     note = "; ".join(problems) if problems else (
-        "enabled; current paths; repeats every 5 min")
+        f"enabled; distro {distro}; stable CLI shim; repeats every 5 min")
     return not problems, note
 
 
@@ -403,6 +382,32 @@ def _package_checks() -> list[tuple[str, bool, bool, str, str]] | None:
     return results
 
 
+def _add_windows_heartbeat_checks(add) -> None:
+    from . import heartbeat
+
+    beacon = heartbeat.beacon_path()
+    if beacon.is_file():
+        heartbeat_age_min = (time.time() - beacon.stat().st_mtime) / 60
+        heartbeat_ok = heartbeat_age_min <= 10
+        heartbeat_note = f"written {heartbeat_age_min:.0f} min ago"
+    else:
+        heartbeat_ok = False
+        heartbeat_note = f"never written ({beacon})"
+    add("Windows heartbeat working", heartbeat_ok, False,
+        "run `agents-live heartbeat install --distro <name>`; see "
+        ".claude/skills/agents-live/docs/windows-heartbeat.md",
+        note=heartbeat_note)
+
+    heartbeat_config = _windows_heartbeat_config()
+    if heartbeat_config is not None:
+        config_ok, config_note = heartbeat_config
+        add("Windows heartbeat configured", config_ok, False,
+            "run `agents-live heartbeat install --distro <name>` to install "
+            "or migrate the task; see "
+            ".claude/skills/agents-live/docs/windows-heartbeat.md",
+            note=config_note)
+
+
 def collect() -> list[dict]:
     """Run every check; return a list of result dicts."""
     checks: list[dict] = []
@@ -472,6 +477,8 @@ def collect() -> list[dict]:
     add_host_runtime_checks()
 
     if not project_checks:
+        if _is_wsl():
+            _add_windows_heartbeat_checks(add)
         return checks
 
     if REPO is None:
@@ -577,26 +584,7 @@ def collect() -> list[dict]:
                 "risk 1)", note=probe_note)
 
     if _is_wsl():
-        heartbeat = REPO / "Agents" / "data" / "heartbeat.ok"
-        if heartbeat.is_file():
-            heartbeat_age_min = (time.time() - heartbeat.stat().st_mtime) / 60
-            heartbeat_ok = heartbeat_age_min <= 10
-            heartbeat_note = f"written {heartbeat_age_min:.0f} min ago"
-        else:
-            heartbeat_ok = False
-            heartbeat_note = "never written"
-        add("Windows heartbeat working", heartbeat_ok, False,
-            "repair or register the WSL Heartbeat scheduled task; see "
-            ".claude/skills/agents-live/docs/windows-heartbeat.md",
-            note=heartbeat_note)
-
-        heartbeat_config = _windows_heartbeat_config()
-        if heartbeat_config is not None:
-            config_ok, config_note = heartbeat_config
-            add("Windows heartbeat configured", config_ok, False,
-                "repair or register the WSL Heartbeat scheduled task; see "
-                ".claude/skills/agents-live/docs/windows-heartbeat.md",
-                note=config_note)
+        _add_windows_heartbeat_checks(add)
 
     return checks
 
