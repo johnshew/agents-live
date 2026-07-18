@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-18
+
 - feat: add an XDG user repository registry with aliases, a safe last-resort
   default, documented selection precedence, and absolute-path persistence.
 - feat: add isolated, partial-failure-tolerant `status --all-repos` and

@@ -113,7 +113,7 @@ DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"upgrade", "migrate"})
 def _usage() -> str:
     # Doc links pinned per §3.5 (repin from main to the release tag at
     # packaging time, Phase 4).
-    blob = f"{DOCS_URL}/blob/v0.1.6/src/agents_live/skill/docs"
+    blob = f"{DOCS_URL}/blob/v0.2.0/src/agents_live/skill/docs"
     return (
         "usage: agents-live [--json] [--repo PATH] <command> [args]\n"
         "       agents-live --version\n\n"
