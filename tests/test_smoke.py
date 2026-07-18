@@ -248,10 +248,10 @@ class TestCliContract(_TempProject):
 
     def test_version_matches_installed_metadata_outside_repository(self) -> None:
         saved = Path.cwd()
-        os.environ.pop(paths.ENV_VAR, None)
+        selected_root = os.environ.pop(paths.ENV_VAR, None)
         paths.clear_cache()
-        with tempfile.TemporaryDirectory() as outside:
-            try:
+        try:
+            with tempfile.TemporaryDirectory() as outside:
                 os.chdir(outside)
                 with (
                     mock.patch.object(paths, "resolve_root") as resolve_root,
@@ -259,10 +259,14 @@ class TestCliContract(_TempProject):
                     mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
                 ):
                     self.assertEqual(cli.main(["--version"]), 0)
-            finally:
-                os.chdir(saved)
+                    output = stdout.getvalue()
+        finally:
+            os.chdir(saved)
+            if selected_root is not None:
+                os.environ[paths.ENV_VAR] = selected_root
+            paths.clear_cache()
         self.assertEqual(
-            stdout.getvalue(),
+            output,
             f"agents-live {importlib.metadata.version('agents-live')}\n",
         )
         resolve_root.assert_not_called()
