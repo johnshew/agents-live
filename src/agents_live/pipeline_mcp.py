@@ -131,6 +131,11 @@ class PipelineMcp:
         self._run_id = run_id
         self._lock = threading.Lock()
         self._store: dict[str, Any] = {}
+        # Paths written by the trusted host via seed(). Agent-facing put
+        # may never overwrite them: a rebound $schema (or a replaced
+        # referenced schema document) would let the agent validate its
+        # output against a schema of its own choosing (PKG-001).
+        self._frozen: set[str] = set()
         self._puts = 0
         self._gets = 0
         self._thread: threading.Thread | None = None
@@ -164,7 +169,10 @@ class PipelineMcp:
 
         Items are stored verbatim without schema validation -- the host
         is trusted to supply schemas before content, and the agent author
-        is responsible for ordering. Reserved-segment rules still apply
+        is responsible for ordering. Every seeded path is frozen: the
+        agent-facing ``put`` can never overwrite it, so seeded schema
+        bindings (and the schema documents they reference) stay exactly
+        as the host wrote them. Reserved-segment rules still apply
         (``$schema`` allowed, other ``$<key>`` rejected) so a typo in
         the agent definition surfaces immediately instead of silently masking a tool
         call.
@@ -192,6 +200,7 @@ class PipelineMcp:
         with self._lock:
             for path, value in normalized_entries:
                 self._store[path] = value
+                self._frozen.add(path)
                 self._puts += 1
         for path, _value in normalized_entries:
             self._log_event(op="seed", path=path, ok=True)
@@ -280,13 +289,18 @@ class PipelineMcp:
                 return path, None, key
             return path, None, None
 
-        def _resolve_schema(raw_schema: Any) -> tuple[dict[str, Any] | None, str | None]:
+        def _resolve_schema(
+            raw_schema: Any, *, binding_frozen: bool = False,
+        ) -> tuple[dict[str, Any] | None, str | None]:
             """Return ``(schema_doc, error)`` for a ``$schema`` binding.
 
             ``raw_schema`` is always a JSON object (enforced at put-time).
             If ``$ref`` is a key, follow it exactly once; the target must
             be a direct schema (no chained ``$ref``). Otherwise the
-            object IS the schema.
+            object IS the schema. A host-seeded (frozen) binding may only
+            reference a host-seeded document — otherwise an agent could
+            supply the forward-declared target itself and validate
+            against a schema of its own choosing (PKG-001).
             """
             if not isinstance(raw_schema, dict):
                 # Defensive: put-time validation should have rejected this.
@@ -297,6 +311,11 @@ class PipelineMcp:
                     if ref not in self._store:
                         return None, f"$schema reference {ref!r} has no content"
                     referenced = self._store[ref]
+                    ref_frozen = ref in self._frozen
+                if binding_frozen and not ref_frozen:
+                    return None, (
+                        f"$schema reference {ref!r} is not host-seeded; "
+                        "a seeded binding may only reference seeded schemas")
                 if not isinstance(referenced, dict):
                     return None, f"$schema reference {ref!r} is not a JSON object"
                 if "$ref" in referenced:
@@ -349,6 +368,16 @@ class PipelineMcp:
                 self._log_event(op="put", path=str(path), ok=False, error=err)
                 return {"ok": False, "error": err}
 
+            # Host-seeded paths (schema bindings and the documents they
+            # reference) are immutable to agents: latest-write-wins must
+            # never let the validated party replace its own validator.
+            with self._lock:
+                frozen = normalized in self._frozen
+            if frozen:
+                msg = "path is host-seeded and read-only"
+                self._log_event(op="put", path=normalized, ok=False, error=msg)
+                return {"ok": False, "path": normalized, "error": msg}
+
             # 1. Writes to /<path>/$schema: value MUST be an object.
             #    Discriminator: '$ref' present -> reference (exactly one
             #    key, string value starting with '/'); otherwise object
@@ -388,8 +417,10 @@ class PipelineMcp:
             schema_path = normalized + _SCHEMA_SUFFIX
             with self._lock:
                 raw_schema = self._store.get(schema_path)
+                schema_frozen = schema_path in self._frozen
             if raw_schema is not None:
-                schema_doc, resolve_err = _resolve_schema(raw_schema)
+                schema_doc, resolve_err = _resolve_schema(
+                    raw_schema, binding_frozen=schema_frozen)
                 if resolve_err:
                     self._log_event(op="put", path=normalized, ok=False,
                                     error=f"schema-resolve: {resolve_err}")

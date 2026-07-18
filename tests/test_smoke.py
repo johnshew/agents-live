@@ -1143,6 +1143,55 @@ class TestUpdateCheck(unittest.TestCase):
             consume.assert_not_called()
             launch.assert_not_called()
 
+class TestPipelineMcpStore(unittest.TestCase):
+    """Store-level checks (no HTTP server started)."""
+
+    def _tools(self):
+        try:  # installed package layout
+            from agents_live.pipeline_mcp import PipelineMcp
+        except ImportError:  # flat checkout layout
+            from pipeline_mcp import PipelineMcp
+        server = PipelineMcp()
+        app = server._build_app()
+        put = app._tool_manager.get_tool("put").fn
+        get = app._tool_manager.get_tool("get").fn
+        return server, put, get
+
+    def test_seeded_schemas_are_frozen_and_enforced(self) -> None:
+        # PKG-001: the agent-facing put must never replace host-seeded
+        # schema bindings, so agent output is always validated against
+        # the schema the host chose.
+        server, put, get = self._tools()
+        schema = {
+            "type": "object",
+            "required": ["done"],
+            "additionalProperties": False,
+            "properties": {"done": {"type": "boolean"}},
+        }
+        server.seed([("/output/$schema", schema)])
+
+        rebind = put(path="/output/$schema", value={})
+        self.assertFalse(rebind["ok"])
+        self.assertIn("read-only", rebind["error"])
+
+        rejected = put(path="/output", value={"done": "not-a-boolean"})
+        self.assertFalse(rejected["ok"])
+        accepted = put(path="/output", value={"done": True})
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(get(path="/output")["value"], {"done": True})
+
+    def test_seeded_ref_binding_rejects_agent_supplied_target(self) -> None:
+        server, put, get = self._tools()
+        server.seed([("/output/$schema", {"$ref": "/schemas/output"})])
+        # The forward-declared target is NOT seeded; an agent supplying a
+        # permissive schema there must not become the validator.
+        planted = put(path="/schemas/output", value={})
+        self.assertTrue(planted["ok"])  # plain content write is fine
+        result = put(path="/output", value={"anything": 1})
+        self.assertFalse(result["ok"])
+        self.assertIn("not host-seeded", result["error"])
+
+
 class TestReleaseTool(unittest.TestCase):
     def _load_tool(self):
         root = Path(__file__).resolve().parents[1]
