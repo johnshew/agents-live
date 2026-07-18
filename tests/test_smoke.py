@@ -265,9 +265,11 @@ class TestUpdateCheck(unittest.TestCase):
         opener.assert_called_once()
 
     def test_cache_timestamp_controls_network_launch(self) -> None:
+        self.assertEqual(update_check.CACHE_INTERVAL, 60 * 60)
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
             update_check.launch_if_stale(now=100)
         popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0][2], update_check.__name__)
 
         update_check.refresh(
             now=100,
@@ -280,11 +282,11 @@ class TestUpdateCheck(unittest.TestCase):
         popen.assert_not_called()
 
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
-            update_check.launch_if_stale(now=100 + 60 * 60 - 1)
+            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL - 1)
         popen.assert_not_called()
 
         with mock.patch.object(update_check.subprocess, "Popen") as popen:
-            update_check.launch_if_stale(now=100 + 60 * 60)
+            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL)
         popen.assert_called_once()
 
     def test_legacy_opt_outs_do_not_suppress_check(self) -> None:
