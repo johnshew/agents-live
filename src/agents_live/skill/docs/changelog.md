@@ -4,6 +4,23 @@ Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
+## 0.1.4 - 2026-07-18
+
+Pre-flip fixes for packaged installs (#1, #6).
+
+- fix: `init` refreshes an existing skill payload when its VERSION
+  differs from the vendored payload's, instead of returning early and
+  leaving it stale (which made doctor's "rerun agents-live init after
+  upgrading" hint a no-op). A refresh replaces only the payload items
+  (SKILL.md, VERSION, docs, templates); anything else in the directory
+  is left alone. (#1)
+- fix: `spawn.spawn_agent` resolved run.py at the flat-checkout
+  `.claude/skills/agents-live/scripts/` path and silently skipped in a
+  packaged install. It now branches like the rest of the runtime:
+  packaged execution re-enters through the CLI shim with an explicit
+  `--repo`; the flat form is unchanged. The module stays stdlib-only at
+  import time for standalone sys.path consumers. (#6)
+
 ## 0.1.3 - 2026-07-18
 
 Packaged watcher fixes (found by greenfield validation of a

@@ -5,8 +5,16 @@ execution contexts: interactive shell, inotifywait watchers, and cron jobs.
 
 Consumers import with:
 
+    from agents_live.spawn import find_uv, spawn_agent   # installed package
+
+or, in a flat scripts checkout:
+
     sys.path.insert(0, str(Path.cwd() / ".claude" / "skills" / "agents-live" / "scripts"))
-    from .spawn import find_uv, spawn_agent
+    from spawn import find_uv, spawn_agent
+
+This module stays stdlib-only at import time: standalone sys.path
+consumers may lack the third-party deps the rest of the runtime carries,
+so the headless helpers used for packaged execution are imported lazily.
 """
 from __future__ import annotations
 
@@ -44,6 +52,40 @@ def find_uv() -> str:
     )
 
 
+def _run_invocation(root: Path, agent_name: str) -> list[str] | None:
+    """argv that executes one run of *agent_name*, for either layout.
+
+    Packaged install: the ``agents-live`` shim with an explicit
+    ``--repo`` (there is no ``scripts/run.py`` on disk to invoke).
+    Flat checkout: the classic ``uv run --script run.py`` form. Returns
+    None (with a stderr log) when neither is resolvable.
+    """
+    try:
+        from .headless import cli_shim_path, packaged_execution
+    except ImportError:
+        packaged = False
+    else:
+        packaged = packaged_execution()
+    if packaged:
+        try:
+            return [str(cli_shim_path()), "--repo", str(root),
+                    "run", "--name", agent_name]
+        except Exception as exc:
+            print(f"[spawn] Agent skipped: {exc}", file=sys.stderr)
+            return None
+    run_script = root / ".claude" / "skills" / "agents-live" / "scripts" / "run.py"
+    if not run_script.is_file():
+        print(f"[spawn] Agent skipped: run.py not found at {run_script}",
+              file=sys.stderr)
+        return None
+    try:
+        uv = find_uv()
+    except FileNotFoundError as exc:
+        print(f"[spawn] Agent skipped: {exc}", file=sys.stderr)
+        return None
+    return [uv, "run", "--script", str(run_script), "--name", agent_name]
+
+
 def spawn_agent(
     root: Path,
     agent_name: str,
@@ -67,18 +109,9 @@ def spawn_agent(
     Returns:
         The Popen object on success, None on failure (logged to stderr).
     """
-    run_script = root / ".claude" / "skills" / "agents-live" / "scripts" / "run.py"
-    if not run_script.is_file():
-        print(f"[spawn] Agent skipped: run.py not found at {run_script}", file=sys.stderr)
+    agent_cmd = _run_invocation(root, agent_name)
+    if agent_cmd is None:
         return None
-
-    try:
-        uv = find_uv()
-    except FileNotFoundError as exc:
-        print(f"[spawn] Agent skipped: {exc}", file=sys.stderr)
-        return None
-
-    agent_cmd = [uv, "run", "--script", str(run_script), "--name", agent_name]
     if changed_files:
         agent_cmd += ["--changed-files", json.dumps(changed_files)]
     if quiet:

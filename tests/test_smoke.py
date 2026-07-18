@@ -21,7 +21,8 @@ from pathlib import Path
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, agent_adapters, cli, headless, migrate, ownership, paths,
+        activate, agent_adapters, cli, headless, init, migrate, ownership,
+        paths, spawn,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -30,9 +31,11 @@ except ImportError:  # flat checkout layout
     import agent_adapters
     import cli
     import headless
+    import init
     import migrate
     import ownership
     import paths
+    import spawn
 
 
 class _TempProject(unittest.TestCase):
@@ -180,6 +183,60 @@ class TestCliContract(_TempProject):
 
     def test_unknown_command_exits_two(self) -> None:
         self.assertEqual(cli.main(["frobnicate"]), 2)
+
+
+class TestInstallSkill(_TempProject):
+    def test_install_then_noop_then_refresh(self) -> None:
+        dest = self.root / ".claude" / "skills" / "agents-live"
+
+        self.assertEqual(init.install_skill(self.root), "installed")
+        self.assertTrue((dest / "SKILL.md").is_file())
+
+        self.assertIsNone(init.install_skill(self.root))
+
+        version_file = dest / "VERSION"
+        if not version_file.is_file():
+            # Flat-checkout source payloads carry no VERSION marker (the
+            # release assembler stamps it); refresh is version-driven.
+            self.skipTest("source payload has no VERSION marker")
+        src_version = version_file.read_text(encoding="utf-8")
+
+        # Outdated payload: VERSION differs -> payload replaced,
+        # non-payload content (e.g. a scripts/ dir) left alone.
+        (dest / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+        (dest / "scripts").mkdir()
+        (dest / "scripts" / "keep.py").write_text("", encoding="utf-8")
+        self.assertEqual(init.install_skill(self.root), "refreshed")
+        self.assertEqual(
+            (dest / "VERSION").read_text(encoding="utf-8"), src_version)
+        self.assertTrue((dest / "scripts" / "keep.py").is_file())
+
+        self.assertIsNone(init.install_skill(self.root))
+
+
+class TestSpawnInvocation(_TempProject):
+    def test_layout_appropriate_argv(self) -> None:
+        scripts = self.root / ".claude" / "skills" / "agents-live" / "scripts"
+        scripts.mkdir(parents=True)
+        run_script = scripts / "run.py"
+        run_script.write_text("", encoding="utf-8")
+        argv = spawn._run_invocation(self.root, "demo")
+        if headless.packaged_execution():
+            # Shim form when resolvable; None (logged skip) when the
+            # shim is absent from the test environment.
+            if argv is not None:
+                self.assertEqual(
+                    argv[1:],
+                    ["--repo", str(self.root), "run", "--name", "demo"])
+        else:
+            self.assertIsNotNone(argv)
+            self.assertIn(str(run_script), argv)
+            self.assertEqual(argv[-2:], ["--name", "demo"])
+
+    def test_flat_layout_without_run_script_skips(self) -> None:
+        if headless.packaged_execution():
+            self.skipTest("packaged layout resolves via the shim")
+        self.assertIsNone(spawn._run_invocation(self.root, "demo"))
 
 
 if __name__ == "__main__":

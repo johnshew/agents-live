@@ -89,24 +89,54 @@ def _skill_source() -> Path | None:
     return None
 
 
-def install_skill(root: Path) -> bool:
-    """Install the vendored skill payload (§3.4 step 2) into the target
-    repo's ``.claude/skills/agents-live/``: SKILL.md, docs, and
-    starter templates - no ``scripts/``. Idempotent: an existing install
-    is left untouched (returns False), and installing into the source
-    checkout itself is a no-op."""
-    source = _skill_source()
-    dest = root / ".claude" / "skills" / "agents-live"
-    if source is None or dest.exists():
-        return False
-    dest.mkdir(parents=True)
+def _payload_version(payload_dir: Path) -> str | None:
+    """The payload's ``VERSION`` marker, or None if absent/unreadable."""
+    try:
+        return (payload_dir / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _copy_payload(source: Path, dest: Path) -> None:
     for item in _SKILL_PAYLOAD:
         payload = source / item
         if payload.is_dir():
             shutil.copytree(payload, dest / item)
         elif payload.is_file():
             shutil.copy2(payload, dest / item)
-    return True
+
+
+def install_skill(root: Path) -> str | None:
+    """Install or refresh the vendored skill payload (§3.4 step 2) in the
+    target repo's ``.claude/skills/agents-live/``: SKILL.md, docs, and
+    starter templates - no ``scripts/``. Returns ``"installed"`` on first
+    install, ``"refreshed"`` when an existing install's VERSION differed
+    from the vendored payload's, and None when already current. A refresh
+    replaces only the payload items; anything else in the directory (a
+    source checkout's ``scripts/``, user additions) is left alone, and
+    installing into the source checkout itself is a no-op."""
+    source = _skill_source()
+    dest = root / ".claude" / "skills" / "agents-live"
+    if source is None or source.resolve() == dest.resolve():
+        return None
+    if not dest.exists():
+        dest.mkdir(parents=True)
+        _copy_payload(source, dest)
+        return "installed"
+    src_version = _payload_version(source)
+    if src_version is None or src_version == _payload_version(dest):
+        # No source VERSION to compare (flat-checkout source payloads
+        # carry none - the release assembler stamps it) -> keep the old
+        # leave-untouched contract rather than refreshing blindly.
+        return None
+    for item in _SKILL_PAYLOAD:
+        target = dest / item
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+    _copy_payload(source, dest)
+    return "refreshed"
 
 
 def declare_ownership(root: Path, value: str) -> bool:
@@ -191,9 +221,13 @@ def main() -> int:
         print(f"Initialized {paths.CONFIG_DOTFILE} (project root: {root})")
     else:
         print(f"{paths.config_source(root)} already up to date")
-    if install_skill(root):
+    skill_status = install_skill(root)
+    if skill_status == "installed":
         print("Installed skill payload: .claude/skills/agents-live/ "
               "(SKILL.md, docs, templates)")
+    elif skill_status == "refreshed":
+        print("Refreshed skill payload to match the installed package: "
+              ".claude/skills/agents-live/")
 
     print(
         "\nNext steps:\n"
