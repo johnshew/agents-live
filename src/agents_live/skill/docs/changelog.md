@@ -30,8 +30,8 @@ history is retained in the source repository.
 - fix: the framework smoketest executed lifecycle modules as script
   files (`sys.executable .../status.py` and friends), which dies in a
   packaged install on their relative imports - the last flat-invocation
-  holdout, surfaced by razor15's first post-flip health check failing
-  at "3/13 verify status". All twelve call sites now share a
+  holdout, surfaced by a freshly flipped packaged host's first health
+  check failing at "3/13 verify status". All twelve call sites now share a
   layout-aware argv helper: `-m agents_live.<module>` packaged, the
   sibling script file flat. A vestigial flat-era `sys.path` insert
   before the spawn-module step is removed.
