@@ -564,8 +564,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
             encoding="utf-8")
         completed = subprocess.run(
             ["bash", str(wrapper), "/ignored/legacy/repo"],
-            env={**os.environ, "HOME": str(self.home),
-                 "WSL_DISTRO_NAME": "Ubuntu"},
+            env={"HOME": str(self.home), "WSL_DISTRO_NAME": "Ubuntu",
+                 "PATH": os.environ.get("PATH", "")},
             capture_output=True, text=True, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
@@ -577,8 +577,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.shim.unlink()
         completed = subprocess.run(
             ["bash", str(wrapper)],
-            env={**os.environ, "HOME": str(self.home),
-                 "WSL_DISTRO_NAME": "Ubuntu"},
+            env={"HOME": str(self.home), "WSL_DISTRO_NAME": "Ubuntu",
+                 "PATH": os.environ.get("PATH", "")},
             capture_output=True, text=True, check=False)
         self.assertEqual(completed.returncode, 1)
         self.assertIn("uv shim not found", completed.stderr)

@@ -15,6 +15,7 @@ TASK_PREFIX = "Agents Live Heartbeat"
 LEGACY_TASK = "WSL Heartbeat"
 LEGACY_ACTION_TOKENS = (
     "windows-heartbeat.sh", "site-packages", "python3.", "--repo")
+INVALID_DISTRO_CHARS = ('"', "\n", "\r", "\0")
 
 
 def state_dir() -> Path:
@@ -35,7 +36,7 @@ def current_distro(distro: str | None = None) -> str:
     if not selected:
         raise RuntimeError(
             "cannot determine the WSL distro; pass --distro <name>")
-    if any(character in selected for character in ('"', "\n", "\r", "\0")):
+    if any(character in selected for character in INVALID_DISTRO_CHARS):
         raise RuntimeError("invalid WSL distro name")
     return selected
 
