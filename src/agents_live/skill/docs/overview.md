@@ -1,7 +1,7 @@
 ---
 title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: overview
 ---
 
@@ -91,9 +91,10 @@ agents-live teardown file-notes    # clean up - remove its triggers
 ```
 
 Check for and install a newer PyPI release with `uv tool upgrade
-agents-live`. After upgrading, run `agents-live --repo <project> init` to
-refresh the optional installed skill payload; `doctor` reports a package and
-payload version mismatch.
+agents-live`. After upgrading, run `agents-live --repo <project> upgrade` to
+refresh the optional installed skill payload. `doctor` reports a package and
+payload version mismatch and recommends this command. `init` remains the
+first-time project setup command.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

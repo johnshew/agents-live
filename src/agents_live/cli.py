@@ -64,6 +64,7 @@ IN_PROCESS = {
     "doctor": "prereqs",
     "prereqs": "prereqs",  # alias
     "init": "init",
+    "upgrade": "upgrade",
     "migrate": "migrate",
 }
 
@@ -116,6 +117,7 @@ def _usage() -> str:
         "  smoketest           end-to-end validation\n"
         "  doctor              environment and install checks\n"
         "  init                initialize the project layout\n"
+        "  upgrade             refresh the project skill payload\n"
         "  migrate             converge cron/watcher entries to the\n"
         "                      canonical invocation form\n"
         "  dashboard           interactive control panel\n\n"

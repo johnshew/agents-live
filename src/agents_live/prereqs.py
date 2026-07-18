@@ -386,7 +386,7 @@ def _package_checks() -> list[tuple[str, bool, bool, str, str]] | None:
     installed = marker.read_text(encoding="utf-8").strip()
     results.append((
         "skill payload version matches package", installed == version, False,
-        "rerun `agents-live init` after upgrading to refresh the payload",
+        "run `agents-live upgrade` to refresh the project skill payload",
         f"skill {installed} vs package {version}"))
     return results
 
