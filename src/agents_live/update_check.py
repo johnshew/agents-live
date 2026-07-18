@@ -54,7 +54,7 @@ def _version(value: object) -> tuple[int, int, int] | None:
     match = _STABLE_SEMVER.fullmatch(str(value))
     if match is None:
         return None
-    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
 def _read_cache() -> dict[str, Any] | None:
