@@ -537,7 +537,14 @@ agents-live smoketest --runtime "agency copilot"
 Ownership has two explicit modes. With no `ownership` declaration in
 `.agents-live.toml` or `[tool.agents-live]`, the project is local by
 definition: every agent is owned by this host and transfers are unavailable.
-Setting `ownership = "registry"` enables `Agents/data/agent-owners.json`.
+This is the only mode the core package ships: registry mode requires an
+ownership-backend plugin (this deployment uses a private git-backed
+backend), and declaring `ownership = "registry"` without one installed
+makes dispatch and ownership mutation abstain rather than fall back to
+local mode.
+
+Setting `ownership = "registry"` (with a backend installed) enables
+`Agents/data/agent-owners.json`.
 Registry values are `"*"` (run everywhere) or a hostname matching
 `hostname -s`; optional `owner:` frontmatter seeds a missing entry during
 activation. An agent with no registry entry AND no frontmatter `owner:` is
@@ -553,18 +560,20 @@ the "ownership never changes implicitly" contract below).
 - `--transfer-to <host>` changes the registry owner without activating
    locally. Transferring to the current host and starting are separate
    operations.
-- Before each dispatch, `run.py` calls `ownership.load_owners()` which
-  pulls the registry from origin (rate-limited 60s, non-blocking
+- Before each dispatch, the runner calls `ownership.load_owners()`,
+  which refreshes the registry through the installed backend (the
+  git-backed backend pulls from origin, rate-limited 60s, non-blocking
   against `Agents/data/git-sync.lock`, fail-open on network errors)
    and re-reads disk fresh. A missing or malformed registry in declared
    registry mode raises `OwnershipUnavailableError`, so dispatch and
    ownership mutation abstain rather than silently reverting to local mode.
    Dispatch is skipped when this host is no longer the owner. Transfers
-   happen via `ownership.set_owner()`
-  which writes, commits, and spawns a detached background `git push`
+   happen via `ownership.set_owner()`, which the git-backed backend
+  persists with a commit and a detached background `git push`
   so the new owner sees the change within seconds.
-- `agents-live-health-check.py` is the backstop: it deactivates
-   agents owned by another host every cron cycle (≤1h).
+- A scheduled health-check agent makes a good backstop: this
+   deployment runs one that deactivates agents owned by another host
+   every cron cycle (≤1h).
 
 ---
 
@@ -581,8 +590,8 @@ the "ownership never changes implicitly" contract below).
 | Custom instructions | repo defaults | `--no-custom-instructions` in agents-live runtime |
 | MCP injection | N/A | N/A (agency: `--mcp <name>`) |
 
-Agency variants (`agency claude`, `agency copilot`) use the same flags as their
-base CLI, plus `--mcp` for M365 servers.
+Plugin-registered adapters (e.g. `agency claude`, `agency copilot`) use the
+same flags as their base CLI, plus adapter-specific extras such as `--mcp`.
 
 Copilot-based agents pass the full prompt body via `-p` and disable
 custom instruction loading with `--no-custom-instructions`. This keeps
@@ -591,18 +600,27 @@ trigger Copilot conversation-history mismatches during unattended execution.
 
 ### Cron line examples
 
+Installed package (what `agents-live start` writes):
+
 ```bash
-# plan + handler (logging is handled internally by run.py via JSONL)
-0 0 */3 * * cd /repo && /home/you/.local/bin/uv run --script .claude/skills/agents-live/scripts/run.py --name ai-news-digest --quiet 2>&1
+# plan + handler (logging is handled internally by the runner via JSONL)
+0 0 */3 * * cd /repo && /home/you/.local/bin/agents-live --repo /repo run --name ai-news-digest --quiet 2>&1
 
 # plan + log only
-0 9 * * * cd /repo && /home/you/.local/bin/uv run --script .claude/skills/agents-live/scripts/run.py --name my-agent --quiet 2>&1
+0 9 * * * cd /repo && /home/you/.local/bin/agents-live --repo /repo run --name my-agent --quiet 2>&1
 ```
 
-`activate.py` writes the absolute path to `uv` into each cron line so the
-entry survives even if the crontab `PATH=` prefix is stripped. The
-`--script` flag tells `uv` to honor the PEP 723 metadata block in
-`run.py` and resolve PyYAML automatically.
+Activation writes the absolute path to the `agents-live` shim and an
+explicit `--repo` into each cron line, so the entry is self-contained:
+nothing at fire time depends on the crontab `PATH=` prefix or the
+working directory resolving the right project.
+
+Source-checkout deployments (pre-packaging) instead persist the script
+form, retired by `migrate` at cutover:
+
+```bash
+0 9 * * * cd /repo && /home/you/.local/bin/uv run --script .claude/skills/agents-live/scripts/run.py --name my-agent --quiet 2>&1
+```
 
 ### Common cron expressions
 

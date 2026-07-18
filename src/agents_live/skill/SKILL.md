@@ -3,8 +3,8 @@ name: agents-live
 description: >-
   Add safe local schedules and file triggers to existing Claude Code and
   GitHub Copilot agents, then test, activate, inspect, and tear down that
-  automation. Supports claude and copilot, plus plugin-registered adapters
-  (this deployment: agency claude, agency copilot).
+  automation. Supports claude and copilot out of the box; installed plugins
+  can register additional adapters (e.g. agency claude, agency copilot).
   Triggers: "make this agent live", "schedule an agent", "watch files with an agent",
   "agents-live create", "agents-live run", "agents-live status",
   "review agent logs", "why did X not pick up", "debug watcher race",
@@ -28,8 +28,9 @@ prompts, their tools, their authentication, or their reasoning.
 - Agent state is computed from crontab and process lists. Runtime is the
   source of truth. A watcher's durable "should be running" intent is its
   `@reboot` respawn line in the crontab (it survives reboot and is removed by
-  a deliberate teardown). The only shared state file is
-  `Agents/data/agent-owners.json`, which records which host owns each agent.
+  a deliberate teardown). Ownership is local by default (every agent belongs
+  to this host). With a plugin-provided registry backend, the shared state
+  file `Agents/data/agent-owners.json` records which host owns each agent.
 
 ## Load before acting
 
@@ -115,14 +116,14 @@ configuration.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `runtime` | *(required)* | `claude`, `copilot`, `none`, or a plugin-registered adapter (this deployment: `agency claude`, `agency copilot`) |
+| `runtime` | *(required)* | `claude`, `copilot`, `none`, or an adapter registered by an installed plugin (e.g. `agency claude`, `agency copilot`) |
 | `mode` | `plan` | `plan` (read-only), `pipeline` (mediated `put`/`get`), or `write` (explicit direct authority) |
 | `model` | *(agent default)* | Optional model override |
 | `pre-processor` | *(none)* | Deterministic script that runs before the agent |
 | `post-processor` | *(log-only)* | Deterministic script that runs after the agent |
 | `env` | *(none)* | Map of env vars passed to the agent process |
 | `mcps` | *(none)* | List of MCP server specs |
-| `owner` | *(registry)* | Machine ownership: `"*"` (any host) or short hostname. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
+| `owner` | *(registry)* | Machine ownership; used only in registry mode, which requires a plugin-provided ownership backend. `"*"` (any host) or short hostname. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
 | `schedule` | -- | Cron expression (at least one of schedule/watchPath required) |
 | `watchPath` | -- | Repo-relative directory or list of directories |
 

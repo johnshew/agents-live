@@ -8,7 +8,8 @@ ms.topic: concept
 ## Agents Live architecture
 
 > Add cron and file-watch automation to your existing agents with `/agents-live`.
-> Supports `claude`, `copilot`, `agency claude`, `agency copilot`.  
+> Supports `claude` and `copilot` out of the box; installed plugins can
+> register additional adapters (e.g. `agency claude`, `agency copilot`).  
 > **Platform: Linux (Ubuntu on WSL)** | Last updated: May 2026
 
 ---

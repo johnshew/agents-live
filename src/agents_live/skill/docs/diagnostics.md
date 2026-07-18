@@ -24,36 +24,13 @@ agent definition. Agents Live discovers standard definitions in
 | Log | Type | What it tells you |
 |-----|------|-------------------|
 | `Agents/logs/agents-live.log` | runtime | **Every** agent's lifecycle: `watcher` debounce batches, `activate`, `start`, `done` with `status`, `duration_s`, `trigger`, `changed_files`. The join point for all diagnostics. |
-| `Agents/logs/agents-live-health-check.log` | cron `0 * * * *` | Hourly check that watchers and scheduled agents are alive. Writes `Agents/data/health.ok` on success. |
-| `Agents/logs/self-heal-log-alerts.log` | cron `0 * * * *` | Scans other logs for `level: error` / `status: error` and opens GitHub issues. First place to check for "something broke overnight". |
-| `Agents/logs/git-sync.log` | cron | Commits and pushes generated files; pulls from remote. |
 
 ### Per-agent logs (domain work)
 
-| Log | Trigger | What it tells you |
-|-----|---------|-------------------|
-| `Agents/logs/note-index.log` | watch `.` | Rebuilds `_index_.md` files. Fires on **every** content write -- noisy. |
-| `Agents/logs/dashboard-update.log` | cron `0 * * * *` | Regenerates the repo-root `DASHBOARD.md` from log aggregates. |
+Each of your agents writes `Agents/logs/<name>.log`. Keep a short
+catalog of what each one means in your own repo -- during an incident,
+"which log is which" should not require reading agent definitions.
 
-### Exercise system
-
-| Log | Type | What it tells you |
-|-----|------|-------------------|
-| `Agents/logs/exercise-state-update.log` | cron + watch `Exercise/` | Main agent: staleness check, parse_tracking, judgment. Typical ~120-200s -- **the long-running agent that causes most races**. |
-| `Agents/logs/exercise-sync-checkboxes.log` | watch `Exercise/Recommendations.md` | Post-run snapshot of checkbox state. **Best source for "who wrote which checkbox when".** |
-| `Exercise/data/log/parse-tracking.log` | domain | Per-day parser results with `line_count / parsed_count / unparsed_count`. |
-
-### Taskflow system
-
-| Log | Trigger | What it tells you |
-|-----|---------|-------------------|
-| `Agents/logs/taskflow-agent.log` | file watcher | Full pipeline trace for every agent dispatch. |
-| `Agents/logs/taskflow-orchestrator.log` | watch `Taskflow/*/Active/`, `Taskflow/*/Monitoring/` | Checkbox detection, operation dispatch, debounce. |
-| `Agents/logs/taskflow-monitor.log` | cron `*/30 * * * *` | Draft-sent detection, reply detection, state transitions. |
-| `Agents/logs/taskflow-check-state.log` | cron `0 */4 * * *` | Validation, server reconciliation. |
-| `Agents/logs/taskflow-email-sync.log` | cron `0 * * * *` | Flagged email fetch, category clearing. |
-| `Agents/logs/taskflow-triage.log` | watch `Taskflow/*/Inbox/` | Triage agent runs on new inbox items. |
-| `Agents/logs/taskflow-todo-sync.log` | cron `0 * * * *` | Microsoft To Do bidirectional sync. |
 
 ### Ancillary sources (not JSONL)
 
@@ -61,9 +38,9 @@ agent definition. Agents Live discovers standard definitions in
 |--------|-----|
 | `Agents/logs/runs/<agent>-<ts>.stdout.txt` | Full raw stdout from every agent run. |
 | `Agents/logs/runs/<agent>-<ts>.stderr.txt` | Full raw stderr from every agent run. |
-| `Agents/logs/runs/<agent>-<ts>.transcript.md` | Archived session transcript (copilot/agency copilot). |
+| `Agents/logs/runs/<agent>-<ts>.transcript.md` | Archived session transcript (copilot-family runtimes). |
 | `Agents/logs/<agent>-transcript.md` | Live session transcript (overwritten each run). |
-| `~/.agency/logs/session_*/chat.json` | Full Copilot agent transcript. |
+| Agent CLI session logs | Full raw transcript kept by the agent CLI itself; location depends on the CLI. |
 | `git log --pretty='%h %ai %s' -- <file>` | Committed state history. |
 | `crontab -l` | Active cron registrations (ground truth). |
 | `ps aux \| grep inotifywait` | Active watcher processes. |
@@ -77,30 +54,20 @@ transcript is the definitive source.
 
 ```bash
 # Recent runs for a specific agent
-ls -lt Agents/logs/runs/exercise-judgment-* | head -10
+ls -lt Agents/logs/runs/my-agent-* | head -10
 
 # View the stdout of the most recent run
-cat "$(ls -t Agents/logs/runs/exercise-judgment-*.stdout.txt | head -1)"
-```
-
-**Locating the right session (agency copilot):**
-
-```bash
-ls -lt ~/.agency/logs/ | head -15
-
-for d in $(ls -dt ~/.agency/logs/session_*/ | head -20); do
-  grep -ql 'Escalation\|ISE' "$d"/*.json 2>/dev/null && echo "$d"
-done
+cat "$(ls -t Agents/logs/runs/my-agent-*.stdout.txt | head -1)"
 ```
 
 **Correlating with pipeline logs:**
 
-The `phase: agent` log entry includes `transcript_path` and the session
-directory in its `message` field. To go from a log entry to the full
-transcript:
+The `phase: agent` log entry includes `transcript_path` and the agent
+CLI's session directory in its `message` field. To go from a log entry
+to the full transcript:
 1. Find the `phase: agent` entry for your agent and time
 2. Extract the session directory from the `message` field
-3. Read `chat.json` in that directory
+3. Read the CLI's transcript file in that directory
 
 ## Diagnostic procedure
 
@@ -116,8 +83,8 @@ transcript:
 
 4. **Pull the per-agent log** for that window.
 
-5. **Correlate with domain logs.** For exercise issues,
-   `parse-tracking.log` shows what the parser saw at run time.
+5. **Correlate with domain logs.** A pre-processor's own log (e.g. a
+   parser log) shows what the pipeline saw at run time.
 
 6. **Cross-check with git.** `git log --pretty='%h %ai %s' -- <file>`.
 
@@ -131,22 +98,23 @@ transcript:
   Signature: a second `start` within 1-2s of `done`, often with
   `status: skipped` (pre-processor catches the self-write).
 
-- **Checkbox sync loop.** `exercise-sync-checkboxes` propagates check
-  state between Recommendations.md and Tracking.md. When the agent also
-  writes one of those files, you get oscillation.
+- **Sync loop.** A post-processor propagates state between two watched
+  files (e.g. checkbox state between a recommendations file and a
+  tracking file). When the agent also writes one of those files, you
+  get oscillation.
 
 ## Smoketests (what's what)
 
-The word "smoketest" refers to **five unrelated things**. Don't confuse
-them when debugging.
+The word "smoketest" refers to **several distinct things**. Don't
+confuse them when debugging (and if your deployment adds its own
+smoketest agents, catalog them in your per-agent log inventory).
 
 | Name | What it is | Trigger | Where to look |
 |------|------------|---------|---------------|
-| `smoketest.py` | End-to-end system test. Creates the `_smoketest-*` agents below, exercises cron + watcher + debounce + spawn paths, then tears them down. Manual / CI only. | `uv run --script .claude/skills/agents-live/scripts/smoketest.py` | `Agents/logs/smoketest-framework-result.json` (verdict), stdout |
-| `_smoketest-cron` | Synthetic scheduled agent created by `smoketest.py`. | created + run by `smoketest.py` | `Agents/logs/_smoketest-cron.log` |
-| `_smoketest-watcher` | Synthetic watcher agent created by `smoketest.py`. **Refuses to run inside the VS Code chat sandbox** (cgroup kills the daemon mid-Claude-call). | created + run by `smoketest.py` | `Agents/logs/_smoketest-watcher.log` |
-| `_smoketest-spawn-child` / `_smoketest-debounce` / `_smoketest-preprocessor` / `_smoketest-pipeline` | Synthetic agents exercising spawn, debounce dispatch, pre/post processors, and pipeline mode. | created + run by `smoketest.py` | `Agents/logs/_smoketest-*.log` |
-| `smoketest-mcp-personal` / `smoketest-mcp-work` | Scheduled agents that ping the personal/work MCP servers. Independent of `smoketest.py`. | cron, hourly | `Agents/logs/smoketest-mcp-{personal,work}.log` |
+| `agents-live smoketest` | End-to-end system test. Creates the `_smoketest-*` agents below, exercises cron + watcher + debounce + spawn paths, then tears them down. Manual / CI only. | `agents-live smoketest --runtime <runtime>` | `Agents/logs/smoketest-framework-result.json` (verdict), stdout |
+| `_smoketest-cron` | Synthetic scheduled agent created by the smoketest. | created + run by the smoketest | `Agents/logs/_smoketest-cron.log` |
+| `_smoketest-watcher` | Synthetic watcher agent created by the smoketest. **Refuses to run inside the VS Code chat sandbox** (cgroup kills the daemon mid-Claude-call). | created + run by the smoketest | `Agents/logs/_smoketest-watcher.log` |
+| `_smoketest-spawn-child` / `_smoketest-debounce` / `_smoketest-preprocessor` / `_smoketest-pipeline` | Synthetic agents exercising spawn, debounce dispatch, pre/post processors, and pipeline mode. | created + run by the smoketest | `Agents/logs/_smoketest-*.log` |
 
 If the system smoketest fails, check `smoketest-framework-result.json`
 first -- it carries `verdict`, `failed_step`, and `reason`.
@@ -161,7 +129,7 @@ stale `_smoketest-*` resources before setup.
 ## Traps to avoid
 
 - `tail -N` / `cat` on 200k-line logs overflows context. Always filter
-  first with qlog.py or timeline.py.
+  first with `agents-live logs` / `agents-live logs timeline`.
 - **Table display caps columns at 80 chars.** Use `--format jsonl` for
   full values.
 - File-change events don't mean content changed -- mtime can bump on an
@@ -188,7 +156,7 @@ stale `_smoketest-*` resources before setup.
 
 ```bash
 # Events for one agent in a window
-agents-live logs --agent exercise-state-update \
+agents-live logs --agent my-agent \
   --since 2026-04-22T13:00 --until 2026-04-22T13:30
 
 # Correlated view across ALL logs
@@ -215,10 +183,10 @@ Filters: `--agent`, `--since`, `--until`, `--phase`, `--status`, `--trigger`,
 
 ```bash
 # Timeline for a specific agent
-agents-live logs timeline exercise-state-update --since 2026-05-01T12:00
+agents-live logs timeline my-agent --since 2026-05-01T12:00
 
 # Content substring filter
-agents-live logs timeline LMCO --last 30
+agents-live logs timeline "invoice" --last 30
 
 # All agents in a window
 agents-live logs timeline --all --since 2026-05-01T16:00
@@ -226,14 +194,6 @@ agents-live logs timeline --all --since 2026-05-01T16:00
 
 ## Key files for reference
 
-### Exercise pipeline
-- Pre-processor: `Agents/handlers/exercise-state-prep.py`
-- Parse entry point: `Exercise/scripts/parse_tracking.py`
-- Sync post-processor: `Exercise/scripts/exercise_sync_checkboxes.py`
+Deployment-specific pipeline entry points (pre-processors, parsers,
+post-processors) belong in your per-agent log inventory.
 
-### Taskflow pipeline
-- Agent definition: `Taskflow/agents/taskflow-agent.md`
-- Pre-processor: `Taskflow/agents/handlers/taskflow-agent-prep.py`
-- Post-processor: `Taskflow/agents/handlers/taskflow-agent-apply.py`
-- Handler: `Taskflow/agents/handlers/taskflow-orchestrator.py`
-- Email sync: `Taskflow/agents/handlers/taskflow-email-sync.py`
