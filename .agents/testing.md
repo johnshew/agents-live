@@ -64,7 +64,7 @@ uvx --from "$wheel" agents-live status --all-repos
 Inspect both artifacts before publication:
 
 ```bash
-unzip -l "$wheel"
+uv run python -m zipfile --list "$wheel"
 tar -tzf "dist/agents_live-${version}.tar.gz"
 ```
 
@@ -86,15 +86,18 @@ agents-live --repo ~/repos/life dashboard --help
 Check PyPI and upgrade when a newer version is available:
 
 ```bash
-uv tool upgrade agents-live
+agents-live upgrade
 uv tool list
-agents-live --repo ~/repos/life init
 agents-live --repo ~/repos/life doctor
 ```
 
-`init` refreshes an installed optional skill payload. `doctor` reports a
-package and payload version mismatch. GitHub repository notifications can
-provide proactive release notices: select **Watch**, **Custom**, then
+`upgrade` reinstalls the latest stable uv-managed runtime, then refreshes
+managed skill payloads in the current initialized project and every available
+registered repository. An explicit `--repo` limits refresh to one project;
+`--runtime-only` and `--skills-only` isolate either phase. `init` retains its
+payload refresh behavior for first-time setup and compatibility. `doctor`
+reports a package and payload version mismatch. GitHub repository notifications
+can provide proactive release notices: select **Watch**, **Custom**, then
 **Releases**.
 
 If bare `agents-live` was installed editable from this checkout, restore the
@@ -109,12 +112,14 @@ uv tool install --force agents-live
 Preview and prepare the release locally:
 
 ```bash
-uv run --script tools/release.py --dry-run
-uv run --script tools/release.py --prepare --yes
+uv run --script tools/release.py --dry-run --bump patch
+uv run --script tools/release.py --prepare --bump patch --yes
 ```
 
-Preparation bumps every version surface, runs the gates, builds the target
-artifacts, and creates a local commit and annotated tag. Before publication:
+Run `/changelog-maintenance` first and replace `patch` with its recommended
+bump. Preparation rejects an empty changelog or an undersized bump, updates
+every version surface, runs the gates, builds the target artifacts, and creates
+a local commit and annotated tag. Before publication:
 
 1. Review the release commit and tag.
 2. Inspect the target-version wheel and source distribution.
@@ -127,9 +132,21 @@ Publish only after those checks pass:
 uv run --script tools/release.py --publish --yes
 ```
 
-After the GitHub workflow succeeds, run `uv tool upgrade agents-live` and
-repeat the installed-tool checks. This final pass proves the artifact that
-PyPI consumers receive, not only the local wheel.
+After the GitHub workflow succeeds, verify the exact release from PyPI and
+repeat the installed-tool checks:
+
+```bash
+version="$(uv version --short)"
+uvx --refresh --from "agents-live==$version" agents-live --version
+agents-live upgrade
+uv tool list
+agents-live --repo ~/repos/life doctor
+```
+
+The isolated exact-version check plus `--refresh` avoids a false negative while
+uv's index cache is catching up without pinning the user-level tool. The global
+upgrade then validates the normal consumer workflow. This final pass proves the
+artifact that PyPI consumers receive, not only the local wheel.
 
 ## Recover an editable tool install
 

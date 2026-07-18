@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: make release readiness explicit by integrating changelog maintenance,
+  enforcing the minimum semantic version bump implied by release notes, using
+  portable artifact inspection, and verifying the exact published PyPI version.
+- feat: make `agents-live upgrade` reinstall the latest uv-managed runtime
+  without requiring project context, then refresh managed skill payloads from
+  the newly installed CLI across the current and registered repositories;
+  explicit `--repo`, `--runtime-only`, and `--skills-only` options constrain
+  the workflow.
+
 ## 0.2.0 - 2026-07-18
 
 - feat: add an XDG user repository registry with aliases, a safe last-resort

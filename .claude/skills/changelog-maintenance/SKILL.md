@@ -1,10 +1,12 @@
 ---
 name: changelog-maintenance
 description: >-
-  Review and update the package changelog and GitHub-issue backlog.
-  Use when: "update the changelog", "what changed recently", "add
-  changelog entry", "is the changelog current", "close out resolved
-  issues", "what needs logging".
+  Review release readiness, update the package changelog, recommend a
+  semantic version bump, and maintain the GitHub-issue backlog. Use when:
+  "prepare a release", "do a release", "release readiness", "what version
+  bump", "update the changelog", "what changed recently", "add changelog
+  entry", "is the changelog current", "close out resolved issues", or
+  "what needs logging".
 ---
 
 # Changelog Maintenance
@@ -28,6 +30,19 @@ changelog or to an issue and delete it.
   version heading yourself.
 - Release-prep **fails if Unreleased is empty**, so shippable work must
   have entries before a release is cut.
+
+## Release handoff
+
+Run `/changelog-maintenance` before the release preview. The handoff must:
+
+1. Compare every commit since the latest release tag with `Unreleased`.
+2. Add any missing user-visible entries and complete issue hygiene.
+3. Recommend the minimum semantic version bump from the reviewed changes.
+4. Leave changelog changes committed so the release starts from a clean tree.
+
+The release tool independently enforces the minimum implied by conventional
+changelog prefixes: `feat:` requires at least minor, `!:` or `BREAKING CHANGE:`
+requires major, and fixes or documentation require patch.
 
 ## Export boundary and PII
 

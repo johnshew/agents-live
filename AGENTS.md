@@ -29,8 +29,8 @@ work on it.
 uv run --with-editable . --script tests/test_smoke.py   # tests
 uv run --with-editable . agents-live --help              # CLI from source
 uv run --script tools/pre-release-audit.py               # release audit
-uv run --script tools/release.py --dry-run                # release preview
-uv run --script tools/release.py --prepare --yes          # prepare patch
+uv run --script tools/release.py --dry-run --bump patch   # release preview
+uv run --script tools/release.py --prepare --bump patch --yes # prepare patch
 uv run --script tools/release.py --publish --yes          # publish prepared
 ```
 

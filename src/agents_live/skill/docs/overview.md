@@ -99,8 +99,9 @@ scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
 cache failures never affect the command. This request sends only ordinary
 package-index request metadata; it does not include project or agent data.
 `agents-live doctor` is the exception: it always performs a fresh check and
-updates the cache. Install an available release with `uv tool upgrade
-agents-live`. Agents Live never updates itself.
+updates the cache. Checks never install updates in the background. Run
+`agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
+release and then refresh managed skill payloads using the newly installed CLI.
 
 Repositories used from outside their working tree can be registered by alias
 under `$XDG_CONFIG_HOME/agents-live/config.toml` (normally
@@ -109,10 +110,12 @@ markers take precedence over the optional default. `status --all-repos`,
 `doctor --all-repos`, and `dashboard --all-repos` provide repo-qualified,
 read-only views; lifecycle actions remain scoped to one selected repository.
 
-After upgrading, run `agents-live --repo <project> upgrade` to refresh the
-optional installed skill payload. `doctor` reports a package and payload
-version mismatch and recommends this command. `init` remains the first-time
-project setup command.
+Bare `agents-live upgrade` works outside a project and refreshes the current
+initialized project plus every available registered repository. An explicit
+`--repo PATH|ALIAS` limits payload refresh to that project. Use `--runtime-only`
+or `--skills-only` to run one half of the workflow. Unavailable registered
+repositories are reported without blocking other refreshes. `init` remains the
+first-time project setup command.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

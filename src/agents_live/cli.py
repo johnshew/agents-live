@@ -76,7 +76,7 @@ IN_PROCESS = {
 
 # init DEFINES the project root (creates the marker); it must not be
 # gated on resolving one.
-NO_ROOT_REQUIRED = frozenset({"init", "heartbeat", "uninstall", "repos"})
+NO_ROOT_REQUIRED = frozenset({"init", "upgrade", "heartbeat", "uninstall", "repos"})
 MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
@@ -127,7 +127,7 @@ def _usage() -> str:
         "  smoketest           end-to-end validation\n"
         "  doctor              environment and install checks\n"
         "  init                initialize the project layout\n"
-        "  upgrade             refresh the project skill payload\n"
+        "  upgrade             upgrade runtime and project skill payloads\n"
         "  migrate             converge cron/watcher entries to the\n"
         "                      canonical invocation form\n"
         "  heartbeat           run or manage the WSL host heartbeat\n"
@@ -154,7 +154,7 @@ def _apply_name_sugar(cmd: str, rest: list[str]) -> list[str]:
 
 def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
     if (
-        cmd not in ("doctor", "prereqs")
+        cmd not in ("doctor", "prereqs", "upgrade")
         and not json_mode
         and "--json" not in rest
         and "--quiet" not in rest

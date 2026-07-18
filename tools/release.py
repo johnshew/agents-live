@@ -25,6 +25,7 @@ VERSION_FILES = (
 CHANGELOG = ROOT / "src" / "agents_live" / "skill" / "docs" / "changelog.md"
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
+BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 
 
 class ReleaseError(RuntimeError):
@@ -72,7 +73,42 @@ def _replace_once(path: Path, old: str, new: str) -> None:
     path.write_text(content.replace(old, new), encoding="utf-8")
 
 
+def _unreleased_notes(changelog: str | None = None) -> str:
+    content = (
+        CHANGELOG.read_text(encoding="utf-8")
+        if changelog is None
+        else changelog
+    )
+    marker = "## Unreleased\n\n"
+    if content.count(marker) != 1:
+        raise ReleaseError("changelog must contain one empty Unreleased heading marker")
+    notes = re.split(r"(?m)^## ", content.split(marker, 1)[1], maxsplit=1)[0].strip()
+    if not notes:
+        raise ReleaseError("changelog Unreleased section has no release notes")
+    return notes
+
+
+def _minimum_bump(notes: str) -> str:
+    if re.search(r"(?mi)^-\s+\w+(?:\([^)]*\))?!:|BREAKING CHANGE:", notes):
+        return "major"
+    if re.search(r"(?mi)^-\s+feat(?:\([^)]*\))?:", notes):
+        return "minor"
+    return "patch"
+
+
+def _check_bump(bump: str) -> str:
+    minimum = _minimum_bump(_unreleased_notes())
+    if BUMP_ORDER[bump] < BUMP_ORDER[minimum]:
+        raise ReleaseError(
+            f"changelog requires at least a {minimum} bump; "
+            f"rerun with --bump {minimum}"
+        )
+    return minimum
+
+
 def _update_versions(current: str, target: str) -> None:
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+    _unreleased_notes(changelog)
     _run(["uv", "version", target, "--no-sync"])
     _replace_once(
         VERSION_FILES[0],
@@ -82,13 +118,7 @@ def _update_versions(current: str, target: str) -> None:
     _replace_once(VERSION_FILES[1], f"/blob/v{current}/", f"/blob/v{target}/")
     _replace_once(VERSION_FILES[2], f"{current}\n", f"{target}\n")
 
-    changelog = CHANGELOG.read_text(encoding="utf-8")
     marker = "## Unreleased\n\n"
-    if changelog.count(marker) != 1:
-        raise ReleaseError("changelog must contain one empty Unreleased heading marker")
-    unreleased = changelog.split(marker, 1)[1].split("\n## ", 1)[0].strip()
-    if not unreleased:
-        raise ReleaseError("changelog Unreleased section has no release notes")
     release_heading = f"{marker}## {target} - {date.today().isoformat()}\n\n"
     CHANGELOG.write_text(
         changelog.replace(marker, release_heading), encoding="utf-8"
@@ -165,9 +195,10 @@ def _check_release_diff() -> None:
     _run(["git", "diff", "--check"])
 
 
-def _print_plan(current: str, target: str) -> None:
+def _print_plan(current: str, target: str, minimum_bump: str) -> None:
     tag = f"v{target}"
     print(f"Release plan: {current} -> {target}")
+    print(f"Minimum bump from changelog: {minimum_bump}")
     print("Version files:")
     for path in RELEASE_FILES:
         print(f"  {path.relative_to(ROOT)}")
@@ -188,14 +219,16 @@ def _print_plan(current: str, target: str) -> None:
 def preview(bump: str) -> None:
     current = _current_version()
     target = _next_version(current, bump)
-    _print_plan(current, target)
+    minimum_bump = _check_bump(bump)
+    _print_plan(current, target, minimum_bump)
 
 
 def prepare(bump: str) -> None:
     _require_tools()
     current = _current_version()
     target = _next_version(current, bump)
-    _print_plan(current, target)
+    minimum_bump = _check_bump(bump)
+    _print_plan(current, target, minimum_bump)
     _check_prepare_state(target, fetch=True)
     original = {path: path.read_bytes() for path in RELEASE_FILES}
     original_head = _git("rev-parse", "HEAD")

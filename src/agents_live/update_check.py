@@ -142,7 +142,7 @@ def consume_notice(installed: str = __version__, *, now: float | None = None) ->
         return None
     return (
         f"agents-live {installed} is installed; {latest} is available.\n"
-        "Upgrade with: uv tool upgrade agents-live"
+        "Upgrade with: agents-live upgrade"
     )
 
 
@@ -158,7 +158,7 @@ def status_text(installed: str = __version__) -> str:
     if installed_semver is not None and latest_semver > installed_semver:
         return (
             f"Update check: agents-live {installed} installed; {latest} available\n"
-            "  Upgrade with: uv tool upgrade agents-live"
+            "  Upgrade with: agents-live upgrade"
         )
     return f"Update check: agents-live {installed} is current (latest: {latest})"
 

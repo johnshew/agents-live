@@ -177,10 +177,18 @@ when the cached result is missing or one hour old. Checks only write under
 update.
 
 When `doctor` reports that the project skill payload does not match the
-installed package, run `agents-live upgrade`. The command replaces only the
-managed payload items (`SKILL.md`, `VERSION`, `docs`, and `templates`) and
-preserves other files in the skill directory. It is a no-op when the payload
-is already current. Use `init` for first-time project layout and setup.
+installed package, run `agents-live upgrade --skills-only`. Skill refresh
+replaces only the managed payload items (`SKILL.md`, `VERSION`, `docs`, and
+`templates`) and preserves other files in the skill directory. It is a no-op
+when the payload is already current. Use `init` for first-time project layout
+and setup.
+
+Bare `agents-live upgrade` needs no project context. It reinstalls the
+uv-managed runtime from the latest stable PyPI release, then invokes the newly
+installed CLI to refresh the current initialized project and every available
+registered repository. `--repo PATH|ALIAS` constrains refresh to one project;
+`--runtime-only` and `--skills-only` run one phase. Unavailable repositories
+produce warnings and a nonzero final result without blocking valid projects.
 
 ### Checks to perform
 
@@ -499,41 +507,45 @@ Package the agents-live system as a standalone, shareable release.
 
 ### Steps
 
-1. **Pre-release audit** -- scan for personal data, secrets, and portability issues:
+1. **Changelog readiness** -- run `/changelog-maintenance`, cover every commit
+   since the latest tag, complete issue hygiene, and select the recommended
+   semantic version bump. Commit any changelog update before continuing.
+
+2. **Pre-release audit** -- scan for personal data, secrets, and portability issues:
    ```bash
    uv run --script .claude/skills/agents-live/scripts/pre-release-audit.py
    ```
    All checks must pass before proceeding.
 
-2. **Assemble** -- copy release-included files into a clean directory:
+3. **Assemble** -- copy release-included files into a clean directory:
    ```bash
    bash .claude/skills/agents-live/scripts/assemble-release.sh [output-dir]
    ```
    Default output: `/tmp/agents-live`.
 
-3. **Verify** -- audit and test from the assembled directory:
+4. **Verify** -- audit and test from the assembled directory:
    ```bash
    cd /tmp/agents-live
    uv run tools/pre-release-audit.py
    uv run --with-editable . python -m unittest tests.test_smoke
    ```
 
-4. **Publish** -- from the assembled public release repository, preview and
+5. **Publish** -- from the assembled public release repository, preview and
    run the guarded release workflow:
 
    ```bash
-   uv run --script tools/release.py --dry-run
-   uv run --script tools/release.py --prepare --yes
+   uv run --script tools/release.py --dry-run --bump patch
+   uv run --script tools/release.py --prepare --bump patch --yes
    # Inspect dist/ and the local release commit.
    uv run --script tools/release.py --publish --yes
    ```
 
-   Use `--bump minor` or `--bump major` instead of the default patch bump
-   when required. The script validates synchronized `main`, updates every
-   version surface and reruns the release gates. Preparation creates the
-   commit and local tag; publication verifies that exact state, reruns the
-   gates, pushes atomically, and creates the GitHub release that triggers
-   PyPI publishing.
+   Replace `patch` with the bump recommended by changelog maintenance. The
+   script rejects an empty `Unreleased` section or undersized bump, validates
+   synchronized `main`, updates every version surface, and reruns the release
+   gates. Preparation creates the commit and local tag; publication verifies
+   that exact state, reruns the gates, pushes atomically, and creates the
+   GitHub release that triggers PyPI publishing.
 
 Full details: [release-process.md](release-process.md)
 

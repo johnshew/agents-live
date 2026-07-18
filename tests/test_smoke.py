@@ -20,6 +20,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -453,12 +454,25 @@ class TestCliContract(_TempProject):
             mock.patch.object(init, "install_skill", return_value=None) as install,
             mock.patch("sys.stdout", stdout),
         ):
-            self.assertEqual(cli.main(["upgrade"]), 0)
+            self.assertEqual(cli.main(["upgrade", "--skills-only"]), 0)
         install.assert_called_once_with(self.root)
         self.assertIn(
-            "Skill payload already matches the installed package",
+            "skill payload already matches the installed package",
             stdout.getvalue(),
         )
+
+    def test_upgrade_works_outside_repository(self) -> None:
+        os.environ.pop(paths.ENV_VAR, None)
+        paths.clear_cache()
+        with (
+            mock.patch.object(upgrade, "_upgrade_runtime", return_value=0) as runtime,
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(paths, "resolve_root") as resolve_root,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(cli.main(["upgrade"]), 0)
+        runtime.assert_called_once_with()
+        resolve_root.assert_not_called()
 
     def test_doctor_without_project_root_runs_host_checks(self) -> None:
         os.environ.pop(paths.ENV_VAR, None)
@@ -831,7 +845,7 @@ class TestUpdateCheck(unittest.TestCase):
             })),
         )
         notice = update_check.consume_notice("1.2.2", now=101)
-        self.assertIn("uv tool upgrade agents-live", notice)
+        self.assertIn("agents-live upgrade", notice)
         self.assertIsNone(update_check.consume_notice("1.2.2", now=102))
         self.assertIsNone(update_check.consume_notice("1.2.3", now=102))
         update_check.refresh(
@@ -899,22 +913,58 @@ class TestReleaseTool(unittest.TestCase):
             path.write_text(content, encoding="utf-8")
         return {path: path.read_bytes() for path in module.RELEASE_FILES}
 
-    def test_dry_run_reports_bump_without_modifying_version(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        pyproject = root / "pyproject.toml"
-        before = pyproject.read_bytes()
-        result = subprocess.run(
-            ["uv", "run", "--script", str(root / "tools" / "release.py"),
-             "--dry-run"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=30,
+    def test_preview_reports_bump_without_modifying_version(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            before = module.PYPROJECT.read_bytes()
+            output = io.StringIO()
+
+            with mock.patch("sys.stdout", output):
+                module.preview("patch")
+
+            self.assertIn("Release plan: 1.2.3 -> 1.2.4", output.getvalue())
+            self.assertIn("Minimum bump from changelog: patch", output.getvalue())
+            self.assertIn("git push --atomic", output.getvalue())
+            self.assertEqual(module.PYPROJECT.read_bytes(), before)
+
+    def test_preview_rejects_bump_below_changelog_minimum(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n"
+                "- feat: add a command.\n\n## 1.2.3\n\nOld.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(module.ReleaseError, "--bump minor"):
+                module.preview("patch")
+
+            output = io.StringIO()
+            with mock.patch("sys.stdout", output):
+                module.preview("minor")
+            self.assertIn("Release plan: 1.2.3 -> 1.3.0", output.getvalue())
+
+    def test_preview_rejects_empty_unreleased_section(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n## 1.2.3\n\nOld.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(module.ReleaseError, "no release notes"):
+                module.preview("patch")
+
+    def test_minimum_bump_detects_breaking_change_markers(self) -> None:
+        module = self._load_tool()
+        self.assertEqual(module._minimum_bump("- feat!: replace the API."), "major")
+        self.assertEqual(
+            module._minimum_bump("- feat: replace the API.\n\nBREAKING CHANGE: API v1"),
+            "major",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"Release plan: \d+\.\d+\.\d+ -> \d+\.\d+\.\d+")
-        self.assertIn("git push --atomic", result.stdout)
-        self.assertEqual(pyproject.read_bytes(), before)
 
     def test_version_update_changes_every_release_surface(self) -> None:
         module = self._load_tool()
@@ -954,6 +1004,8 @@ class TestReleaseTool(unittest.TestCase):
                 mock.patch.object(module, "_check_release_diff",
                                   side_effect=KeyboardInterrupt),
                 mock.patch.object(module.subprocess, "run") as run,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
             ):
                 with self.assertRaises(KeyboardInterrupt):
                     module.prepare("patch")
@@ -1040,6 +1092,7 @@ class TestReleaseTool(unittest.TestCase):
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=existing),
                 mock.patch.object(module, "_run") as run,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
                 module.publish()
             run.assert_not_called()
@@ -1050,6 +1103,7 @@ class TestReleaseTool(unittest.TestCase):
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=missing),
                 mock.patch.object(module, "_run") as run,
+                mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
                 module.publish()
             commands = [call.args[0] for call in run.call_args_list]
@@ -1090,21 +1144,99 @@ class TestInstallSkill(_TempProject):
         with (
             mock.patch.object(init, "install_skill", return_value="refreshed"),
             mock.patch("builtins.print") as output,
-            mock.patch("sys.argv", ["agents-live upgrade"]),
+            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
         ):
             self.assertEqual(upgrade.main(), 0)
-        output.assert_called_once_with(
-            "Upgraded skill payload to match the installed package: "
-            ".claude/skills/agents-live/")
+        output.assert_any_call(
+            f"{self.root}: upgraded skill payload to match the installed package")
 
         with (
             mock.patch.object(init, "install_skill", return_value=None),
             mock.patch("builtins.print") as output,
+            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        output.assert_any_call(
+            f"{self.root}: skill payload already matches the installed package")
+
+    def test_runtime_upgrade_installs_unpinned_latest_release(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            mock.patch.object(subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 0)
+        run.assert_called_once_with(
+            ["/usr/bin/uv", "tool", "install", "--force", "agents-live@latest"],
+            check=False,
+        )
+
+    def test_upgrade_discovers_current_and_registered_projects(self) -> None:
+        selected = os.environ.pop(paths.ENV_VAR, None)
+        try:
+            with (
+                mock.patch.object(paths, "_walk_for_marker", return_value=self.root),
+                mock.patch.object(
+                    repos,
+                    "entries",
+                    return_value=[
+                        ("current", str(self.root), None),
+                        ("other", "/repos/other", None),
+                        ("gone", "/repos/gone", "path is unavailable"),
+                    ],
+                ),
+            ):
+                targets, errors = upgrade._targets()
+        finally:
+            if selected is not None:
+                os.environ[paths.ENV_VAR] = selected
+        self.assertEqual(
+            targets,
+            [("current project", self.root), ("other", Path("/repos/other"))],
+        )
+        self.assertEqual(errors, ["gone: path is unavailable"])
+
+    def test_default_upgrade_refreshes_with_newly_installed_cli(self) -> None:
+        target = Path("/repos/life")
+        with (
+            mock.patch.object(upgrade, "_upgrade_runtime", return_value=0) as runtime,
+            mock.patch.object(
+                upgrade, "_targets", return_value=([("life", target)], [])),
+            mock.patch.object(
+                upgrade, "_refresh_with_installed_cli", return_value=0) as refresh,
+            mock.patch.object(init, "install_skill") as install,
+            mock.patch("builtins.print"),
             mock.patch("sys.argv", ["agents-live upgrade"]),
         ):
             self.assertEqual(upgrade.main(), 0)
-        output.assert_called_once_with(
-            "Skill payload already matches the installed package")
+        runtime.assert_called_once_with()
+        refresh.assert_called_once_with(target)
+        install.assert_not_called()
+
+    def test_skills_only_continues_after_project_refresh_failure(self) -> None:
+        broken = Path("/repos/broken")
+        healthy = Path("/repos/healthy")
+        with (
+            mock.patch.object(
+                upgrade,
+                "_targets",
+                return_value=([("broken", broken), ("healthy", healthy)], []),
+            ),
+            mock.patch.object(
+                upgrade,
+                "_refresh_payload",
+                side_effect=[PermissionError("denied"), None],
+            ) as refresh,
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
+        ):
+            self.assertEqual(upgrade.main(), 1)
+        self.assertEqual(
+            refresh.call_args_list,
+            [mock.call(broken), mock.call(healthy)],
+        )
+        self.assertIn("broken (/repos/broken): denied", stderr.getvalue())
 
 
 class TestSpawnInvocation(_TempProject):

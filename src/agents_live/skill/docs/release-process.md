@@ -114,21 +114,26 @@ and no deployment agent or private adapter is present.
 ## Publish
 
 Publish from the assembled release repository after the audit, tests, artifact
-inspection, and version review pass. Preview the default patch release first:
+inspection, and version review pass. Run `/changelog-maintenance` first to
+compare commits since the latest tag with `Unreleased`, complete issue hygiene,
+and recommend the minimum semantic version bump. Commit any resulting
+changelog update, then preview the selected release:
 
 ```bash
-uv run --script tools/release.py --dry-run
+uv run --script tools/release.py --dry-run --bump patch
 ```
 
 Run the release after reviewing the plan:
 
 ```bash
-uv run --script tools/release.py --prepare --yes
+uv run --script tools/release.py --prepare --bump patch --yes
 ```
 
-The script requires a clean `main` synchronized with `origin/main`. It bumps
-all version surfaces, moves the changelog's Unreleased notes under the new
-version, reruns the audit, smoke suite, and build, and creates the release
+Replace `patch` with the recommended bump. The script rejects an empty
+`Unreleased` section and a bump below the minimum implied by conventional
+changelog prefixes. It requires a clean `main` synchronized with `origin/main`,
+bumps all version surfaces, moves the changelog's Unreleased notes under the
+new version, reruns the audit, smoke suite, and build, and creates the release
 commit and annotated tag locally. Inspect the target-version wheel and source
 distribution under `dist/`, then publish:
 
@@ -139,7 +144,11 @@ uv run --script tools/release.py --publish --yes
 Publication verifies that the tagged release commit is exactly one commit
 ahead of `origin/main`, reruns every gate, pushes the commit and tag atomically,
 and creates the GitHub release. That release triggers trusted publishing to
-PyPI.
+PyPI. Wait for the workflow to succeed, verify the exact version with `uvx
+--refresh --from "agents-live==<version>" agents-live --version`, then run
+`agents-live upgrade` and the installed-tool checks. The isolated exact-version
+check avoids mistaking cache propagation for a failed publish without pinning
+the user-level tool.
 
 Use semantic versioning:
 
@@ -149,8 +158,7 @@ Use semantic versioning:
 | Backward-compatible command or engine capability | Minor |
 | Bug fix or documentation correction | Patch |
 
-Pass `--bump minor` or `--bump major` when required. Do not publish directly
-from the private consuming repository.
+Do not publish directly from the private consuming repository.
 
 ## Release checklist
 
@@ -161,6 +169,8 @@ from the private consuming repository.
 * [ ] Wheel and source distribution build successfully
 * [ ] Installed CLI and `init` payload match the documented contract
 * [ ] Documentation matches current behavior
+* [ ] `/changelog-maintenance` covers every commit since the latest tag
 * [ ] Version and release tag follow semantic versioning
 * [ ] Release script preview shows the expected version and file set
 * [ ] Target-version artifacts inspected after preparation
+* [ ] Trusted publishing succeeds and the exact version installs from PyPI

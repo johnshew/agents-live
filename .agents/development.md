@@ -53,19 +53,19 @@ installed by uv:
 ```bash
 agents-live --repo ~/repos/life doctor
 uv tool list
-uv tool upgrade agents-live
+agents-live upgrade
 ```
 
-`uv tool list` reports the installed version. `uv tool upgrade agents-live`
-checks PyPI and upgrades when a newer release exists; it is safe to run when
-already current. To restore a normal PyPI installation after experimenting
-with `uv tool install --editable .`, run:
+`uv tool list` reports the installed version. `agents-live upgrade` reinstalls
+the latest stable uv-managed runtime and refreshes managed payloads in the
+current initialized project and registered repositories. To restore a normal
+PyPI installation after experimenting with `uv tool install --editable .`, run:
 
 ```bash
 uv tool install --force agents-live
 ```
 
-After upgrading, run `agents-live --repo <project> init` to refresh an
+Use `agents-live --repo <project> upgrade --skills-only` to refresh only one
 installed skill payload. `agents-live --repo <project> doctor` reports any
 package and skill payload version mismatch.
 

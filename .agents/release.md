@@ -9,6 +9,14 @@ narrative, including the upstream assembly step, is in
 Use [testing.md](testing.md) to validate source, target-version artifacts, and
 the installed PyPI tool as separate execution modes.
 
+## Changelog readiness
+
+Invoke `/changelog-maintenance` before previewing a release. It compares every
+commit since the latest tag with `Unreleased`, adds missing user-visible notes,
+completes issue hygiene, and recommends the minimum semantic version bump.
+Commit any resulting changelog update before continuing because preparation
+requires a clean tree.
+
 ## Versioning
 
 Semantic versioning; the version lives in `pyproject.toml`.
@@ -35,23 +43,25 @@ and no private adapter or deployment-specific agent is present.
 
 ## Publish
 
-Preview the next patch release without changing files or remotes:
+Preview the selected release without changing files or remotes:
 
 ```bash
-uv run --script tools/release.py --dry-run
+uv run --script tools/release.py --dry-run --bump patch
 ```
 
 Prepare the release locally:
 
 ```bash
-uv run --script tools/release.py --prepare --yes
+uv run --script tools/release.py --prepare --bump patch --yes
 ```
 
-Pass `--bump minor` or `--bump major` when the change requires it. The
-script requires a clean `main` synchronized with `origin/main`. It updates
-all package, skill, documentation-link, and changelog versions; runs every
-release gate; and creates the release commit and annotated tag locally.
-Inspect the target-version artifacts under `dist/` and review the commit.
+Replace `patch` with the bump recommended by changelog maintenance. The script
+rejects an empty `Unreleased` section and any bump below the minimum implied by
+`feat:`, `!:` or `BREAKING CHANGE:` notes. It requires a clean `main`
+synchronized with `origin/main`, updates all package, skill,
+documentation-link, and changelog versions, runs every release gate, and
+creates the release commit and annotated tag locally. Inspect the
+target-version artifacts under `dist/` and review the commit.
 
 Publish the prepared commit and tag:
 
@@ -64,10 +74,14 @@ commit to be exactly one commit ahead of `origin/main`, pushes the commit and
 tag atomically, and creates the GitHub release.
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
-which rebuilds and publishes to PyPI through trusted publishing. If a
-failure or interruption occurs before the release commit, the script restores
-every version file and clears its staged changes. A failure after the commit
-remains visible for recovery. Rerun `--publish --yes` if GitHub release
+which rebuilds and publishes to PyPI through trusted publishing. Wait for that
+workflow to succeed, verify the exact version on PyPI, then run the installed
+tool checks in [testing.md](testing.md). Use an exact version and `--refresh`
+when uv's index cache has not observed the new release yet.
+
+If a failure or interruption occurs before the release commit, the script
+restores every version file and clears its staged changes. A failure after the
+commit remains visible for recovery. Rerun `--publish --yes` if GitHub release
 creation fails after the atomic push; publication accepts the exact tagged
-commit locally or on `origin/main` and skips a release that already exists.
-Do not rewrite or delete a pushed release tag.
+commit locally or on `origin/main` and skips a release that already exists. Do
+not rewrite or delete a pushed release tag.
