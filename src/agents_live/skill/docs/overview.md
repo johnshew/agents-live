@@ -99,9 +99,8 @@ commands. This request sends only ordinary package-index request metadata; it
 does not include project or agent data. Disable it with
 `AGENTS_LIVE_NO_UPDATE_CHECK=1` or `update_check = false` in
 `$XDG_CONFIG_HOME/agents-live/config.toml`. View the cached result with
-`agents-live doctor`, refresh explicitly with
-`agents-live doctor --refresh-updates`, and install an available release with
-`uv tool upgrade agents-live`. Agents Live never updates itself.
+`agents-live doctor`, and install an available release with `uv tool upgrade
+agents-live`. Agents Live never updates itself.
 
 After upgrading, run `agents-live --repo <project> init` to refresh the
 optional installed skill payload; `doctor` reports a package and payload
