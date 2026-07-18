@@ -111,7 +111,7 @@ def launch_if_stale(*, now: float | None = None) -> None:
         return
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "agents_live.update_check"],
+            [sys.executable, "-m", __name__],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
