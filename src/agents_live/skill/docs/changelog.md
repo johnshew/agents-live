@@ -14,6 +14,17 @@ history is retained in the source repository.
 - fix: bare `agents-live logs timeline` now shows the last 50 events across
   all agents, and malformed or pre-v5 rows are skipped with a warning rather
   than aborting valid neighboring events.
+- fix: `doctor` outside an initialized project now runs the host readiness
+  checks instead of refusing to run; project-level checks are reported as
+  skipped until `agents-live init` creates the project config.
+- feat: promote the WSL Windows heartbeat to distro-level host
+  infrastructure. `agents-live heartbeat install --distro <name>` registers
+  one Task Scheduler task per distro that invokes the stable uv CLI shim
+  and writes the beacon under the user state directory, with no project or
+  checkout binding, so a single heartbeat serves every project in the
+  distro. Doctor verifies the distro-scoped task and recommends migration
+  for legacy checkout-, site-packages-, or project-pinned registrations,
+  and `agents-live heartbeat uninstall` removes the task.
 - feat: add best-effort PyPI update notifications for interactive CLI use.
   Ordinary commands refresh a shared cache in the background when it is one
   hour old and display each available stable release once; `doctor` always
@@ -24,6 +35,8 @@ history is retained in the source repository.
   workflow for refreshing a project's managed skill payload. Doctor now
   recommends it when package and payload versions differ; `init` keeps its
   existing refresh behavior for compatibility.
+- feat: add an `agents-live --version` flag that reports the installed
+  package version.
 
 ## 0.1.6 - 2026-07-18
 
