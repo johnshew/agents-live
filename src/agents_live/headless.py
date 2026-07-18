@@ -2517,6 +2517,7 @@ def crontab_lock() -> Iterator[None]:
         os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     lock_path = state_home / "agents-live" / "crontab.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Never truncate or replace the inode another process may have locked.
     with lock_path.open("a", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -73,12 +73,13 @@ class _TempProject(unittest.TestCase):
         (agent_dir / f"{name}.md").write_text(body, encoding="utf-8")
 
 
-AGENT_DEFINITION = """---
+TEST_CRON_SCHEDULE = "0 6 * * *"
+AGENT_DEFINITION = f"""---
 description: Smoke fixture. Never delegate to this agent.
 disable-model-invocation: true
 runtime: none
 mode: plan
-schedule: "0 6 * * *"
+schedule: "{TEST_CRON_SCHEDULE}"
 pre-processor: Agents/handlers/prep.py
 ---
 Smoke fixture body.
@@ -122,7 +123,7 @@ class TestAgentParsing(_TempProject):
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         config = headless.load_agent_config("smoke-fixture")
         self.assertEqual(config.name, "smoke-fixture")
-        self.assertEqual(config.schedule, ["0 6 * * *"])
+        self.assertEqual(config.schedule, [TEST_CRON_SCHEDULE])
 
     def test_unknown_runtime_fails_closed(self) -> None:
         self.write_agent("bad-runtime", AGENT_DEFINITION.replace("runtime: none",
@@ -133,12 +134,12 @@ class TestAgentParsing(_TempProject):
 
 class TestInvocationForms(_TempProject):
     def test_run_invocation_carries_name_token(self) -> None:
-        line = f"0 6 * * * cd {self.root} && " + " ".join(
+        line = f"{TEST_CRON_SCHEDULE} cd {self.root} && " + " ".join(
             headless.run_invocation("t"))
         self.assertTrue(headless.cron_line_matches(line, "t"))
 
     def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
-        cron = (f"0 6 * * * cd {self.root} && agents-live run "
+        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
         watcher = headless.build_reboot_watcher_line("shared")
         self.assertTrue(headless.cron_line_matches(cron, "shared"))
@@ -159,7 +160,7 @@ class TestInvocationForms(_TempProject):
                         self.fail("contended lock was acquired")
 
     def test_removal_preserves_foreign_same_named_entries(self) -> None:
-        cron = (f"0 6 * * * cd {self.root} && agents-live run "
+        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
         watcher = headless.build_reboot_watcher_line("shared")
         foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
@@ -193,13 +194,14 @@ class TestMigratePlanning(_TempProject):
 
     def test_stale_line_planned_for_rewrite(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        stale = (f"0 6 * * * cd {self.root} && /usr/bin/uv run --script "
+        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && "
+                 f"/usr/bin/uv run --script "
                  f"{self.root}/old/run.py --name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([stale])
         self.assertIn("smoke-fixture", plan["schedule"])
 
     def test_undefined_agent_is_reported_not_planned(self) -> None:
-        line = (f"0 6 * * * cd {self.root} && uv run --script x.py "
+        line = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script x.py "
                 f"--name ghost-agent --quiet 2>&1")
         plan = migrate.plan_migration([line])
         self.assertEqual(plan["schedule"], {})
@@ -207,7 +209,7 @@ class TestMigratePlanning(_TempProject):
 
     def test_foreign_same_named_entries_are_not_migrated(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        foreign = (f"0 6 * * * cd {FOREIGN_REPO} && "
+        foreign = (f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && "
                    f"agents-live --repo {FOREIGN_REPO} run "
                    "--name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([foreign])
