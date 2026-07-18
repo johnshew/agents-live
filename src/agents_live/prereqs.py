@@ -38,7 +38,14 @@ from . import preflight
 from . import update_check
 from .paths import resolve_root
 
-REPO = resolve_root()
+try:
+    REPO = resolve_root()
+except ValueError:
+    REPO = None
+
+
+def _project_checks_enabled() -> bool:
+    return REPO is not None and paths.config_source(REPO) is not None
 
 
 def _has(cmd: str) -> bool:
@@ -413,6 +420,23 @@ def collect() -> list[dict]:
     add("inotifywait", _has("inotifywait"), True,
         "sudo apt install inotify-tools",
         note="required for file-watcher agents (note-index, todo-index, ...)")
+
+    if not _project_checks_enabled():
+        add("node", _has("node"), False, "install Node.js (e.g. nvm install --lts)")
+        add("npm", _has("npm"), False, "install Node.js (e.g. nvm install --lts)")
+        if _is_wsl():
+            add("node is WSL-native (not /mnt/c interop)",
+                _node_is_wsl_native(), False,
+                ". ~/.nvm/nvm.sh && nvm use node  "
+                "(ensure ~/.nvm precedes /mnt/c in PATH)")
+        add("claude CLI", _has("claude"), False,
+            "npm i -g @anthropic-ai/claude-code")
+        add("copilot CLI", _has("copilot"), False, "npm i -g @github/copilot")
+        add("agency CLI", _has("agency"), False,
+            "curl -sSfL https://aka.ms/InstallTool.sh | sh -s agency")
+        return checks
+
+    assert REPO is not None
     add("Agents/ directory", (REPO / "Agents").is_dir(), True, "repo layout issue")
     add("Agents/handlers/ directory", (REPO / "Agents" / "handlers").is_dir(), True,
         "repo layout issue")
@@ -580,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         update_check.refresh()
     except OSError:
         pass
+    project_checks = _project_checks_enabled()
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]
     optional_failures = [c for c in checks if not c["required"] and not c["ok"]]
@@ -589,12 +614,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "ok": ok,
             "host": _hostname(),
+            "project_checks": "run" if project_checks else "skipped until init",
             "checks": checks,
         }, indent=2))
         return 0 if ok else 1
 
     host = _hostname()
     print(f"Prerequisites for agents-live (host: {host}):\n")
+    if not project_checks:
+        print("  Project checks skipped until `agents-live init` creates a "
+              "project config.\n")
     for c in checks:
         if c["ok"]:
             mark = "PASS"

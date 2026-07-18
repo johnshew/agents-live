@@ -165,6 +165,10 @@ converges stale crontab entries, then running the
 `agents-live-health-check` agent once re-verifies and refreshes the
 beacon.
 
+Before `init`, a markerless `doctor` runs host readiness checks only (including
+cron, inotifywait, and agent CLIs) and notes that project checks are skipped.
+Run `agents-live init` to create the project config and enable the full set.
+
 `doctor` always performs a fresh PyPI update check and updates the shared cache.
 For interactive terminal use, it also displays the result. Other commands check
 when the cached result is missing or one hour old. Checks only write under

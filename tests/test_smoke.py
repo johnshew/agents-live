@@ -192,6 +192,37 @@ class TestCliContract(_TempProject):
     def test_unknown_command_exits_two(self) -> None:
         self.assertEqual(cli.main(["frobnicate"]), 2)
 
+    def test_doctor_without_project_root_runs_host_checks(self) -> None:
+        import importlib
+        prereqs = importlib.import_module(
+            f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
+
+        os.environ.pop(paths.ENV_VAR, None)
+        paths.clear_cache()
+        with (
+            mock.patch.object(prereqs, "REPO", None),
+            mock.patch.object(prereqs, "_has", return_value=True),
+            mock.patch.object(prereqs, "_python_312_resolvable", return_value=True),
+            mock.patch.object(prereqs, "_is_wsl", return_value=False),
+            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "refresh"),
+            mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(cli.main(["doctor"]), 0)
+        output = stdout.getvalue()
+        self.assertIn("Project checks skipped", output)
+        self.assertIn("[PASS] crontab", output)
+        self.assertIn("[PASS] inotifywait", output)
+        self.assertIn("[PASS] copilot CLI", output)
+        self.assertNotIn("Agents/ directory", output)
+        self.assertNotIn("[PASS] project config", output)
+
+    def test_doctor_rejects_invalid_environment_root(self) -> None:
+        os.environ[paths.ENV_VAR] = str(self.root / "missing")
+        paths.clear_cache()
+        self.assertEqual(cli.main(["doctor"]), 2)
+
     def test_dashboard_script_imports_in_packaged_layout(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
         result = subprocess.run(
