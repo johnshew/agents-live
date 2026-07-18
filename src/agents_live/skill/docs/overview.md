@@ -90,11 +90,22 @@ agents-live start file-notes       # activate it unattended
 agents-live teardown file-notes    # clean up - remove its triggers
 ```
 
-Check for and install a newer PyPI release with `uv tool upgrade
-agents-live`. After upgrading, run `agents-live --repo <project> upgrade` to
-refresh the optional installed skill payload. `doctor` reports a package and
-payload version mismatch and recommends this command. `init` remains the
-first-time project setup command.
+On interactive terminal invocations, agents-live checks PyPI for a newer
+stable release when its shared cached result is missing or one hour old. The
+result is stored under
+`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). For ordinary
+commands, the refresh runs in the background and is skipped for
+scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
+cache failures never affect the command. This request sends only ordinary
+package-index request metadata; it does not include project or agent data.
+`agents-live doctor` is the exception: it always performs a fresh check and
+updates the cache. Install an available release with `uv tool upgrade
+agents-live`. Agents Live never updates itself.
+
+After upgrading, run `agents-live --repo <project> upgrade` to refresh the
+optional installed skill payload. `doctor` reports a package and payload
+version mismatch and recommends this command. `init` remains the first-time
+project setup command.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

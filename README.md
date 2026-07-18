@@ -60,11 +60,22 @@ file-watch agent; cron-only agents need none.
 uv tool install agents-live   # or: uv tool install <path-to-wheel>
 ```
 
-Check for and install a newer PyPI release with `uv tool upgrade
-agents-live`. After upgrading, run `agents-live --repo <project> upgrade` to
-refresh the optional installed skill payload. `doctor` reports a package and
-payload version mismatch and recommends this command. `init` remains the
-first-time project setup command.
+On interactive terminal invocations, agents-live checks PyPI for a newer
+stable release when its shared cached result is missing or one hour old. The
+result is stored under
+`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). For ordinary
+commands, the refresh runs in the background and is skipped for
+scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
+cache failures never affect the command. This request sends only ordinary
+package-index request metadata; it does not include project or agent data.
+`agents-live doctor` is the exception: it always performs a fresh check and
+updates the cache. Install an available release with `uv tool upgrade
+agents-live`. Agents Live never updates itself.
+
+After upgrading, run `agents-live --repo <project> upgrade` to refresh the
+optional installed skill payload. `doctor` reports a package and payload
+version mismatch and recommends this command. `init` remains the first-time
+project setup command.
 
 ## Quick start
 

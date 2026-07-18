@@ -165,6 +165,12 @@ converges stale crontab entries, then running the
 `agents-live-health-check` agent once re-verifies and refreshes the
 beacon.
 
+`doctor` always performs a fresh PyPI update check and updates the shared cache.
+For interactive terminal use, it also displays the result. Other commands check
+when the cached result is missing or one hour old. Checks only write under
+`$XDG_CACHE_HOME/agents-live/`; they do not change the project or install an
+update.
+
 When `doctor` reports that the project skill payload does not match the
 installed package, run `agents-live upgrade`. The command replaces only the
 managed payload items (`SKILL.md`, `VERSION`, `docs`, and `templates`) and

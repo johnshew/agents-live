@@ -15,8 +15,11 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +28,7 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, init, migrate, ownership,
-        paths, spawn, upgrade,
+        paths, spawn, update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -39,6 +42,7 @@ except ImportError:  # flat checkout layout
     import ownership
     import paths
     import spawn
+    import update_check
     import upgrade
 
 
@@ -199,6 +203,164 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
+    def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
+        import importlib
+        prereqs = importlib.import_module(
+            f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
+
+        with (
+            mock.patch.object(prereqs, "collect", return_value=[]),
+            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(
+                update_check, "refresh", side_effect=OSError) as refresh,
+            mock.patch.object(
+                update_check, "status_text", return_value="Update check: current") as status,
+            mock.patch.object(update_check, "interactive", return_value=True),
+        ):
+            self.assertEqual(prereqs.main([]), 0)
+        refresh.assert_called_once()
+        status.assert_called_once()
+
+    def test_doctor_json_suppresses_cached_update_result(self) -> None:
+        import importlib
+        prereqs = importlib.import_module(
+            f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
+
+        with (
+            mock.patch.object(prereqs, "collect", return_value=[]),
+            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "refresh") as refresh,
+            mock.patch.object(update_check, "status_text") as status,
+            mock.patch.object(update_check, "interactive", return_value=True),
+        ):
+            self.assertEqual(prereqs.main(["--json"]), 0)
+        refresh.assert_called_once()
+        status.assert_not_called()
+
+
+class TestUpdateCheck(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self._env = mock.patch.dict(os.environ, {
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+        })
+        self._env.start()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _response(metadata: dict) -> io.BytesIO:
+        return io.BytesIO(json.dumps(metadata).encode())
+
+    def test_refresh_selects_latest_stable_semantic_version(self) -> None:
+        opener = mock.Mock(return_value=self._response({
+            "info": {"version": "2.0.0rc1"},
+            "releases": {"1.9.0": [], "2.0.0rc1": [], "1.10.0": []},
+        }))
+        result = update_check.refresh(now=100, opener=opener)
+        self.assertEqual(result["latest_version"], "1.10.0")
+        opener.assert_called_once()
+
+    def test_cache_timestamp_controls_network_launch(self) -> None:
+        self.assertEqual(update_check.CACHE_INTERVAL, 60 * 60)
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100)
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0][2], update_check.__name__)
+
+        update_check.refresh(
+            now=100,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "1.2.3"},
+            })),
+        )
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=101)
+        popen.assert_not_called()
+
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL - 1)
+        popen.assert_not_called()
+
+        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+            update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL)
+        popen.assert_called_once()
+
+    def test_legacy_opt_outs_do_not_suppress_check(self) -> None:
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "agents-live" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("update_check = false\n", encoding="utf-8")
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_NO_UPDATE_CHECK": "1"}),
+            mock.patch.object(update_check.subprocess, "Popen") as popen,
+        ):
+            update_check.launch_if_stale(now=100)
+        popen.assert_called_once()
+
+    def test_offline_and_malformed_metadata_are_cached_failures(self) -> None:
+        offline = update_check.refresh(
+            now=100, opener=mock.Mock(side_effect=TimeoutError))
+        self.assertEqual(offline["error"], "TimeoutError")
+        malformed = update_check.refresh(
+            now=200,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "2.0.0rc1"},
+                "releases": {"2.0.0beta1": [], "2.0.0rc1": []},
+            })),
+        )
+        self.assertEqual(malformed["error"], "ValueError")
+        self.assertIsNone(malformed["latest_version"])
+
+    def test_malformed_cache_is_ignored(self) -> None:
+        path = update_check.cache_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json", encoding="utf-8")
+        self.assertIsNone(update_check.cached_result())
+
+    def test_available_notice_is_emitted_once_per_check(self) -> None:
+        update_check.refresh(
+            now=100,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "1.2.3"},
+            })),
+        )
+        notice = update_check.consume_notice("1.2.2", now=101)
+        self.assertIn("uv tool upgrade agents-live", notice)
+        self.assertIsNone(update_check.consume_notice("1.2.2", now=102))
+        self.assertIsNone(update_check.consume_notice("1.2.3", now=102))
+        update_check.refresh(
+            now=200,
+            opener=mock.Mock(return_value=self._response({
+                "info": {"version": "1.2.4"},
+            })),
+        )
+        self.assertIn(
+            "1.2.4 is available",
+            update_check.consume_notice("1.2.2", now=201),
+        )
+
+    def test_cli_suppresses_noninteractive_quiet_and_json_checks(self) -> None:
+        with (
+            mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch.object(update_check, "consume_notice") as consume,
+            mock.patch.object(update_check, "launch_if_stale") as launch,
+        ):
+            self.assertEqual(cli._finish(7, "status", [], json_mode=False), 7)
+            consume.assert_not_called()
+            launch.assert_not_called()
+        with (
+            mock.patch.object(update_check, "interactive", return_value=True),
+            mock.patch.object(update_check, "consume_notice") as consume,
+            mock.patch.object(update_check, "launch_if_stale") as launch,
+        ):
+            cli._finish(0, "run", ["--quiet"], json_mode=False)
+            cli._finish(0, "status", ["--json"], json_mode=False)
+            consume.assert_not_called()
+            launch.assert_not_called()
 
 class TestReleaseTool(unittest.TestCase):
     def _load_tool(self):
