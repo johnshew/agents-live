@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from . import __version__
 
-CACHE_INTERVAL = 60 * 60
+CACHE_INTERVAL = 60 * 60  # one hour
 NETWORK_TIMEOUT = 1.0
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"
 # Stable SemVer only: the absent ``-prerelease`` production deliberately
