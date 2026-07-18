@@ -239,11 +239,51 @@ class TestAdapterRegistry(unittest.TestCase):
 
 
 class TestCliContract(_TempProject):
+    def setUp(self) -> None:
+        super().setUp()
+        for patcher in (
+            mock.patch.object(update_check, "consume_notice", return_value=None),
+            mock.patch.object(update_check, "launch_if_stale"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_help_exits_zero(self) -> None:
-        self.assertEqual(cli.main(["--help"]), 0)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+        ):
+            self.assertEqual(cli.main(["--help"]), 0)
+        self.assertIn("usage: agents-live", stdout.getvalue())
+        self.assertIn("upgrade", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_unknown_command_exits_two(self) -> None:
-        self.assertEqual(cli.main(["frobnicate"]), 2)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+        ):
+            self.assertEqual(cli.main(["frobnicate"]), 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("error: unknown command 'frobnicate'", stderr.getvalue())
+        self.assertIn("usage: agents-live", stderr.getvalue())
+
+    def test_upgrade_dispatches_for_selected_project(self) -> None:
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(init, "install_skill", return_value=None) as install,
+            mock.patch("sys.stdout", stdout),
+        ):
+            self.assertEqual(cli.main(["upgrade"]), 0)
+        install.assert_called_once_with(self.root)
+        self.assertIn(
+            "Skill payload already matches the installed package",
+            stdout.getvalue(),
+        )
 
     def test_dashboard_script_imports_in_packaged_layout(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
@@ -269,6 +309,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
+            mock.patch("sys.stdout", io.StringIO()),
+            mock.patch("sys.stderr", io.StringIO()),
         ):
             self.assertEqual(prereqs.main([]), 0)
         refresh.assert_called_once()
@@ -285,6 +327,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(update_check, "status_text") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
+            mock.patch("sys.stdout", io.StringIO()),
+            mock.patch("sys.stderr", io.StringIO()),
         ):
             self.assertEqual(prereqs.main(["--json"]), 0)
         refresh.assert_called_once()
