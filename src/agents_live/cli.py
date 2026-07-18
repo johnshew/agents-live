@@ -40,7 +40,6 @@ import os
 import shutil
 import subprocess
 import sys
-from importlib import metadata
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -239,13 +238,14 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    if args == ["--version"]:
-        print(f"agents-live {metadata.version('agents-live')}")
-        return 0
-
     # Global flags, accepted in any order before the subcommand.
     json_mode = False
     while args:
+        if args[0] == "--version":
+            # __version__ is the same source every other consumer reads
+            # (update checks, doctor), so the numbers can never disagree.
+            print(f"agents-live {__version__}")
+            return 0
         if args[0] == "--json":
             json_mode = True
             # Layer 2 (§3.6): carry json mode into in-process subcommands
@@ -332,11 +332,20 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "logs" and rest and rest[0] == "timeline":
             script, rest = "timeline.py", rest[1:]
         uv = shutil.which("uv") or "uv"
-        completed = subprocess.run(
-            [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
-            check=False,
-        )
-        return _finish(completed.returncode, cmd, rest, json_mode=json_mode)
+        try:
+            completed = subprocess.run(
+                [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
+                check=False,
+            )
+        except KeyboardInterrupt:
+            # Ctrl-C reaches the child (same process group) which handles
+            # its own shutdown; the waiting parent reports the
+            # conventional interrupt status instead of a traceback.
+            return 130
+        code = completed.returncode
+        if code < 0:
+            code = 128 - code  # signal death -> conventional 128+signum
+        return _finish(code, cmd, rest, json_mode=json_mode)
 
     if cmd not in IN_PROCESS:
         print(f"error: unknown command '{cmd}'\n\n{_usage()}", file=sys.stderr)

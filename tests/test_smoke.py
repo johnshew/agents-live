@@ -554,10 +554,11 @@ class TestCliContract(_TempProject):
                     mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
                 ):
                     self.assertEqual(cli.main(["--version"]), 0)
+                    # __version__ is THE version source (update checks,
+                    # doctor); --version must read the same one.
                     self.assertEqual(
                         stdout.getvalue(),
-                        f"agents-live "
-                        f"{importlib.metadata.version('agents-live')}\n",
+                        f"agents-live {cli.__version__}\n",
                     )
                     resolve_root.assert_not_called()
                     interactive.assert_not_called()
@@ -566,6 +567,11 @@ class TestCliContract(_TempProject):
             if selected_root is not None:
                 os.environ[paths.ENV_VAR] = selected_root
             paths.clear_cache()
+
+    def test_version_combines_with_other_global_flags(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(cli.main(["--json", "--version"]), 0)
+        self.assertIn(f"agents-live {cli.__version__}", stdout.getvalue())
 
     def test_heartbeat_works_outside_repository(self) -> None:
         os.environ.pop(paths.ENV_VAR, None)
