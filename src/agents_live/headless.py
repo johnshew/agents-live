@@ -28,8 +28,8 @@ layer can use it without a dependency cycle.
 """
 from __future__ import annotations
 
-import glob
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -2517,7 +2517,7 @@ def crontab_lock() -> Iterator[None]:
         os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     lock_path = state_home / "agents-live" / "crontab.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
+    with lock_path.open("a", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

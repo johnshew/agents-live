@@ -83,6 +83,7 @@ pre-processor: Agents/handlers/prep.py
 ---
 Smoke fixture body.
 """
+FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
 class TestPathsResolver(_TempProject):
@@ -140,13 +141,12 @@ class TestInvocationForms(_TempProject):
         cron = (f"0 6 * * * cd {self.root} && agents-live run "
                 "--name shared --quiet")
         watcher = headless.build_reboot_watcher_line("shared")
-        foreign = "/tmp/foreign-agents-live-project"
         self.assertTrue(headless.cron_line_matches(cron, "shared"))
         self.assertFalse(headless.cron_line_matches(
-            cron.replace(str(self.root), foreign), "shared"))
+            cron.replace(str(self.root), FOREIGN_REPO), "shared"))
         with mock.patch.object(
                 headless, "current_crontab_lines",
-                return_value=[watcher.replace(str(self.root), foreign)]):
+                return_value=[watcher.replace(str(self.root), FOREIGN_REPO)]):
             self.assertEqual(headless.list_reboot_watcher_agent_names(), [])
 
     def test_crontab_lock_fails_fast_when_busy(self) -> None:
@@ -162,9 +162,8 @@ class TestInvocationForms(_TempProject):
         cron = (f"0 6 * * * cd {self.root} && agents-live run "
                 "--name shared --quiet")
         watcher = headless.build_reboot_watcher_line("shared")
-        foreign = "/tmp/foreign-agents-live-project"
-        foreign_cron = cron.replace(str(self.root), foreign)
-        foreign_watcher = watcher.replace(str(self.root), foreign)
+        foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
+        foreign_watcher = watcher.replace(str(self.root), FOREIGN_REPO)
         with (
             mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
@@ -208,8 +207,8 @@ class TestMigratePlanning(_TempProject):
 
     def test_foreign_same_named_entries_are_not_migrated(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        foreign = (f"0 6 * * * cd /tmp/foreign-agents-live-project && "
-                   "agents-live --repo /tmp/foreign-agents-live-project run "
+        foreign = (f"0 6 * * * cd {FOREIGN_REPO} && "
+                   f"agents-live --repo {FOREIGN_REPO} run "
                    "--name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([foreign])
         self.assertEqual(plan, {"schedule": {}, "watcher": {}, "missing": []})
