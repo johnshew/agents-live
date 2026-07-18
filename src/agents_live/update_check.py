@@ -18,6 +18,8 @@ CACHE_INTERVAL = 24 * 60 * 60
 NETWORK_TIMEOUT = 1.0
 NO_CHECK_ENV = "AGENTS_LIVE_NO_UPDATE_CHECK"
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"
+# Stable SemVer only: the absent ``-prerelease`` production deliberately
+# rejects alpha, beta, and release-candidate metadata.
 _STABLE_SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?$"
 )
@@ -124,20 +126,20 @@ def _lock_path() -> Path:
     return cache_path().with_suffix(".lock")
 
 
-def _claim_refresh() -> bool:
+def _claim_refresh(now: float) -> bool:
     lock = _lock_path()
     for attempt in range(2):
         try:
             lock.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(descriptor, "w") as handle:
-                handle.write(str(time.time()))
+                handle.write(str(now))
             return True
         except FileExistsError:
             if attempt:
                 return False
             try:
-                if time.time() - lock.stat().st_mtime <= CACHE_INTERVAL:
+                if now - lock.stat().st_mtime <= CACHE_INTERVAL:
                     return False
                 lock.unlink(missing_ok=True)
             except OSError:
@@ -150,7 +152,7 @@ def _claim_refresh() -> bool:
 def launch_if_stale(*, now: float | None = None) -> None:
     """Start a detached refresh without delaying the requested command."""
     current = time.time() if now is None else now
-    if disabled() or _is_fresh(_read_cache(), current) or not _claim_refresh():
+    if disabled() or _is_fresh(_read_cache(), current) or not _claim_refresh(current):
         return
     try:
         subprocess.Popen(

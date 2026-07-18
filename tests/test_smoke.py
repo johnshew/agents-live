@@ -285,6 +285,7 @@ class TestUpdateCheck(unittest.TestCase):
             now=200,
             opener=mock.Mock(return_value=self._response({
                 "info": {"version": "2.0.0rc1"},
+                "releases": {"2.0.0beta1": [], "2.0.0rc1": []},
             })),
         )
         self.assertEqual(malformed["error"], "ValueError")
