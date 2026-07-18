@@ -15,6 +15,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -183,6 +184,17 @@ class TestCliContract(_TempProject):
 
     def test_unknown_command_exits_two(self) -> None:
         self.assertEqual(cli.main(["frobnicate"]), 2)
+
+    def test_dashboard_script_imports_in_packaged_layout(self) -> None:
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        result = subprocess.run(
+            ["uv", "run", "--script", str(dashboard), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--dev", result.stdout)
 
 
 class TestInstallSkill(_TempProject):

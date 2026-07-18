@@ -4,6 +4,27 @@ Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
+## Unreleased
+
+Packaged dashboard and Windows heartbeat fixes (found migrating
+razor15 per the F7 runbook).
+
+- fix: `dashboard` crashed on launch in a packaged install
+  (`ImportError: attempted relative import with no known parent
+  package`): it still imported its siblings as flat top-level modules.
+  It now branches on layout - packaged, imports go through the
+  `agents_live` package; flat, the classic sys.path form. Its action
+  buttons had the same latent bug (`uv run <script>` on module files
+  whose relative imports need the package); packaged they now re-enter
+  through the CLI shim with an explicit `--repo`, the same branch
+  spawn takes.
+- fix: `windows-heartbeat.sh` derived the repo root by walking up from
+  its own location, which only holds in the flat checkout; from
+  site-packages the beacon and log landed silently in the uv tool
+  directory while Task Scheduler reported success. The repo root can
+  now be passed as the first argument; packaged Task Scheduler
+  registrations must pin it (`... -- bash <script> <repo>`).
+
 ## 0.1.4 - 2026-07-18
 
 Pre-flip fixes for packaged installs (#1, #6).

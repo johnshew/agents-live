@@ -45,11 +45,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
 
-import headless  # noqa: E402
-import ownership  # noqa: E402
+# Dual-layout import: packaged, the sibling modules belong to the
+# agents_live package and must be imported through it so their relative
+# imports resolve; flat, they are top-level scripts beside this file.
+# __init__.py is the layout discriminator - the flat scripts dir has none.
+if (SCRIPTS_DIR / "__init__.py").is_file():
+    if str(SCRIPTS_DIR.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR.parent))
+    from agents_live import headless, ownership  # noqa: E402
+else:
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    import headless  # noqa: E402
+    import ownership  # noqa: E402
 from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
 
@@ -235,6 +244,26 @@ DASHBOARD_LOG = LOGS_DIR / "dashboard.log"
 DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log"
 
 
+# Script file -> CLI subcommand, for packaged execution where the flat
+# script files cannot be uv-run (their relative imports need the
+# package). The shim re-enters the same module in-process - the same
+# branch spawn takes for its packaged run invocation.
+_CLI_SUBCOMMAND = {
+    "prereqs.py": "prereqs",
+    "activate.py": "start",
+    "run.py": "run",
+    "teardown.py": "teardown",
+}
+
+
+def _script_argv(script: str, args: list[str]) -> list[str]:
+    """argv for one lifecycle action, for either layout."""
+    if headless.packaged_execution():
+        return [str(headless.cli_shim_path()), "--repo", str(REPO_ROOT),
+                _CLI_SUBCOMMAND[script], *args]
+    return ["uv", "run", str(SCRIPTS_DIR / script), *args]
+
+
 def _run_script(script: str, args: list[str],
                 *, timeout: float | None = None) -> tuple[int, str]:
     """Run a lifecycle script with the given args; return (exit_code, output).
@@ -245,7 +274,7 @@ def _run_script(script: str, args: list[str],
     """
     try:
         proc = subprocess.run(
-            ["uv", "run", str(SCRIPTS_DIR / script), *args],
+            _script_argv(script, args),
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

@@ -51,13 +51,26 @@ tail ~/repos/your-repo/Agents/logs/heartbeat.log
 
 Run in an **elevated PowerShell** (Admin):
 
+In a packaged install, point the task at the scripts inside the
+installed package — never at a repo checkout, whose copies can move or
+be deleted — and pass the repo root as the script's argument (the
+walk-up default only resolves the repo in the flat checkout). Find the
+packaged copies with:
+
+```bash
+find ~/.local/share/uv/tools/agents-live -name windows-heartbeat.sh -o -name run-hidden.vbs
+```
+
 ```powershell
-# Adjust distro name and repo path for your machine:
-$vbsPath = "\\wsl.localhost\Ubuntu\home\you\repos\your-repo\.claude\skills\agents-live\scripts\run-hidden.vbs"
-$shPath  = "/home/you/repos/your-repo/.claude/skills/agents-live/scripts/windows-heartbeat.sh"
+# Adjust distro name, user, repo, and Python version for your machine
+# (the site-packages segment embeds the Python minor version — re-run
+# the find above and re-register after interpreter upgrades):
+$vbsPath = "\\wsl.localhost\Ubuntu\home\you\.local\share\uv\tools\agents-live\lib\python3.13\site-packages\agents_live\run-hidden.vbs"
+$shPath  = "/home/you/.local/share/uv/tools/agents-live/lib/python3.13/site-packages/agents_live/windows-heartbeat.sh"
+$repo    = "/home/you/repos/your-repo"
 
 $action  = New-ScheduledTaskAction -Execute "wscript.exe" `
-    -Argument "`"$vbsPath`" `"wsl.exe -d Ubuntu -- bash $shPath`""
+    -Argument "`"$vbsPath`" `"wsl.exe -d Ubuntu -- bash $shPath $repo`""
 
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
     -RepetitionInterval (New-TimeSpan -Minutes 5)

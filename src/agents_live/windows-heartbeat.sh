@@ -2,10 +2,18 @@
 # windows-heartbeat.sh - Keep WSL alive so cron-based Agents Live agents keep running.
 # Called by Windows Task Scheduler every 5 minutes.
 #
+# Usage: windows-heartbeat.sh [REPO_DIR]
+#
 # Writes Agents/data/heartbeat.ok on each successful run so the health check
 # and dashboard can confirm the Windows scheduler is working.
+#
+# REPO_DIR must be passed explicitly in a packaged install: the
+# walk-up default only holds in the flat checkout, where this script
+# lives at .claude/skills/agents-live/scripts/ inside the repo. From
+# site-packages it resolves to the uv tool directory and the beacon
+# lands there, invisible to the health check.
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REPO_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 LOG_DIR="$REPO_DIR/Agents/logs"
 LOG_FILE="$LOG_DIR/heartbeat.log"
 DATA_DIR="$REPO_DIR/Agents/data"
