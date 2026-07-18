@@ -145,7 +145,7 @@ def _wait_for_fresh_beacon(previous_mtime: float | None, timeout: float = 20) ->
         if current is not None and (
                 previous_mtime is None or current > previous_mtime):
             return True
-        time.sleep(0.25)
+        time.sleep(0.5)
     return False
 
 

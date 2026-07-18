@@ -10,7 +10,7 @@ if [[ ! -x "$CLI" ]]; then
     exit 1
 fi
 if [[ -z "${WSL_DISTRO_NAME:-}" ]]; then
-    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; run agents-live heartbeat install --distro <name>" >&2
+    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; run agents-live heartbeat install --distro <name> (replace <name> with a distro from wsl.exe -l -q)" >&2
     exit 1
 fi
 # A legacy task reaches this wrapper after an upgrade. Installing the

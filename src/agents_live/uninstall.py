@@ -32,8 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     uv = shutil.which("uv")
     if not uv:
         print(
-            "error: host cleanup succeeded, but uv was not found; run "
-            "`uv tool uninstall agents-live`",
+            "error: host cleanup succeeded, but uv was not found; restore or "
+            "install uv, then run `uv tool uninstall agents-live`",
             file=sys.stderr)
         return 1
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)

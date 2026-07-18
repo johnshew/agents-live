@@ -572,6 +572,17 @@ class TestWindowsHeartbeat(unittest.TestCase):
             invocation.read_text(encoding="utf-8"),
             "heartbeat install --distro Ubuntu\n")
 
+    def test_compatibility_wrapper_fails_clearly_without_stable_shim(self) -> None:
+        wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
+        self.shim.unlink()
+        completed = subprocess.run(
+            ["bash", str(wrapper)],
+            env={**os.environ, "HOME": str(self.home),
+                 "WSL_DISTRO_NAME": "Ubuntu"},
+            capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("uv shim not found", completed.stderr)
+
 
 class TestTimeline(_TempProject):
     def test_bare_timeline_keeps_valid_rows_among_invalid_rows(self) -> None:
