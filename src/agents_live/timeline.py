@@ -86,7 +86,24 @@ def load_jsonl(path: Path, text_filter: str | None, since: str | None) -> list[d
                 continue
             if (not isinstance(d, dict)
                     or d.get("log_schema") != 5
-                    or not d.get("agent_name")):
+                    or not isinstance(d.get("agent_name"), str)
+                    or not d["agent_name"]
+                    or not isinstance(d.get("ts", ""), str)
+                    or not isinstance(d.get("phase", ""), str)
+                    or any(
+                        d.get(field) is not None
+                        and not isinstance(d[field], str)
+                        for field in ("status", "message", "summary", "output")
+                    )
+                    or (
+                        d.get("duration_s") is not None
+                        and not isinstance(d["duration_s"], (int, float))
+                    )
+                    or not isinstance(d.get("changed_files", []), list)
+                    or not all(
+                        isinstance(item, str)
+                        for item in d.get("changed_files", [])
+                    )):
                 skipped += 1
                 continue
             if since and d.get("ts", "") < since:
@@ -226,7 +243,8 @@ def print_timeline(events: list[dict]) -> None:
             parts.append(detail_msg)
 
         if ev.get("tokens_in"):
-            parts.append(f"tokens={ev['tokens_in']}in/{ev['tokens_out']}out")
+            parts.append(
+                f"tokens={ev['tokens_in']}in/{ev.get('tokens_out', '?')}out")
         if ev.get("premium_requests"):
             parts.append(f"reqs={ev['premium_requests']}")
 

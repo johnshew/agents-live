@@ -428,7 +428,14 @@ class TestTimeline(_TempProject):
              "agent_name": "legacy-agent"},
         ]
         log.write_text(
-            "\n".join([json.dumps(row) for row in rows] + ["not-json", "[]"]),
+            "\n".join(
+                [json.dumps(row) for row in rows]
+                + ["not-json", "[]", json.dumps({
+                    "log_schema": 5,
+                    "ts": [],
+                    "agent_name": "malformed-agent",
+                })]
+            ),
             encoding="utf-8",
         )
 
@@ -443,7 +450,8 @@ class TestTimeline(_TempProject):
         self.assertIn("Timeline (all agents, last 50)", result.stdout)
         self.assertIn("valid-agent", result.stdout)
         self.assertNotIn("legacy-agent", result.stdout)
-        self.assertIn("skipped 3 malformed or pre-v5 rows", result.stderr)
+        self.assertNotIn("malformed-agent", result.stdout)
+        self.assertIn("skipped 4 malformed or pre-v5 rows", result.stderr)
 
 
 class TestUpdateCheck(unittest.TestCase):
