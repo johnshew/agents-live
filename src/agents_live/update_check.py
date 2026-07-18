@@ -18,7 +18,7 @@ CACHE_INTERVAL = 24 * 60 * 60
 NETWORK_TIMEOUT = 1.0
 NO_CHECK_ENV = "AGENTS_LIVE_NO_UPDATE_CHECK"
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"
-_SEMVER = re.compile(
+_STABLE_SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?$"
 )
 
@@ -49,7 +49,7 @@ def interactive() -> bool:
 
 
 def _version(value: object) -> tuple[int, int, int] | None:
-    match = _SEMVER.fullmatch(str(value))
+    match = _STABLE_SEMVER.fullmatch(str(value))
     if match is None:
         return None
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
@@ -126,22 +126,25 @@ def _lock_path() -> Path:
 
 def _claim_refresh() -> bool:
     lock = _lock_path()
-    try:
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(str(time.time()))
-        return True
-    except FileExistsError:
+    for attempt in range(2):
         try:
-            if time.time() - lock.stat().st_mtime > CACHE_INTERVAL:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(str(time.time()))
+            return True
+        except FileExistsError:
+            if attempt:
+                return False
+            try:
+                if time.time() - lock.stat().st_mtime <= CACHE_INTERVAL:
+                    return False
                 lock.unlink(missing_ok=True)
-                return _claim_refresh()
+            except OSError:
+                return False
         except OSError:
-            pass
-        return False
-    except OSError:
-        return False
+            return False
+    return False
 
 
 def launch_if_stale(*, now: float | None = None) -> None:
@@ -196,9 +199,11 @@ def status_text(installed: str = __version__) -> str:
     if cache is None:
         return "Update check: never completed"
     latest = cache.get("latest_version")
-    if _version(latest) is None:
+    installed_semver = _version(installed)
+    latest_semver = _version(latest)
+    if latest_semver is None:
         return f"Update check: last attempt failed ({cache.get('error', 'invalid metadata')})"
-    if _version(installed) is not None and _version(latest) > _version(installed):
+    if installed_semver is not None and latest_semver > installed_semver:
         return (
             f"Update check: agents-live {installed} installed; {latest} available\n"
             "  Upgrade with: uv tool upgrade agents-live"

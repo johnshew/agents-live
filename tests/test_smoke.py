@@ -323,16 +323,20 @@ class TestUpdateCheck(unittest.TestCase):
     def test_cli_suppresses_noninteractive_quiet_and_json_checks(self) -> None:
         with (
             mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch.object(update_check, "consume_notice") as consume,
             mock.patch.object(update_check, "launch_if_stale") as launch,
         ):
             self.assertEqual(cli._finish(7, "status", [], json_mode=False), 7)
+            consume.assert_not_called()
             launch.assert_not_called()
         with (
             mock.patch.object(update_check, "interactive", return_value=True),
+            mock.patch.object(update_check, "consume_notice") as consume,
             mock.patch.object(update_check, "launch_if_stale") as launch,
         ):
             cli._finish(0, "run", ["--quiet"], json_mode=False)
             cli._finish(0, "status", ["--json"], json_mode=False)
+            consume.assert_not_called()
             launch.assert_not_called()
 
 class TestReleaseTool(unittest.TestCase):
