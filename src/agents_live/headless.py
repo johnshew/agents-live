@@ -54,7 +54,7 @@ import yaml
 
 from . import agent_adapters
 from . import paths
-from .mcp_config_loader import load_mcp_servers
+from .mcp_config_loader import McpConfigError, load_mcp_servers
 
 HEADLESS_PROMPT = (
     "You are a headless automated agent. Output ONLY what the prompt asks for. "
@@ -320,9 +320,10 @@ class AgentConfig:
         if not name:
             return None
         if "/" in name or "\\" in name:
-            return repo_root() / name
+            return _contained_in_repo(repo_root() / name, "processor", name)
         # Resolve bare handler names relative to the agent's own directory
-        return self.prompt_path.parent / "handlers" / name
+        return _contained_in_repo(
+            self.prompt_path.parent / "handlers" / name, "processor", name)
 
     @property
     def prompt_reference(self) -> str:
@@ -384,11 +385,9 @@ class AgentConfig:
         return self.watch_path
 
     def watch_path_absolute_for(self, wp: str) -> Path:
-        """Resolve a single watch path string to an absolute path."""
-        p = Path(wp)
-        if p.is_absolute():
-            return p
-        return repo_root() / wp
+        """Resolve a single watch path string to an absolute path inside
+        the repository (the documented repo-relative contract)."""
+        return _contained_in_repo(repo_root() / wp, "watchPath", wp)
 
     @property
     def watch_path_absolute(self) -> Path | None:
@@ -420,6 +419,50 @@ def _repo_relative(path: Path) -> str:
         return str(path.resolve().relative_to(repo_root()))
     except ValueError:
         return str(path)
+
+
+def _contained_in_repo(path: Path, kind: str, reference: str) -> Path:
+    """*path*, after requiring it to live inside the repository root.
+
+    Watch paths and processors are documented as repository-relative;
+    resolving (so symlinks and ``..`` count) and checking containment
+    keeps an agent definition from watching external data or executing
+    code outside the project (PKG-003). Note ``repo_root() / value``
+    yields the value itself when it is absolute, so absolute paths land
+    here too and only pass when they point inside the repo.
+    """
+    root = repo_root().resolve()
+    resolved = path.resolve()
+    if resolved == root or root in resolved.parents:
+        return path
+    raise AgentsLiveError(
+        f"{kind} {reference!r} resolves outside the repository root "
+        f"({resolved}); use a repository-relative path")
+
+
+# Vixie cron vocabulary only. The strict charset is a security boundary,
+# not pedantry: schedule strings are embedded as the leading tokens of
+# crontab lines, so anything beyond field characters (a `;`, `#`, or
+# newline) would smuggle shell commands or extra lines into the user's
+# crontab (PKG-002).
+_CRON_KEYWORDS = frozenset({
+    "@reboot", "@yearly", "@annually", "@monthly", "@weekly", "@daily",
+    "@midnight", "@hourly"})
+_CRON_FIELD = re.compile(r"^[0-9*/,\-]+$")
+
+
+def _validated_schedule(value: object, prompt: Path) -> str:
+    """*value* as a cron expression safe to persist into a crontab line:
+    exactly five fields with a strict charset, or one @keyword."""
+    sched = str(value).strip()
+    fields = sched.split()
+    if len(fields) == 1 and fields[0] in _CRON_KEYWORDS:
+        return fields[0]
+    if len(fields) == 5 and all(_CRON_FIELD.fullmatch(f) for f in fields):
+        return " ".join(fields)
+    raise AgentsLiveError(
+        f"invalid schedule {sched!r} in {_repo_relative(prompt)}; expected "
+        "five cron fields (digits and * / , - only) or an @keyword")
 
 
 def clean_path() -> str:
@@ -926,11 +969,12 @@ def _parse_frontmatter(prompt_path: str | Path) -> AgentConfig:
     post_processor = _opt_str(data.get("post-processor"))
     schedule_value = data.get("schedule")
     if isinstance(schedule_value, list):
-        schedule = [str(v) for v in schedule_value if v not in (None, "")]
+        schedule = [_validated_schedule(v, prompt)
+                    for v in schedule_value if v not in (None, "")]
     elif schedule_value in (None, ""):
         schedule = []
     else:
-        schedule = [str(schedule_value)]
+        schedule = [_validated_schedule(schedule_value, prompt)]
     watch_value = data.get("watchPath")
     if isinstance(watch_value, list):
         watch_path = [str(v) for v in watch_value if v not in (None, "")]
@@ -1178,7 +1222,13 @@ def list_agents() -> list[str]:
 
 def _load_mcp_servers() -> dict:
     """Load MCP server definitions from .vscode/mcp.json."""
-    return load_mcp_servers(repo_root())
+    try:
+        return load_mcp_servers(repo_root())
+    except McpConfigError as exc:
+        # Fail closed as a typed CLI error, not a traceback: running the
+        # agent without its declared MCP servers would silently change
+        # its capabilities.
+        raise AgentsLiveError(str(exc)) from exc
 
 
 def _resolve_mcp(name: str, runtime: str = "claude") -> ResolvedMcp:

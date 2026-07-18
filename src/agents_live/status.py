@@ -149,11 +149,17 @@ def _in_sandbox() -> bool:
         result = subprocess.run(
             ["crontab", "-l"],
             capture_output=True,
+            text=True,
             check=False,
         )
-        return result.returncode != 0
     except FileNotFoundError:
         return False  # crontab not installed - not a sandbox issue
+    if result.returncode == 0:
+        return False
+    # A fresh user has no crontab yet (`no crontab for <user>`, exit 1);
+    # that is an empty table, not a sandbox (mirrors
+    # headless.current_crontab_lines).
+    return "no crontab for" not in (result.stderr or "")
 
 
 def main() -> int:

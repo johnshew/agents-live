@@ -31,7 +31,8 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, heartbeat, init, migrate,
-        ownership, paths, prereqs, repos, spawn, uninstall, update_check, upgrade,
+        ownership, paths, prereqs, repos, spawn, status, uninstall,
+        update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -48,6 +49,7 @@ except ImportError:  # flat checkout layout
     import prereqs
     import repos
     import spawn
+    import status
     import update_check
     import upgrade
     import uninstall
@@ -250,6 +252,42 @@ class TestAgentParsing(_TempProject):
         with self.assertRaises(headless.AgentsLiveError):
             headless.load_agent_config("bad-runtime")
 
+    def test_schedule_injection_fails_closed(self) -> None:
+        # PKG-002: the schedule is embedded verbatim at the head of a
+        # crontab line, so anything beyond cron fields is command
+        # injection, not configuration.
+        for hostile in (
+            "* * * * * touch /tmp/pwned; #",
+            "@reboot; touch /tmp/pwned",
+            "0 6 * * *\n* * * * * touch /tmp/pwned",
+            "@daily @daily",
+        ):
+            self.write_agent("sched", AGENT_DEFINITION.replace(
+                f'schedule: "{TEST_CRON_SCHEDULE}"',
+                f'schedule: "{hostile.replace(chr(10), chr(92) + "n")}"'))
+            with self.assertRaisesRegex(headless.AgentsLiveError,
+                                        "invalid schedule"):
+                headless.load_agent_config("sched")
+        for benign in ("@reboot", "*/5 8-18 * * 1-5", TEST_CRON_SCHEDULE):
+            self.write_agent("sched", AGENT_DEFINITION.replace(
+                TEST_CRON_SCHEDULE, benign))
+            config = headless.load_agent_config("sched")
+            self.assertEqual(config.schedule, [benign])
+
+    def test_watch_and_processor_paths_stay_inside_repo(self) -> None:
+        # PKG-003: watchPath and processors are documented repo-relative.
+        self.write_agent("esc", AGENT_DEFINITION + "")
+        config = headless.load_agent_config("esc")
+        with self.assertRaisesRegex(headless.AgentsLiveError, "outside"):
+            config.watch_path_absolute_for("../outside")
+        with self.assertRaisesRegex(headless.AgentsLiveError, "outside"):
+            config.watch_path_absolute_for("/etc")
+        inside = config.watch_path_absolute_for("Agents/data")
+        self.assertEqual(inside, self.root / "Agents" / "data")
+        escaping = headless.replace(config, pre_processor="../evil.py")
+        with self.assertRaisesRegex(headless.AgentsLiveError, "outside"):
+            _ = escaping.pre_processor_path
+
 
 class TestInvocationForms(_TempProject):
     def test_run_invocation_carries_name_token(self) -> None:
@@ -415,6 +453,44 @@ class TestInvocationForms(_TempProject):
             orphans, stale = prereqs._crontab_inconsistencies()
         self.assertEqual(orphans, [])
         self.assertEqual(stale, [f"{gone} (project root moved or deleted)"])
+
+    def test_jsonc_mcp_config_parses_and_fails_closed(self) -> None:
+        # PKG-004: inline comments and trailing commas are valid VS Code
+        # JSONC; malformed files must raise, never silently drop servers.
+        # Layout-agnostic import: resolve the loader through headless.
+        loader = importlib.import_module(
+            headless.load_mcp_servers.__module__)
+        config_dir = self.root / ".vscode"
+        config_dir.mkdir()
+        (config_dir / "mcp.json").write_text(
+            '{\n'
+            '  // full-line comment\n'
+            '  "servers": {\n'
+            '    "custom": {\n'
+            '      "command": "npx", // inline comment\n'
+            '      "args": ["-y", "custom-mcp",], /* block */\n'
+            '    },\n'
+            '  },\n'
+            '}\n',
+            encoding="utf-8")
+        servers = loader.load_mcp_servers(self.root)
+        self.assertEqual(servers["custom"]["command"], "npx")
+        self.assertEqual(servers["custom"]["args"], ["-y", "custom-mcp"])
+        (config_dir / "mcp.json").write_text("{broken", encoding="utf-8")
+        with self.assertRaises(loader.McpConfigError):
+            loader.load_mcp_servers(self.root)
+
+    def test_status_treats_missing_crontab_as_empty_not_sandbox(self) -> None:
+        # PKG-005: a fresh user has no crontab; that is not a sandbox.
+        fresh = subprocess.CompletedProcess(
+            ["crontab", "-l"], 1, stdout="", stderr="no crontab for user\n")
+        sandbox = subprocess.CompletedProcess(
+            ["crontab", "-l"], 1, stdout="",
+            stderr="crontab: not allowed here\n")
+        with mock.patch.object(status.subprocess, "run", return_value=fresh):
+            self.assertFalse(status._in_sandbox())
+        with mock.patch.object(status.subprocess, "run", return_value=sandbox):
+            self.assertTrue(status._in_sandbox())
 
     def test_doctor_skips_unreadable_crontab(self) -> None:
         completed = subprocess.CompletedProcess(
