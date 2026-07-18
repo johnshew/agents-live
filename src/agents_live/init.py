@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -106,6 +107,35 @@ def _copy_payload(source: Path, dest: Path) -> None:
             shutil.copy2(payload, dest / item)
 
 
+def _install_payload(source: Path, dest: Path) -> None:
+    """Stage the payload beside *dest*, then swap it in.
+
+    The full copy happens in a staging directory first, so a mid-copy
+    failure (disk full, Ctrl-C) never destroys an existing install.
+    During the swap, VERSION moves last: a payload interrupted mid-swap
+    has no VERSION marker, keeps comparing as stale, and the next
+    install/upgrade completes it — it can never masquerade as current.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(
+        dir=dest.parent, prefix=".agents-live-staging-"))
+    try:
+        _copy_payload(source, staging)
+        dest.mkdir(exist_ok=True)
+        for item in _SKILL_PAYLOAD:
+            target = dest / item
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+        for item in sorted(_SKILL_PAYLOAD, key=lambda i: i == "VERSION"):
+            staged = staging / item
+            if staged.exists():
+                shutil.move(str(staged), str(dest / item))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def install_skill(root: Path) -> str | None:
     """Install or refresh the vendored skill payload (§3.4 step 2) in the
     target repo's ``.claude/skills/agents-live/``: SKILL.md, docs, and
@@ -120,8 +150,7 @@ def install_skill(root: Path) -> str | None:
     if source is None or source.resolve() == dest.resolve():
         return None
     if not dest.exists():
-        dest.mkdir(parents=True)
-        _copy_payload(source, dest)
+        _install_payload(source, dest)
         return "installed"
     src_version = _payload_version(source)
     if src_version is None or src_version == _payload_version(dest):
@@ -129,13 +158,7 @@ def install_skill(root: Path) -> str | None:
         # carry none - the release assembler stamps it) -> keep the old
         # leave-untouched contract rather than refreshing blindly.
         return None
-    for item in _SKILL_PAYLOAD:
-        target = dest / item
-        if target.is_dir():
-            shutil.rmtree(target)
-        elif target.exists():
-            target.unlink()
-    _copy_payload(source, dest)
+    _install_payload(source, dest)
     return "refreshed"
 
 

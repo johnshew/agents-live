@@ -361,6 +361,43 @@ class TestInvocationForms(_TempProject):
         self.assertEqual(headless._cron_line_agent_name(flat), "bar")
         self.assertIsNone(headless._cron_line_agent_name(unrelated))
 
+    def test_interrupted_payload_refresh_is_recoverable(self) -> None:
+        source = self.root / "payload-src"
+        (source / "docs").mkdir(parents=True)
+        (source / "SKILL.md").write_text("new skill\n", encoding="utf-8")
+        (source / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+        (source / "docs" / "a.md").write_text("new docs\n", encoding="utf-8")
+        dest = self.root / ".claude" / "skills" / "agents-live"
+        (dest / "docs").mkdir(parents=True)
+        (dest / "SKILL.md").write_text("old skill\n", encoding="utf-8")
+        (dest / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        (dest / "user-note.md").write_text("mine\n", encoding="utf-8")
+
+        # A copy that dies mid-staging must leave the old payload intact.
+        with (
+            mock.patch.object(init, "_skill_source", return_value=source),
+            mock.patch.object(init, "_copy_payload",
+                              side_effect=OSError("disk full")),
+            self.assertRaises(OSError),
+        ):
+            init.install_skill(self.root)
+        self.assertEqual((dest / "VERSION").read_text(encoding="utf-8"),
+                         "1.0.0\n")
+        self.assertEqual((dest / "SKILL.md").read_text(encoding="utf-8"),
+                         "old skill\n")
+
+        # The real refresh completes, preserves user files, and a
+        # rerun reports current.
+        with mock.patch.object(init, "_skill_source", return_value=source):
+            self.assertEqual(init.install_skill(self.root), "refreshed")
+            self.assertIsNone(init.install_skill(self.root))
+        self.assertEqual((dest / "VERSION").read_text(encoding="utf-8"),
+                         "2.0.0\n")
+        self.assertEqual((dest / "user-note.md").read_text(encoding="utf-8"),
+                         "mine\n")
+        self.assertEqual(
+            [p.name for p in dest.parent.iterdir()], ["agents-live"])
+
     def test_doctor_flags_lines_from_missing_project_roots(self) -> None:
         gone = f"{self.root}-deleted"
         crontab = "\n".join([
