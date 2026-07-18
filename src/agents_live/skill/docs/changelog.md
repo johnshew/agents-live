@@ -6,6 +6,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: add an XDG user repository registry with aliases, a safe last-resort
+  default, documented selection precedence, and absolute-path persistence.
+- feat: add isolated, partial-failure-tolerant `status --all-repos` and
+  `doctor --all-repos` views plus a read-only dashboard repository selector.
+- fix: reject absolute or escaping `agent_directories`, including symlink
+  escapes, so within-repository discovery cannot become cross-repository access.
 - fix: scope schedule, watcher, migration, and health-check crontab matching
   to the current repository, so projects sharing a user crontab cannot
   cross-report, remove, rewrite, or reject one another's entries.

@@ -35,6 +35,10 @@ explicit:
 uv run --with-editable . agents-live --repo ~/repos/life doctor
 uv run --with-editable . agents-live --repo ~/repos/life status
 uv run --with-editable . agents-live --repo ~/repos/life dashboard --help
+uv run --with-editable . agents-live repos list
+uv run --with-editable . agents-live status --all-repos
+uv run --with-editable . agents-live doctor --all-repos
+uv run --with-editable . agents-live dashboard --all-repos --help
 ```
 
 Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
@@ -53,6 +57,8 @@ wheel="dist/agents_live-${version}-py3-none-any.whl"
 uvx --from "$wheel" agents-live --help
 uvx --from "$wheel" agents-live --repo ~/repos/life doctor
 uvx --from "$wheel" agents-live --repo ~/repos/life dashboard --help
+uvx --from "$wheel" agents-live repos list
+uvx --from "$wheel" agents-live status --all-repos
 ```
 
 Inspect both artifacts before publication:

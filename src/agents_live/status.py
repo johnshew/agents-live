@@ -16,6 +16,7 @@ import subprocess
 
 from .headless import AgentsLiveError, agent_details, list_agents, load_agent_config
 from . import repos
+from . import preflight
 
 LOGS_DIR = Path("Agents/logs")
 
@@ -163,12 +164,13 @@ def main() -> int:
         help="Read status from every registered repository")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args()
+    json_mode = args.json_mode or preflight.json_mode()
 
     if args.all_repos:
         if args.name:
             parser.error("--all-repos cannot be combined with an agent name")
         payload = repos.collect_status()
-        if args.json_mode:
+        if json_mode:
             print(json.dumps(payload, indent=2))
         else:
             if not payload["repos"]:
@@ -191,7 +193,7 @@ def main() -> int:
         return 1
 
     try:
-        if args.name and not args.json_mode:
+        if args.name and not json_mode:
             raise AgentsLiveError("--json flag is required when querying a single agent")
         if args.name:
             details = agent_details(load_agent_config(args.name))
@@ -200,7 +202,7 @@ def main() -> int:
 
         names = list_agents()
         if not names:
-            if args.json_mode:
+            if json_mode:
                 print('{"agents": []}')
             else:
                 print("No agents configured")
@@ -213,7 +215,7 @@ def main() -> int:
             except AgentsLiveError:
                 continue
 
-        if args.json_mode:
+        if json_mode:
             print(json.dumps({"agents": agents}, indent=2))
         else:
             print(format_table(agents))

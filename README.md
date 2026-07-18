@@ -91,6 +91,25 @@ agents-live logs
 agents-live teardown my-agent   # deactivate — remove its triggers
 ```
 
+For work across projects, register normalized absolute repository paths in
+the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
+`~/.config/agents-live/config.toml`):
+
+```bash
+agents-live repos add life ~/repos/life
+agents-live repos default life
+agents-live --repo life status
+agents-live status --all-repos
+agents-live doctor --all-repos
+agents-live dashboard --all-repos   # read-only repository selector
+```
+
+Selection precedence is explicit `--repo` path or alias,
+`AGENTS_LIVE_REPO`, the nearest local marker, markerless-git adoption for
+`run`/`start`, then the configured default. A default never overrides the
+current project. Aggregate commands are read-only; lifecycle mutations always
+target one selected repository, and persisted commands pin its absolute path.
+
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)

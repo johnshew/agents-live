@@ -96,12 +96,16 @@ not the user-facing contract.
 | `start --all [--dry-run]` | `agents-live start --all [--dry-run]` |
 | `stop <name>` / `teardown <name>` | `agents-live stop <name>` |
 | `status [name] [--json]` | `agents-live status [name] [--json]` |
+| `status --all-repos` | `agents-live status --all-repos` *(read-only, repo-qualified)* |
+| `repos` | `agents-live repos list|add|default|remove` |
 | `dashboard` | `agents-live dashboard --dev` |
+| `dashboard --all-repos` | `agents-live dashboard --all-repos` *(read-only)* |
 | `logs [name]` | `agents-live logs [name] [--errors] [--all] [--limit 50]` |
 | `logs query` | `agents-live logs [--agent name] [--errors] [--all] [--since T] [--slow N]` |
 | `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
 | `doctor` / `prereqs` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
+| `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |

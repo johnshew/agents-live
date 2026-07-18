@@ -154,7 +154,7 @@ def _remove(alias: str) -> None:
 
 def _child_json(alias: str, path: str, command: str) -> dict:
     completed = subprocess.run(
-        [sys.executable, "-m", "agents_live.cli", "--json", "--repo", path, command],
+        [sys.executable, "-m", "agents_live.cli", "--repo", path, command, "--json"],
         capture_output=True, text=True, check=False,
     )
     try:

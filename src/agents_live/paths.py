@@ -10,10 +10,10 @@ Resolution order:
    ``[tool.agents-live]`` table.
 4. The default repository in the user-level XDG registry.
 
-No fallback beyond that: with no explicit root, no env var, and no
-marker on the walk, resolution fails loudly (the Phase 1 acceptance
-criterion - a script-location anchor would resolve inside the installed
-package's environment instead of the user's project). All persisted
+The optional user-configured default is the only fallback: a script-location
+anchor would resolve inside the installed package instead of the user's
+project. With no explicit root, env var, marker, or default, resolution fails
+loudly. All persisted
 invocations (cron lines, watcher respawns, dispatches) pin CWD to the
 repo, so the marker walk always succeeds for scheduled work. One
 first-use exception lives at the CLI layer, not here: interactive
