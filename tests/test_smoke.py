@@ -202,7 +202,7 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
-    def test_interactive_doctor_displays_cached_update_result(self) -> None:
+    def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
         import importlib
         prereqs = importlib.import_module(
             f"{cli.__package__}.prereqs" if cli.__package__ else "prereqs")
@@ -211,7 +211,7 @@ class TestCliContract(_TempProject):
             mock.patch.object(prereqs, "collect", return_value=[]),
             mock.patch.object(prereqs, "_hostname", return_value="test-host"),
             mock.patch.object(
-                update_check, "refresh", side_effect=RuntimeError) as refresh,
+                update_check, "refresh", side_effect=OSError) as refresh,
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
