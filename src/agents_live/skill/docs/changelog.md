@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: add `agents-live upgrade` as the explicit post-package-upgrade
+  workflow for refreshing a project's managed skill payload. Doctor now
+  recommends it when package and payload versions differ; `init` keeps its
+  existing refresh behavior for compatibility.
+
 ## 0.1.6 - 2026-07-18
 
 - fix: the framework smoketest executed lifecycle modules as script

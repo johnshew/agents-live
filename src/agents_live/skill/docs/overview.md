@@ -102,9 +102,10 @@ package-index request metadata; it does not include project or agent data.
 updates the cache. Install an available release with `uv tool upgrade
 agents-live`. Agents Live never updates itself.
 
-After upgrading, run `agents-live --repo <project> init` to refresh the
-optional installed skill payload; `doctor` reports a package and payload
-version mismatch.
+After upgrading, run `agents-live --repo <project> upgrade` to refresh the
+optional installed skill payload. `doctor` reports a package and payload
+version mismatch and recommends this command. `init` remains the first-time
+project setup command.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

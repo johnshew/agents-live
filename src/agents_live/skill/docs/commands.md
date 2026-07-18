@@ -171,6 +171,12 @@ when the cached result is missing or one hour old. Checks only write under
 `$XDG_CACHE_HOME/agents-live/`; they do not change the project or install an
 update.
 
+When `doctor` reports that the project skill payload does not match the
+installed package, run `agents-live upgrade`. The command replaces only the
+managed payload items (`SKILL.md`, `VERSION`, `docs`, and `templates`) and
+preserves other files in the skill directory. It is a no-op when the payload
+is already current. Use `init` for first-time project layout and setup.
+
 ### Checks to perform
 
 1. **Platform**: Confirm running on Linux under WSL, not native Windows.

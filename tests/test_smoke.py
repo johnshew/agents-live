@@ -28,7 +28,7 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, init, migrate, ownership,
-        paths, spawn, update_check,
+        paths, spawn, update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -43,6 +43,7 @@ except ImportError:  # flat checkout layout
     import paths
     import spawn
     import update_check
+    import upgrade
 
 
 class _TempProject(unittest.TestCase):
@@ -582,6 +583,26 @@ class TestInstallSkill(_TempProject):
         self.assertTrue((dest / "scripts" / "keep.py").is_file())
 
         self.assertIsNone(init.install_skill(self.root))
+
+    def test_upgrade_reports_refresh_then_current(self) -> None:
+        with (
+            mock.patch.object(init, "install_skill", return_value="refreshed"),
+            mock.patch("builtins.print") as output,
+            mock.patch("sys.argv", ["agents-live upgrade"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        output.assert_called_once_with(
+            "Upgraded skill payload to match the installed package: "
+            ".claude/skills/agents-live/")
+
+        with (
+            mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch("builtins.print") as output,
+            mock.patch("sys.argv", ["agents-live upgrade"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        output.assert_called_once_with(
+            "Skill payload already matches the installed package")
 
 
 class TestSpawnInvocation(_TempProject):
