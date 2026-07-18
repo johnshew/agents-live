@@ -41,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+from importlib import metadata
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -110,7 +111,8 @@ def _usage() -> str:
     # packaging time, Phase 4).
     blob = f"{DOCS_URL}/blob/v0.1.6/src/agents_live/skill/docs"
     return (
-        "usage: agents-live [--json] [--repo PATH] <command> [args]\n\n"
+        "usage: agents-live [--json] [--repo PATH] <command> [args]\n"
+        "       agents-live --version\n\n"
         "commands:\n"
         "  run <name>          execute an agent once (verbose)\n"
         "  start <name>|--all  activate cron/watcher triggers\n"
@@ -128,7 +130,8 @@ def _usage() -> str:
         "global flags:\n"
         "  --json              machine-readable output and error envelopes\n"
         "  --repo PATH         pin the project root (else AGENTS_LIVE_REPO\n"
-        "                      or marker walk-up from the current directory)\n\n"
+        "                      or marker walk-up from the current directory)\n"
+        "  --version           show the installed version and exit\n\n"
         f"docs: {DOCS_URL}\n"
         f"  commands reference  {blob}/commands.md\n"
         f"  architecture        {blob}/approach.md\n"
@@ -228,6 +231,10 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+
+    if args == ["--version"]:
+        print(f"agents-live {metadata.version('agents-live')}")
+        return 0
 
     # Global flags, accepted in any order before the subcommand.
     json_mode = False

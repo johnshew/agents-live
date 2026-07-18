@@ -14,6 +14,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 """
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import io
 import json
@@ -259,7 +260,34 @@ class TestCliContract(_TempProject):
             self.assertEqual(cli.main(["--help"]), 0)
         self.assertIn("usage: agents-live", stdout.getvalue())
         self.assertIn("upgrade", stdout.getvalue())
+        self.assertIn("--version", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_version_works_outside_repository(self) -> None:
+        saved = Path.cwd()
+        selected_root = os.environ.pop(paths.ENV_VAR, None)
+        paths.clear_cache()
+        try:
+            with tempfile.TemporaryDirectory() as outside:
+                os.chdir(outside)
+                with (
+                    mock.patch.object(paths, "resolve_root") as resolve_root,
+                    mock.patch.object(update_check, "interactive") as interactive,
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                ):
+                    self.assertEqual(cli.main(["--version"]), 0)
+                    self.assertEqual(
+                        stdout.getvalue(),
+                        f"agents-live "
+                        f"{importlib.metadata.version('agents-live')}\n",
+                    )
+                    resolve_root.assert_not_called()
+                    interactive.assert_not_called()
+        finally:
+            os.chdir(saved)
+            if selected_root is not None:
+                os.environ[paths.ENV_VAR] = selected_root
+            paths.clear_cache()
 
     def test_unknown_command_exits_two(self) -> None:
         stdout = io.StringIO()
