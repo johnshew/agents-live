@@ -60,6 +60,11 @@ file-watch agent; cron-only agents need none.
 uv tool install agents-live   # or: uv tool install <path-to-wheel>
 ```
 
+Check for and install a newer PyPI release with `uv tool upgrade
+agents-live`. After upgrading, run `agents-live --repo <project> init` to
+refresh the optional installed skill payload; `doctor` reports a package and
+payload version mismatch.
+
 ## Quick start
 
 ```bash

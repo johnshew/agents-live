@@ -103,7 +103,7 @@ not the user-facing contract.
 | `smoketest` | `agents-live smoketest` |
 | `doctor` / `prereqs` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
-| `release` | Audit, assemble, publish *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
+| `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
 
 **Smoketest and commands that touch cron/inotifywait require `requestUnsandboxedExecution: true`.**
 

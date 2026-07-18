@@ -6,8 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
-Packaged dashboard and Windows heartbeat fixes (found migrating
-razor15 per the F7 runbook).
+Packaged dashboard and Windows heartbeat fixes, plus guarded release
+automation and a source-to-PyPI testing runbook.
 
 - fix: `dashboard` crashed on launch in a packaged install
   (`ImportError: attempted relative import with no known parent
@@ -30,6 +30,15 @@ razor15 per the F7 runbook).
   now expects the scripts installed beside the package - following the
   layout: flat, site-packages, or editable - and requires the repo to
   be pinned in the task action.
+- build: `tools/release.py` now previews, prepares, and publishes a
+  semantic release through guarded phases. It synchronizes every
+  version surface, runs the audit/tests/build, creates an annotated
+  tag, leaves target artifacts available for inspection, pushes the
+  commit and tag atomically, and safely retries GitHub release creation.
+- docs: the contributor testing runbook separates editable source,
+  isolated wheel, and installed PyPI validation. It also documents
+  update detection, skill-payload refresh, and recovery from an
+  editable user-level tool installation.
 
 ## 0.1.4 - 2026-07-18
 

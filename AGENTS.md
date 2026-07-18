@@ -1,4 +1,7 @@
-# AGENTS
+---
+title: Agents Live Repository Guidance
+description: Guidance for coding agents working in the agents-live repository
+---
 
 Guidance for coding agents (Claude Code, GitHub Copilot, others)
 working in this repository.
@@ -14,6 +17,7 @@ work on it.
 | When you are... | Read first |
 |---|---|
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
+| Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
 | Creating, running, or debugging triggered agents in this checkout | [.agents/agents-live.md](.agents/agents-live.md) |
 | Changing the skill payload, docs, or templates | [src/agents_live/skill/SKILL.md](src/agents_live/skill/SKILL.md) and [docs/](src/agents_live/skill/docs/) |
@@ -25,6 +29,9 @@ work on it.
 uv run --with-editable . --script tests/test_smoke.py   # tests
 uv run --with-editable . agents-live --help              # CLI from source
 uv run --script tools/pre-release-audit.py               # release audit
+uv run --script tools/release.py --dry-run                # release preview
+uv run --script tools/release.py --prepare --yes          # prepare patch
+uv run --script tools/release.py --publish --yes          # publish prepared
 ```
 
 ## Rules
@@ -52,7 +59,7 @@ uv run --script tools/pre-release-audit.py               # release audit
 - `src/agents_live/` - package: CLI, runtime modules, and the vendored
   skill payload (`skill/` with SKILL.md, docs, starter templates)
 - `tests/` - export-safe smoke suite
-- `tools/` - release tooling (pre-release audit)
+- `tools/` - release tooling (audit and guarded publish workflow)
 - `Agents/` - local triggered-agent runtime dir (handlers, logs)
 - `.agents/` - agent-facing guides (this file's targets)
 - `.github/workflows/` - CI: publish to PyPI on GitHub release

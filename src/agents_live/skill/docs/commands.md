@@ -1,7 +1,7 @@
 ---
 title: Agents Live Command Reference
 description: Installation, lifecycle, validation, and logging commands for agents-live
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: reference
 ---
 
@@ -499,7 +499,22 @@ Package the agents-live system as a standalone, shareable release.
    uv run --with-editable . python -m unittest tests.test_smoke
    ```
 
-4. **Publish** -- push to the release repository and tag.
+4. **Publish** -- from the assembled public release repository, preview and
+   run the guarded release workflow:
+
+   ```bash
+   uv run --script tools/release.py --dry-run
+   uv run --script tools/release.py --prepare --yes
+   # Inspect dist/ and the local release commit.
+   uv run --script tools/release.py --publish --yes
+   ```
+
+   Use `--bump minor` or `--bump major` instead of the default patch bump
+   when required. The script validates synchronized `main`, updates every
+   version surface and reruns the release gates. Preparation creates the
+   commit and local tag; publication verifies that exact state, reruns the
+   gates, pushes atomically, and creates the GitHub release that triggers
+   PyPI publishing.
 
 Full details: [release-process.md](release-process.md)
 

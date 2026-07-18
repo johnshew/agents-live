@@ -90,6 +90,11 @@ agents-live start file-notes       # activate it unattended
 agents-live teardown file-notes    # clean up - remove its triggers
 ```
 
+Check for and install a newer PyPI release with `uv tool upgrade
+agents-live`. After upgrading, run `agents-live --repo <project> init` to
+refresh the optional installed skill payload; `doctor` reports a package and
+payload version mismatch.
+
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local
 mode, all defaults). `agents-live init` is optional - run it to install

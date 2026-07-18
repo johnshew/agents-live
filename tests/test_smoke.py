@@ -14,11 +14,13 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
@@ -195,6 +197,200 @@ class TestCliContract(_TempProject):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
+
+
+class TestReleaseTool(unittest.TestCase):
+    def _load_tool(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "agents_live_release_tool", root / "tools" / "release.py")
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _fixture(self, module, root: Path) -> dict[Path, bytes]:
+        module.ROOT = root
+        module.PYPROJECT = root / "pyproject.toml"
+        module.VERSION_FILES = (
+            root / "src" / "agents_live" / "__init__.py",
+            root / "src" / "agents_live" / "cli.py",
+            root / "src" / "agents_live" / "skill" / "VERSION",
+        )
+        module.CHANGELOG = (
+            root / "src" / "agents_live" / "skill" / "docs" / "changelog.md")
+        module.RELEASE_FILES = (
+            module.PYPROJECT, *module.VERSION_FILES, module.CHANGELOG)
+        contents = (
+            'version = "1.2.3"\n',
+            '__version__ = "1.2.3"\n',
+            'blob = "https://example.test/blob/v1.2.3/docs"\n',
+            "1.2.3\n",
+            "# Changelog\n\n## Unreleased\n\nA fix.\n\n## 1.2.3\n\nOld.\n",
+        )
+        for path, content in zip(module.RELEASE_FILES, contents):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return {path: path.read_bytes() for path in module.RELEASE_FILES}
+
+    def test_dry_run_reports_bump_without_modifying_version(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pyproject = root / "pyproject.toml"
+        before = pyproject.read_bytes()
+        result = subprocess.run(
+            ["uv", "run", "--script", str(root / "tools" / "release.py"),
+             "--dry-run"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"Release plan: \d+\.\d+\.\d+ -> \d+\.\d+\.\d+")
+        self.assertIn("git push --atomic", result.stdout)
+        self.assertEqual(pyproject.read_bytes(), before)
+
+    def test_version_update_changes_every_release_surface(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+
+            def fake_run(argv, *, capture=False):
+                if argv[:2] == ["uv", "version"]:
+                    module.PYPROJECT.write_text(
+                        'version = "1.2.4"\n', encoding="utf-8")
+                return ""
+
+            with mock.patch.object(module, "_run", side_effect=fake_run):
+                module._update_versions("1.2.3", "1.2.4")
+
+            for path in module.RELEASE_FILES:
+                self.assertIn("1.2.4", path.read_text(encoding="utf-8"))
+            changelog = module.CHANGELOG.read_text(encoding="utf-8")
+            self.assertIn("## Unreleased\n\n## 1.2.4 - ", changelog)
+
+    def test_prepare_interruption_restores_release_files(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            original = self._fixture(module, Path(tmp))
+
+            def modify_versions(*_args):
+                for path in module.RELEASE_FILES:
+                    path.write_text("changed\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(module, "_require_tools"),
+                mock.patch.object(module, "_print_plan"),
+                mock.patch.object(module, "_check_prepare_state"),
+                mock.patch.object(module, "_git", return_value="original-head"),
+                mock.patch.object(module, "_update_versions",
+                                  side_effect=modify_versions),
+                mock.patch.object(module, "_check_release_diff",
+                                  side_effect=KeyboardInterrupt),
+                mock.patch.object(module.subprocess, "run") as run,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    module.prepare("patch")
+
+            for path, content in original.items():
+                self.assertEqual(path.read_bytes(), content)
+            run.assert_called_once()
+            self.assertIn("reset", run.call_args.args[0])
+
+    def test_publish_state_accepts_prepared_and_already_pushed(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            expected = "\n".join(
+                str(path.relative_to(module.ROOT)) for path in module.RELEASE_FILES)
+
+            def git_result(*args):
+                values = {
+                    ("status", "--porcelain"): "",
+                    ("branch", "--show-current"): "main",
+                    ("rev-parse", "HEAD"): "release-head",
+                    ("rev-parse", "origin/main"): "origin-head",
+                    ("rev-list", "--count", "origin/main..HEAD"): "1",
+                    ("merge-base", "HEAD", "origin/main"): "origin-head",
+                    ("cat-file", "-t", "v1.2.3"): "tag",
+                    ("rev-parse", "v1.2.3^{}"): "release-head",
+                    ("diff", "--name-only", "HEAD^..HEAD"): expected,
+                }
+                return values[args]
+
+            with (
+                mock.patch.object(module, "_git", side_effect=git_result),
+                mock.patch.object(module, "_run"),
+            ):
+                self.assertTrue(module._check_publish_state("1.2.3"))
+
+            def pushed_git_result(*args):
+                if args == ("rev-parse", "origin/main"):
+                    return "release-head"
+                return git_result(*args)
+
+            with (
+                mock.patch.object(module, "_git", side_effect=pushed_git_result),
+                mock.patch.object(module, "_run"),
+            ):
+                self.assertFalse(module._check_publish_state("1.2.3"))
+
+    def test_publish_state_rejects_divergence_and_lightweight_tag(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            base = {
+                ("status", "--porcelain"): "",
+                ("branch", "--show-current"): "main",
+                ("rev-parse", "HEAD"): "release-head",
+                ("rev-parse", "origin/main"): "origin-head",
+                ("rev-list", "--count", "origin/main..HEAD"): "2",
+            }
+            with (
+                mock.patch.object(module, "_git", side_effect=lambda *args: base[args]),
+                mock.patch.object(module, "_run"),
+                self.assertRaises(module.ReleaseError),
+            ):
+                module._check_publish_state("1.2.3")
+
+            base[("rev-list", "--count", "origin/main..HEAD")] = "1"
+            base[("merge-base", "HEAD", "origin/main")] = "origin-head"
+            base[("cat-file", "-t", "v1.2.3")] = "commit"
+            with (
+                mock.patch.object(module, "_git", side_effect=lambda *args: base[args]),
+                mock.patch.object(module, "_run"),
+                self.assertRaises(module.ReleaseError),
+            ):
+                module._check_publish_state("1.2.3")
+
+    def test_publish_retry_skips_push_and_existing_release_skips_gates(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            existing = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"url":"https://example.test/release"}\n')
+            with (
+                mock.patch.object(module, "_require_tools"),
+                mock.patch.object(module, "_check_publish_state", return_value=False),
+                mock.patch.object(module.subprocess, "run", return_value=existing),
+                mock.patch.object(module, "_run") as run,
+            ):
+                module.publish()
+            run.assert_not_called()
+
+            missing = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+            with (
+                mock.patch.object(module, "_require_tools"),
+                mock.patch.object(module, "_check_publish_state", return_value=False),
+                mock.patch.object(module.subprocess, "run", return_value=missing),
+                mock.patch.object(module, "_run") as run,
+            ):
+                module.publish()
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertFalse(any(command[:2] == ["git", "push"] for command in commands))
+            self.assertTrue(any(command[:3] == ["gh", "release", "create"]
+                                for command in commands))
 
 
 class TestInstallSkill(_TempProject):

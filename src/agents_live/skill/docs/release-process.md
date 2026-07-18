@@ -1,7 +1,7 @@
 ---
 title: Agents Live Release Process
 description: Assemble, audit, build, and publish the agents-live Python package
-ms.date: 2026-07-15
+ms.date: 2026-07-18
 ms.topic: how-to
 ---
 
@@ -41,7 +41,8 @@ agents-live-release/
 ├── tests/
 │   └── test_smoke.py
 └── tools/
-    └── pre-release-audit.py
+  ├── pre-release-audit.py
+  └── release.py
 ```
 
 ## Assemble and audit
@@ -113,7 +114,34 @@ and no deployment agent or private adapter is present.
 ## Publish
 
 Publish from the assembled release repository after the audit, tests, artifact
-inspection, and version review pass. Use semantic versioning:
+inspection, and version review pass. Preview the default patch release first:
+
+```bash
+uv run --script tools/release.py --dry-run
+```
+
+Run the release after reviewing the plan:
+
+```bash
+uv run --script tools/release.py --prepare --yes
+```
+
+The script requires a clean `main` synchronized with `origin/main`. It bumps
+all version surfaces, moves the changelog's Unreleased notes under the new
+version, reruns the audit, smoke suite, and build, and creates the release
+commit and annotated tag locally. Inspect the target-version wheel and source
+distribution under `dist/`, then publish:
+
+```bash
+uv run --script tools/release.py --publish --yes
+```
+
+Publication verifies that the tagged release commit is exactly one commit
+ahead of `origin/main`, reruns every gate, pushes the commit and tag atomically,
+and creates the GitHub release. That release triggers trusted publishing to
+PyPI.
+
+Use semantic versioning:
 
 | Change | Version bump |
 |---|---|
@@ -121,8 +149,8 @@ inspection, and version review pass. Use semantic versioning:
 | Backward-compatible command or engine capability | Minor |
 | Bug fix or documentation correction | Patch |
 
-Tag the exact commit used to build the artifacts. Do not publish directly from
-the private consuming repository.
+Pass `--bump minor` or `--bump major` when required. Do not publish directly
+from the private consuming repository.
 
 ## Release checklist
 
@@ -134,3 +162,5 @@ the private consuming repository.
 * [ ] Installed CLI and `init` payload match the documented contract
 * [ ] Documentation matches current behavior
 * [ ] Version and release tag follow semantic versioning
+* [ ] Release script preview shows the expected version and file set
+* [ ] Target-version artifacts inspected after preparation

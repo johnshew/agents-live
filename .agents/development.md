@@ -1,4 +1,7 @@
-# Developing agents-live
+---
+title: Developing Agents Live
+description: Build, test, and run agents-live from source without replacing the installed tool
+---
 
 How to build, test, and change the code in this repository.
 
@@ -30,6 +33,41 @@ uv run --with-editable . agents-live --help
 # audit the tree for release-blocking content
 uv run --script tools/pre-release-audit.py
 ```
+
+## Source checkout and installed tool
+
+See [testing.md](testing.md) for the full source, wheel, and installed-tool
+validation matrix.
+
+Use the editable project environment when testing code in this repository:
+
+```bash
+uv run --with-editable . agents-live --repo ~/repos/life doctor
+uv run --with-editable . agents-live --repo ~/repos/life dashboard --dev
+```
+
+These commands execute the current checkout without replacing the user-level
+tool. From another repository, bare `agents-live` executes the version
+installed by uv:
+
+```bash
+agents-live --repo ~/repos/life doctor
+uv tool list
+uv tool upgrade agents-live
+```
+
+`uv tool list` reports the installed version. `uv tool upgrade agents-live`
+checks PyPI and upgrades when a newer release exists; it is safe to run when
+already current. To restore a normal PyPI installation after experimenting
+with `uv tool install --editable .`, run:
+
+```bash
+uv tool install --force agents-live
+```
+
+After upgrading, run `agents-live --repo <project> init` to refresh an
+installed skill payload. `agents-live --repo <project> doctor` reports any
+package and skill payload version mismatch.
 
 ## Conventions
 
