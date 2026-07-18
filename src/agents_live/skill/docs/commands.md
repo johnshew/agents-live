@@ -165,9 +165,9 @@ converges stale crontab entries, then running the
 `agents-live-health-check` agent once re-verifies and refreshes the
 beacon.
 
-For interactive terminal use, `doctor` also displays the cached PyPI update
-result. Checks run when that shared result is missing or 24 hours old and only
-write the user cache under
+`doctor` always performs a fresh PyPI update check and updates the shared cache.
+For interactive terminal use, it also displays the result. Other commands check
+when the cached result is missing or 24 hours old. Checks only write under
 `$XDG_CACHE_HOME/agents-live/`; they do not change the project or install an
 update.
 

@@ -63,13 +63,14 @@ uv tool install agents-live   # or: uv tool install <path-to-wheel>
 On interactive terminal invocations, agents-live checks PyPI for a newer
 stable release when its shared cached result is missing or 24 hours old. The
 result is stored under
-`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). The refresh
-runs in the background; network and cache failures never affect the command.
-No check runs for scheduled/internal, quiet, JSON, piped, or redirected
-commands. This request sends only ordinary package-index request metadata; it
-does not include project or agent data. View the cached result with `agents-live
-doctor`, and install an available release with `uv tool upgrade agents-live`.
-Agents Live never updates itself.
+`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). For ordinary
+commands, the refresh runs in the background and is skipped for
+scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
+cache failures never affect the command. This request sends only ordinary
+package-index request metadata; it does not include project or agent data.
+`agents-live doctor` is the exception: it always performs a fresh check and
+updates the cache. Install an available release with `uv tool upgrade
+agents-live`. Agents Live never updates itself.
 
 After upgrading, run `agents-live --repo <project> init` to refresh the
 optional installed skill payload; `doctor` reports a package and payload
