@@ -296,7 +296,6 @@ def main(argv: list[str] | None = None) -> int:
         uv = shutil.which("uv") or "uv"
         completed = subprocess.run(
             [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
-            capture_output=False,
             check=False,
         )
         return _finish(completed.returncode, cmd, rest, json_mode=json_mode)
