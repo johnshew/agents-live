@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 
 from . import heartbeat
 
@@ -26,14 +27,14 @@ def main(argv: list[str] | None = None) -> int:
             "recovery: "
             "uvx agents-live heartbeat uninstall --distro "
             f"{shlex.quote(selected)}",
-            file=__import__("sys").stderr)
+            file=sys.stderr)
         return 1
     uv = shutil.which("uv")
     if not uv:
         print(
             "error: host cleanup succeeded, but uv was not found; run "
             "`uv tool uninstall agents-live`",
-            file=__import__("sys").stderr)
+            file=sys.stderr)
         return 1
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)
     return completed.returncode

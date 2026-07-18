@@ -4,7 +4,7 @@
 #
 # Compatibility wrapper for legacy scheduled tasks.
 #
-CLI="${AGENTS_LIVE_EXECUTABLE:-$HOME/.local/bin/agents-live}"
+CLI="$HOME/.local/bin/agents-live"
 if [[ ! -x "$CLI" ]]; then
     echo "windows-heartbeat.sh: agents-live uv shim not found: $CLI" >&2
     exit 1

@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -225,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return run_once()
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        print(f"error: heartbeat: {exc}", file=__import__("sys").stderr)
+        print(f"error: heartbeat: {exc}", file=sys.stderr)
         return 1
     return 0
 
