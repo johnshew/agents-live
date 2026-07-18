@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 0.1.5 - 2026-07-18
+
 Packaged dashboard and Windows heartbeat fixes, plus guarded release
 automation and a source-to-PyPI testing runbook.
 
