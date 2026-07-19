@@ -101,7 +101,8 @@ package-index request metadata; it does not include project or agent data.
 `agents-live doctor` is the exception: it always performs a fresh check and
 updates the cache. Checks never install updates in the background. Run
 `agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
-release and then refresh managed skill payloads using the newly installed CLI.
+release without dropping co-installed requirements, converge project-declared
+plugins, and then refresh managed skill payloads using the newly installed CLI.
 
 Repositories used from outside their working tree can be registered by path
 under `$XDG_CONFIG_HOME/agents-live/config.toml` (normally
@@ -116,6 +117,13 @@ initialized project plus every available registered repository. An explicit
 or `--skills-only` to run one half of the workflow. Unavailable registered
 repositories are reported without blocking other refreshes. `init` remains the
 first-time project setup command.
+
+Projects that need plugin-provided adapters or registry ownership declare a
+committed wheel under `[plugins]` in `.agents-live.toml` or
+`[tool.agents-live.plugins]` in `pyproject.toml`. The wheel path is
+repository-relative, and an optional SHA-256 pins its contents. `init`, `start`,
+and `upgrade` converge declarations into the host-global uv tool environment;
+`doctor` verifies each distribution and its agents-live entry points.
 
 No setup step: the first `run` or `start` inside a git repository records
 the project root by writing a minimal `.agents-live.toml` marker (local

@@ -541,6 +541,47 @@ def collect() -> list[dict]:
     add("project config", config_ok, True,
         "run `agents-live init` (never hand-edit the config)",
         note=config_note)
+    try:
+        from . import plugins  # noqa: PLC0415
+        for plugin_name, plugin_ok, plugin_note in plugins.checks(REPO):
+            add(
+                f"plugin {plugin_name} installed and entry points resolve",
+                plugin_ok,
+                True,
+                "run `agents-live upgrade` to converge declared plugins",
+                note=plugin_note,
+            )
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        add(
+            "declared plugins valid",
+            False,
+            True,
+            "repair [plugins], then run `agents-live upgrade`",
+            note=str(exc),
+        )
+    registry_declared = False
+    try:
+        from . import ownership  # noqa: PLC0415
+        registry_declared = paths.load_config(REPO).get("ownership") == "registry"
+        registry_available = ownership.registry_available() if registry_declared else True
+    except Exception as exc:
+        registry_available = False
+        registry_note = str(exc)
+    else:
+        registry_note = (
+            "agents_live.ownership registry backend resolves"
+            if registry_available else
+            "ownership = \"registry\" but no agents_live.ownership "
+            "registry backend resolves"
+        )
+    if registry_declared:
+        add(
+            "registry ownership backend resolves",
+            registry_available,
+            True,
+            "run `agents-live upgrade` to converge declared plugins",
+            note=registry_note,
+        )
     consistency = _crontab_inconsistencies()
     if consistency is not None:
         orphans, stale = consistency

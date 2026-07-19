@@ -338,6 +338,32 @@ signal-shielded `finally` block for every current exit. The lock file is kept
 on disk because deleting an advisory-lock inode creates a race; ownership is
 the held file descriptor, while the file content is diagnostic metadata only.
 
+### Plugin architecture
+
+Plugins are wheels committed within the project and declared under `[plugins]`
+in `.agents-live.toml` or `[tool.agents-live.plugins]` in `pyproject.toml`.
+The declaration maps a distribution name to a repository-relative wheel path
+and an optional SHA-256 integrity pin. The wheel filename and metadata carry
+the version.
+
+Plugins extend the kernel through Python entry points:
+
+- `agents_live.agents` registers unattended runtime adapters.
+- `agents_live.ownership`, entry point name `registry`, supplies multi-host
+  ownership.
+
+The uv tool environment is host-global. `init` and non-dry-run `start`
+converge the selected project; `upgrade` unions declarations from all
+registered projects and preserves requirements already recorded in uv's tool
+receipt. `doctor` only lints installed distributions and resolves their entry
+points. `repos add` is bookkeeping and reports pending plugins without
+installing them.
+
+No separate consent prompt is required. Activating a repository already grants
+its committed handlers and agent prompts execution authority on that host, so
+a committed wheel adds no new trust boundary. The optional SHA-256 protects the
+declared artifact's integrity.
+
 ### Agent support
 
 1. **Your existing agent**: The Markdown prompt remains a normal Claude Code or

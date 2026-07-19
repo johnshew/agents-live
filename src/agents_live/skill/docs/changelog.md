@@ -8,6 +8,13 @@ history is retained in the source repository.
 
 - feat: make `repos default <path>` register an existing unregistered
   repository before selecting it as the fallback.
+- fix: preserve uv receipt-recorded co-installed requirements during
+  `agents-live upgrade`, so upgrading the runtime no longer removes plugin
+  wheels from the tool environment.
+- feat: let projects declare committed plugin wheels with optional SHA-256
+  pins. `init`, `start`, and `upgrade` converge declarations into the
+  host-global tool environment; `doctor` reports missing or broken providers,
+  and `repos add` remains read-only. (#34)
 
 ## 0.3.1 - 2026-07-18
 

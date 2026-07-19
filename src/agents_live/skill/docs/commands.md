@@ -1,7 +1,7 @@
 ---
 title: Agents Live Command Reference
 description: Installation, lifecycle, validation, and logging commands for agents-live
-ms.date: 2026-07-18
+ms.date: 2026-07-19
 ms.topic: reference
 ---
 
@@ -152,7 +152,10 @@ below and report the results. If any check fails, explain how to fix it.
 
 `doctor` is the CLI name for the same command and adds the read-only
 installation checks (§3.4.1, Phase 3): project config present and
-parseable (with every declared agent directory existing), crontab
+parseable (with every declared agent directory and plugin wheel existing),
+each declared plugin distribution installed with resolvable entry points,
+registry ownership backed by a resolving `agents_live.ownership` provider,
+crontab
 entries consistent with the agent files (no orphaned `--name` /
 `--ensure-watcher` references, no stale script paths - scoped to lines
 referencing this repo, since the crontab is host-global), every active
@@ -183,12 +186,14 @@ replaces only the managed payload items (`SKILL.md`, `VERSION`, `docs`, and
 when the payload is already current. Use `init` for first-time project layout
 and setup.
 
-Bare `agents-live upgrade` needs no project context. It reinstalls the
-uv-managed runtime from the latest stable PyPI release, then invokes the newly
-installed CLI to refresh the current initialized project and every available
-registered repository. `--repo PATH|ALIAS` constrains refresh to one project;
-`--runtime-only` and `--skills-only` run one phase. Unavailable repositories
-produce warnings and a nonzero final result without blocking valid projects.
+Bare `agents-live upgrade` needs no project context. It upgrades the uv-managed
+runtime in place so receipt-recorded `--with` requirements survive, unions
+plugin declarations from the current and every available registered project,
+then invokes the newly installed CLI to refresh their skill payloads.
+`--repo PATH|ALIAS` constrains payload refresh to one project, while plugin
+convergence remains host-global. `--runtime-only` and `--skills-only` run one
+phase. Unavailable repositories produce warnings and a nonzero final result
+without blocking valid projects.
 
 ### Checks to perform
 
@@ -624,14 +629,42 @@ repository explicitly to run, start, stop, teardown, migrate, claim, or repair.
 be relative and may not escape through `..` or symlinks; register another
 repository instead of pointing this setting outside the selected root.
 
+### Project-declared plugins
+
+Plugin wheels are project configuration, not an installation runbook:
+
+```toml
+# .agents-live.toml
+[plugins]
+example-plugin = { path = "Agents/plugins/example-plugin-1.0.0-py3-none-any.whl", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+```
+
+Each key is the wheel's distribution name. `path` must name an existing
+repository-relative `.whl` that does not escape the project, including through
+a symlink. `sha256` is optional; when present it must be 64 hexadecimal
+characters and is verified before installation. For pyproject configuration,
+use `[tool.agents-live.plugins]`.
+
+`init` and a non-dry-run `start` converge the selected project's declarations.
+`upgrade` unions declarations across registered repositories because the uv
+tool environment is host-global. Existing receipt-recorded co-installed
+requirements and the primary agents-live install source are preserved, so
+convergence does not turn an editable or pinned install into a PyPI install.
+`repos add` never changes the environment; it
+reports missing declarations as pending for `init`, `start`, or `upgrade`.
+`doctor` is read-only and makes a missing distribution, broken agents-live
+entry point, integrity mismatch, or declared registry mode without a resolving
+ownership backend a required failure. Its repair command is
+`agents-live upgrade`.
+
 ### Multi-machine agent ownership
 
 Ownership has two explicit modes. With no `ownership` declaration in
 `.agents-live.toml` or `[tool.agents-live]`, the project is local by
 definition: every agent is owned by this host and transfers are unavailable.
-This is the only mode the core package ships: registry mode requires an
-ownership-backend plugin (this deployment uses a private git-backed
-backend), and declaring `ownership = "registry"` without one installed
+This is the only mode the core package ships: registry mode requires a
+project-declared ownership-backend plugin, and declaring
+`ownership = "registry"` without one installed
 makes dispatch and ownership mutation abstain rather than fall back to
 local mode.
 
