@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: label generated GitHub release comparison links as `Diffs`.
+  New publications and existing-release retries distinguish commit comparisons
+  from the curated `Full changelog` link.
+
 ## 1.0.0 - 2026-07-19
 
 - fix: emit typed JSON envelopes for usage errors, structured failures, and log records. (#65)
