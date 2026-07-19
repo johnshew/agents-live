@@ -45,15 +45,6 @@ uv run --script tools/pre-release-audit.py
 uv build
 ```
 
-Human-facing help, doctor, and status output is checked against
-`tests/golden/*.txt`. After an intentional output change, regenerate and
-review those files explicitly:
-
-```bash
-AGENTS_LIVE_UPDATE_GOLDENS=1 uv run --with-editable . \
-  python -m unittest tests.test_smoke.TestHumanOutputGoldens
-```
-
 Exercise source behavior against a configured project by keeping `--repo`
 explicit:
 

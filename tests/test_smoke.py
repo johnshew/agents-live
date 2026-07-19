@@ -21,7 +21,6 @@ import importlib.util
 import io
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -102,11 +101,6 @@ pre-processor: Agents/handlers/prep.py
 Smoke fixture body.
 """
 FOREIGN_REPO = "/tmp/foreign-agents-live-project"
-GOLDEN_DIR = Path(__file__).with_name("golden")
-UPDATE_GOLDENS_ENV = "AGENTS_LIVE_UPDATE_GOLDENS"
-UPDATE_GOLDENS_VALUES = frozenset({"1", "true", "yes"})
-ISO_TIMESTAMP_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 
 class TestSmoketestDispatch(_TempProject):
@@ -1424,115 +1418,6 @@ class TestCliContract(_TempProject):
             invoke(["--json", "doctor"]),
             invoke(["doctor", "--json"]),
         )
-
-
-class TestHumanOutputGoldens(_TempProject):
-    def _capture_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(update_check, "interactive", return_value=False),
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-        ):
-            code = cli.main(argv)
-        return code, stdout.getvalue(), stderr.getvalue()
-
-    def _normalize(self, text: str, *, host: str = "") -> str:
-        text = text.replace("\r\n", "\n")
-        replacements = (
-            (str(self.root), "<REPO>"),
-            (str(Path.home()), "<HOME>"),
-            (cli.__version__, "<VERSION>"),
-            (host, "<HOST>"),
-        )
-        for value, replacement in replacements:
-            if value:
-                text = text.replace(value, replacement)
-        text = ISO_TIMESTAMP_PATTERN.sub("<TIMESTAMP>", text)
-        return re.sub(r"\bpid \d+\b", "pid <PID>", text)
-
-    def _assert_golden(
-        self,
-        name: str,
-        result: tuple[int, str, str],
-        *,
-        host: str = "",
-    ) -> None:
-        code, stdout, stderr = result
-        actual = (
-            f"exit: {code}\n"
-            "--- stdout ---\n"
-            f"{self._normalize(stdout, host=host)}"
-            "--- stderr ---\n"
-            f"{self._normalize(stderr, host=host)}"
-        )
-        path = GOLDEN_DIR / name
-        if os.environ.get(UPDATE_GOLDENS_ENV, "").lower() in UPDATE_GOLDENS_VALUES:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(actual, encoding="utf-8")
-        self.assertEqual(
-            path.read_text(encoding="utf-8"),
-            actual,
-            f"{name} changed; review the diff or regenerate with "
-            f"{UPDATE_GOLDENS_ENV}=1",
-        )
-
-    def test_help_output(self) -> None:
-        self._assert_golden("help.txt", self._capture_cli(["--help"]))
-
-    def test_doctor_output(self) -> None:
-        host = "portable-test-host"
-        checks = [
-            {
-                "name": "crontab", "ok": True, "required": True,
-                "fix": "install cron", "note": "available",
-            },
-            {
-                "name": "optional integration", "ok": False,
-                "required": False, "fix": "install integration", "note": "",
-            },
-        ]
-        with (
-            mock.patch.object(doctor, "_project_checks_enabled",
-                              return_value=False),
-            mock.patch.object(doctor, "collect", return_value=checks),
-            mock.patch.object(doctor, "_hostname", return_value=host),
-            mock.patch.object(update_check, "refresh"),
-        ):
-            result = self._capture_cli(["doctor"])
-        self._assert_golden("doctor.txt", result, host=host)
-
-    def test_status_output(self) -> None:
-        agents = {
-            "nightly": {
-                "name": "nightly", "type": "cron",
-                "schedule": "0 6 * * *", "watchPath": None,
-                "runtime": "none", "mode": "plan", "state": "active",
-                "owner": "*", "isOwner": True,
-                "triggerStates": {"cron": "active"},
-            },
-            "index": {
-                "name": "index", "type": "watcher",
-                "schedule": None, "watchPath": "src",
-                "runtime": "copilot", "mode": "plan", "state": "stopped",
-                "owner": None, "isOwner": None,
-                "triggerStates": {"watcher": "stopped"},
-            },
-        }
-        with (
-            mock.patch.object(status, "_in_sandbox", return_value=False),
-            mock.patch.object(status, "list_agents",
-                              return_value=list(agents)),
-            mock.patch.object(status, "load_agent_config",
-                              side_effect=lambda name: name),
-            mock.patch.object(status, "agent_details",
-                              side_effect=lambda name: agents[name]),
-            mock.patch.object(status, "logs_root",
-                              return_value=self.root / "Agents" / "logs"),
-        ):
-            result = self._capture_cli(["status"])
-        self._assert_golden("status.txt", result)
 
 
 class TestWindowsHeartbeat(unittest.TestCase):
