@@ -6,6 +6,22 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: emit typed JSON envelopes for usage errors, structured failures, and log records. (#65)
+  Under `--json`, argparse usage errors no longer exit with empty output,
+  doctor's structured failure payloads pass through untouched, programming
+  errors keep their tracebacks, and `logs` renders one stable envelope for
+  zero, one, or many rows. The spec gate also accepts `--flag=value` and
+  attached short values such as `-n20`.
+- fix: keep agent discovery working when a declared plugin wheel is absent from disk. (#66)
+  A fresh clone without gitignored build artifacts no longer breaks `status`,
+  `run`, `start`, or cron-fired runs; plugin installation still requires the
+  wheel and verifies its integrity.
+- fix: suppress the interactive ownership-takeover prompt in JSON mode. (#69)
+  A machine caller can no longer hang forever on a prompt hidden by captured
+  output; consent is given with `start <name> --yes`.
+- fix: accept Vixie cron name fields such as `MON-FRI` and `JAN-DEC` in agent schedules. (#68)
+- fix: run framework smoketest status checks through the supported JSON environment contract. (#67)
+- fix: list every agent name in generated shell completions instead of only the last. (#70)
 - fix: enforce major release bumps for conventional breaking markers. (#62)
   Release previews recognize `type!:` and scoped `type(scope)!:` entries, plus
   `BREAKING CHANGE:` footers.
@@ -48,9 +64,12 @@ history is retained in the source repository.
   release, and publishes those same files to PyPI.
 - feat: register an existing repository through `repos default <path>`.
   An unregistered path is added before it becomes the fallback repository.
-- feat: drive CLI policy and generated interfaces from one command spec. (#36, #37, #38)
+- feat: drive CLI policy and generated interfaces from one command spec. (#36, #37, #38, #73)
   The declarative grammar controls dispatch, cross-command contracts, help,
-  the published EBNF grammar, and the command and flag table.
+  the published EBNF grammar, and the command and flag table. Validation
+  constraints, JSON dispatch policy, the dashboard verb map, and the
+  completion scripts' agent-name verbs are likewise declared on or derived
+  from the spec.
 - feat: generate bash and zsh completion scripts with `agents-live completions`. (#39)
   Completion includes agent-name suggestions for lifecycle commands.
 - feat: move watcher process and reboot plumbing to a hidden namespace. (#43)
@@ -62,6 +81,9 @@ history is retained in the source repository.
   Existing `Agents/` definitions remain discoverable, while new definitions use
   the native directory shared by Claude Code, Copilot CLI, and VS Code.
 - docs: align shipped Markdown with the repository punctuation rules. (#33)
+- chore: gate release preparation and publication on the framework smoketest. (#72)
+  `tools/release.py` runs `agents-live smoketest` alongside the unit suite and
+  the pre-release audit during both `--prepare` and `--publish`.
 - chore: require isolated worktrees and a standard implementation loop.
   Branch work no longer changes the shared primary checkout used by concurrent
   sessions.
