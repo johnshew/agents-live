@@ -600,10 +600,10 @@ def logs_root() -> Path:
 # A bare inotifywait watcher does not survive a reboot, so the "intended to be
 # running" state must live somewhere durable. That place is the crontab:
 # activating a watcher installs an ``@reboot`` line that re-runs
-# ``activate.py --ensure-watcher <name>`` (the guarded, idempotent respawn
+# ``activate.py ensure-watcher <name>`` (the guarded, idempotent respawn
 # path), and tearing it down removes that line. The presence of the line is
 # the single source of truth for "this watcher should be running", and it
-# survives reboot natively. ``--ensure-watcher`` carries no ``--name`` token,
+# survives reboot natively. ``ensure-watcher`` carries no ``--name`` token,
 # so these lines are invisible to the run.py schedule machinery
 # (:func:`cron_line_matches`) and never collide with an agent's cron schedule.
 
@@ -649,9 +649,9 @@ def run_invocation(name: str) -> list[str]:
 
 def ensure_watcher_invocation(name: str) -> list[str]:
     """argv persisted into the @reboot respawn line for *name*'s watcher.
-    Both forms carry the ``--ensure-watcher <name>`` token pair the
+    Both forms carry the ``ensure-watcher <name>`` token pair the
     matchers key on."""
-    return cli_invocation("start", "--ensure-watcher", name,
+    return cli_invocation("internal", "ensure-watcher", name,
                           flat_script=ACTIVATE_SCRIPT_PATH)
 
 
@@ -675,29 +675,28 @@ def cli_invocation(subcommand: str, *args: str, flat_script: Path) -> list[str]:
 
 def _watcher_reboot_line_matches(line: str, name: str) -> bool:
     """Return True if a crontab line is the @reboot watcher respawn for
-    name. Keyed on the ``--ensure-watcher <name>`` token pair, which both
-    the script-path and packaged-shim line forms carry (and which never
-    appears in run.py schedule lines)."""
+    name. Legacy flag-form lines remain recognizable so `migrate` and
+    lifecycle operations can replace or remove them."""
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
     return crontab_line_belongs_to_repo(line) and any(
-        first == "--ensure-watcher" and second == name
+        first in ("ensure-watcher", "--ensure-watcher") and second == name
         for first, second in zip(tokens, tokens[1:])
     )
 
 
 def _reboot_watcher_line_agent_name(line: str) -> str | None:
     """Return the agent name carried by a watcher @reboot line, else None."""
-    if "--ensure-watcher" not in line:
+    if "ensure-watcher" not in line:
         return None
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
     for first, second in zip(tokens, tokens[1:]):
-        if first == "--ensure-watcher":
+        if first in ("ensure-watcher", "--ensure-watcher"):
             return second
     return None
 
@@ -2699,8 +2698,8 @@ def _find_all_watcher_pids(name: str) -> list[int]:
 def _watcher_argv_is_agents_live(args: list[str]) -> bool:
     """True if an argv list belongs to an agents-live watch loop host.
 
-    Flat checkout: ``... activate.py --watch-loop <name>``. Packaged:
-    ``... <bin>/agents-live --repo <root> start --watch-loop <name>`` -
+    Flat checkout: ``... activate.py watch-loop <name>``. Packaged:
+    ``... <bin>/agents-live --repo <root> internal watch-loop <name>`` -
     matched on the executable's basename, never substring, so a
     ``--repo`` path like ``.../agents-live-test`` cannot false-positive.
     """
@@ -2730,7 +2729,7 @@ def _is_watcher_cmdline(args: list[str], name: str) -> bool:
     """Return True if an argv list is the watch loop for exactly this agent
     in exactly this repo.
 
-    Requires the exact adjacent pair ``["--watch-loop", name]`` so an agent
+    Requires the exact adjacent action/name pair so an agent
     name that is a substring of another (``todo`` vs ``todo-push``) never
     matches the wrong watcher.
     """
@@ -2739,7 +2738,7 @@ def _is_watcher_cmdline(args: list[str], name: str) -> bool:
     if not _watcher_argv_belongs_to_repo(args):
         return False
     return any(
-        first == "--watch-loop" and second == name
+        first in ("watch-loop", "--watch-loop") and second == name
         for first, second in zip(args, args[1:])
     )
 
@@ -2797,8 +2796,8 @@ def _watcher_cmdline_agent_name(args: list[str]) -> str | None:
     """Return the watched agent name from a watcher argv list, else None.
 
     The inverse of :func:`_is_watcher_cmdline`: a watch loop runs
-    ``activate.py --watch-loop <name>`` (flat checkout) or
-    ``agents-live ... start --watch-loop <name>`` (packaged). Scoped to
+    ``activate.py watch-loop <name>`` (flat checkout) or
+    ``agents-live ... internal watch-loop <name>`` (packaged). Scoped to
     the current repo so another project's same-named watchers are not
     enumerated as this project's.
     """
@@ -2807,7 +2806,7 @@ def _watcher_cmdline_agent_name(args: list[str]) -> str | None:
     if not _watcher_argv_belongs_to_repo(args):
         return None
     for first, second in zip(args, args[1:]):
-        if first == "--watch-loop":
+        if first in ("watch-loop", "--watch-loop"):
             return second
     return None
 
@@ -2817,7 +2816,7 @@ def _list_active_watcher_agent_names() -> list[str]:
 
     Runtime-is-truth enumeration (the reverse of the per-name watcher
     lookup): scans ``/proc`` (or ``ps`` on non-Linux) for
-    ``activate.py --watch-loop <name>`` processes.
+    ``activate.py watch-loop <name>`` processes.
     """
     names: list[str] = []
     proc_dir = Path("/proc")

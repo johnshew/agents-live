@@ -7,7 +7,8 @@
 canonical invocation form (Phase 5 core; §5.2 F3).
 
 Scope: crontab schedule lines (``--name <agent>``) and @reboot watcher
-respawn lines (``--ensure-watcher <agent>``) that reference THIS project
+respawn lines (``ensure-watcher <agent>`` or its legacy flag form) that
+reference THIS project
 (the crontab is host-global; other projects' lines are never touched).
 Every entry is compared against what activation would write today -
 ``activate.build_cron_lines`` / ``headless.build_reboot_watcher_line`` -
@@ -69,7 +70,10 @@ def plan_migration(lines: list[str]) -> dict:
         name = _token_pair_value(line, "--name")
         if name:
             schedule_names.add(name)
-        watcher = _token_pair_value(line, "--ensure-watcher")
+        watcher = (
+            _token_pair_value(line, "ensure-watcher")
+            or _token_pair_value(line, "--ensure-watcher")
+        )
         if watcher:
             watcher_names.add(watcher)
 
@@ -95,7 +99,7 @@ def plan_migration(lines: list[str]) -> dict:
             continue
         old = [l for l in lines
                if headless.crontab_line_belongs_to_repo(l)
-               and _token_pair_value(l, "--ensure-watcher") == name]
+               and headless._reboot_watcher_line_agent_name(l) == name]
         new = [build_reboot_watcher_line(name)]
         if sorted(old) != sorted(new):
             plan["watcher"][name] = (old, new)

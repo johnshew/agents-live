@@ -243,7 +243,7 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     """(orphaned agent names, stale script paths) from the installed
     crontab, or None when the crontab is unreadable (check skipped).
 
-    Orphans are ``--name``/``--ensure-watcher`` references whose agent
+    Orphans are ``--name``/``ensure-watcher`` references whose agent
     file no longer exists; stale entries are ``.py`` script references
     that no longer exist on disk (§4 migration concern: pre-cutover
     ``uv run .../scripts/...`` lines) and agents-live lines pinned to a
@@ -279,7 +279,8 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
                 foreign_tokens = shlex.split(stripped)
             except ValueError:
                 foreign_tokens = stripped.split()
-            shaped = any(t in ("--name", "--ensure-watcher")
+            shaped = any(t in ("--name", "ensure-watcher",
+                              "--ensure-watcher")
                          for t in foreign_tokens)
             root = next(
                 (second for first, second in
@@ -291,7 +292,8 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
             continue
         tokens = stripped.split()
         for index, token in enumerate(tokens):
-            if token in ("--name", "--ensure-watcher") and index + 1 < len(tokens):
+            if token in ("--name", "ensure-watcher",
+                         "--ensure-watcher") and index + 1 < len(tokens):
                 referenced.add(tokens[index + 1])
             if token.endswith(".py") and "/" in token:
                 script_paths.add(token)
