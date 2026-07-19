@@ -33,6 +33,15 @@ class Cmd:
     subcommands: tuple["Cmd", ...] = ()
     args: tuple[Arg, ...] = ()
     hidden: bool = False
+    # Validation constraints, enforced generically by validation_error().
+    mutually_exclusive: tuple[tuple[str, ...], ...] = ()
+    requires_one_of: tuple[str, ...] = ()
+    subcommand_required: bool = False
+    # JSON-mode dispatch policy: extra argv appended when the leading
+    # flag is absent, and the shape of the command's stdout ("object" =
+    # one JSON document, "records" = one JSON document per line).
+    json_args: tuple[str, ...] = ()
+    json_shape: str = "object"
 
 
 GLOBAL_ARGS = (
@@ -56,6 +65,8 @@ COMMANDS = (
         "start", "Activate cron and watcher triggers.", "activate", "in-process",
         root="auto-marker", probes=("crontab", "inotify"),
         dynamic_probes="start", json=True, name_sugar=True, default_notice=True,
+        mutually_exclusive=(("--yes", "--all"),),
+        requires_one_of=("--name", "--all"),
         args=(
             Arg(("--name",), "Agent name.", kind="value"),
             Arg(("--all",), "Activate all configured agents."),
@@ -67,7 +78,7 @@ COMMANDS = (
     ),
     Cmd(
         "internal", "Run internal watcher plumbing.", "activate", "in-process",
-        probes=("crontab", "inotify"), hidden=True,
+        probes=("crontab", "inotify"), hidden=True, subcommand_required=True,
         subcommands=(
             Cmd(
                 "watch-loop", "Run one watcher loop.", "activate", "in-process",
@@ -103,6 +114,7 @@ COMMANDS = (
     Cmd(
         "logs", "Query logs and correlated event timelines.", "qlog.py",
         "subprocess", json=True,
+        json_args=("--format", "jsonl"), json_shape="records",
         subcommands=(
             Cmd(
                 "timeline", "Show a correlated event timeline.", "timeline.py",
@@ -164,6 +176,7 @@ COMMANDS = (
     Cmd(
         "upgrade", "Upgrade runtime and project skill payloads.", "upgrade",
         "in-process", root="none", json=True, update_notice=False,
+        mutually_exclusive=(("--runtime-only", "--skills-only"),),
         args=(
             Arg(("--runtime-only",), "Upgrade only the runtime."),
             Arg(("--skills-only",), "Refresh only skill payloads."),
@@ -206,7 +219,7 @@ COMMANDS = (
     ),
     Cmd(
         "repos", "Manage registered repositories.", "repos", "in-process",
-        root="none", json=True,
+        root="none", json=True, subcommand_required=True,
         subcommands=(
             Cmd("list", "List registered repositories.", "repos", "in-process",
                 root="none"),
@@ -365,12 +378,20 @@ def _ebnf_command(command: Cmd) -> list[str]:
         suffix = _ebnf_flags(
             command, skip=frozenset({"--name", "--all"}))
         return [f"{prefix} {selector}" + (f" {suffix}" if suffix else "")]
-    if command.name == "logs":
-        query = _ebnf_flags(command)
-        lines = [f'{prefix} ( query | "timeline" timeline_args )']
-        lines.append(f"query        ::= {query}")
-        timeline = command.subcommands[0]
-        lines.append(f"timeline_args ::= {_ebnf_flags(timeline)}")
+    if command.args and command.subcommands:
+        # Own query flags OR a subcommand: render the query and each
+        # subcommand's flags as named productions.
+        query = f"{command.name}_query"
+        alternatives = [query] + [
+            f'"{child.name}" {child.name}_args'
+            for child in command.subcommands if not child.hidden
+        ]
+        lines = [f'{prefix} ( {" | ".join(alternatives)} )']
+        lines.append(f"{query:<12} ::= {_ebnf_flags(command)}")
+        for child in command.subcommands:
+            if child.hidden:
+                continue
+            lines.append(f"{child.name}_args ::= {_ebnf_flags(child)}")
         return lines
     if command.subcommands:
         alternatives = []
@@ -381,7 +402,7 @@ def _ebnf_command(command: Cmd) -> list[str]:
             alternatives.append(
                 f'"{child.name}"' + (f" {suffix}" if suffix else ""))
         group = "( " + " | ".join(alternatives) + " )"
-        if command.name == "heartbeat":
+        if not command.subcommand_required:
             group = f"[ {group} ]"
         return [f"{prefix} {group}"]
     suffix = _ebnf_flags(command)
@@ -494,38 +515,58 @@ def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
             continue
         option = token.split("=", 1)[0]
         if option.startswith("-") and option not in known:
+            # Attached short-option value (-n20), accepted by argparse.
+            if (not option.startswith("--") and len(option) > 2
+                    and option[:2] in takes_value):
+                continue
             return option
         if option in takes_value and "=" not in token:
             skip_value = True
     return None
 
 
+def _flag_present(argv: list[str], flag: str) -> bool:
+    """True when *flag* appears as a token or in ``--flag=value`` form."""
+    return any(token == flag or token.startswith(f"{flag}=")
+               for token in argv)
+
+
 def validation_error(command: Cmd, argv: list[str]) -> str | None:
-    """Return a concise spec-derived usage error, or None."""
-    if command.name == "start":
-        if "--yes" in argv and "--all" in argv:
-            return "--yes requires a targeted name and cannot be used with --all"
-        if "--all" not in argv and "--name" not in argv and (
-                not argv or argv[0].startswith("-")):
-            return "start requires NAME, --name NAME, or --all"
-    if command.name == "upgrade":
-        if "--runtime-only" in argv and "--skills-only" in argv:
-            return "--runtime-only and --skills-only are mutually exclusive"
+    """Return a concise spec-derived usage error, or None.
+
+    All constraints are declared on the spec (``mutually_exclusive``,
+    ``requires_one_of``, ``subcommand_required``, ``required`` args);
+    nothing here keys on a command's name.
+    """
+    for group in command.mutually_exclusive:
+        present = [flag for flag in group if _flag_present(argv, flag)]
+        if len(present) > 1:
+            return " and ".join(present) + " are mutually exclusive"
+    if command.requires_one_of:
+        sugared = (command.name_sugar and argv
+                   and not argv[0].startswith("-"))
+        if not sugared and not any(
+                _flag_present(argv, flag)
+                for flag in command.requires_one_of):
+            options = [
+                "NAME, --name NAME" if flag == "--name" and command.name_sugar
+                else flag
+                for flag in command.requires_one_of
+            ]
+            return f"{command.name} requires " + ", or ".join(options)
     current = command
-    if command.subcommands and argv:
+    if command.subcommands:
         child = next(
-            (item for item in command.subcommands if item.name == argv[0]),
+            (item for item in command.subcommands if argv
+             and item.name == argv[0]),
             None,
         )
         if child is not None:
             current = child
             argv = argv[1:]
-        elif command.name == "repos":
-            return "repos requires one of: " + ", ".join(
+        elif command.subcommand_required:
+            return f"{command.name} requires one of: " + ", ".join(
                 item.name for item in command.subcommands if not item.hidden)
-    elif command.name == "repos":
-        return "repos requires one of: " + ", ".join(
-            item.name for item in command.subcommands if not item.hidden)
     for argument in current.args:
         if argument.hidden:
             continue
@@ -546,7 +587,7 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
                 if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
                     return f"{flag} requires a value"
             if argument.required and not any(
-                    flag in argv for flag in argument.flags):
+                    _flag_present(argv, flag) for flag in argument.flags):
                 if not command.name_sugar or not argv or argv[0].startswith("-"):
                     return f"{argument.flags[0]} is required"
     return None

@@ -27,6 +27,27 @@ def _flags(command: Cmd) -> list[str]:
     ))
 
 
+def _agent_name_condition() -> str:
+    """Shell test matching every command that accepts an agent name
+    positionally (the spec's ``name_sugar`` flag), so the completion
+    scripts never hardcode a verb list."""
+    return " || ".join(
+        f'"$command" == {command.name}'
+        for command in COMMANDS
+        if not command.hidden and command.name_sugar
+    )
+
+
+# Extracts every "name" value from the one-line JSON that
+# `agents-live status --json` emits: grep -o yields one match per name
+# (a line-oriented sed over single-line JSON would only ever yield the
+# last agent), and the sed strips the key and quotes.
+_NAMES_PIPELINE = (
+    "grep -o '\"name\": *\"[^\"]*\"' |\n"
+    "        sed 's/.*: *\"\\(.*\\)\"$/\\1/'"
+)
+
+
 def bash() -> str:
     cases = []
     for command in COMMANDS:
@@ -45,7 +66,7 @@ def bash() -> str:
     return f"""# bash completion for agents-live
 _agents_live_agent_names() {{
     agents-live status --json 2>/dev/null |
-        sed -n 's/.*"name": *"\\([^"]*\\)".*/\\1/p'
+        {_NAMES_PIPELINE}
 }}
 
 _agents_live() {{
@@ -59,8 +80,7 @@ _agents_live() {{
     case "$command" in
 {chr(10).join(cases)}
     esac
-    if [[ "$command" == run || "$command" == start ||
-          "$command" == stop ]]; then
+    if [[ {_agent_name_condition()} ]]; then
         opts="$opts $(_agents_live_agent_names)"
     fi
     COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
@@ -90,7 +110,7 @@ def zsh() -> str:
 _agents_live_agent_names() {{
     local -a agents
     agents=("${{(@f)$(agents-live status --json 2>/dev/null |
-        sed -n 's/.*"name": *"\\([^"]*\\)".*/\\1/p')}}")
+        {_NAMES_PIPELINE})}}")
     _describe 'agent' agents
 }}
 
@@ -104,8 +124,7 @@ _agents_live() {{
         case "$command" in
 {chr(10).join(cases)}
         esac
-        if [[ "$command" == run || "$command" == start ||
-              "$command" == stop ]]; then
+        if [[ {_agent_name_condition()} ]]; then
             _agents_live_agent_names
             return
         fi
