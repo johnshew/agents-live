@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 VERSION_FILES = (
     ROOT / "src" / "agents_live" / "__init__.py",
-    ROOT / "src" / "agents_live" / "cli.py",
     ROOT / "src" / "agents_live" / "skill" / "VERSION",
 )
 CHANGELOG = ROOT / "src" / "agents_live" / "skill" / "docs" / "changelog.md"
@@ -146,8 +145,7 @@ def _update_versions(current: str, target: str) -> None:
         f'__version__ = "{current}"',
         f'__version__ = "{target}"',
     )
-    _replace_once(VERSION_FILES[1], f"/blob/v{current}/", f"/blob/v{target}/")
-    _replace_once(VERSION_FILES[2], f"{current}\n", f"{target}\n")
+    _replace_once(VERSION_FILES[1], f"{current}\n", f"{target}\n")
 
     marker = "## Unreleased\n\n"
     release_heading = f"{marker}## {target} - {date.today().isoformat()}\n\n"

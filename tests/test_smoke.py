@@ -2207,7 +2207,6 @@ class TestReleaseTool(unittest.TestCase):
         module.PYPROJECT = root / "pyproject.toml"
         module.VERSION_FILES = (
             root / "src" / "agents_live" / "__init__.py",
-            root / "src" / "agents_live" / "cli.py",
             root / "src" / "agents_live" / "skill" / "VERSION",
         )
         module.CHANGELOG = (
@@ -2217,7 +2216,6 @@ class TestReleaseTool(unittest.TestCase):
         contents = (
             'version = "1.2.3"\n',
             '__version__ = "1.2.3"\n',
-            'blob = "https://example.test/blob/v1.2.3/docs"\n',
             "1.2.3\n",
             "# Changelog\n\n## Unreleased\n\nA fix.\n\n"
             "## 1.2.3 - 2026-07-18\n\n- fix: old release note.\n",
