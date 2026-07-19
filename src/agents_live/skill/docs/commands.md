@@ -24,13 +24,13 @@ spec. `VALUE`, `NAME`, `PATH`, and `ALIAS` are terminal values.
 invocation   ::= "agents-live" global* ( command | help_word )
 help_word    ::= "-h" | "--help" | "help" | "--version" | ""
 global       ::= "--json" | "--repo" ( PATH | ALIAS )
-command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | heartbeat | uninstall | repos | dashboard
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | heartbeat | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
 stop         ::= "stop" ( NAME | "--name" NAME )
 status       ::= "status" [ NAME ] [ "--json" ] [ "--all-repos" ]
 logs         ::= "logs" ( query | "timeline" timeline_args )
-query        ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" VALUE ] [ "--check-schema" ]
+query        ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--json" ] [ "--all-repos" ]
@@ -40,6 +40,7 @@ migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+completions  ::= "completions" ( "bash" | "zsh" )
 dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
 ```
 
@@ -67,8 +68,21 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | repos add | in-process | none |  |  |  |  |  | Register a repository. |
 | repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
+| completions | in-process | none |  |  |  |  |  | Generate shell completion scripts. |
 | dashboard | subprocess | required |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
 <!-- END GENERATED CLI -->
+
+## Shell completions
+
+Generate bash or zsh completion directly from the command spec:
+
+```bash
+source <(agents-live completions bash)
+# zsh: source <(agents-live completions zsh)
+```
+
+To install persistently, redirect the generated script to the completion
+directory loaded by your shell configuration.
 
 ## Contents
 

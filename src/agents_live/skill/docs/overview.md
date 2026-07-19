@@ -1,7 +1,7 @@
 ---
 title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
-ms.date: 2026-07-18
+ms.date: 2026-07-19
 ms.topic: overview
 ---
 
@@ -84,6 +84,7 @@ Trying it takes about a minute:
 
 ```bash
 uv tool install agents-live        # install the Python package
+source <(agents-live completions bash) # optional shell completion
 agents-live doctor                 # verify cron, inotifywait, and agent CLIs
 agents-live run file-notes         # test the agent once, in the foreground
 agents-live start file-notes       # activate it unattended

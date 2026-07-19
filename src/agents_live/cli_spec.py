@@ -215,6 +215,14 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "completions", "Generate shell completion scripts.", "completions",
+        "in-process", root="none",
+        args=(
+            Arg(("shell",), "Shell name.", kind="positional", required=True,
+                choices=("bash", "zsh")),
+        ),
+    ),
+    Cmd(
         "dashboard", "Open the interactive control panel.", "dashboard.py",
         "subprocess", all_repos=True,
         args=(
@@ -304,14 +312,23 @@ def _ebnf_flags(command: Cmd, *, skip: frozenset[str] = frozenset()) -> str:
         if any(flag in skip for flag in argument.flags):
             continue
         if argument.kind == "positional":
-            token = argument.flags[0].upper()
+            if argument.choices:
+                token = "( " + " | ".join(
+                    f'"{choice}"' for choice in argument.choices) + " )"
+            else:
+                token = argument.flags[0].upper()
             parts.append(token if argument.required else f"[ {token} ]")
             continue
         flags = " | ".join(f'"{flag}"' for flag in argument.flags)
         if len(argument.flags) > 1:
             flags = f"( {flags} )"
         if argument.kind == "value":
-            flags += " VALUE"
+            value = (
+                "( " + " | ".join(f'"{choice}"'
+                                   for choice in argument.choices) + " )"
+                if argument.choices else "VALUE"
+            )
+            flags += f" {value}"
         parts.append(f"[ {flags} ]")
     return " ".join(parts)
 

@@ -32,9 +32,9 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, agent_adapters, cli, headless, heartbeat, init, migrate,
-        ownership, paths, plugins, preflight, prereqs, repos, spawn, status,
-        uninstall, update_check, upgrade,
+        activate, agent_adapters, cli, completions, headless, heartbeat, init,
+        migrate, ownership, paths, plugins, preflight, prereqs, repos, spawn,
+        status, uninstall, update_check, upgrade,
     )
     from agents_live.cli_spec import COMMANDS, render_docs_block
 except ImportError:  # flat checkout layout
@@ -43,6 +43,7 @@ except ImportError:  # flat checkout layout
     import activate
     import agent_adapters
     import cli
+    import completions
     import headless
     import heartbeat
     import init
@@ -1045,6 +1046,35 @@ class TestCliContract(_TempProject):
             self.assertEqual(cli.main(["dashboard", "--dev"]), 0)
         scripts = [Path(call.args[0][3]).name for call in run.call_args_list]
         self.assertEqual(scripts, ["qlog.py", "timeline.py", "dashboard.py"])
+
+    def test_completion_scripts_follow_public_spec(self) -> None:
+        scripts = {"bash": completions.bash(), "zsh": completions.zsh()}
+        for shell, script in scripts.items():
+            with self.subTest(shell=shell):
+                for command in COMMANDS:
+                    if command.hidden:
+                        continue
+                    self.assertIn(command.name, script)
+                    for alias in command.aliases:
+                        self.assertIn(alias, script)
+                    for item in (command, *command.subcommands):
+                        for argument in item.args:
+                            for flag in argument.flags:
+                                if flag.startswith("-") and not argument.hidden:
+                                    self.assertIn(flag, script)
+                self.assertIn("agents-live status --json", script)
+                self.assertNotIn("--watch-loop", script)
+                self.assertNotIn("--ensure-watcher", script)
+
+    def test_completions_command_prints_selected_shell(self) -> None:
+        for shell, marker in (("bash", "complete -F"),
+                              ("zsh", "#compdef agents-live")):
+            with (
+                self.subTest(shell=shell),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(cli.main(["completions", shell]), 0)
+                self.assertIn(marker, stdout.getvalue())
 
     def test_version_works_outside_repository(self) -> None:
         saved = Path.cwd()
