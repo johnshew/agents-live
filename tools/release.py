@@ -30,6 +30,10 @@ CHANGELOG_URL = (
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
+GENERATED_COMPARE_LABEL_RE = re.compile(
+    r"(?m)^\*\*Full Changelog\*\*: "
+    r"(?=https://github\.com/johnshew/agents-live/compare/)"
+)
 
 
 class ReleaseError(RuntimeError):
@@ -116,6 +120,22 @@ def _release_notes(version: str) -> str:
         "\n".join(summaries)
         + f"\n\n[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
     )
+
+
+def _label_release_comparison(tag: str) -> None:
+    body = _run(
+        ["gh", "release", "view", tag, "--json", "body", "--jq", ".body"],
+        capture=True,
+    )
+    updated, replacements = GENERATED_COMPARE_LABEL_RE.subn("**Diffs**: ", body)
+    if replacements == 0:
+        return
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".md", delete_on_close=False
+    ) as notes_file:
+        notes_file.write(updated + "\n")
+        notes_file.close()
+        _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
 
 
 def _minimum_bump(notes: str) -> str:
@@ -311,6 +331,7 @@ def publish() -> None:
         text=True,
     )
     if existing.returncode == 0:
+        _label_release_comparison(tag)
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
         return
     notes = _release_notes(version)
@@ -333,6 +354,7 @@ def publish() -> None:
             "--notes-file", notes_file.name,
             "--title", f"agents-live {tag}",
         ])
+    _label_release_comparison(tag)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
 
