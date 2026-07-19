@@ -620,8 +620,9 @@ Package the agents-live system as a standalone, shareable release.
    script rejects an empty `Unreleased` section or undersized bump, validates
    synchronized `main`, updates every version surface, and reruns the release
    gates. Preparation creates the commit and local tag; publication verifies
-   that exact state, reruns the gates, pushes atomically, and creates the
-   GitHub release that triggers PyPI publishing.
+   that exact state, reruns the gates, pushes atomically, and creates a GitHub
+   release with one first-line summary per changelog entry plus a link to the
+   full tagged changelog. The release triggers PyPI publishing.
 
 Full details: [release-process.md](release-process.md)
 

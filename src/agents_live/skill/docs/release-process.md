@@ -137,11 +137,13 @@ uv run --script tools/release.py --prepare --bump patch --yes
 
 Replace `patch` with the recommended bump. The script rejects an empty
 `Unreleased` section and a bump below the minimum implied by conventional
-changelog prefixes. It requires a clean `main` synchronized with `origin/main`,
-bumps all version surfaces, moves the changelog's Unreleased notes under the
-new version, reruns the audit, smoke suite, and build, and creates the release
-commit and annotated tag locally. Inspect the target-version wheel and source
-distribution under `dist/`, then publish:
+changelog prefixes. Each changelog bullet starts with a standalone one-line
+summary; indented continuation lines hold the detail. It requires a clean
+`main` synchronized with `origin/main`, bumps all version surfaces, moves the
+changelog's Unreleased notes under the new version, reruns the audit, smoke
+suite, and build, and creates the release commit and annotated tag locally.
+Inspect the target-version wheel and source distribution under `dist/`, then
+publish:
 
 ```bash
 uv run --script tools/release.py --publish --yes
@@ -149,8 +151,10 @@ uv run --script tools/release.py --publish --yes
 
 Publication verifies that the tagged release commit is exactly one commit
 ahead of `origin/main`, reruns every gate, pushes the commit and tag atomically,
-and creates the GitHub release. That release triggers trusted publishing to
-PyPI. Wait for the workflow to succeed, verify the exact version with `uvx
+and creates the GitHub release. The release body contains each changelog
+entry's first-line summary, a link to the full changelog at the release tag,
+and GitHub's generated notes. That release triggers trusted publishing to PyPI.
+Wait for the workflow to succeed, verify the exact version with `uvx
 --refresh --from "agents-live==<version>" agents-live --version`, then run
 `agents-live upgrade` and the installed-tool checks. The isolated exact-version
 check avoids mistaking cache propagation for a failed publish without pinning

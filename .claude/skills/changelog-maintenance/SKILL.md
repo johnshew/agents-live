@@ -28,6 +28,9 @@ changelog or to an issue and delete it.
   tool inserts `## <version> - <date>` below the Unreleased heading,
   moving the accumulated entries into that section. Never pre-stamp a
   version heading yourself.
+- The first physical line of every bullet must be a standalone one-line
+  summary. Put supporting detail on indented continuation lines. The release
+  tool copies only the first line of each bullet into the GitHub release body.
 - Release-prep **fails if Unreleased is empty**, so shippable work must
   have entries before a release is cut.
 
@@ -41,8 +44,9 @@ Run `/changelog-maintenance` before the release preview. The handoff must:
 4. Leave changelog changes committed so the release starts from a clean tree.
 
 The release tool independently enforces the minimum implied by conventional
-changelog prefixes: `feat:` requires at least minor, `!:` or `BREAKING CHANGE:`
-requires major, and fixes or documentation require patch.
+changelog prefixes: `feat:` requires at least minor, `feat!:` or `fix!:` and
+`BREAKING CHANGE:` footers require major, and fixes or documentation require
+patch.
 
 ## Export boundary and PII
 
@@ -89,20 +93,27 @@ first; `src/agents_live/skill/docs/` changes usually state the
 user-visible behavior directly and are the best source for the entry's
 wording.
 
-Match the existing format - conventional-commit-style bullets, wrapped
-to the file's line width. Keep fixes before feats (matching the
-existing section), most significant first within each group:
+Match the existing format: conventional-commit-style bullets whose first line
+is a standalone summary. Put elaboration on wrapped, indented continuation
+lines. Keep fixes before feats (matching the existing section), most
+significant first within each group:
 
 ```markdown
-- fix: scope crontab matching to the current repository, so projects
-  sharing a user crontab cannot remove one another's entries.
-- feat: add `agents-live upgrade` as the explicit post-package-upgrade
-  workflow for refreshing a project's managed skill payload.
+- fix: isolate shared crontab mutations by project.
+  Projects sharing a user crontab can no longer remove one another's entries.
+- feat: add `agents-live upgrade` for refreshing managed skill payloads.
+  The command updates the runtime and every registered project by default.
 ```
 
 Rules:
 
 - Prefix `fix:` / `feat:` / `docs:` / `chore:` to match the change.
+- Mark a breaking change with `!` before the colon, such as `feat!:` or
+  `fix(parser)!:`. Use an optional `BREAKING CHANGE:` footer for migration
+  detail, not a bold Markdown prefix.
+- Make the first physical line read as a complete summary without depending on
+  continuation lines. The release-prep pass must fix entries that violate this
+  rule before recommending a release.
 - Describe the user-visible behavior change and why it matters, not
   the implementation diff. One entry per logical change.
 - No commit hashes - the git history is the audit trail. Cite a GitHub

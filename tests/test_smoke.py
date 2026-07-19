@@ -2116,7 +2116,8 @@ class TestReleaseTool(unittest.TestCase):
             '__version__ = "1.2.3"\n',
             'blob = "https://example.test/blob/v1.2.3/docs"\n',
             "1.2.3\n",
-            "# Changelog\n\n## Unreleased\n\nA fix.\n\n## 1.2.3 - 2026-07-18\n\nOld.\n",
+            "# Changelog\n\n## Unreleased\n\nA fix.\n\n"
+            "## 1.2.3 - 2026-07-18\n\n- fix: old release note.\n",
         )
         for path, content in zip(module.RELEASE_FILES, contents):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2171,6 +2172,10 @@ class TestReleaseTool(unittest.TestCase):
     def test_minimum_bump_detects_breaking_change_markers(self) -> None:
         module = self._load_tool()
         self.assertEqual(module._minimum_bump("- feat!: replace the API."), "major")
+        self.assertEqual(
+            module._minimum_bump("- fix(parser)!: reject ambiguous input."),
+            "major",
+        )
         self.assertEqual(
             module._minimum_bump("- feat: replace the API.\n\nBREAKING CHANGE: API v1"),
             "major",
@@ -2295,6 +2300,14 @@ class TestReleaseTool(unittest.TestCase):
         module = self._load_tool()
         with tempfile.TemporaryDirectory() as tmp:
             self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n## 1.2.3 - 2026-07-18\n\n"
+                "- fix: keep this standalone summary.\n"
+                "  This detail stays in the changelog.\n"
+                "- feat!: replace the old contract.\n"
+                "  Migration details also stay out of the release body.\n",
+                encoding="utf-8",
+            )
             existing = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout='{"url":"https://example.test/release"}\n')
             with (
@@ -2308,18 +2321,38 @@ class TestReleaseTool(unittest.TestCase):
             run.assert_not_called()
 
             missing = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+            release_bodies = []
+
+            def capture_run(argv, *, capture=False):
+                if argv[:3] == ["gh", "release", "create"]:
+                    notes_path = Path(argv[argv.index("--notes-file") + 1])
+                    release_bodies.append(notes_path.read_text(encoding="utf-8"))
+                return ""
+
             with (
                 mock.patch.object(module, "_require_tools"),
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=missing),
-                mock.patch.object(module, "_run") as run,
+                mock.patch.object(module, "_run", side_effect=capture_run) as run,
                 mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
                 module.publish()
             commands = [call.args[0] for call in run.call_args_list]
             self.assertFalse(any(command[:2] == ["git", "push"] for command in commands))
-            self.assertTrue(any(command[:3] == ["gh", "release", "create"]
-                                for command in commands))
+            release_command = next(
+                command for command in commands
+                if command[:3] == ["gh", "release", "create"]
+            )
+            self.assertIn("--notes-file", release_command)
+            self.assertEqual(
+                release_bodies,
+                [
+                "- fix: keep this standalone summary.\n"
+                "- feat!: replace the old contract.\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n"
+                ],
+            )
 
 
 class TestInstallSkill(_TempProject):
