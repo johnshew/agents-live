@@ -839,11 +839,21 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.sweep:
+        # The sweep's stdout contract is exactly one JSON document (the
+        # host loop parses it). In-process work can print - notably
+        # activate.prune_orphans reporting each pruned entry - so capture
+        # everything and forward it to stderr instead.
+        buffer = io.StringIO()
         try:
-            result = sweep()
+            with contextlib.redirect_stdout(buffer):
+                result = sweep()
         except Exception as exc:
             preflight.emit_failure("health-check", f"sweep failed: {exc}")
             return 1
+        finally:
+            captured = buffer.getvalue().strip()
+            if captured:
+                print(captured, file=sys.stderr)
         print(json.dumps(result))
         return 1 if result["failed"] else 0
     return run_host_loop(quiet=args.quiet)
