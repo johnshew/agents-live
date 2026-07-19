@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.0.2 - 2026-07-19
+
 - fix: stop crashing watchers on their first file-change dispatch.
   The dispatch logger rendered its run-capture paths repo-relative, but
   captures moved to the user-level state home in 2.0.0, so the watcher
