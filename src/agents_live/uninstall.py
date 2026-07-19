@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import heartbeat
+from . import heartbeat, preflight
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,12 +23,11 @@ def main(argv: list[str] | None = None) -> int:
             selected = (
                 args.distro or os.environ.get("WSL_DISTRO_NAME")
                 or "<your-distro-name>")
-            print(
-                f"error: host cleanup failed; agents-live remains installed: {exc}\n"
-                "recovery: "
-                "uvx agents-live heartbeat uninstall --distro "
-                f"{shlex.quote(selected)}",
-                file=sys.stderr)
+            preflight.emit_failure(
+                "uninstall",
+                "host cleanup failed; agents-live remains installed: "
+                f"{exc}; recovery: uvx agents-live heartbeat uninstall "
+                f"--distro {shlex.quote(selected)}")
             return 1
     else:
         # Non-WSL hosts have no Windows heartbeat task to remove; a hard
@@ -36,10 +35,10 @@ def main(argv: list[str] | None = None) -> int:
         print("no WSL host integrations to remove; uninstalling the tool")
     uv = shutil.which("uv")
     if not uv:
-        print(
-            "error: host cleanup succeeded, but uv was not found; restore or "
-            "install uv, then run `uv tool uninstall agents-live`",
-            file=sys.stderr)
+        preflight.emit_failure(
+            "uninstall",
+            "host cleanup succeeded, but uv was not found; restore or install "
+            "uv, then run `uv tool uninstall agents-live`")
         return 1
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)
     return completed.returncode

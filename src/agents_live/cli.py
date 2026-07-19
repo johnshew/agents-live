@@ -16,18 +16,17 @@ lifecycle operation is a subcommand:
 
     cli.py run <name> [...]          execute an agent once (run.py)
     cli.py start <name>|--all [...]  activate cron/watcher (activate.py)
-    cli.py stop <name>               deactivate, keep config (teardown.py)
-    cli.py teardown <name>           same as stop (teardown.py)
+    cli.py stop <name>               deactivate, keep config
     cli.py status [...]              list agents and state (status.py)
     cli.py smoketest [...]           end-to-end validation (smoketest.py)
-    cli.py doctor [...]              environment/install checks (prereqs.py)
+    cli.py doctor [...]              environment/install checks
     cli.py logs [timeline] [...]     query logs (qlog.py / timeline.py)
     cli.py dashboard [...]           interactive control panel (dashboard.py)
 
 Global flag: ``--repo <path-or-alias>`` (before the subcommand) pins the
 project root. Without it, resolution follows paths.py.
 
-``run``/``start``/``stop``/``teardown`` accept the agent name positionally
+``run``/``start``/``stop`` accept the agent name positionally
 (``cli.py run foo`` == ``cli.py run --name foo``).
 
 ``logs`` and ``dashboard`` delegate via ``uv run --script`` so their
@@ -37,6 +36,9 @@ other subcommands dispatch in-process to the module's ``main()``.
 from __future__ import annotations
 
 import os
+import contextlib
+import io
+import json
 import shutil
 import subprocess
 import sys
@@ -49,34 +51,13 @@ from . import paths
 from . import preflight
 from . import update_check
 from . import __version__
-
-# Host-mutating subcommands run the static capability preflight first
-# (proposal §3.6). Read-only commands never preflight - they must work
-# sandboxed.
-HOST_MUTATING = frozenset(preflight._COMMAND_PROBES)
-
-# subcommand -> module name (in-process dispatch to module.main())
-IN_PROCESS = {
-    "run": "run",
-    "start": "activate",
-    "stop": "teardown",
-    "teardown": "teardown",
-    "status": "status",
-    "smoketest": "smoketest",
-    "doctor": "prereqs",
-    "prereqs": "prereqs",  # alias
-    "init": "init",
-    "upgrade": "upgrade",
-    "migrate": "migrate",
-    "heartbeat": "heartbeat",
-    "uninstall": "uninstall",
-    "repos": "repos",
-}
-
-# init DEFINES the project root (creates the marker); it must not be
-# gated on resolving one.
-NO_ROOT_REQUIRED = frozenset({"init", "upgrade", "heartbeat", "uninstall", "repos"})
-MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
+from .cli_spec import (
+    COMMAND_BY_NAME,
+    command_help,
+    render_usage,
+    unknown_flag,
+    validation_error,
+)
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 # inside a git repository that has no marker write the minimal local-mode
@@ -86,8 +67,6 @@ MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 # invocations pin the root). Every other command - and any resolution
 # failure caused by a set-but-invalid AGENTS_LIVE_REPO - keeps the
 # fail-loudly contract.
-AUTO_MARKER = frozenset({"run", "start"})
-
 _MARKER_TEMPLATE = """\
 # agents-live project marker (auto-created by `agents-live {cmd}`).
 # Marks the project root and holds project config; an empty config means
@@ -95,68 +74,23 @@ _MARKER_TEMPLATE = """\
 # the skill, seed agent directories, or declare non-local configuration.
 """
 
-# subcommand -> script file (subprocess via uv run --script; on-demand deps)
-SUBPROCESS = {
-    "logs": "qlog.py",
-    "dashboard": "dashboard.py",
-}
-
-# subcommands whose first bare argument is agent-name sugar for --name
-NAME_SUGAR = {"run", "start", "stop", "teardown"}
-
 DOCS_URL = "https://github.com/johnshew/agents-live"
-ALL_REPOS_COMMANDS = frozenset({"status", "doctor", "prereqs", "dashboard"})
-# `run` executes an agent, so silently targeting the registry default
-# would be invisible mutation; `upgrade` is NO_ROOT_REQUIRED and never
-# reaches the notice block, so listing it here would be dead weight.
-DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"run", "migrate"})
 
 
 def _usage() -> str:
-    # Doc links pinned per §3.5 (repin from main to the release tag at
-    # packaging time, Phase 4).
-    blob = f"{DOCS_URL}/blob/v0.3.1/src/agents_live/skill/docs"
-    return (
-        "usage: agents-live [--json] [--repo PATH] <command> [args]\n"
-        "       agents-live --version\n\n"
-        "commands:\n"
-        "  run <name>          execute an agent once (verbose)\n"
-        "  start <name>|--all  activate cron/watcher triggers\n"
-        "  stop <name>         deactivate triggers, keep config\n"
-        "  teardown <name>     same as stop\n"
-        "  status [name]       list agents and runtime state\n"
-        "  logs [timeline]     query logs / correlated event timeline\n"
-        "  smoketest           end-to-end validation\n"
-        "  doctor              environment and install checks\n"
-        "  init                initialize the project layout\n"
-        "  upgrade             upgrade runtime and project skill payloads\n"
-        "  migrate             converge cron/watcher entries to the\n"
-        "                      canonical invocation form\n"
-        "  heartbeat           run or manage the WSL host heartbeat\n"
-        "  uninstall           remove host integrations, then the uv tool\n"
-        "  repos               manage registered repositories\n"
-        "  dashboard           interactive control panel\n\n"
-        "global flags:\n"
-        "  --json              machine-readable output and error envelopes\n"
-        "  --repo PATH|ALIAS   pin a path or registered repository (else\n"
-        "                      AGENTS_LIVE_REPO, local marker, then default)\n"
-        "  --version           show the installed version and exit\n\n"
-        f"docs: {DOCS_URL}\n"
-        f"  commands reference  {blob}/commands.md\n"
-        f"  architecture        {blob}/approach.md\n"
-        f"  diagnostics         {blob}/diagnostics.md\n"
-    )
+    return render_usage(__version__, DOCS_URL)
 
 
-def _apply_name_sugar(cmd: str, rest: list[str]) -> list[str]:
-    if cmd in NAME_SUGAR and rest and not rest[0].startswith("-"):
+def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
+    if name_sugar and rest and not rest[0].startswith("-"):
         return ["--name", rest[0], *rest[1:]]
     return rest
 
 
 def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
+    command = COMMAND_BY_NAME.get(cmd)
     if (
-        cmd not in ("doctor", "prereqs", "upgrade")
+        (command is None or command.update_notice)
         and not json_mode
         and "--json" not in rest
         and "--quiet" not in rest
@@ -166,6 +100,55 @@ def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
         update_check.launch_if_stale()
         if notice:
             print(f"\n{notice}", file=sys.stderr)
+    return code
+
+
+def _emit_failure(code: str, operation: str, detail: str,
+                  *, json_mode: bool) -> None:
+    preflight.emit_error(
+        preflight.CapabilityFailure(
+            code, "command", operation, detail.strip() or "command failed"),
+        json_mode=json_mode,
+    )
+
+
+def _captured_result(code: int, cmd: str, stdout: str, stderr: str) -> int:
+    """Emit one JSON value for a captured JSON-capable command."""
+    text = stdout.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed_lines = []
+        for line in text.splitlines():
+            try:
+                parsed_lines.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        parsed = None
+        if parsed_lines:
+            parsed = (
+                {"ok": code == 0, "operation": cmd, "records": parsed_lines}
+                if cmd == "logs" and code == 0 else parsed_lines[-1]
+            )
+            if code != 0:
+                parsed = next(
+                    (item for item in reversed(parsed_lines)
+                     if isinstance(item, dict) and "error" in item),
+                    parsed,
+                )
+    if code != 0 and not (
+            isinstance(parsed, dict) and isinstance(parsed.get("error"), dict)):
+        _emit_failure(
+            "operation_failed", cmd, stderr.strip() or text,
+            json_mode=True,
+        )
+    elif parsed is not None:
+        print(json.dumps(parsed))
+    else:
+        payload = {"ok": True, "operation": cmd}
+        if text:
+            payload["detail"] = text
+        print(json.dumps(payload))
     return code
 
 
@@ -259,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args[0] == "--repo":
             if len(args) < 2:
-                print("error: --repo requires a path or alias", file=sys.stderr)
+                _emit_failure(
+                    "usage_error", "--repo", "--repo requires a path or alias",
+                    json_mode=json_mode)
                 return 2
             try:
                 root = paths.resolve_root(args[1])
@@ -281,18 +266,50 @@ def main(argv: list[str] | None = None) -> int:
         return _finish(0, "help", [], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
+    command = COMMAND_BY_NAME.get(cmd)
+    if command is None:
+        _emit_failure(
+            "unknown_command", cmd, f"unknown command '{cmd}'",
+            json_mode=json_mode)
+        return 2
+    if "--json" in rest:
+        json_mode = True
+        os.environ[preflight.JSON_ENV_VAR] = "1"
+        rest = [argument for argument in rest if argument != "--json"]
+    if json_mode and not command.json:
+        _emit_failure(
+            "usage_error", cmd, f"{cmd} does not support --json",
+            json_mode=True)
+        return 2
+    if command is not None and any(arg in ("-h", "--help") for arg in rest):
+        print(command_help(command, cmd), end="")
+        return _finish(0, cmd, rest, json_mode=json_mode)
+    if command is not None:
+        unknown = unknown_flag(command, rest)
+        if unknown is not None:
+            _emit_failure(
+                "usage_error", cmd, f"unrecognized argument: {unknown}",
+                json_mode=json_mode)
+            return 2
     all_repos = "--all-repos" in rest
-    if all_repos and cmd not in ALL_REPOS_COMMANDS:
-        print(f"error: {cmd} does not support --all-repos; select one repository",
-              file=sys.stderr)
+    if all_repos and (command is None or not command.all_repos):
+        _emit_failure(
+            "usage_error", cmd,
+            f"{cmd} does not support --all-repos; select one repository",
+            json_mode=json_mode)
+        return 2
+    invalid = validation_error(command, rest)
+    if invalid is not None:
+        _emit_failure("usage_error", cmd, invalid, json_mode=json_mode)
         return 2
 
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module.
-    if cmd not in NO_ROOT_REQUIRED and not all_repos:
+    if (command is None or command.root != "none") and not all_repos:
         if (
-            cmd in AUTO_MARKER
+            command is not None
+            and command.root == "auto-marker"
             and not os.environ.get(paths.ENV_VAR, "").strip()
             and paths._walk_for_marker(Path.cwd()) is None
         ):
@@ -301,44 +318,65 @@ def main(argv: list[str] | None = None) -> int:
             paths.resolve_root()
         except ValueError as exc:
             allow_markerless_invocation = (
-                cmd in MARKERLESS_ALLOWED
+                command is not None
+                and command.root == "markerless"
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
             if not allow_markerless_invocation and (
-                    cmd not in AUTO_MARKER or _adopt_git_root(cmd) is None):
+                    command is None
+                    or command.root != "auto-marker"
+                    or _adopt_git_root(cmd) is None):
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),
                     json_mode=json_mode)
                 return 2
         if (
             paths.resolution_source() == "default"
-            and cmd in DEFAULT_NOTICE_COMMANDS
+            and command is not None
+            and command.default_notice
         ):
             print(f"agents-live: using default repo {paths.resolve_root()}",
                   file=sys.stderr)
 
-    rest = _apply_name_sugar(cmd, rest)
+    rest = _apply_name_sugar(
+        command.name_sugar if command is not None else False, rest)
 
     # Static capability preflight for host-mutating commands (§3.6).
     # Advisory layer 1 of 3: the operation itself still converts failures,
     # and post-verification confirms state. For a targeted `start` the
     # probe set derives from the agent's own triggers.
-    if cmd in HOST_MUTATING:
-        capabilities = _start_capabilities(rest) if cmd == "start" else None
+    if command is not None and (
+            command.probes or command.dynamic_probes is not None):
+        capabilities = (
+            _start_capabilities(rest)
+            if command.dynamic_probes == "start"
+            else None
+        )
+        if capabilities is None:
+            capabilities = frozenset(command.probes)
         failure = preflight.check(cmd, capabilities)
         if failure is not None:
             preflight.emit_error(failure, json_mode=json_mode)
             return 2
 
-    if cmd in SUBPROCESS:
-        script = SUBPROCESS[cmd]
-        if cmd == "logs" and rest and rest[0] == "timeline":
-            script, rest = "timeline.py", rest[1:]
+    if command is not None and command.dispatch == "subprocess":
+        script = command.module
+        if rest:
+            subcommand = next(
+                (sub for sub in command.subcommands if sub.name == rest[0]),
+                None,
+            )
+            if subcommand is not None:
+                script, rest = subcommand.module, rest[1:]
+        if json_mode and cmd == "logs" and script == "qlog.py":
+            if "--format" not in rest:
+                rest.extend(("--format", "jsonl"))
         uv = shutil.which("uv") or "uv"
         try:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
+                **({"capture_output": True, "text": True} if json_mode else {}),
             )
         except KeyboardInterrupt:
             # Ctrl-C reaches the child (same process group) which handles
@@ -348,28 +386,35 @@ def main(argv: list[str] | None = None) -> int:
         code = completed.returncode
         if code < 0:
             code = 128 - code  # signal death -> conventional 128+signum
+        if json_mode:
+            return _captured_result(
+                code, cmd, completed.stdout, completed.stderr)
         return _finish(code, cmd, rest, json_mode=json_mode)
-
-    if cmd not in IN_PROCESS:
-        print(f"error: unknown command '{cmd}'\n\n{_usage()}", file=sys.stderr)
-        return 2
 
     import importlib
     # Package-aware dispatch (Phase 4): as loose scripts the modules are
     # top-level; installed as a package they are agents_live.<name>.
-    module_name = IN_PROCESS[cmd]
+    module_name = command.module
     if __package__:
         module_name = f"{__package__}.{module_name}"
     module = importlib.import_module(module_name)
     sys.argv = [f"agents-live {cmd}", *rest]
     try:
+        if json_mode:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = module.main()
+            return _captured_result(
+                code, cmd, stdout.getvalue(), stderr.getvalue())
         code = module.main()
         return _finish(code, cmd, rest, json_mode=json_mode)
     except Exception as exc:
         # Layer-2 safety net: a typed error that escapes a subcommand's
         # own handling still leaves as the envelope, never a traceback.
-        if getattr(exc, "category", None) is None:
-            raise
         preflight.emit_typed_error(exc, cmd)
         return 1
 

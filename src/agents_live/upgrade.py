@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import init, paths, plugins, repos
+from . import init, paths, plugins, preflight, repos
 from .spawn import find_uv
 
 
@@ -50,7 +50,7 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        preflight.emit_failure("upgrade", str(exc))
         return 1
     status = subprocess.run(
         [uv, "tool", "upgrade", "agents-live"], check=False,
@@ -60,7 +60,7 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     try:
         plugins.converge(roots or [])
     except (OSError, ValueError, plugins.PluginError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        preflight.emit_failure("upgrade", str(exc))
         return 1
     return 0
 
@@ -74,11 +74,9 @@ def _refresh_with_installed_cli(root: Path) -> int:
     try:
         executable = str(cli_shim_path())
     except AgentsLiveError as exc:
-        print(
-            f"error: agents-live executable not found after runtime "
-            f"upgrade: {exc}",
-            file=sys.stderr,
-        )
+        preflight.emit_failure(
+            "upgrade",
+            f"agents-live executable not found after runtime upgrade: {exc}")
         return 1
     return subprocess.run(
         [executable, "--repo", str(root), "upgrade", "--skills-only"],
@@ -115,7 +113,7 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         # The message already names its source (registry file vs an
         # invalid AGENTS_LIVE_REPO); no prefix that could mislabel it.
-        print(f"error: {exc}", file=sys.stderr)
+        preflight.emit_failure("upgrade", str(exc))
         return 1
 
     if not args.skills_only:
@@ -137,7 +135,8 @@ def main() -> int:
             try:
                 _refresh_payload(root)
             except (OSError, ValueError) as exc:
-                print(f"error: {label} ({root}): {exc}", file=sys.stderr)
+                preflight.emit_failure(
+                    "upgrade", f"{label} ({root}): {exc}")
                 failed = True
         elif _refresh_with_installed_cli(root) != 0:
             failed = True

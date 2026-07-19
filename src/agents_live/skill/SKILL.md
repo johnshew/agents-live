@@ -28,7 +28,7 @@ prompts, their tools, their authentication, or their reasoning.
 - Agent state is computed from crontab and process lists. Runtime is the
   source of truth. A watcher's durable "should be running" intent is its
   `@reboot` respawn line in the crontab (it survives reboot and is removed by
-  a deliberate teardown). Ownership is local by default (every agent belongs
+  a deliberate stop). Ownership is local by default (every agent belongs
   to this host). With a plugin-provided registry backend, the shared state
   file `Agents/data/agent-owners.json` records which host owns each agent.
 
@@ -38,7 +38,7 @@ prompts, their tools, their authentication, or their reasoning.
 |---|---|
 | Explaining the system or comparing it to other offerings | [docs/overview.md](docs/overview.md) |
 | `create` (building a new agent) | [docs/commands.md](docs/commands.md) section "create" |
-| `install` or `prereqs` | [docs/commands.md](docs/commands.md) -- or just run the script; output is self-documenting |
+| `install` or `doctor` | [docs/commands.md](docs/commands.md) -- or just run the command; output is self-documenting |
 | `smoketest` | [docs/commands.md](docs/commands.md) section "smoketest" |
 | `release` | [docs/release-process.md](docs/release-process.md) |
 | Editing any script | [docs/approach.md](docs/approach.md) (architecture) |
@@ -78,7 +78,7 @@ description ending "Never delegate to this agent." plus
 ## Lifecycle
 
 ```
-create -> run (test) -> start (activate) -> stop -> teardown
+create -> run (test) -> start (activate) -> stop
 ```
 
 ## Commands
@@ -94,7 +94,7 @@ not the user-facing contract.
 | `run <name>` | `agents-live run <name>` |
 | `start <name>` | `agents-live start <name>` |
 | `start --all [--dry-run]` | `agents-live start --all [--dry-run]` |
-| `stop <name>` / `teardown <name>` | `agents-live stop <name>` |
+| `stop <name>` | `agents-live stop <name>` |
 | `status [name] [--json]` | `agents-live status [name] [--json]` |
 | `status --all-repos` | `agents-live status --all-repos` *(read-only, repo-qualified)* |
 | `repos` | `agents-live repos list|add|default|remove` |
@@ -104,7 +104,7 @@ not the user-facing contract.
 | `logs query` | `agents-live logs [--agent name] [--errors] [--all] [--since T] [--slow N]` |
 | `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
-| `doctor` / `prereqs` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
+| `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |

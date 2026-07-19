@@ -8,7 +8,7 @@
 Despite the name, this module is never executed directly - it has no
 ``main()`` and no CLI. It is the common library imported by every
 executable in the skill (``run.py``, ``activate.py``, ``status.py``,
-``teardown.py``, ``prereqs.py``, ``smoketest.py``, ``dashboard.py``):
+``stop.py``, ``doctor.py``, ``smoketest.py``, ``dashboard.py``):
 
 * agent discovery and config: ``AgentConfig``, frontmatter parsing,
   ``load_agent_config`` / ``list_agents``, MCP resolution;
@@ -111,7 +111,7 @@ COPILOT_OUTPUT_MAX_LINES = 100
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # The public API - exactly what the consumer scripts (run.py, activate.py,
-# status.py, teardown.py, prereqs.py, smoketest.py, dashboard.py) import.
+# status.py, stop.py, doctor.py, smoketest.py, dashboard.py) import.
 # Everything else in this module is underscore-private implementation.
 __all__ = [
     # errors (subclasses carry .category for structured triage)
@@ -707,7 +707,7 @@ def list_reboot_watcher_agent_names() -> list[str]:
 
     This is the durable "intended watchers" set: the reverse of
     :func:`install_watcher_reboot_line`. The presence of a line means the
-    watcher is meant to be running; a deliberate teardown removes it. Returns
+    watcher is meant to be running; a deliberate stop removes it. Returns
     ``[]`` when the crontab is empty or unavailable.
     """
     lines = current_crontab_lines() or []
@@ -1154,7 +1154,7 @@ def agent_file_exists(name: str) -> bool:
 
     This is the deletion predicate for orphan pruning (TT-001 review
     finding): a malformed or transiently unreadable definition must read
-    as "exists but broken" (abstain), never as "deleted" (teardown).
+    as "exists but broken" (abstain), never as "deleted" (stop).
     Discovery's lenient trigger probe deliberately skips broken native
     files, so absence from :func:`list_agents` is NOT proof the file is
     gone."""

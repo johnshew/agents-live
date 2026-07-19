@@ -14,10 +14,81 @@ Agents Live operates the Claude Code and GitHub Copilot agents you already
 use. These commands add and manage local triggers around standard agent
 definitions; they do not introduce a separate agent format or runtime.
 
+<!-- BEGIN GENERATED CLI -->
+## CLI grammar
+
+The public command surface is generated from the declarative command
+spec. `VALUE`, `NAME`, `PATH`, and `ALIAS` are terminal values.
+
+```ebnf
+invocation   ::= "agents-live" pre_command* ( command post_command* | help_word )
+help_word    ::= "-h" | "--help" | "help" | "--version" | ""
+pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
+post_command ::= "--json"
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | heartbeat | uninstall | repos | completions | dashboard
+run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
+start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
+stop         ::= "stop" ( NAME | "--name" NAME )
+status       ::= "status" [ NAME ] [ "--all-repos" ]
+logs         ::= "logs" ( query | "timeline" timeline_args )
+query        ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
+timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
+smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
+doctor       ::= "doctor" [ "--all-repos" ]
+init         ::= "init"
+upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
+migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ]
+heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
+uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
+repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+completions  ::= "completions" ( "bash" | "zsh" )
+dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
+```
+
+## CLI command and flag table
+
+| command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
+|---|---|---|---|---|---|---|---|---|
+| run | in-process | auto-marker |  | yes |  | yes | --name, --changed-files, --quiet | Execute an agent once. |
+| start | in-process | auto-marker | crontab, inotify | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
+| stop | in-process | required | crontab | yes |  | yes | --name | Deactivate triggers and keep configuration. |
+| status | in-process | required |  | yes | yes |  | --all-repos | List agents and runtime state. |
+| logs | subprocess | required |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
+| logs timeline | subprocess | required |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
+| smoketest | in-process | required | crontab, inotify | yes |  |  | --runtime, --model | Run end-to-end validation. |
+| doctor | in-process | markerless |  | yes | yes |  | --all-repos | Check environment and installation readiness. |
+| init | in-process | none |  | yes |  |  |  | Initialize the project layout. |
+| upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
+| migrate | in-process | required | crontab | yes |  |  | --dry-run, -n | Converge persisted runtime invocations. |
+| heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
+| heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
+| heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |
+| uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
+| repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
+| repos list | in-process | none |  |  |  |  |  | List registered repositories. |
+| repos add | in-process | none |  |  |  |  |  | Register a repository. |
+| repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
+| repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
+| completions | in-process | none |  |  |  |  |  | Generate shell completion scripts. |
+| dashboard | subprocess | required |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
+<!-- END GENERATED CLI -->
+
+## Shell completions
+
+Generate bash or zsh completion directly from the command spec:
+
+```bash
+source <(agents-live completions bash)
+# zsh: source <(agents-live completions zsh)
+```
+
+To install persistently, redirect the generated script to the completion
+directory loaded by your shell configuration.
+
 ## Contents
 
 - [install -- Installation Instructions](#install----installation-instructions)
-- [prereqs -- Check Environment Readiness](#prereqs----check-environment-readiness)
+- [doctor -- Check Environment Readiness](#doctor----check-environment-readiness)
 - [smoketest -- End-to-End Validation](#smoketest----end-to-end-validation)
 - [create -- Create an Agent](#create----create-an-agent)
 - [release -- Audit, Assemble, and Publish](#release----audit-assemble-and-publish)
@@ -25,9 +96,9 @@ definitions; they do not introduce a separate agent format or runtime.
 
 ## `install` -- Installation Instructions
 
-Run `prereqs` first to identify what is missing, then install accordingly.
+Run `doctor` first to identify what is missing, then install accordingly.
 This is an **agent-led judgment call, not a deterministic script**: read
-`prereqs` output, decide what actually needs installing on *this* host, and
+`doctor` output, decide what actually needs installing on *this* host, and
 run it interactively. Do not build or invoke a fire-and-forget installer
 that runs every fix command unconditionally.
 
@@ -39,7 +110,7 @@ that runs every fix command unconditionally.
   this host has Microsoft-account/network access at all (e.g. the user has
   said so, or a prior attempt failed reaching `aka.ms`/`microsoft.com`). If
   not, don't retry the install -- confirm with the user that the host is
-  intentionally agency-less and skip it. `prereqs.py` already scopes its
+  intentionally agency-less and skip it. `doctor.py` already scopes its
    `agency`/`claude`/`copilot` warnings to agents *owned by this host* (per
    `Agents/data/agent-owners.json`), so a WARN here does not necessarily mean
   action is needed.
@@ -117,12 +188,12 @@ that runs every fix command unconditionally.
 Full bring-up sequence for a new host. Every step is idempotent -- safe to
 re-run.
 
-1. **Check prereqs.** `agents-live doctor` -- reports what's missing,
+1. **Check readiness.** `agents-live doctor` -- reports what's missing,
    scoped to the agents this host owns.
 2. **Install missing tools.** Use the commands above. Hand sudo-gated
    `apt install` lines to the user; skip host-inapplicable tools (e.g.
    `agency` on an agency-less host).
-3. **Re-check prereqs.** Confirm all *required* checks pass. Optional
+3. **Re-check readiness.** Confirm all *required* checks pass. Optional
    agent-CLI WARNs for agents this host doesn't own are expected.
 4. **Activate owned agents.** `agents-live start --all` -- installs the
    cron lines and starts the file-watchers for agents this host owns. Safe on
@@ -145,7 +216,7 @@ host step -- see `.agents/new-machine-setup.md` ("Credential storage").
 
 ---
 
-## `prereqs` -- Check Environment Readiness
+## `doctor` -- Check Environment Readiness
 
 Verify that the environment is ready to run agents. Run each check
 below and report the results. If any check fails, explain how to fix it.
@@ -264,7 +335,7 @@ without blocking valid projects.
    endpoints. Not every host has that access, and multi-machine ownership
    (`Agents/data/agent-owners.json`) already pins `agency`-based agents to
    specific hosts (see [Multi-machine ownership](#multi-machine-agent-ownership)
-   below). `prereqs.py` checks agent-owners.json and only warns about a
+   below). `doctor.py` checks agent-owners.json and only warns about a
    missing `claude`/`copilot`/`agency` CLI if *this host* actually owns a
    agent that declares that runtime; otherwise it reports the CLI as
    "not required on this host". Agents with no registry entry and no
@@ -386,7 +457,7 @@ Prerequisites for agents-live (host: <hostname>):
   Ready to go (2 warnings).
 ```
 
-Agent-CLI warnings (`claude`/`copilot`/`agency`) are host-scoped: `prereqs.py`
+Agent-CLI warnings (`claude`/`copilot`/`agency`) are host-scoped: `doctor.py`
 cross-references `Agents/data/agent-owners.json` and only names a CLI as
 "needed" if an agent owned by *this* host declares that runtime. A host with
 no Microsoft-account/network access and no owned `agency` agents can safely
@@ -397,7 +468,7 @@ ignore an `agency` WARN.
 ## `smoketest` -- End-to-End Validation
 
 Validates the full chain: create -> frontmatter -> status -> agent CLI -> JSON
-output -> post-processor -> file write -> watcher detect -> agent CLI -> confirm -> teardown.
+output -> post-processor -> file write -> watcher detect -> agent CLI -> confirm -> stop.
 
 **Requires unsandboxed execution.** The smoketest uses inotifywait (kernel
 inotify) and agent CLI network calls, both blocked in the VS Code sandbox.
@@ -566,7 +637,6 @@ agents-live run my-agent             # test it
 agents-live start my-agent           # start cron or watcher
 agents-live start --all --dry-run    # preview what would activate (no mutations)
 agents-live stop my-agent            # remove triggers, keep agent definition
-agents-live teardown my-agent        # alias for stop
 
 # Multi-machine ownership
 agents-live start my-agent --transfer-to laptop  # transfer to laptop (does NOT activate locally)
@@ -623,7 +693,7 @@ repository without hiding healthy peers. Aggregate doctor runs host checks once
 and project checks once per valid repository; its exit status is nonzero when a
 required host/project check or repository validation fails. The aggregate
 dashboard can filter registered repositories but exposes no actions. Select one
-repository explicitly to run, start, stop, teardown, migrate, claim, or repair.
+repository explicitly to run, start, stop, migrate, claim, or repair.
 
 `agent_directories` remains a within-repository discovery setting. Entries must
 be relative and may not escape through `..` or symlinks; register another

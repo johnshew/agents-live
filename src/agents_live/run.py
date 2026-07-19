@@ -415,7 +415,7 @@ def main() -> int:
             # envelope on stdout, not prose on stderr.
             preflight.emit_typed_error(exc, "run")
         else:
-            print(f"Error: {exc}", file=sys.stderr)
+            preflight.emit_typed_error(exc, "run")
         return 1
     finally:
         pipeline_stack.close()

@@ -60,6 +60,13 @@ file-watch agent; cron-only agents need none.
 uv tool install agents-live   # or: uv tool install <path-to-wheel>
 ```
 
+Generate shell completion from the same command spec as the CLI:
+
+```bash
+source <(agents-live completions bash)
+# zsh: source <(agents-live completions zsh)
+```
+
 On interactive terminal invocations, agents-live checks PyPI for a newer
 stable release when its shared cached result is missing or one hour old. The
 result is stored under
@@ -92,7 +99,7 @@ agents-live run my-agent        # test once, in the foreground
 agents-live start my-agent      # activate cron/watcher triggers
 agents-live status
 agents-live logs
-agents-live teardown my-agent   # deactivate — remove its triggers
+agents-live stop my-agent       # deactivate and keep its configuration
 ```
 
 Projects that need plugin-provided adapters or registry ownership declare the

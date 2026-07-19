@@ -178,13 +178,12 @@ def _in_sandbox() -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--json", dest="json_mode", action="store_true")
     parser.add_argument(
         "--all-repos", action="store_true",
         help="Read status from every registered repository")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args()
-    json_mode = args.json_mode or preflight.json_mode()
+    json_mode = preflight.json_mode()
 
     if args.all_repos:
         if args.name:
@@ -241,7 +240,7 @@ def main() -> int:
             print(format_table(agents))
         return 0
     except AgentsLiveError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        preflight.emit_typed_error(exc, "status")
         return 1
 
 

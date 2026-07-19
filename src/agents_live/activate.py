@@ -709,6 +709,7 @@ def _resolve_activation_ownership(
     *,
     batch_mode: bool,
     transfer_to: str | None,
+    assume_yes: bool = False,
     dry_run: bool = False,
 ) -> bool:
     """Resolve ownership for an activation request.
@@ -802,12 +803,7 @@ def _resolve_activation_ownership(
     # Registry mode: a missing/corrupt registry is abstention, never
     # local ownership (a vanished file must not flip a multi-host
     # deployment to activate-everything-here).
-    try:
-        ownership.load_owners()
-    except ownership.OwnershipUnavailableError as exc:
-        print(f"'{name}': ownership registry unavailable; refusing to "
-              f"activate: {exc}", file=sys.stderr)
-        return False
+    ownership.load_owners()
 
     # Explicit transfer: registry-only on every host, including this one.
     # Registration happens later via a plain `activate` on the owning machine.
@@ -847,7 +843,23 @@ def _resolve_activation_ownership(
     if owner == ownership.WILDCARD or owner == host:
         return True
 
-    # Owned by a different host: never take over implicitly.
+    # Owned by a different host: take over only with per-invocation consent.
+    take_over = assume_yes
+    if not batch_mode and not take_over and sys.stdin.isatty():
+        answer = input(
+            f"{name} is owned by {owner}; take ownership and activate here? "
+            "[y/N] ")
+        take_over = answer.strip().lower() in {"y", "yes"}
+    if not batch_mode and take_over:
+        if dry_run:
+            print(f"[dry-run] would transfer '{name}' ownership: "
+                  f"{owner} -> {host} and activate here")
+        else:
+            ownership.set_owner(name, host)
+            print(f"Transferred '{name}' ownership: {owner} -> {host}")
+            log_event(system_log(), level="info", agent_name=name,
+                      phase="ownership-transfer", previous=owner, new=host)
+        return True
     if not batch_mode:
         print(
             f"'{name}' is owned by '{owner}'; not activating on '{host}'. "
@@ -866,7 +878,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
     file is an orphan left behind by a deleted or renamed agent. Removing the
     file then becomes a complete decommission: the next reconcile on each host
     enumerates its own runtime, finds the orphan, and tears it down (cron +
-    watcher), so no per-host manual teardown is needed.
+    watcher), so no per-host manual stop is needed.
 
     Returns the list of pruned agent names. Safe to call repeatedly: an agent
     whose file still exists is never touched, and ``remove_*``/``stop_watcher``
@@ -882,7 +894,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
         # "not listed" is not "deleted". Only a missing FILE (checked
         # without parsing, across every agent location) proves deletion;
         # an existing-but-broken definition gets abstention + a warning,
-        # never teardown.
+        # never stop.
         if agent_file_exists(name):
             log_event(system_log(), level="warning", agent_name=name,
                       phase="prune-orphan",
@@ -900,7 +912,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
             remove_cron_entries(name)
             remove_watcher_reboot_line(name)
         except AgentsLiveError:
-            pass  # crontab unavailable; watcher teardown below still applies
+            pass  # crontab unavailable; watcher stop below still applies
         stop_watcher(name)
         log_event(system_log(), level="info", agent_name=name, phase="prune-orphan",
                   message="removed cron/watcher for deleted agent definition")
@@ -914,6 +926,7 @@ def activate_one(
     *,
     batch_mode: bool = False,
     transfer_to: str | None = None,
+    assume_yes: bool = False,
     dry_run: bool = False,
 ) -> list[str]:
     """Activate a single agent. Returns list of activated trigger types.
@@ -928,6 +941,7 @@ def activate_one(
         config,
         batch_mode=batch_mode,
         transfer_to=transfer_to,
+        assume_yes=assume_yes,
         dry_run=dry_run,
     ):
         return []
@@ -990,12 +1004,18 @@ def main() -> int:
              "watchers, or agent-owners.json.",
     )
     parser.add_argument(
+        "--yes", action="store_true",
+        help="Take ownership from another host without prompting.",
+    )
+    parser.add_argument(
         "--prune-orphans", dest="prune_orphans", action="store_true",
         help="Tear down cron/watcher entries on this host whose agent "
              "definition file no longer exists, then exit. Implied at the "
              "start of --all so reconcile also decommissions deleted agents.",
     )
     args = parser.parse_args()
+    if args.yes and (args.all or not args.name):
+        parser.error("--yes requires a targeted --name and cannot be used with --all")
 
     try:
         if args.list_reboot_watchers:
@@ -1065,6 +1085,7 @@ def main() -> int:
             args.name,
             batch_mode=False,
             transfer_to=args.transfer_to,
+            assume_yes=args.yes,
             dry_run=args.dry_run,
         )
         if not activated and not args.transfer_to:
@@ -1076,7 +1097,7 @@ def main() -> int:
                     f"agent '{args.name}' has no schedule or watchPath"
                 )
         return 0
-    except AgentsLiveError as exc:
+    except (AgentsLiveError, ownership.OwnershipUnavailableError) as exc:
         # Layer 2 (§3.6): typed errors leave as the envelope in json
         # mode, one concise stderr line otherwise.
         preflight.emit_typed_error(exc, "start")
