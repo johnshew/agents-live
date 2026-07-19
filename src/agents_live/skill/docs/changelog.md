@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.0.1 - 2026-07-19
+
 - fix: keep the health-check sweep's stdout contract pure JSON when in-process work prints.
   The first pass on a host that prunes retired agent entries no longer
   fails with "sweep emitted non-JSON output"; pruning notices are
