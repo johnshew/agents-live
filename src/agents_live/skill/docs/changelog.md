@@ -41,8 +41,6 @@ history is retained in the source repository.
   watcher lines to the canonical invocation. (#43)
 - feat: run the release audit and unit suite on every pull request and push
   to `main`. (#40)
-- test: protect complete help, doctor, and status human output with portable
-  golden files and explicit opt-in regeneration. (#44)
 
 ## 0.3.1 - 2026-07-18
 
