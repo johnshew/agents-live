@@ -976,10 +976,12 @@ def main() -> int:
 
     internal_parser = argparse.ArgumentParser(add_help=False)
     internal_commands = internal_parser.add_subparsers(dest="internal_command")
-    for command in ("watch-loop", "ensure-watcher"):
+    internal_names = (
+        "watch-loop", "ensure-watcher", "list-reboot-watchers")
+    for command in internal_names:
         child = internal_commands.add_parser(command)
-        child.add_argument("internal_name")
-    internal_commands.add_parser("list-reboot-watchers")
+        if command != "list-reboot-watchers":
+            child.add_argument("internal_name")
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--name")
@@ -1007,8 +1009,7 @@ def main() -> int:
              "definition file no longer exists, then exit. Implied at the "
              "start of --all so reconcile also decommissions deleted agents.",
     )
-    if len(sys.argv) > 1 and sys.argv[1] in {
-            "watch-loop", "ensure-watcher", "list-reboot-watchers"}:
+    if len(sys.argv) > 1 and sys.argv[1] in internal_names:
         args = internal_parser.parse_args()
     else:
         args = parser.parse_args()
