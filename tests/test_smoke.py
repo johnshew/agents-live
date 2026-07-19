@@ -1517,7 +1517,7 @@ assert module.DASHBOARD_TRANSCRIPT is None
             result = repos._child_json("project", "/project", "doctor")
         self.assertTrue(result["ok"])
         self.assertEqual(
-            run.call_args.kwargs["env"][update_check.SKIP_REFRESH_ENV], "1")
+            run.call_args.kwargs["env"][repos.SKIP_UPDATE_CHECK_ENV], "1")
 
 
     def test_doctor_json_suppresses_cached_update_result(self) -> None:
