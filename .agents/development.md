@@ -81,6 +81,41 @@ package and skill payload version mismatch.
   `src/agents_live/skill/docs/overview.md`.
 - Minimal diffs; match the style of the surrounding code and docs.
 
+## Commit hygiene
+
+Review the branch history before its first push:
+
+```bash
+git fetch origin main
+git log --oneline origin/main..HEAD
+git diff --check origin/main...HEAD
+git rev-list --no-merges origin/main..HEAD | while read -r commit; do
+  if ! git diff-tree --root --no-commit-id --name-only -r "$commit" | grep -q .; then
+    git show -s --format='%h %s' "$commit"
+  fi
+done
+```
+
+The final command prints empty non-merge commits. It should produce no output.
+The full branch review must also confirm that:
+
+- Every commit describes one meaningful repository state with an imperative,
+  conventional-commit subject.
+- Plans and progress notes remain in the session, issue, or PR description.
+- Each implementation commit is understandable and testable on its own.
+- A commit does not exist only to correct behavior or documentation introduced
+  earlier on the same unshared branch.
+- Implementation commits remain separate from the single follow-up changelog
+  commit, and release preparation remains a distinct commit.
+- The branch contains no incidental `Merge remote-tracking branch
+  'origin/main'` synchronization commit.
+
+Clean up superseded or empty commits while the branch is still local and
+unshared. If review has started or the branch is on the remote, do not rewrite
+it without explicit developer approval. Never rewrite commits reachable from
+`main` or a release tag. If an unshared branch falls behind, rebase it onto
+current `origin/main`; do not merge `origin/main` into it merely to synchronize.
+
 ## Backlog
 
 Pending work is tracked as GitHub issues on this repo (`gh issue

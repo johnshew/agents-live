@@ -94,6 +94,17 @@ The standard loop for any change that lands as commits:
   belongs in its own worktree so the primary checkout stays on a
   clean `main` for the agents sharing it. Quick reads and
   investigation can happen in place.
+- **Keep every commit meaningful and reviewable.** Plans belong in the
+  session, issue, or PR description, never in empty or planning-only
+  commits. Before the first push, fold superseded fixes and documentation
+  into the commit they correct while preserving intentional implementation,
+  changelog, and release boundaries. Do not rewrite a shared branch without
+  explicit developer approval, and never rewrite `main` or released tags.
+- **Do not merge `origin/main` into a feature branch only to synchronize it.**
+  Start work from current `origin/main`. Rebase a local, unshared branch
+  before review when it falls behind; after sharing, ask before choosing a
+  history-rewriting update. Incidental synchronization merges obscure the PR
+  boundary and become permanent under merge-commit workflows.
 - **No backward-compatibility shims.** Clean break, migrate all
   consumers; ask the developer before adding any compat code.
 - **Keep agent memory to pointers.** Canonical facts live in the

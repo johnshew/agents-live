@@ -37,6 +37,9 @@ history is retained in the source repository.
   pass) moves legacy in-tree state to the new locations; tooling that read
   `Agents/logs/` or `Agents/data/health.ok` directly must switch to
   `agents-live logs` or the state-home paths.
+- chore: require reviewable commits and pre-PR branch history checks.
+  Plans stay outside git, unshared branches drop empty or superseded commits,
+  and synchronization avoids incidental merges from `origin/main`.
 
 ## 1.0.0 - 2026-07-19
 
