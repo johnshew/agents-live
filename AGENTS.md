@@ -34,6 +34,29 @@ uv run --script tools/release.py --prepare --bump patch --yes # prepare patch
 uv run --script tools/release.py --publish --yes          # publish prepared
 ```
 
+## Workflow
+
+The standard loop for any change that lands as commits:
+
+1. Read the guide matching the task (table above) and check
+   `gh issue list` for related backlog.
+2. Investigate in place; reads and searches are fine in the primary
+   checkout.
+3. Create a git worktree for the change. Tool-generated branch names
+   are fine; the branch is disposable.
+4. Edit, then run the smoke tests and the release audit (Quick
+   commands above).
+5. Commit with issue references, push, and open a pull request.
+6. After checks pass, merge with `gh pr merge <n> --merge`. Never pass
+   `--delete-branch` from inside a worktree: it tries to check out
+   `main`, which the primary checkout holds, and fails after the
+   merge. Delete the head branch separately
+   (`git push origin --delete <branch>`) if the repository does not
+   delete it automatically.
+7. Confirm the merged commits are reachable from `origin/main`, then
+   remove the worktree and fast-forward `main` in the primary
+   checkout.
+
 ## Rules
 
 - **Use `uv`, never plain `python3`.** The package requires Python
@@ -56,7 +79,9 @@ uv run --script tools/release.py --publish --yes          # publish prepared
   `src/agents_live/`.
 - **The backlog lives in GitHub issues, not in-tree docs.** Check
   `gh issue list` before starting work; file new findings as issues
-  and reference them from commits (`Fixes #N` closes on merge).
+  and reference them from commits (`Fixes #N` closes on merge). A
+  task that is blocked, deferred, or handed back to the developer
+  gets an issue before moving on, so it survives the session.
 - **Never hand-parse runtime logs.** Use `agents-live logs` and
   `agents-live logs timeline` - they correlate events across log
   files and agent transcripts. Reading `Agents/logs/*.log` directly
@@ -73,7 +98,10 @@ uv run --script tools/release.py --publish --yes          # publish prepared
   consumers; ask the developer before adding any compat code.
 - **Keep agent memory to pointers.** Canonical facts live in the
   repo and GitHub issues; a memory entry holds only a pointer to
-  that home, never the content itself.
+  that home, never the content itself. The one exception is
+  machine-specific facts (personal paths, hostnames, deployment
+  details): the export-clean rule keeps those out of the repo and
+  its issues, so local memory is their designated home.
 - No em dashes; no emojis or icons unless the developer asks.
 
 ## Structure
