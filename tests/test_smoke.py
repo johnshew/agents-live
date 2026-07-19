@@ -996,19 +996,41 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertFalse((directory / "crontab.lock").exists())
 
     def test_doctor_accepts_stable_distro_task(self) -> None:
-        cli_shim_path = self.shim
+        execute, arguments = heartbeat.task_action("Ubuntu", self.shim)
+        # The action must launch through the hidden-window wrapper, not
+        # bare wsl.exe (which flashes a console every five minutes).
+        self.assertEqual(execute, "wscript.exe")
+        self.assertIn("run-hidden.vbs", arguments)
+        self.assertIn(r"\\wsl.localhost\Ubuntu", arguments)
+        self.assertIn("wsl.exe", arguments)
         task = {
             "Enabled": True,
-            "Execute": "wsl.exe",
-            "Arguments": heartbeat.task_arguments("Ubuntu", cli_shim_path),
+            "Execute": execute,
+            "Arguments": arguments,
             "Interval": "PT5M",
         }
         with mock.patch.object(
                 heartbeat, "task_configuration", return_value=(task, False)):
             self.assertEqual(
                 prereqs._windows_heartbeat_config(),
-                (True, "enabled; distro Ubuntu; stable CLI shim; "
+                (True, "enabled; distro Ubuntu; hidden stable CLI shim; "
                        "repeats every 5 min"))
+
+    def test_doctor_flags_visible_console_registration(self) -> None:
+        # Pre-0.3.1 tasks executed wsl.exe directly; doctor must point
+        # at the reinstall that wraps them with run-hidden.vbs.
+        task = {
+            "Enabled": True,
+            "Execute": "wsl.exe",
+            "Arguments": heartbeat.wsl_command("Ubuntu", self.shim),
+            "Interval": "PT5M",
+        }
+        with mock.patch.object(
+                heartbeat, "task_configuration", return_value=(task, False)):
+            ok, note = prereqs._windows_heartbeat_config()
+        self.assertFalse(ok)
+        self.assertIn("visible console", note)
+        self.assertIn("heartbeat install", note)
 
     def test_doctor_recommends_migration_for_legacy_task(self) -> None:
         with mock.patch.object(

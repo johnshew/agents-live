@@ -17,14 +17,18 @@ every 5 minutes from Windows Task Scheduler.
 One task per WSL distro runs this action every five minutes:
 
 ```text
-wsl.exe -d <distro> --exec /home/<user>/.local/bin/agents-live heartbeat
+wscript.exe "\\wsl.localhost\<distro>\...\agents_live\run-hidden.vbs"
+    "wsl.exe -d <distro> --exec /home/<user>/.local/bin/agents-live heartbeat"
 ```
 
-The distro argument selects the host runtime. The uv-managed shim selects the
-currently installed agents-live version without pinning a checkout,
-`site-packages`, or a Python-minor-version directory. There is deliberately no
-project binding: one host heartbeat serves every Agents Live project in that
-distro.
+The packaged `run-hidden.vbs` wrapper launches wsl.exe with a hidden
+window, so the five-minute cadence never flashes a console. The distro
+argument selects the host runtime. The uv-managed shim selects the
+currently installed agents-live version without pinning a checkout or a
+Python-minor-version directory (the wrapper's own path tracks the
+installed package through the `\\wsl.localhost` share). There is
+deliberately no project binding: one host heartbeat serves every Agents
+Live project in that distro.
 
 The command writes `heartbeat.ok` and `heartbeat.log` under
 `${XDG_STATE_HOME:-~/.local/state}/agents-live/`. Repository discovery is never
@@ -36,9 +40,10 @@ stable CLI shim makes installation fail clearly.
 `agents-live doctor` verifies the shared beacon is less than 10 minutes old.
 
 It also verifies the current distro's task is enabled, repeats every five
-minutes, and invokes the stable shim through `wsl.exe`. Checkout,
-`site-packages`, Python-versioned, project-pinned, and legacy `WSL Heartbeat`
-actions produce a migration recommendation.
+minutes, and invokes the stable shim through the hidden-window wrapper.
+Direct `wsl.exe` actions (visible console), checkout, Python-versioned,
+project-pinned, and legacy `WSL Heartbeat` actions produce a
+re-registration or migration recommendation.
 
 ## Diagnosing
 

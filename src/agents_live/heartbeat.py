@@ -54,11 +54,47 @@ def stable_cli_path() -> Path:
     return Path.home() / ".local" / "bin" / "agents-live"
 
 
-def task_arguments(distro: str, cli_path: Path | None = None) -> str:
+def wsl_command(distro: str, cli_path: Path | None = None) -> str:
+    """The full wsl.exe command line the scheduled task ultimately runs."""
     return subprocess.list2cmdline([
-        "-d", current_distro(distro), "--exec",
+        "wsl.exe", "-d", current_distro(distro), "--exec",
         str(cli_path or stable_cli_path()), "heartbeat",
     ])
+
+
+def _installed_vbs() -> Path | None:
+    """``run-hidden.vbs`` inside the uv tool environment, if installed.
+
+    Persisted task actions must reference the installed tool (matching
+    stable_cli_path()'s contract), never a development checkout that
+    happens to be running this code."""
+    tool_dir = Path.home() / ".local" / "share" / "uv" / "tools" / "agents-live"
+    matches = sorted(tool_dir.glob(
+        "lib/python3.*/site-packages/agents_live/run-hidden.vbs"))
+    return matches[-1] if matches else None
+
+
+def vbs_windows_path(distro: str) -> str:
+    r"""The ``run-hidden.vbs`` wrapper as Windows sees it.
+
+    The wrapper lives in this package inside the distro's filesystem;
+    Windows tools reach it through the ``\\wsl.localhost\<distro>`` UNC
+    share."""
+    vbs = _installed_vbs() or Path(__file__).resolve().with_name(
+        "run-hidden.vbs")
+    return (rf"\\wsl.localhost\{current_distro(distro)}"
+            + str(vbs).replace("/", "\\"))
+
+
+def task_action(distro: str, cli_path: Path | None = None) -> tuple[str, str]:
+    """(Execute, Arguments) for the scheduled task.
+
+    ``wscript.exe`` runs the packaged ``run-hidden.vbs`` wrapper, which
+    launches wsl.exe with a hidden window - a task that executes wsl.exe
+    directly flashes a visible console every five minutes.
+    """
+    return "wscript.exe", subprocess.list2cmdline([
+        vbs_windows_path(distro), wsl_command(distro, cli_path)])
 
 
 def run_once() -> int:
@@ -118,9 +154,9 @@ def _task_exists(name: str) -> bool:
 
 def _register_task(distro: str, cli_path: Path) -> None:
     name = task_name(distro)
-    arguments = task_arguments(distro, cli_path)
+    execute, arguments = task_action(distro, cli_path)
     script = (
-        f"$action=New-ScheduledTaskAction -Execute 'wsl.exe' "
+        f"$action=New-ScheduledTaskAction -Execute {_ps_quote(execute)} "
         f"-Argument {_ps_quote(arguments)};"
         "$trigger=New-ScheduledTaskTrigger -Once -At (Get-Date) "
         "-RepetitionInterval (New-TimeSpan -Minutes 5);"
