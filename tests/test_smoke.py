@@ -15,6 +15,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.metadata
 import importlib.util
 import io
@@ -25,13 +26,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, heartbeat, init, migrate,
-        ownership, paths, prereqs, repos, spawn, status, uninstall,
+        ownership, paths, plugins, prereqs, repos, spawn, status, uninstall,
         update_check, upgrade,
     )
 except ImportError:  # flat checkout layout
@@ -46,6 +48,7 @@ except ImportError:  # flat checkout layout
     import migrate
     import ownership
     import paths
+    import plugins
     import prereqs
     import repos
     import spawn
@@ -112,6 +115,34 @@ class TestPathsResolver(_TempProject):
         finally:
             os.chdir(saved)
 
+    def test_plugin_declarations_validate_repo_relative_wheels_and_sha256(self) -> None:
+        wheel = self.root / "Agents" / "plugins" / "example.whl"
+        wheel.parent.mkdir(parents=True)
+        wheel.write_bytes(b"wheel")
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample = { path = "Agents/plugins/example.whl", '
+            f'sha256 = "{hashlib.sha256(b"wheel").hexdigest()}" }}\n',
+            encoding="utf-8",
+        )
+        declaration = paths.validated_plugins(
+            self.root, paths.load_config(self.root)["plugins"])
+        self.assertEqual(declaration["example"]["path"], wheel)
+
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample = { path = "../example.whl" }\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            paths.load_config(self.root)
+
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample = { path = "Agents/plugins/example.whl", '
+            'sha256 = "bad" }\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "64 hexadecimal"):
+            paths.load_config(self.root)
+
 
 class TestRepositoryRegistry(_TempProject):
     def setUp(self) -> None:
@@ -173,6 +204,19 @@ class TestRepositoryRegistry(_TempProject):
         self.assertEqual(repos.main(["default", str(self.root)]), 0)
         registry = repos.load()
         self.assertEqual(registry["default_repo"], self.root.name)
+
+    def test_add_reports_declared_plugins_without_installing(self) -> None:
+        with (
+            mock.patch.object(
+                plugins, "checks",
+                return_value=[("example-plugin", False, "not installed")]),
+            mock.patch.object(plugins, "converge") as converge,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        converge.assert_not_called()
+        self.assertIn(
+            "will be installed on init/start/upgrade", stdout.getvalue())
 
     def test_help_action_prints_usage(self) -> None:
         stdout = io.StringIO()
@@ -303,6 +347,94 @@ class TestOwnershipKernel(_TempProject):
         # document, the outcome is identical: abstention, never local.
         with self.assertRaises(ownership.OwnershipUnavailableError):
             ownership.load_owners(rate_limit_secs=10**9)
+
+
+class TestProjectPlugins(_TempProject):
+    def _wheel(self, name: str = "example-plugin", version: str = "1.2.3") -> Path:
+        wheel = self.root / "Agents" / "plugins" / f"{name}-1.2.3-py3-none-any.whl"
+        wheel.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr(
+                f"{name.replace('-', '_')}-{version}.dist-info/METADATA",
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+            )
+        return wheel
+
+    def test_declared_plugin_uses_wheel_metadata_identity(self) -> None:
+        wheel = self._wheel()
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root)}" }}\n',
+            encoding="utf-8",
+        )
+        plugin = plugins.declared(self.root)["example-plugin"]
+        self.assertEqual(plugin.name, "example-plugin")
+        self.assertEqual(plugin.version, "1.2.3")
+
+    def test_doctor_fails_for_missing_plugin_and_registry_backend(self) -> None:
+        wheel = self._wheel()
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n'
+            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root)}" }}\n',
+            encoding="utf-8",
+        )
+        no_crontab = subprocess.CompletedProcess(
+            ["crontab", "-l"], 1, stdout="", stderr="no crontab for test")
+        with (
+            mock.patch.object(prereqs, "REPO", self.root),
+            mock.patch.object(prereqs, "_project_checks_enabled", return_value=True),
+            mock.patch.object(prereqs, "_has", return_value=True),
+            mock.patch.object(prereqs, "_python_312_resolvable", return_value=True),
+            mock.patch.object(prereqs, "_is_wsl", return_value=False),
+            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(prereqs, "_package_checks", return_value=[]),
+            mock.patch.object(prereqs, "_native_agents", return_value=None),
+            mock.patch.object(prereqs.subprocess, "run", return_value=no_crontab),
+            mock.patch.object(
+                plugins, "checks",
+                return_value=[("example-plugin", False, "distribution is not installed")]),
+            mock.patch.object(ownership, "registry_available", return_value=False),
+        ):
+            checks = {check["name"]: check for check in prereqs.collect()}
+        plugin_check = checks[
+            "plugin example-plugin installed and entry points resolve"]
+        self.assertFalse(plugin_check["ok"])
+        self.assertTrue(plugin_check["required"])
+        self.assertEqual(
+            plugin_check["fix"],
+            "run `agents-live upgrade` to converge declared plugins",
+        )
+        self.assertFalse(checks["registry ownership backend resolves"]["ok"])
+
+    def test_init_and_start_converge_but_start_dry_run_does_not(self) -> None:
+        with (
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+            mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch("importlib.reload", return_value=mock.Mock(
+                main=mock.Mock(return_value=0))),
+            mock.patch("sys.argv", ["agents-live init"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(init.main(), 0)
+        converge.assert_called_once_with([self.root])
+
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        with (
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+            mock.patch.object(activate, "activate_one", return_value=["cron"]),
+            mock.patch("sys.argv", ["agents-live start", "--name", "smoke-fixture"]),
+        ):
+            self.assertEqual(activate.main(), 0)
+        converge.assert_called_once_with([self.root])
+
+        with (
+            mock.patch.object(plugins, "converge") as converge,
+            mock.patch.object(activate, "activate_one", return_value=["cron"]),
+            mock.patch(
+                "sys.argv",
+                ["agents-live start", "--name", "smoke-fixture", "--dry-run"]),
+        ):
+            self.assertEqual(activate.main(), 0)
+        converge.assert_not_called()
 
 
 class TestAgentParsing(_TempProject):
@@ -769,7 +901,7 @@ class TestCliContract(_TempProject):
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
             self.assertEqual(cli.main(["upgrade"]), 0)
-        runtime.assert_called_once_with()
+        runtime.assert_called_once_with([])
         resolve_root.assert_not_called()
 
     def test_doctor_without_project_root_runs_host_checks(self) -> None:
@@ -1567,15 +1699,94 @@ class TestInstallSkill(_TempProject):
         output.assert_any_call(
             f"{self.root}: skill payload already matches the installed package")
 
-    def test_runtime_upgrade_installs_unpinned_latest_release(self) -> None:
+    def test_runtime_upgrade_preserves_uv_receipt_requirements(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0)
         with (
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             mock.patch.object(subprocess, "run", return_value=completed) as run,
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
         ):
             self.assertEqual(upgrade._upgrade_runtime(), 0)
         run.assert_called_once_with(
-            ["/usr/bin/uv", "tool", "install", "--force", "agents-live@latest"],
+            ["/usr/bin/uv", "tool", "upgrade", "agents-live"],
+            check=False,
+        )
+        converge.assert_called_once_with([])
+
+    def test_runtime_upgrade_keeps_coinstalled_wheel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = root / "tool"
+            plugin = root / "plugin"
+            for package, name in ((tool, "agents-live"), (plugin, "dummy-plugin")):
+                module = name.replace("-", "_")
+                (package / "src" / module).mkdir(parents=True)
+                (package / "src" / module / "__init__.py").write_text(
+                    "def main(): pass\n", encoding="utf-8")
+                scripts = (
+                    '\n[project.scripts]\nagents-live = "agents_live:main"\n'
+                    if name == "agents-live" else "")
+                (package / "pyproject.toml").write_text(
+                    "[build-system]\nrequires = [\"hatchling\"]\n"
+                    "build-backend = \"hatchling.build\"\n\n"
+                    f"[project]\nname = \"{name}\"\nversion = \"1.0.0\"\n"
+                    + scripts,
+                    encoding="utf-8",
+                )
+            wheels = root / "wheels"
+            subprocess.run(
+                ["uv", "build", "--wheel", "--out-dir", str(wheels), str(plugin)],
+                check=True, capture_output=True, text=True)
+            plugin_wheel = next(wheels.glob("dummy_plugin-*.whl"))
+            environment = {
+                "UV_TOOL_DIR": str(root / "tools"),
+                "UV_TOOL_BIN_DIR": str(root / "bin"),
+            }
+            with mock.patch.dict(os.environ, environment):
+                subprocess.run(
+                    ["uv", "tool", "install", str(tool), "--with", str(plugin_wheel)],
+                    check=True, capture_output=True, text=True)
+                with mock.patch.object(plugins, "converge", return_value=False):
+                    self.assertEqual(upgrade._upgrade_runtime(), 0)
+                tool_python = root / "tools" / "agents-live" / "bin" / "python"
+                installed = subprocess.run(
+                    [
+                        str(tool_python), "-c",
+                        "import importlib.metadata; "
+                        "print(importlib.metadata.version('dummy-plugin'))",
+                    ],
+                    check=True, capture_output=True, text=True,
+                )
+            self.assertEqual(installed.stdout.strip(), "1.0.0")
+
+    def test_plugin_convergence_preserves_receipt_and_unions_declarations(self) -> None:
+        first = plugins.Plugin(
+            "first-plugin", Path("/repo/first.whl"), None, "1.0")
+        second = plugins.Plugin(
+            "second-plugin", Path("/repo/second.whl"), None, "2.0")
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(
+                plugins, "union",
+                return_value={"first-plugin": first, "second-plugin": second}),
+            mock.patch.object(
+                plugins, "inspect",
+                side_effect=[(False, "missing"), (True, "installed")]),
+            mock.patch.object(plugins, "_integrity_error", return_value=None),
+            mock.patch.object(
+                plugins, "_receipt_requirements",
+                return_value={"co-installed": "/repo/co-installed.whl"}),
+            mock.patch.object(plugins, "find_uv", return_value="/usr/bin/uv"),
+            mock.patch.object(plugins.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(plugins.converge([self.root]))
+        run.assert_called_once_with(
+            [
+                "/usr/bin/uv", "tool", "install", "--force", "agents-live@latest",
+                "--with", "/repo/co-installed.whl",
+                "--with", "/repo/first.whl",
+                "--with", "/repo/second.whl",
+            ],
             check=False,
         )
 
@@ -1617,7 +1828,7 @@ class TestInstallSkill(_TempProject):
             mock.patch("sys.argv", ["agents-live upgrade"]),
         ):
             self.assertEqual(upgrade.main(), 0)
-        runtime.assert_called_once_with()
+        runtime.assert_called_once_with([target])
         refresh.assert_called_once_with(target)
         install.assert_not_called()
 

@@ -35,6 +35,7 @@ timeline, prereqs) imports this module flat from the same directory.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -49,6 +50,7 @@ MARKERS = (CONFIG_DOTFILE, f"{PYPROJECT} with [tool.{PYPROJECT_TABLE}]")
 
 _cached_default_root: Path | None = None
 _cached_default_source: str | None = None
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def resolve_root(explicit: str | Path | None = None) -> Path:
@@ -216,12 +218,55 @@ def load_config(root: Path | None = None) -> dict:
     if dotfile.is_file():
         try:
             with dotfile.open("rb") as fh:
-                return tomllib.load(fh)
+                config = tomllib.load(fh)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ValueError(
                 f"project config unreadable: {dotfile}: {exc}") from exc
-    table = _pyproject_table(base / PYPROJECT, on_error="raise")
-    return table if table is not None else {}
+    else:
+        table = _pyproject_table(base / PYPROJECT, on_error="raise")
+        config = table if table is not None else {}
+    validated_plugins(base, config.get("plugins", {}))
+    return config
+
+
+def validated_plugins(root: Path, values: object) -> dict[str, dict[str, object]]:
+    """Validate and resolve project-declared plugin wheels."""
+    if not isinstance(values, dict):
+        raise ValueError("plugins must be a table")
+    base = root.resolve()
+    result = {}
+    for name, declaration in values.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("plugin names must be non-empty strings")
+        if not isinstance(declaration, dict):
+            raise ValueError(f"plugin {name!r} must be an inline table")
+        unknown = set(declaration) - {"path", "sha256"}
+        if unknown:
+            raise ValueError(
+                f"plugin {name!r} has unknown field(s): {', '.join(sorted(unknown))}")
+        value = declaration.get("path")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"plugin {name!r} path must be a non-empty string")
+        relative = Path(value)
+        if relative.is_absolute():
+            raise ValueError(f"plugin {name!r} path must be repo-relative: {value}")
+        resolved = (base / relative).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(
+                f"plugin {name!r} path escapes the repository: {value}") from exc
+        if not resolved.is_file():
+            raise ValueError(f"plugin {name!r} wheel does not exist: {value}")
+        if resolved.suffix != ".whl":
+            raise ValueError(f"plugin {name!r} path must name a .whl file: {value}")
+        digest = declaration.get("sha256")
+        if digest is not None and (
+                not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
+            raise ValueError(
+                f"plugin {name!r} sha256 must be exactly 64 hexadecimal characters")
+        result[name] = {"path": resolved, "sha256": digest}
+    return result
 
 
 def validated_agent_directories(root: Path, values: object) -> list[Path]:

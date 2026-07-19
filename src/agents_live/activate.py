@@ -958,6 +958,8 @@ def activate_one(
 
 
 def main() -> int:
+    from . import plugins
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--name")
     parser.add_argument("--all", action="store_true", help="Activate all agents that have a schedule or watchPath")
@@ -1017,6 +1019,12 @@ def main() -> int:
                 log_event(agent_log, level="error", phase="watcher",
                           status="crash", message=traceback.format_exc()[:2000])
                 return 1
+
+        if not args.dry_run:
+            try:
+                plugins.converge([repo_root()])
+            except (OSError, ValueError, plugins.PluginError) as exc:
+                raise AgentsLiveError(f"plugin convergence failed: {exc}") from exc
 
         if args.prune_orphans and not (args.all or args.name):
             pruned = prune_orphans(dry_run=args.dry_run)

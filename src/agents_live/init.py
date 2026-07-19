@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from . import paths
+from . import paths, plugins
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -217,6 +217,11 @@ def _toml_value(key: str, value: object) -> str:
         return str(value)
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return "[" + ", ".join(json.dumps(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{json.dumps(str(k))} = {_toml_value(str(k), v)}"
+            for k, v in value.items()
+        ) + " }"
     raise ValueError(
         f"cannot rewrite project config: key {key!r} has a value this "
         f"tool does not serialize ({type(value).__name__})")
@@ -244,6 +249,12 @@ def main() -> int:
         print(f"Initialized {paths.CONFIG_DOTFILE} (project root: {root})")
     else:
         print(f"{paths.config_source(root)} already up to date")
+    try:
+        if plugins.converge([root]):
+            print("Converged declared plugins in the agents-live tool environment")
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        print(f"error: plugin convergence failed: {exc}", file=sys.stderr)
+        return 1
     skill_status = install_skill(root)
     if skill_status == "installed":
         print("Installed skill payload: .claude/skills/agents-live/ "

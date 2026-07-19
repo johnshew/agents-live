@@ -71,7 +71,8 @@ package-index request metadata; it does not include project or agent data.
 `agents-live doctor` is the exception: it always performs a fresh check and
 updates the cache. Checks never install updates in the background. Run
 `agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
-release and then refresh managed skill payloads using the newly installed CLI.
+release without dropping co-installed requirements, converge project-declared
+plugins, and then refresh managed skill payloads using the newly installed CLI.
 
 Bare `agents-live upgrade` works outside a project and refreshes the current
 initialized project plus every available registered repository. An explicit
@@ -93,6 +94,19 @@ agents-live status
 agents-live logs
 agents-live teardown my-agent   # deactivate — remove its triggers
 ```
+
+Projects that need plugin-provided adapters or registry ownership declare the
+committed wheel in `.agents-live.toml`:
+
+```toml
+[plugins]
+example-plugin = { path = "Agents/plugins/example-plugin-1.0.0-py3-none-any.whl", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+```
+
+The path is repository-relative and the optional SHA-256 pins its contents.
+`init`, `start`, and `upgrade` converge declarations into the host-global uv
+tool environment. `doctor` reports missing or broken entry points, while
+`repos add` only reports what a later activation will install.
 
 For work across projects, register normalized absolute repository paths in
 the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import init, paths, repos
+from . import init, paths, plugins, repos
 from .spawn import find_uv
 
 
@@ -46,15 +46,23 @@ def _refresh_payload(root: Path) -> None:
     print(f"{root}: {message}")
 
 
-def _upgrade_runtime() -> int:
+def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return subprocess.run(
-        [uv, "tool", "install", "--force", "agents-live@latest"], check=False,
+    status = subprocess.run(
+        [uv, "tool", "upgrade", "agents-live"], check=False,
     ).returncode
+    if status != 0:
+        return status
+    try:
+        plugins.converge(roots or [])
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _refresh_with_installed_cli(root: Path) -> int:
@@ -92,18 +100,25 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.skills_only:
-        runtime_status = _upgrade_runtime()
-        if runtime_status != 0 or args.runtime_only:
-            return runtime_status
-
     try:
         targets, errors = _targets()
+        plugin_roots = [root for _, root in targets]
+        if os.environ.get(paths.ENV_VAR, "").strip():
+            for alias, value, error in repos.entries():
+                if error:
+                    errors.append(f"{alias}: {error}")
+                else:
+                    plugin_roots.append(Path(value))
     except (OSError, ValueError) as exc:
         # The message already names its source (registry file vs an
         # invalid AGENTS_LIVE_REPO); no prefix that could mislabel it.
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    if not args.skills_only:
+        runtime_status = _upgrade_runtime(list(dict.fromkeys(plugin_roots)))
+        if runtime_status != 0 or args.runtime_only:
+            return runtime_status
 
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)

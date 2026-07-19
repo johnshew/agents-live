@@ -321,7 +321,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "help":
             parser.print_help()
         elif args.action == "add":
+            from . import plugins  # noqa: PLC0415
+            root = Path(args.path).expanduser().resolve()
+            pending = [
+                name for name, ok, _ in plugins.checks(root) if not ok
+            ]
             _add(args.path)
+            if pending:
+                print(
+                    f"Declared plugin(s) not installed: {', '.join(pending)}; "
+                    "will be installed on init/start/upgrade")
         elif args.action == "default":
             _set_default(args.repo)
         elif args.action == "remove":
