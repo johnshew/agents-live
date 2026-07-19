@@ -63,7 +63,9 @@ uv run --script tools/release.py --prepare --bump patch --yes
 
 Replace `patch` with the bump recommended by changelog maintenance. The script
 rejects an empty `Unreleased` section and any bump below the minimum implied by
-`feat:`, `!:` or `BREAKING CHANGE:` notes. It requires a clean `main`
+`feat:`, conventional `type!:` or `BREAKING CHANGE:` notes. Every changelog
+bullet must start with a standalone one-line summary; supporting detail belongs
+on indented continuation lines. The script requires a clean `main`
 synchronized with `origin/main`, updates all package, skill,
 documentation-link, and changelog versions, runs every release gate, and
 creates the release commit and annotated tag locally. Inspect the
@@ -78,8 +80,9 @@ uv run --script tools/release.py --publish --yes
 For the initial push, publication reruns all gates, requires the tagged release
 commit to be exactly one commit ahead of `origin/main`, pushes the commit and
 tag atomically, and creates the GitHub release. The release body starts with
-the version's changelog section, followed by GitHub's generated notes (merged
-pull requests and the compare link).
+one first-line summary per changelog entry and a link to the full changelog at
+the release tag, followed by GitHub's generated notes (merged pull requests and
+the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
 which rebuilds, attaches the wheel and sdist to the GitHub release, and

@@ -6,41 +6,68 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: forward smoketest changed paths through run's `--changed-files`
-  JSON-array contract instead of the nonexistent singular flag. (#41)
-- fix: add `start <name> --yes` for explicit ownership takeover without a
-  prompt; interactive targeted starts prompt, while non-interactive starts
-  still refuse takeover without consent. (#47)
-- fix: resolve the repository registry in subprocess-dispatched
-  commands. `logs` and `logs timeline` crashed with an ImportError
-  whenever the project resolved through a registered alias or the
-  default repository rather than an explicit `--repo`, environment
-  override, or local marker. (#48)
-- fix: preserve uv receipt-recorded co-installed requirements during
-  `agents-live upgrade`, so upgrading the runtime no longer removes plugin
-  wheels from the tool environment.
-- feat: let projects declare committed plugin wheels with optional SHA-256
-  pins. `init`, `start`, and `upgrade` converge declarations into the
-  host-global tool environment; `doctor` reports missing or broken providers,
-  and `repos add` remains read-only. (#34)
-- feat: make `repos default <path>` register an existing unregistered
-  repository before selecting it as the fallback.
-- feat: define command policy and arguments once in a declarative spec that
-  drives dispatch, cross-command contracts, generated help, the published
-  EBNF grammar, and the command/flag table. (#36, #37, #38)
-- feat: generate bash and zsh completion scripts with
-  `agents-live completions`, including agent-name suggestions for lifecycle
-  commands. (#39)
-- **BREAKING** feat: unify machine output under position-independent `--json`
-  and typed error envelopes. Repository lists, migration plans, upgrades,
-  log timelines, and smoketest verdicts now have JSON output. The duplicate
-  `teardown` and `prereqs` verbs are removed; use `stop` and `doctor`.
-  (#42)
-- feat: move watcher process and reboot plumbing from `start` flags to a
-  hidden `internal` namespace. `agents-live migrate` rewrites persisted legacy
-  watcher lines to the canonical invocation. (#43)
-- feat: run the release audit and unit suite on every pull request and push
-  to `main`. (#40)
+- fix: enforce major release bumps for conventional breaking markers. (#62)
+  Release previews recognize `type!:` and scoped `type(scope)!:` entries, plus
+  `BREAKING CHANGE:` footers.
+- fix: publish one-line changelog summaries in GitHub release notes. (#63)
+  Supporting detail remains in the tagged changelog linked from each release;
+  GitHub's generated pull request list and compare link follow the summaries.
+- fix: refresh release metadata once during `doctor --all-repos`. (#31)
+  Child repository checks no longer repeat the same network request.
+- fix: reject rootless dashboard access to repository-scoped paths. (#30)
+  The all-repositories dashboard no longer carries CWD-relative sentinel paths
+  that could write runtime data outside a resolved project.
+- fix: pass smoketest changed paths through the supported JSON-array contract. (#41)
+  Dispatch uses run's `--changed-files` argument instead of a nonexistent
+  singular flag.
+- fix: support explicit ownership takeover with `start <name> --yes`. (#47)
+  Interactive targeted starts prompt, while non-interactive starts still
+  refuse takeover without consent.
+- fix: resolve repository aliases in subprocess-dispatched log commands. (#48)
+  `logs` and `logs timeline` work with a registered alias or default repository,
+  not only an explicit `--repo`, environment override, or local marker.
+- fix: preserve co-installed plugin requirements during runtime upgrades.
+  `agents-live upgrade` no longer removes plugin wheels recorded in the uv tool
+  receipt.
+- feat!: unify machine-readable output under position-independent `--json`. (#42)
+  Repository lists, migration plans, upgrades, log timelines, and smoketest
+  verdicts use typed JSON envelopes. The duplicate `teardown` and `prereqs`
+  verbs are removed; use `stop` and `doctor`.
+- feat: let projects declare committed plugin wheels with optional SHA-256 pins. (#34)
+  `init`, `start`, and `upgrade` converge declarations into the host-global
+  tool environment; `doctor` reports missing or broken providers, and
+  `repos add` remains read-only.
+- feat: adopt moved-project trigger entries with `migrate --adopt <old-root>`. (#32)
+  Adoption rejects live roots, matches agents and roots token-exactly, preserves
+  unrelated crontab entries, and supports dry-run planning.
+- feat: scan shipped text for locally configured machine names during audits. (#29)
+  A gitignored local file supplies literal names without committing personal
+  host information.
+- feat: attach wheel and source distribution artifacts to GitHub releases.
+  The trusted-publishing workflow builds once, uploads both artifacts to the
+  release, and publishes those same files to PyPI.
+- feat: register an existing repository through `repos default <path>`.
+  An unregistered path is added before it becomes the fallback repository.
+- feat: drive CLI policy and generated interfaces from one command spec. (#36, #37, #38)
+  The declarative grammar controls dispatch, cross-command contracts, help,
+  the published EBNF grammar, and the command and flag table.
+- feat: generate bash and zsh completion scripts with `agents-live completions`. (#39)
+  Completion includes agent-name suggestions for lifecycle commands.
+- feat: move watcher process and reboot plumbing to a hidden namespace. (#43)
+  `agents-live migrate` rewrites persisted legacy watcher lines to the
+  canonical `internal` invocation.
+- feat: run the release audit and unit suite on every pull request and push. (#40)
+  The required release gates now run automatically on `main` and PR branches.
+- docs: standardize starter-agent instructions on `.claude/agents/`. (#5)
+  Existing `Agents/` definitions remain discoverable, while new definitions use
+  the native directory shared by Claude Code, Copilot CLI, and VS Code.
+- docs: align shipped Markdown with the repository punctuation rules. (#33)
+- chore: require isolated worktrees and a standard implementation loop.
+  Branch work no longer changes the shared primary checkout used by concurrent
+  sessions.
+- chore: normalize historical GitHub release titles and delete merged branches.
+  Release metadata now follows one title convention, and merged PR head branches
+  are removed automatically.
 
 ## 0.3.1 - 2026-07-18
 

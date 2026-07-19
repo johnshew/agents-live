@@ -24,6 +24,10 @@ VERSION_FILES = (
     ROOT / "src" / "agents_live" / "skill" / "VERSION",
 )
 CHANGELOG = ROOT / "src" / "agents_live" / "skill" / "docs" / "changelog.md"
+CHANGELOG_URL = (
+    "https://github.com/johnshew/agents-live/blob/{tag}/"
+    "src/agents_live/skill/docs/changelog.md"
+)
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
@@ -99,6 +103,20 @@ def _version_notes(version: str) -> str:
     if not notes:
         raise ReleaseError(f"changelog section for {version} is empty")
     return notes
+
+
+def _release_notes(version: str) -> str:
+    summaries = [
+        line for line in _version_notes(version).splitlines()
+        if line.startswith("- ")
+    ]
+    if not summaries:
+        raise ReleaseError(f"changelog section for {version} has no bullet entries")
+    tag = f"v{version}"
+    return (
+        "\n".join(summaries)
+        + f"\n\n[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
+    )
 
 
 def _minimum_bump(notes: str) -> str:
@@ -224,7 +242,7 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         f"git tag -a {tag}",
         f"git push --atomic origin main {tag}",
         f"gh release create {tag} --verify-tag --generate-notes "
-        "--notes-file <changelog section>",
+        "--notes-file <changelog summaries>",
     )
     for command in commands:
         print(f"  {command}")
@@ -292,7 +310,7 @@ def publish() -> None:
     if existing.returncode == 0:
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
         return
-    notes = _version_notes(version)
+    notes = _release_notes(version)
     _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
     _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
     _run(["uv", "build"])
