@@ -18,7 +18,7 @@ invocations (cron lines, watcher respawns, dispatches) pin CWD to the
 repo, so the marker walk always succeeds for scheduled work. One
 first-use exception lives at the CLI layer, not here: interactive
 ``run``/``start`` inside a markerless git repository auto-create the
-minimal local-mode marker at the git root (``cli.AUTO_MARKER``), after
+minimal local-mode marker at the git root (their command spec policy), after
 which resolution succeeds by the normal walk.
 
 The markers ARE the config home (§3.2 decision, 2026-07-12): project

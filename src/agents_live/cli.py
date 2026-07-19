@@ -49,34 +49,7 @@ from . import paths
 from . import preflight
 from . import update_check
 from . import __version__
-
-# Host-mutating subcommands run the static capability preflight first
-# (proposal §3.6). Read-only commands never preflight - they must work
-# sandboxed.
-HOST_MUTATING = frozenset(preflight._COMMAND_PROBES)
-
-# subcommand -> module name (in-process dispatch to module.main())
-IN_PROCESS = {
-    "run": "run",
-    "start": "activate",
-    "stop": "teardown",
-    "teardown": "teardown",
-    "status": "status",
-    "smoketest": "smoketest",
-    "doctor": "prereqs",
-    "prereqs": "prereqs",  # alias
-    "init": "init",
-    "upgrade": "upgrade",
-    "migrate": "migrate",
-    "heartbeat": "heartbeat",
-    "uninstall": "uninstall",
-    "repos": "repos",
-}
-
-# init DEFINES the project root (creates the marker); it must not be
-# gated on resolving one.
-NO_ROOT_REQUIRED = frozenset({"init", "upgrade", "heartbeat", "uninstall", "repos"})
-MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
+from .cli_spec import COMMAND_BY_NAME
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 # inside a git repository that has no marker write the minimal local-mode
@@ -86,8 +59,6 @@ MARKERLESS_ALLOWED = frozenset({"doctor", "prereqs"})
 # invocations pin the root). Every other command - and any resolution
 # failure caused by a set-but-invalid AGENTS_LIVE_REPO - keeps the
 # fail-loudly contract.
-AUTO_MARKER = frozenset({"run", "start"})
-
 _MARKER_TEMPLATE = """\
 # agents-live project marker (auto-created by `agents-live {cmd}`).
 # Marks the project root and holds project config; an empty config means
@@ -95,21 +66,7 @@ _MARKER_TEMPLATE = """\
 # the skill, seed agent directories, or declare non-local configuration.
 """
 
-# subcommand -> script file (subprocess via uv run --script; on-demand deps)
-SUBPROCESS = {
-    "logs": "qlog.py",
-    "dashboard": "dashboard.py",
-}
-
-# subcommands whose first bare argument is agent-name sugar for --name
-NAME_SUGAR = {"run", "start", "stop", "teardown"}
-
 DOCS_URL = "https://github.com/johnshew/agents-live"
-ALL_REPOS_COMMANDS = frozenset({"status", "doctor", "prereqs", "dashboard"})
-# `run` executes an agent, so silently targeting the registry default
-# would be invisible mutation; `upgrade` is NO_ROOT_REQUIRED and never
-# reaches the notice block, so listing it here would be dead weight.
-DEFAULT_NOTICE_COMMANDS = HOST_MUTATING | frozenset({"run", "migrate"})
 
 
 def _usage() -> str:
@@ -148,15 +105,16 @@ def _usage() -> str:
     )
 
 
-def _apply_name_sugar(cmd: str, rest: list[str]) -> list[str]:
-    if cmd in NAME_SUGAR and rest and not rest[0].startswith("-"):
+def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
+    if name_sugar and rest and not rest[0].startswith("-"):
         return ["--name", rest[0], *rest[1:]]
     return rest
 
 
 def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
+    command = COMMAND_BY_NAME.get(cmd)
     if (
-        cmd not in ("doctor", "prereqs", "upgrade")
+        (command is None or command.update_notice)
         and not json_mode
         and "--json" not in rest
         and "--quiet" not in rest
@@ -281,8 +239,9 @@ def main(argv: list[str] | None = None) -> int:
         return _finish(0, "help", [], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
+    command = COMMAND_BY_NAME.get(cmd)
     all_repos = "--all-repos" in rest
-    if all_repos and cmd not in ALL_REPOS_COMMANDS:
+    if all_repos and (command is None or not command.all_repos):
         print(f"error: {cmd} does not support --all-repos; select one repository",
               file=sys.stderr)
         return 2
@@ -290,9 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module.
-    if cmd not in NO_ROOT_REQUIRED and not all_repos:
+    if (command is None or command.root != "none") and not all_repos:
         if (
-            cmd in AUTO_MARKER
+            command is not None
+            and command.root == "auto-marker"
             and not os.environ.get(paths.ENV_VAR, "").strip()
             and paths._walk_for_marker(Path.cwd()) is None
         ):
@@ -301,39 +261,56 @@ def main(argv: list[str] | None = None) -> int:
             paths.resolve_root()
         except ValueError as exc:
             allow_markerless_invocation = (
-                cmd in MARKERLESS_ALLOWED
+                command is not None
+                and command.root == "markerless"
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
             if not allow_markerless_invocation and (
-                    cmd not in AUTO_MARKER or _adopt_git_root(cmd) is None):
+                    command is None
+                    or command.root != "auto-marker"
+                    or _adopt_git_root(cmd) is None):
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),
                     json_mode=json_mode)
                 return 2
         if (
             paths.resolution_source() == "default"
-            and cmd in DEFAULT_NOTICE_COMMANDS
+            and command is not None
+            and command.default_notice
         ):
             print(f"agents-live: using default repo {paths.resolve_root()}",
                   file=sys.stderr)
 
-    rest = _apply_name_sugar(cmd, rest)
+    rest = _apply_name_sugar(
+        command.name_sugar if command is not None else False, rest)
 
     # Static capability preflight for host-mutating commands (§3.6).
     # Advisory layer 1 of 3: the operation itself still converts failures,
     # and post-verification confirms state. For a targeted `start` the
     # probe set derives from the agent's own triggers.
-    if cmd in HOST_MUTATING:
-        capabilities = _start_capabilities(rest) if cmd == "start" else None
+    if command is not None and (
+            command.probes or command.dynamic_probes is not None):
+        capabilities = (
+            _start_capabilities(rest)
+            if command.dynamic_probes == "start"
+            else None
+        )
+        if capabilities is None:
+            capabilities = frozenset(command.probes)
         failure = preflight.check(cmd, capabilities)
         if failure is not None:
             preflight.emit_error(failure, json_mode=json_mode)
             return 2
 
-    if cmd in SUBPROCESS:
-        script = SUBPROCESS[cmd]
-        if cmd == "logs" and rest and rest[0] == "timeline":
-            script, rest = "timeline.py", rest[1:]
+    if command is not None and command.dispatch == "subprocess":
+        script = command.module
+        if rest:
+            subcommand = next(
+                (sub for sub in command.subcommands if sub.name == rest[0]),
+                None,
+            )
+            if subcommand is not None:
+                script, rest = subcommand.module, rest[1:]
         uv = shutil.which("uv") or "uv"
         try:
             completed = subprocess.run(
@@ -350,14 +327,14 @@ def main(argv: list[str] | None = None) -> int:
             code = 128 - code  # signal death -> conventional 128+signum
         return _finish(code, cmd, rest, json_mode=json_mode)
 
-    if cmd not in IN_PROCESS:
+    if command is None:
         print(f"error: unknown command '{cmd}'\n\n{_usage()}", file=sys.stderr)
         return 2
 
     import importlib
     # Package-aware dispatch (Phase 4): as loose scripts the modules are
     # top-level; installed as a package they are agents_live.<name>.
-    module_name = IN_PROCESS[cmd]
+    module_name = command.module
     if __package__:
         module_name = f"{__package__}.{module_name}"
     module = importlib.import_module(module_name)

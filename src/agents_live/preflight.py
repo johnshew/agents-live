@@ -101,16 +101,6 @@ def _probe_inotify(operation: str) -> CapabilityFailure | None:
     return None
 
 
-# Which probes each host-mutating subcommand needs. Read-only commands
-# (status, logs, doctor) never preflight - they must work sandboxed.
-_COMMAND_PROBES = {
-    "start": (_probe_crontab, _probe_inotify),
-    "stop": (_probe_crontab,),
-    "teardown": (_probe_crontab,),
-    "smoketest": (_probe_crontab, _probe_inotify),
-    "migrate": (_probe_crontab,),
-}
-
 _CAPABILITY_PROBES = {
     "crontab": _probe_crontab,
     "inotify": _probe_inotify,
@@ -118,19 +108,13 @@ _CAPABILITY_PROBES = {
 
 
 def check(operation: str,
-          capabilities: frozenset[str] | set[str] | None = None,
+          capabilities: frozenset[str] | set[str],
           ) -> CapabilityFailure | None:
     """Run the static probes for a subcommand; first failure or None.
 
-    ``capabilities`` narrows the probe set to what the selected work
-    actually needs (2026-07-12 finding: a cron-only agent must not
-    require inotify to start). None keeps the per-command default;
-    an empty set runs nothing - the caller decided the operation's own
-    error (e.g. agent_invalid) is the better report."""
-    if capabilities is None:
-        probes = _COMMAND_PROBES.get(operation, ())
-    else:
-        probes = tuple(_CAPABILITY_PROBES[c] for c in sorted(capabilities))
+    ``capabilities`` is declared by the command spec and may be narrowed to
+    what the selected work actually needs. An empty set runs nothing."""
+    probes = tuple(_CAPABILITY_PROBES[c] for c in sorted(capabilities))
     for probe in probes:
         failure = probe(operation)
         if failure is not None:
