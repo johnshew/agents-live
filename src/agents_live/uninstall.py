@@ -4,11 +4,11 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 
 from . import heartbeat, preflight
+from .spawn import find_uv
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,8 +33,9 @@ def main(argv: list[str] | None = None) -> int:
         # Non-WSL hosts have no Windows heartbeat task to remove; a hard
         # dependency here would make uninstall impossible off WSL.
         print("no WSL host integrations to remove; uninstalling the tool")
-    uv = shutil.which("uv")
-    if not uv:
+    try:
+        uv = find_uv()
+    except FileNotFoundError:
         preflight.emit_failure(
             "uninstall",
             "host cleanup succeeded, but uv was not found; restore or install "

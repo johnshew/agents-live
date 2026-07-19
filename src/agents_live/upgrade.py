@@ -65,7 +65,7 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     return 0
 
 
-def _refresh_with_installed_cli(root: Path) -> int:
+def _refresh_with_installed_cli() -> int:
     # cli_shim_path prefers the entry point beside the interpreter (the
     # uv tool env), so a freshly installed shim is found even when
     # ~/.local/bin is not on PATH yet.
@@ -79,7 +79,7 @@ def _refresh_with_installed_cli(root: Path) -> int:
             f"agents-live executable not found after runtime upgrade: {exc}")
         return 1
     return subprocess.run(
-        [executable, "--repo", str(root), "upgrade", "--skills-only"],
+        [executable, "upgrade", "--skills-only"],
         check=False,
     ).returncode
 
@@ -120,6 +120,13 @@ def main() -> int:
         runtime_status = _upgrade_runtime(list(dict.fromkeys(target_roots)))
         if runtime_status != 0 or args.runtime_only:
             return runtime_status
+        # After the runtime upgrade this process is still the old
+        # version, so payload refresh must run in the freshly installed
+        # CLI. One child covers every target: its own `_targets()`
+        # resolves the current project and all registered repositories
+        # (and honors AGENTS_LIVE_REPO), so per-repo children would only
+        # multiply interpreter start-ups.
+        return _refresh_with_installed_cli()
 
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)
@@ -131,14 +138,11 @@ def main() -> int:
     failed = bool(errors)
     for label, root in targets:
         print(f"Refreshing {label}: {root}")
-        if args.skills_only:
-            try:
-                _refresh_payload(root)
-            except (OSError, ValueError) as exc:
-                preflight.emit_failure(
-                    "upgrade", f"{label} ({root}): {exc}")
-                failed = True
-        elif _refresh_with_installed_cli(root) != 0:
+        try:
+            _refresh_payload(root)
+        except (OSError, ValueError) as exc:
+            preflight.emit_failure(
+                "upgrade", f"{label} ({root}): {exc}")
             failed = True
     return 1 if failed else 0
 
