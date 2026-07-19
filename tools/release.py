@@ -237,6 +237,7 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
     commands = (
         "uv run --script tools/pre-release-audit.py",
         "uv run --with-editable . --script tests/test_smoke.py",
+        "uv run --with-editable . agents-live smoketest",
         "uv build",
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
@@ -270,6 +271,10 @@ def prepare(bump: str) -> None:
         _check_release_diff()
         _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
         _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
+        # End-to-end gate: the framework smoketest exercises the real
+        # trigger/run/status loop in this checkout, catching breaks the
+        # unit suite cannot (e.g. module argv contract drift).
+        _run(["uv", "run", "--with-editable", ".", "agents-live", "smoketest"])
         _run(["uv", "build"])
         _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
         message = f"chore(build): bump version to v{target}"
@@ -313,6 +318,7 @@ def publish() -> None:
     notes = _release_notes(version)
     _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
     _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
+    _run(["uv", "run", "--with-editable", ".", "agents-live", "smoketest"])
     _run(["uv", "build"])
     if needs_push:
         _run(["git", "push", "--atomic", "origin", "main", tag])
