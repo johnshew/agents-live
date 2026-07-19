@@ -844,8 +844,12 @@ def _resolve_activation_ownership(
         return True
 
     # Owned by a different host: take over only with per-invocation consent.
+    # Never prompt in JSON mode - stdout is captured into the envelope, so
+    # an interactive question would be invisible and block forever;
+    # machine callers consent with --yes.
     take_over = assume_yes
-    if not batch_mode and not take_over and sys.stdin.isatty():
+    if (not batch_mode and not take_over and sys.stdin.isatty()
+            and not preflight.json_mode()):
         answer = input(
             f"{name} is owned by {owner}; take ownership and activate here? "
             "[y/N] ")

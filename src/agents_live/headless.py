@@ -442,13 +442,15 @@ def _contained_in_repo(path: Path, kind: str, reference: str) -> Path:
 
 # Vixie cron vocabulary only. The strict charset is a security boundary,
 # not pedantry: schedule strings are embedded as the leading tokens of
-# crontab lines, so anything beyond field characters (a `;`, `#`, or
+# crontab lines, so anything beyond field characters (a `;`, `#`, `%`, or
 # newline) would smuggle shell commands or extra lines into the user's
-# crontab (PKG-002).
+# crontab (PKG-002). Letters are part of that vocabulary - Vixie cron
+# accepts month and weekday names (MON-FRI, JAN-DEC) - and pose no
+# injection risk, so they stay inside the boundary.
 _CRON_KEYWORDS = frozenset({
     "@reboot", "@yearly", "@annually", "@monthly", "@weekly", "@daily",
     "@midnight", "@hourly"})
-_CRON_FIELD = re.compile(r"^[0-9*/,\-]+$")
+_CRON_FIELD = re.compile(r"^[0-9A-Za-z*/,\-]+$")
 
 
 def _validated_schedule(value: object, prompt: Path) -> str:
@@ -462,7 +464,7 @@ def _validated_schedule(value: object, prompt: Path) -> str:
         return " ".join(fields)
     raise AgentsLiveError(
         f"invalid schedule {sched!r} in {_repo_relative(prompt)}; expected "
-        "five cron fields (digits and * / , - only) or an @keyword")
+        "five cron fields (letters, digits, and * / , - only) or an @keyword")
 
 
 def clean_path() -> str:
