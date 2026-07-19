@@ -247,6 +247,6 @@ def converge(roots: list[Path]) -> bool:
     completed = subprocess.run(command, check=False)
     if completed.returncode:
         raise PluginError(
-            f"plugin convergence failed (exit {completed.returncode}): "
-            + " ".join(command))
+            f"plugin convergence failed with exit code {completed.returncode}; "
+            "run `agents-live upgrade` to retry")
     return True
