@@ -1241,6 +1241,39 @@ class TestTimeline(_TempProject):
         self.assertNotIn("malformed-agent", result.stdout)
         self.assertIn("skipped 4 malformed or pre-v5 rows", result.stderr)
 
+    def test_flat_script_resolves_registered_default_repo(self) -> None:
+        # Regression for #48: logs/timeline run via `uv run --script`,
+        # where paths is a top-level module and `from . import repos`
+        # has no parent package. The crash fires only on the
+        # registry-default branch, which the rest of the suite never
+        # reaches because it pins AGENTS_LIVE_REPO.
+        log = self.root / "Agents" / "logs" / "solo.log"
+        log.write_text(json.dumps({
+            "log_schema": 5, "ts": "2026-07-18T20:00:00Z",
+            "agent_name": "registry-agent", "phase": "done", "status": "ok",
+        }) + "\n", encoding="utf-8")
+
+        xdg = self.root / "xdg-config"
+        (xdg / "agents-live").mkdir(parents=True)
+        (xdg / "agents-live" / "config.toml").write_text(
+            f'default_repo = "proj"\n\n[repos]\nproj = "{self.root}"\n',
+            encoding="utf-8")
+
+        env = {k: v for k, v in os.environ.items() if k != paths.ENV_VAR}
+        env["XDG_CONFIG_HOME"] = str(xdg)
+        script = Path(headless.__file__).with_name("timeline.py")
+        with tempfile.TemporaryDirectory() as bare_cwd:
+            result = subprocess.run(
+                [shutil.which("uv") or "uv", "run", "--script",
+                 str(script), "--all"],
+                capture_output=True, text=True, timeout=120,
+                cwd=bare_cwd, env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ImportError", result.stderr)
+        self.assertIn("registry-agent", result.stdout)
+
 
 class TestUpdateCheck(unittest.TestCase):
     def setUp(self) -> None:
@@ -1838,6 +1871,11 @@ class TestInstallSkill(_TempProject):
             mock.patch.object(init, "install_skill") as install,
             mock.patch("builtins.print"),
             mock.patch("sys.argv", ["agents-live upgrade"]),
+            # AGENTS_LIVE_REPO is set by _TempProject, so main() consults
+            # the registry for extra plugin roots; point it at an empty
+            # temp registry, not this host's real one (issue #49).
+            mock.patch.dict(os.environ, {
+                "XDG_CONFIG_HOME": str(self.root / "xdg-config")}),
         ):
             self.assertEqual(upgrade.main(), 0)
         runtime.assert_called_once_with([target])
