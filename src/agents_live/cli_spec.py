@@ -63,12 +63,27 @@ COMMANDS = (
             Arg(("--yes",), "Confirm ownership takeover without prompting."),
             Arg(("--transfer-to",), "Transfer ownership to a host.", kind="value"),
             Arg(("--prune-orphans",), "Remove triggers for deleted agents."),
-            Arg(("--watch-loop",), "Run the watcher loop.", kind="value",
-                hidden=True),
-            Arg(("--ensure-watcher",), "Restore one watcher.", kind="value",
-                hidden=True),
-            Arg(("--list-reboot-watchers",), "List durable watchers.",
-                hidden=True),
+        ),
+    ),
+    Cmd(
+        "internal", "Run internal watcher plumbing.", "activate", "in-process",
+        probes=("crontab", "inotify"), hidden=True,
+        subcommands=(
+            Cmd(
+                "watch-loop", "Run one watcher loop.", "activate", "in-process",
+                args=(Arg(("name",), "Agent name.", kind="positional",
+                          required=True),),
+            ),
+            Cmd(
+                "ensure-watcher", "Restore one watcher.", "activate",
+                "in-process",
+                args=(Arg(("name",), "Agent name.", kind="positional",
+                          required=True),),
+            ),
+            Cmd(
+                "list-reboot-watchers", "List durable watchers.", "activate",
+                "in-process",
+            ),
         ),
     ),
     Cmd(

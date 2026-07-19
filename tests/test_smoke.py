@@ -645,7 +645,8 @@ class TestInvocationForms(_TempProject):
 
     def test_reboot_line_round_trips_agent_name(self) -> None:
         line = headless.build_reboot_watcher_line("t")
-        self.assertIn("--ensure-watcher", line)
+        self.assertIn("internal ensure-watcher t", line)
+        self.assertNotIn("start --ensure-watcher", line)
 
     def test_persisted_lines_carry_inline_path(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
@@ -683,11 +684,11 @@ class TestInvocationForms(_TempProject):
 
     def test_watcher_matching_is_scoped_to_current_repo(self) -> None:
         packaged = ["/home/u/.local/bin/agents-live", "--repo", str(self.root),
-                    "start", "--watch-loop", "shared"]
+                    "internal", "watch-loop", "shared"]
         foreign = ["/home/u/.local/bin/agents-live", "--repo", FOREIGN_REPO,
-                   "start", "--watch-loop", "shared"]
+                   "internal", "watch-loop", "shared"]
         flat = ["uv", "run", "--script",
-                f"{self.root}/scripts/activate.py", "--watch-loop", "shared"]
+                f"{self.root}/scripts/activate.py", "watch-loop", "shared"]
         self.assertTrue(headless._is_watcher_cmdline(packaged, "shared"))
         self.assertTrue(headless._is_watcher_cmdline(flat, "shared"))
         self.assertFalse(headless._is_watcher_cmdline(foreign, "shared"))
@@ -848,6 +849,17 @@ class TestMigratePlanning(_TempProject):
         plan = migrate.plan_migration([stale])
         self.assertIn("smoke-fixture", plan["schedule"])
 
+    def test_legacy_watcher_line_is_planned_for_internal_rewrite(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        stale = (
+            f"@reboot cd {self.root} && agents-live --repo {self.root} "
+            "start --ensure-watcher smoke-fixture 2>&1"
+        )
+        plan = migrate.plan_migration([stale])
+        old, new = plan["watcher"]["smoke-fixture"]
+        self.assertEqual(old, [stale])
+        self.assertIn("internal ensure-watcher smoke-fixture", new[0])
+
     def test_undefined_agent_is_reported_not_planned(self) -> None:
         line = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script x.py "
                 f"--name ghost-agent --quiet 2>&1")
@@ -874,7 +886,7 @@ class TestMigratePlanning(_TempProject):
             f"@reboot cd {foreign_repo} && agents-live --repo {foreign_repo} "
             "start --ensure-watcher missing",
             f"@reboot cd {self.root} && agents-live --repo {self.root} "
-            "start --ensure-watcher smoke-fixture",
+            "internal ensure-watcher smoke-fixture",
         ])
         completed = subprocess.CompletedProcess(
             ["crontab", "-l"], 0, stdout=crontab, stderr="")
@@ -944,6 +956,30 @@ class TestCliContract(_TempProject):
         self.assertIn("upgrade", stdout.getvalue())
         self.assertIn("--version", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_start_surface_rejects_internal_plumbing(self) -> None:
+        help_text = cli.command_help(
+            next(command for command in COMMANDS if command.name == "start"))
+        for plumbing in (
+                "--watch-loop", "--ensure-watcher", "--list-reboot-watchers"):
+            with self.subTest(plumbing=plumbing):
+                self.assertNotIn(plumbing, help_text)
+                with mock.patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(cli.main(["start", plumbing]), 2)
+        self.assertNotIn("internal", cli._usage())
+
+    def test_internal_ensure_watcher_dispatches(self) -> None:
+        with (
+            mock.patch.object(preflight, "check", return_value=None),
+            mock.patch.object(activate, "activate_watcher",
+                              return_value=123) as ensure,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(
+                cli.main(["internal", "ensure-watcher", "fixture"]), 0)
+        ensure.assert_called_once_with("fixture")
+        self.assertEqual(
+            stdout.getvalue(), "Ensured watcher for 'fixture': pid 123\n")
 
     def test_each_command_help_comes_from_spec(self) -> None:
         for command in COMMANDS:

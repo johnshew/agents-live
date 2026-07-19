@@ -228,7 +228,7 @@ each declared plugin distribution installed with resolvable entry points,
 registry ownership backed by a resolving `agents_live.ownership` provider,
 crontab
 entries consistent with the agent files (no orphaned `--name` /
-`--ensure-watcher` references, no stale script paths - scoped to lines
+`internal ensure-watcher` references, no stale script paths - scoped to lines
 referencing this repo, since the crontab is host-global), every active
 watcher covered by an `@reboot` respawn line (check 13 below), and the
 health beacon fresh within 75 minutes - a stale beacon means the

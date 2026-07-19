@@ -36,6 +36,9 @@ history is retained in the source repository.
   log timelines, and smoketest verdicts now have JSON output. The duplicate
   `teardown` and `prereqs` verbs are removed; use `stop` and `doctor`.
   (#42)
+- feat: move watcher process and reboot plumbing from `start` flags to a
+  hidden `internal` namespace. `agents-live migrate` rewrites persisted legacy
+  watcher lines to the canonical invocation. (#43)
 - feat: run the release audit and unit suite on every pull request and push
   to `main`. (#40)
 

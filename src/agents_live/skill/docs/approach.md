@@ -1,7 +1,7 @@
 ---
 title: Agents Live Architecture
 description: Architecture and runtime contracts for agents-live triggered agents
-ms.date: 2026-07-18
+ms.date: 2026-07-19
 ms.topic: concept
 ---
 
@@ -239,8 +239,9 @@ contracts:
 - **Cron**: the installed line invokes `run.py --name <name>`. Matching is an
   adjacent-token `--name <name>` pair (via `shlex.split`), so names never
   collide with substrings or other arguments.
-- **Watcher**: the process runs `activate.py --watch-loop <name>`. Matching is
-  the adjacent-token `--watch-loop <name>` pair.
+- **Watcher**: the process runs `activate.py watch-loop <name>` in a flat
+  checkout or `agents-live internal watch-loop <name>` when packaged.
+  Matching uses the adjacent `watch-loop <name>` action/name pair.
 
 `headless.py` exposes both the per-name lookup (`cron_line_matches`,
 watcher cmdline matching) and the reverse, enumerate-all lookup

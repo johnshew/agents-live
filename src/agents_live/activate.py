@@ -669,7 +669,7 @@ def activate_watcher(name: str) -> int:
         stop_watcher(name)
 
     ensure_logs_dir()
-    loop_argv = cli_invocation("start", "--watch-loop", name,
+    loop_argv = cli_invocation("internal", "watch-loop", name,
                                flat_script=SCRIPT_PATH)
     with open("/dev/null", "w") as devnull:
         process = subprocess.Popen(
@@ -975,21 +975,14 @@ def main() -> int:
     from . import plugins
 
     parser = argparse.ArgumentParser()
+    internal_commands = parser.add_subparsers(dest="internal_command")
+    for command in ("watch-loop", "ensure-watcher", "list-reboot-watchers"):
+        child = internal_commands.add_parser(command)
+        if command != "list-reboot-watchers":
+            child.add_argument("name")
+
     parser.add_argument("--name")
     parser.add_argument("--all", action="store_true", help="Activate all agents that have a schedule or watchPath")
-    parser.add_argument("--watch-loop", dest="watch_loop_name")
-    parser.add_argument(
-        "--ensure-watcher", dest="ensure_watcher_name",
-        help="Idempotently (re)spawn the watcher for the given agent and exit. "
-             "Used by the @reboot crontab line to restore watchers after a "
-             "reboot; safe to run repeatedly (it kills any stale watcher first).",
-    )
-    parser.add_argument(
-        "--list-reboot-watchers", dest="list_reboot_watchers", action="store_true",
-        help="Print, one per line, the agent name of every watcher with an "
-             "@reboot respawn line installed in this host's crontab, then exit. "
-             "This is the durable 'intended watchers' set.",
-    )
     parser.add_argument(
         "--transfer-to",
         dest="transfer_to",
@@ -1018,21 +1011,21 @@ def main() -> int:
         parser.error("--yes requires a targeted --name and cannot be used with --all")
 
     try:
-        if args.list_reboot_watchers:
+        if getattr(args, "internal_command", None) == "list-reboot-watchers":
             for agent_name in list_reboot_watcher_agent_names():
                 print(agent_name)
             return 0
 
-        if args.ensure_watcher_name:
+        if getattr(args, "internal_command", None) == "ensure-watcher":
             # Guarded, idempotent respawn used by the @reboot crontab line.
-            pid = activate_watcher(args.ensure_watcher_name)
-            print(f"Ensured watcher for '{args.ensure_watcher_name}': pid {pid}")
+            pid = activate_watcher(args.name)
+            print(f"Ensured watcher for '{args.name}': pid {pid}")
             return 0
 
-        if args.watch_loop_name:
-            agent_log = logs_root() / f"{args.watch_loop_name}.log"
+        if getattr(args, "internal_command", None) == "watch-loop":
+            agent_log = logs_root() / f"{args.name}.log"
             try:
-                return watch_loop(args.watch_loop_name)
+                return watch_loop(args.name)
             except Exception:
                 import traceback
                 ensure_logs_dir()
