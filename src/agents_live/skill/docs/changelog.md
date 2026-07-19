@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: forward smoketest changed paths through run's `--changed-files`
+  JSON-array contract instead of the nonexistent singular flag. (#41)
+- fix: add `start <name> --yes` for explicit ownership takeover without a
+  prompt; interactive targeted starts prompt, while non-interactive starts
+  still refuse takeover without consent. (#47)
 - fix: resolve the repository registry in subprocess-dispatched
   commands. `logs` and `logs timeline` crashed with an ImportError
   whenever the project resolved through a registered alias or the
@@ -20,6 +25,19 @@ history is retained in the source repository.
   and `repos add` remains read-only. (#34)
 - feat: make `repos default <path>` register an existing unregistered
   repository before selecting it as the fallback.
+- feat: define command policy and arguments once in a declarative spec that
+  drives dispatch, cross-command contracts, generated help, the published
+  EBNF grammar, and the command/flag table. (#36, #37, #38)
+- feat: generate bash and zsh completion scripts with
+  `agents-live completions`, including agent-name suggestions for lifecycle
+  commands. (#39)
+- **BREAKING** feat: unify machine output under position-independent `--json`
+  and typed error envelopes. Repository lists, migration plans, upgrades,
+  log timelines, and smoketest verdicts now have JSON output. The duplicate
+  `teardown` and `prereqs` verbs are removed; use `stop` and `doctor`.
+  (#42)
+- feat: run the release audit and unit suite on every pull request and push
+  to `main`. (#40)
 
 ## 0.3.1 - 2026-07-18
 
@@ -56,7 +74,7 @@ history is retained in the source repository.
   of silently running agents without their MCP server definitions.
 - fix: scope watcher process matching to the current repository, so
   same-named watchers in different projects are no longer cross-reported
-  or cross-killed by `stop`, `teardown`, `status`, or orphan pruning.
+  or cross-killed by `stop`, `status`, or orphan pruning.
 - fix: recognize packaged-shim cron lines during agent enumeration, so
   orphan pruning and runtime listings see cron-scheduled agents on
   packaged installs again (previously only flat-layout `run.py` lines
@@ -286,6 +304,6 @@ Initial public release.
 - docs: commands.md check 14 uses `pgrep -x inotifywait`; the old
   `-f "inotifywait.*"` pattern self-matched its invoking shell and
   reported a watcher when none was running.
-- prereqs/doctor: agent-CLI notes now distinguish agents owned by this
+- doctor: agent-CLI notes now distinguish agents owned by this
   host from unclaimed agents (no registry entry, no frontmatter
   `owner:`) - previously both were reported as "owned by this host".

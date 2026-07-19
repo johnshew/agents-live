@@ -88,7 +88,7 @@ source <(agents-live completions bash) # optional shell completion
 agents-live doctor                 # verify cron, inotifywait, and agent CLIs
 agents-live run file-notes         # test the agent once, in the foreground
 agents-live start file-notes       # activate it unattended
-agents-live teardown file-notes    # clean up - remove its triggers
+agents-live stop file-notes        # clean up - remove its triggers
 ```
 
 On interactive terminal invocations, agents-live checks PyPI for a newer
@@ -133,8 +133,8 @@ the conversational `/agents-live` skill (itself optional support for
 the CLI), seed the agent directories, or declare more complex
 (multi-host) configuration. `stop` pauses an agent without
 removing it, so the full lifecycle is
-`create -> run -> start -> stop`. `teardown` is an alias for `stop`; both
-remove triggers while preserving the agent definition. An optional
+`create -> run -> start -> stop`. `stop` removes triggers while preserving
+the agent definition. An optional
 local dashboard adds run/pause/activate controls, ownership visibility, and
 trailing 24-hour and seven-day cost per agent - convenient, never required;
 everything it does is also a CLI command.

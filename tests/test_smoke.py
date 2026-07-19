@@ -33,7 +33,7 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, heartbeat, init,
-        migrate, ownership, paths, plugins, preflight, prereqs, repos, spawn,
+        migrate, ownership, paths, plugins, preflight, doctor, repos, spawn,
         status, uninstall, update_check, upgrade,
     )
     from agents_live.cli_spec import COMMANDS, render_docs_block
@@ -52,7 +52,7 @@ except ImportError:  # flat checkout layout
     import paths
     import plugins
     import preflight
-    import prereqs
+    import doctor
     import repos
     import spawn
     import status
@@ -63,7 +63,7 @@ except ImportError:  # flat checkout layout
 
 
 class _TempProject(unittest.TestCase):
-    """A temp project selected via the env var, restored on teardown."""
+    """A temp project selected via the env var, restored on stop."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -487,15 +487,15 @@ class TestProjectPlugins(_TempProject):
         no_crontab = subprocess.CompletedProcess(
             ["crontab", "-l"], 1, stdout="", stderr="no crontab for test")
         with (
-            mock.patch.object(prereqs, "REPO", self.root),
-            mock.patch.object(prereqs, "_project_checks_enabled", return_value=True),
-            mock.patch.object(prereqs, "_has", return_value=True),
-            mock.patch.object(prereqs, "_python_312_resolvable", return_value=True),
-            mock.patch.object(prereqs, "_is_wsl", return_value=False),
-            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
-            mock.patch.object(prereqs, "_package_checks", return_value=[]),
-            mock.patch.object(prereqs, "_native_agents", return_value=None),
-            mock.patch.object(prereqs.subprocess, "run", return_value=no_crontab),
+            mock.patch.object(doctor, "REPO", self.root),
+            mock.patch.object(doctor, "_project_checks_enabled", return_value=True),
+            mock.patch.object(doctor, "_has", return_value=True),
+            mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
+            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
+            mock.patch.object(doctor, "_package_checks", return_value=[]),
+            mock.patch.object(doctor, "_native_agents", return_value=None),
+            mock.patch.object(doctor.subprocess, "run", return_value=no_crontab),
             mock.patch.object(
                 plugins, "checks",
                 return_value=[(
@@ -503,7 +503,7 @@ class TestProjectPlugins(_TempProject):
                     "distribution example-plugin is not installed")]),
             mock.patch.object(ownership, "registry_available", return_value=False),
         ):
-            checks = {check["name"]: check for check in prereqs.collect()}
+            checks = {check["name"]: check for check in doctor.collect()}
         plugin_check = checks[
             "plugin example-plugin installed and entry points resolve"]
         self.assertFalse(plugin_check["ok"])
@@ -753,11 +753,11 @@ class TestInvocationForms(_TempProject):
         completed = subprocess.CompletedProcess(
             ["crontab", "-l"], 0, stdout=crontab, stderr="")
         with (
-            mock.patch.object(prereqs, "REPO", self.root),
-            mock.patch.object(prereqs.subprocess, "run",
+            mock.patch.object(doctor, "REPO", self.root),
+            mock.patch.object(doctor.subprocess, "run",
                               return_value=completed),
         ):
-            orphans, stale = prereqs._crontab_inconsistencies()
+            orphans, stale = doctor._crontab_inconsistencies()
         self.assertEqual(orphans, [])
         self.assertEqual(stale, [f"{gone} (project root moved or deleted)"])
 
@@ -809,9 +809,9 @@ class TestInvocationForms(_TempProject):
         completed = subprocess.CompletedProcess(
             ["crontab", "-l"], 1, stdout="",
             stderr="crontab: error: cannot open crontab")
-        with mock.patch.object(prereqs.subprocess, "run",
+        with mock.patch.object(doctor.subprocess, "run",
                                return_value=completed):
-            self.assertIsNone(prereqs._crontab_inconsistencies())
+            self.assertIsNone(doctor._crontab_inconsistencies())
 
     def test_install_preserves_user_path_and_foreign_lines(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
@@ -879,10 +879,10 @@ class TestMigratePlanning(_TempProject):
         completed = subprocess.CompletedProcess(
             ["crontab", "-l"], 0, stdout=crontab, stderr="")
         with (
-            mock.patch.object(prereqs, "REPO", self.root),
-            mock.patch.object(prereqs.subprocess, "run", return_value=completed),
+            mock.patch.object(doctor, "REPO", self.root),
+            mock.patch.object(doctor.subprocess, "run", return_value=completed),
         ):
-            self.assertEqual(prereqs._crontab_inconsistencies(), ([], []))
+            self.assertEqual(doctor._crontab_inconsistencies(), ([], []))
 
 
 class TestAdapterRegistry(unittest.TestCase):
@@ -908,8 +908,23 @@ class TestAdapterRegistry(unittest.TestCase):
 
 
 class TestCliContract(_TempProject):
+    @staticmethod
+    def _valid_args(command: str) -> list[str]:
+        return {
+            "run": ["fixture"],
+            "start": ["fixture"],
+            "stop": ["fixture"],
+            "repos": ["list"],
+            "completions": ["bash"],
+        }.get(command, [])
+
     def setUp(self) -> None:
         super().setUp()
+        saved_json = os.environ.pop(preflight.JSON_ENV_VAR, None)
+        self.addCleanup(os.environ.pop, preflight.JSON_ENV_VAR, None)
+        if saved_json is not None:
+            self.addCleanup(
+                os.environ.__setitem__, preflight.JSON_ENV_VAR, saved_json)
         for patcher in (
             mock.patch.object(update_check, "consume_notice", return_value=None),
             mock.patch.object(update_check, "launch_if_stale"),
@@ -985,7 +1000,9 @@ class TestCliContract(_TempProject):
                            return_value=fake_module),
                 mock.patch.object(paths, "resolve_root") as resolve_root,
             ):
-                self.assertEqual(cli.main([command.name]), 0)
+                self.assertEqual(
+                    cli.main([command.name, *self._valid_args(command.name)]),
+                    0)
                 resolve_root.assert_not_called()
 
     def test_required_root_commands_emit_no_project_envelope(self) -> None:
@@ -1003,12 +1020,26 @@ class TestCliContract(_TempProject):
                     with self.subTest(command=command.name):
                         paths.clear_cache()
                         stdout = io.StringIO()
-                        with mock.patch("sys.stdout", stdout):
+                        stderr = io.StringIO()
+                        argv = (
+                            ["--json", command.name,
+                             *self._valid_args(command.name)]
+                            if command.json else [
+                                command.name, *self._valid_args(command.name)]
+                        )
+                        with (
+                            mock.patch("sys.stdout", stdout),
+                            mock.patch("sys.stderr", stderr),
+                        ):
                             self.assertEqual(
-                                cli.main(["--json", command.name]), 2)
-                        envelope = json.loads(stdout.getvalue())
-                        self.assertEqual(
-                            envelope["error"]["code"], "no_project_root")
+                                cli.main(argv), 2)
+                        if command.json:
+                            envelope = json.loads(stdout.getvalue())
+                            self.assertEqual(
+                                envelope["error"]["code"], "no_project_root")
+                        else:
+                            self.assertIn(
+                                "error [no_project_root]", stderr.getvalue())
         finally:
             os.chdir(saved_cwd)
             if saved_root is not None:
@@ -1033,9 +1064,93 @@ class TestCliContract(_TempProject):
                                return_value=fake_module),
                     mock.patch.object(preflight, "check", return_value=None),
                 ):
-                    self.assertEqual(cli.main([command.name]), 0)
+                    self.assertEqual(
+                        cli.main([command.name, *self._valid_args(command.name)]),
+                        0)
                     self.assertEqual(cli.main([alias]), 0)
                 self.assertEqual(calls, [[], []])
+
+    def test_json_commands_accept_both_flag_positions(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.main.side_effect = lambda: print("human result") or 0
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout='{"record": true}\n', stderr="")
+        for command in COMMANDS:
+            if not command.json:
+                continue
+            outputs = []
+            suffix = self._valid_args(command.name)
+            for argv in (["--json", command.name, *suffix],
+                         [command.name, *suffix, "--json"]):
+                stdout = io.StringIO()
+                with (
+                    self.subTest(command=command.name, argv=argv),
+                    mock.patch("importlib.import_module",
+                               return_value=fake_module),
+                    mock.patch.object(cli.subprocess, "run",
+                                      return_value=completed),
+                    mock.patch.object(preflight, "check", return_value=None),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    self.assertEqual(cli.main(argv), 0)
+                    outputs.append(json.loads(stdout.getvalue()))
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_json_commands_emit_typed_failure_envelopes(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.main.side_effect = RuntimeError("contract failure")
+        completed = subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="contract failure")
+        for command in COMMANDS:
+            if not command.json:
+                continue
+            stdout = io.StringIO()
+            with (
+                self.subTest(command=command.name),
+                mock.patch("importlib.import_module",
+                           return_value=fake_module),
+                mock.patch.object(cli.subprocess, "run",
+                                  return_value=completed),
+                mock.patch.object(preflight, "check", return_value=None),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(cli.main([
+                    "--json", command.name,
+                    *self._valid_args(command.name),
+                ]), 1)
+                envelope = json.loads(stdout.getvalue())
+                self.assertEqual(
+                    envelope["error"]["operation"], command.name)
+                self.assertIn("contract failure",
+                              envelope["error"]["detail"])
+
+    def test_nonzero_machine_result_is_normalized_to_error_envelope(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.main.side_effect = (
+            lambda: print('{"verdict": "FAIL"}') or 1)
+        stdout = io.StringIO()
+        with (
+            mock.patch("importlib.import_module", return_value=fake_module),
+            mock.patch.object(preflight, "check", return_value=None),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(cli.main(["run", "fixture", "--json"]), 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["error"]["code"], "operation_failed")
+
+    def test_removed_duplicate_verbs_are_unknown(self) -> None:
+        help_text = cli._usage()
+        completion = completions.bash()
+        for removed in ("teardown", "prereqs"):
+            with (
+                self.subTest(command=removed),
+                mock.patch("sys.stderr",
+                           new_callable=io.StringIO) as stderr,
+            ):
+                self.assertEqual(cli.main([removed]), 2)
+                self.assertIn("[unknown_command]", stderr.getvalue())
+            self.assertNotIn(removed, help_text)
+            self.assertNotIn(removed, completion)
 
     def test_subprocess_dispatch_uses_declared_modules(self) -> None:
         completed = subprocess.CompletedProcess([], 0)
@@ -1075,6 +1190,27 @@ class TestCliContract(_TempProject):
             ):
                 self.assertEqual(cli.main(["completions", shell]), 0)
                 self.assertIn(marker, stdout.getvalue())
+
+    def test_repos_list_and_migrate_expose_structured_results(self) -> None:
+        config_home = self.root / "contract-config"
+        with mock.patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(config_home)}):
+            for argv, expected_key in (
+                (["repos", "list", "--json"], "repositories"),
+                (["migrate", "--dry-run", "--json"], "plan"),
+            ):
+                stdout = io.StringIO()
+                with (
+                    self.subTest(argv=argv),
+                    mock.patch.object(preflight, "check", return_value=None),
+                    mock.patch.object(
+                        headless, "current_crontab_lines", return_value=[]),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    self.assertEqual(cli.main(argv), 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertTrue(payload["ok"])
+                self.assertIn(expected_key, payload)
 
     def test_version_works_outside_repository(self) -> None:
         saved = Path.cwd()
@@ -1124,8 +1260,9 @@ class TestCliContract(_TempProject):
         ):
             self.assertEqual(cli.main(["frobnicate"]), 2)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("error: unknown command 'frobnicate'", stderr.getvalue())
-        self.assertIn("usage: agents-live", stderr.getvalue())
+        self.assertIn(
+            "error [unknown_command] frobnicate: unknown command 'frobnicate'",
+            stderr.getvalue())
 
     def test_mutating_command_rejects_all_repos(self) -> None:
         stderr = io.StringIO()
@@ -1163,11 +1300,11 @@ class TestCliContract(_TempProject):
         os.environ.pop(paths.ENV_VAR, None)
         paths.clear_cache()
         with (
-            mock.patch.object(prereqs, "REPO", None),
-            mock.patch.object(prereqs, "_has", return_value=True),
-            mock.patch.object(prereqs, "_python_312_resolvable", return_value=True),
-            mock.patch.object(prereqs, "_is_wsl", return_value=False),
-            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(doctor, "REPO", None),
+            mock.patch.object(doctor, "_has", return_value=True),
+            mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
+            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "refresh"),
             mock.patch.object(update_check, "interactive", return_value=False),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
@@ -1199,8 +1336,8 @@ class TestCliContract(_TempProject):
 
     def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
         with (
-            mock.patch.object(prereqs, "collect", return_value=[]),
-            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(doctor, "collect", return_value=[]),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(
                 update_check, "refresh", side_effect=OSError) as refresh,
             mock.patch.object(
@@ -1209,21 +1346,22 @@ class TestCliContract(_TempProject):
             mock.patch("sys.stdout", io.StringIO()),
             mock.patch("sys.stderr", io.StringIO()),
         ):
-            self.assertEqual(prereqs.main([]), 0)
+            self.assertEqual(doctor.main([]), 0)
         refresh.assert_called_once()
         status.assert_called_once()
 
     def test_doctor_json_suppresses_cached_update_result(self) -> None:
         with (
-            mock.patch.object(prereqs, "collect", return_value=[]),
-            mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+            mock.patch.object(doctor, "collect", return_value=[]),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(update_check, "status_text") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
+            mock.patch.dict(os.environ, {preflight.JSON_ENV_VAR: "1"}),
             mock.patch("sys.stdout", io.StringIO()),
             mock.patch("sys.stderr", io.StringIO()),
         ):
-            self.assertEqual(prereqs.main(["--json"]), 0)
+            self.assertEqual(doctor.main([]), 0)
         refresh.assert_called_once()
         status.assert_not_called()
 
@@ -1232,8 +1370,8 @@ class TestCliContract(_TempProject):
             stdout = io.StringIO()
             with (
                 mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": ""}),
-                mock.patch.object(prereqs, "collect", return_value=[]),
-                mock.patch.object(prereqs, "_hostname", return_value="test-host"),
+                mock.patch.object(doctor, "collect", return_value=[]),
+                mock.patch.object(doctor, "_hostname", return_value="test-host"),
                 mock.patch.object(update_check, "refresh"),
                 mock.patch("sys.stdout", stdout),
             ):
@@ -1399,7 +1537,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         with mock.patch.object(
                 heartbeat, "task_configuration", return_value=(task, False)):
             self.assertEqual(
-                prereqs._windows_heartbeat_config(),
+                doctor._windows_heartbeat_config(),
                 (True, "enabled; distro Ubuntu; hidden stable CLI shim; "
                        "repeats every 5 min"))
 
@@ -1414,7 +1552,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         }
         with mock.patch.object(
                 heartbeat, "task_configuration", return_value=(task, False)):
-            ok, note = prereqs._windows_heartbeat_config()
+            ok, note = doctor._windows_heartbeat_config()
         self.assertFalse(ok)
         self.assertIn("visible console", note)
         self.assertIn("heartbeat install", note)
@@ -1422,7 +1560,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_doctor_recommends_migration_for_legacy_task(self) -> None:
         with mock.patch.object(
                 heartbeat, "task_configuration", return_value=(None, True)):
-            ok, note = prereqs._windows_heartbeat_config()
+            ok, note = doctor._windows_heartbeat_config()
         self.assertFalse(ok)
         self.assertIn("requires migration", note)
 

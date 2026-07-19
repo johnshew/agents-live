@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import preflight
+
 TASK_PREFIX = "Agents Live Heartbeat"
 LEGACY_TASK = "WSL Heartbeat"
 LEGACY_ACTION_TOKENS = (
@@ -282,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return run_once()
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        print(f"error: heartbeat: {exc}", file=sys.stderr)
+        preflight.emit_failure("heartbeat", str(exc))
         return 1
     return 0
 

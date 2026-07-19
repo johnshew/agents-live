@@ -878,7 +878,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
     file is an orphan left behind by a deleted or renamed agent. Removing the
     file then becomes a complete decommission: the next reconcile on each host
     enumerates its own runtime, finds the orphan, and tears it down (cron +
-    watcher), so no per-host manual teardown is needed.
+    watcher), so no per-host manual stop is needed.
 
     Returns the list of pruned agent names. Safe to call repeatedly: an agent
     whose file still exists is never touched, and ``remove_*``/``stop_watcher``
@@ -894,7 +894,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
         # "not listed" is not "deleted". Only a missing FILE (checked
         # without parsing, across every agent location) proves deletion;
         # an existing-but-broken definition gets abstention + a warning,
-        # never teardown.
+        # never stop.
         if agent_file_exists(name):
             log_event(system_log(), level="warning", agent_name=name,
                       phase="prune-orphan",
@@ -912,7 +912,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
             remove_cron_entries(name)
             remove_watcher_reboot_line(name)
         except AgentsLiveError:
-            pass  # crontab unavailable; watcher teardown below still applies
+            pass  # crontab unavailable; watcher stop below still applies
         stop_watcher(name)
         log_event(system_log(), level="info", agent_name=name, phase="prune-orphan",
                   message="removed cron/watcher for deleted agent definition")

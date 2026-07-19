@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -276,12 +277,6 @@ def main() -> None:
     if len(all_entries) > args.last:
         all_entries = all_entries[-args.last:]
 
-    # Print header
-    filter_desc = f"filter={args.filter}" if args.filter else "all agents"
-    since_desc = f" since {args.since}" if args.since else ""
-    print(f"\nTimeline ({filter_desc}{since_desc}, last {args.last})")
-    print("=" * 80)
-
     # Deduplicate and skip redundant sub-phase start entries
     seen = set()
     deduped = []
@@ -295,6 +290,16 @@ def main() -> None:
         if status == "start" and phase in ("pre-processor", "agent", "post-processor"):
             continue
         deduped.append(ev)
+
+    if os.environ.get("AGENTS_LIVE_JSON") == "1":
+        print(json.dumps({"ok": True, "events": deduped}))
+        return
+
+    # Print header
+    filter_desc = f"filter={args.filter}" if args.filter else "all agents"
+    since_desc = f" since {args.since}" if args.since else ""
+    print(f"\nTimeline ({filter_desc}{since_desc}, last {args.last})")
+    print("=" * 80)
 
     print_timeline(deduped)
 

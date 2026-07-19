@@ -6,9 +6,9 @@
 # The dependencies are headless.py's: the crontab-consistency and
 # watcher-coverage checks import it, and without its deps in this script
 # env the imports fail silently and the checks self-skip.
-"""Check environment readiness for Agents Live agents (the `prereqs` command).
+"""Check environment readiness for Agents Live agents (the `doctor` command).
 
-Mirrors the checks documented in docs/commands.md (`prereqs` section).
+Mirrors the checks documented in docs/commands.md (`doctor` section).
 Each check is classified `required` or optional. Exit 0 when every
 required check passes, 1 otherwise. `--json` emits a machine-readable
 summary for callers such as the dashboard Health check button, which
@@ -593,7 +593,7 @@ def collect() -> list[dict]:
             note = f"{note}; " if note else ""
             note += f"crontab references missing script(s): {joined}"
         add("crontab entries match agent files", not orphans and not stale, False,
-            "run `migrate` for stale script paths; teardown removed agent(s) "
+            "run `migrate` for stale script paths; stop removed agent(s) "
             "for orphans; edit with `crontab -e` for entries from a moved "
             "or deleted project root",
             note=note or "no orphaned or stale entries")
@@ -678,12 +678,11 @@ def collect() -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check agents-live prerequisites.")
-    parser.add_argument("--json", action="store_true", help="Emit a JSON summary")
     parser.add_argument(
         "--all-repos", action="store_true",
         help="Run host checks once and project checks for every registered repo")
     args = parser.parse_args(argv)
-    json_mode = args.json or preflight.json_mode()
+    json_mode = preflight.json_mode()
 
     if args.all_repos:
         payload = repos.collect_doctor()
@@ -739,7 +738,10 @@ def main(argv: list[str] | None = None) -> int:
     print()
     if required_failures:
         names = ", ".join(c["name"] for c in required_failures)
-        print(f"FAIL: {len(required_failures)} required check(s) failing: {names}")
+        preflight.emit_failure(
+            "doctor",
+            f"{len(required_failures)} required check(s) failing: {names}",
+            code="required_checks_failed")
     elif optional_failures:
         names = ", ".join(c["name"] for c in optional_failures)
         print(f"OK (required checks pass); {len(optional_failures)} optional missing: {names}")

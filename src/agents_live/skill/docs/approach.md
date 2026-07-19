@@ -33,7 +33,7 @@ Then manage it:
 /agents-live start ai-news-digest
 /agents-live status
 /agents-live stop ai-news-digest
-/agents-live teardown ai-news-digest
+/agents-live stop ai-news-digest
 ```
 
 Another example:
@@ -50,17 +50,16 @@ Another example:
 | `run <name>` | Execute once, show output |
 | `start <name>` | Activate cron or watcher (auto-detects type) |
 | `stop <name>` | Deactivate, keep config |
-| `teardown <name>` | Stop + delete agent (logs preserved) |
 | `status` | List all agents and state |
 | `logs <name>` | Show recent output |
-| `prereqs` | Check environment readiness |
+| `doctor` | Check environment readiness |
 | `smoketest` | End-to-end validation |
 | `release` | Audit, assemble, verify, publish portable release |
 
 ### Lifecycle
 
 ```
-create → run (test) → start (activate) → stop → teardown
+create → run (test) → start (activate) → stop
 ```
 
 ### Example: status output
@@ -105,7 +104,7 @@ Agents/                              # runtime artifacts
     ├── activate.py              # start cron or watcher (auto-detects type)
     ├── run.py                   # execute an agent once with verbose output
     ├── qlog.py                  # query live and archived logs
-    ├── teardown.py              # stop + remove an agent
+    ├── stop.py              # stop + remove an agent
     ├── status.py                # list all agents + state (--json for structured output)
     └── smoketest.py             # end-to-end validation (all agents)
 ```
@@ -190,7 +189,7 @@ agents-live status --json
 agents-live status --json <name>
 ```
 
-Infrastructure scripts (`activate.py`, `run.py`, `status.py`, `teardown.py`,
+Infrastructure scripts (`activate.py`, `run.py`, `status.py`, `stop.py`,
 `qlog.py`, `smoketest.py`, `headless.py`) declare their dependencies (PyYAML)
 inline via PEP 723 `# /// script` blocks and are invoked through `uv run`.
 This keeps the skill portable: `uv` resolves the environment on demand, no
@@ -256,7 +255,7 @@ file a complete decommission:
 - The health-check handler (hourly, and on boot) calls `--prune-orphans` before
   reconciling. Removing an agent with `git rm` therefore decommissions it:
   every host self-cleans on its next health check, with no manual
-  per-host teardown. Cron entries (which survive reboots) and watcher processes
+  per-host stop. Cron entries (which survive reboots) and watcher processes
   (which do not) are both handled.
 - The health-check handler also runs `migrate.py` at the start of every pass
   (idempotent convergence): a persisted cron entry that survives reboot can
@@ -323,7 +322,7 @@ See `Agents/docs/proposal-pipeline-side-channel.md` for the design and
 ### Smoketest lifecycle isolation
 
 The system smoketest uses fixed `_smoketest-*` fixture names, so one
-host-local `flock` covers the complete setup/run/teardown lifecycle. Only the
+host-local `flock` covers the complete setup/run/stop lifecycle. Only the
 lock owner may clean or create those resources. Cleanup is idempotent and
 covers agent definitions, handlers, cron entries, watcher processes, in-flight
 smoketest `run.py` process trees, and
@@ -428,7 +427,7 @@ extracted and logged alongside the output.
 
 `/agents-live smoketest` validates the full chain end-to-end:
 create → frontmatter → status → agent CLI → JSON output → handler → file write →
-watcher detect → agent CLI → teardown
+watcher detect → agent CLI → stop
 
 Supports all agents via `--agent`. Stops and cleans up on failure.
 
@@ -489,7 +488,7 @@ npx -y @softeria/ms-365-mcp-server --login
 Follow the browser prompt to authenticate. Token cache is stored at
 `~/.config/ms365-mcp/.token-cache.json`.
 
-Use `/agents-live prereqs` to verify all are installed.
+Use `agents-live doctor` to verify all are installed.
 
 ---
 
@@ -605,9 +604,9 @@ Each row carries `_src` provenance. `qlog.py` normalizes numeric query
 columns across the text-typed archive and live JSONL and validates the
 contract with `--all --check-schema`.
 
-### Teardown behavior
+### Agent-removal behavior
 
-`teardown` removes the agent file but preserves logs by default. Use
+The internal removal helper preserves logs by default. Use
 `--delete-logs` to also remove the agent's log file.
 
 ---

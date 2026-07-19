@@ -52,7 +52,7 @@ def main() -> int:
     except AgentsLiveError as exc:
         # Layer 2 (§3.6): typed errors leave as the envelope in json
         # mode, one concise stderr line otherwise.
-        preflight.emit_typed_error(exc, "teardown")
+        preflight.emit_typed_error(exc, "stop")
         return 1
 
 

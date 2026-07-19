@@ -8,8 +8,8 @@
 An HTML control surface over the agents-live lifecycle scripts. It
 lists every agent with its live state and ownership, and exposes per-agent
 Run / Activate / Pause / Claim buttons that shell the existing scripts
-(`run.py`, `activate.py`, `teardown.py`), plus a top-bar Health check
-that verifies prerequisites (`prereqs.py`), activates everything owned by
+(`run.py`, `activate.py`, `stop.py`), plus a top-bar Health check
+that verifies prerequisites (`doctor.py`), activates everything owned by
 this host (`activate.py --all`), then runs the `agents-live-health-check`
 worker (watchers, cron, framework smoketest) and refreshes the health
 beacon. The header health label reflects the real beacon
@@ -256,10 +256,10 @@ DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log"
 # package). The shim re-enters the same module in-process - the same
 # branch spawn takes for its packaged run invocation.
 _CLI_SUBCOMMAND = {
-    "prereqs.py": "prereqs",
+    "doctor.py": "doctor",
     "activate.py": "start",
     "run.py": "run",
-    "teardown.py": "teardown",
+    "stop.py": "stop",
 }
 
 
@@ -376,7 +376,7 @@ async def health_check() -> None:
     Runs every check the system's health depends on, in order, and
     surfaces each result rather than only the prerequisites:
 
-    1. `prereqs.py` - environment readiness (gate: abort if a required
+    1. `doctor.py` - environment readiness (gate: abort if a required
        prerequisite is missing, so the failure surfaces up front instead
        of as a cryptic mid-activation error).
     2. `activate.py --all` - ensure every agent owned by this host (or `*`)
@@ -390,7 +390,7 @@ async def health_check() -> None:
     user sees the whole picture, not just the lifecycle scripts' exit
     codes.
     """
-    if await do_action("Prereqs", "prereqs.py", []) != 0:
+    if await do_action("Doctor", "doctor.py", []) != 0:
         _safe_ui(
             ui.notify,
             "Prerequisites failing - resolve the items above before activating.",
@@ -421,7 +421,7 @@ async def pause_all(names: list[str]) -> None:
         _safe_ui(ui.notify, "Nothing running to stop", type="info")
         return
     for name in names:
-        await do_action("Stop", "teardown.py", ["--name", name], agent_name=name)
+        await do_action("Stop", "stop.py", ["--name", name], agent_name=name)
 
 
 # --- UI -----------------------------------------------------------------
@@ -541,7 +541,7 @@ async def _activate_row(event) -> None:
 
 async def _pause_row(event) -> None:
     name = event.args["name"]
-    await do_action("Stop", "teardown.py", ["--name", name], agent_name=name)
+    await do_action("Stop", "stop.py", ["--name", name], agent_name=name)
 
 
 async def _claim_row(event) -> None:

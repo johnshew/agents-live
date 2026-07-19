@@ -60,7 +60,7 @@ _agents_live() {{
 {chr(10).join(cases)}
     esac
     if [[ "$command" == run || "$command" == start ||
-          "$command" == stop || "$command" == teardown ]]; then
+          "$command" == stop ]]; then
         opts="$opts $(_agents_live_agent_names)"
     fi
     COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
@@ -105,7 +105,7 @@ _agents_live() {{
 {chr(10).join(cases)}
         esac
         if [[ "$command" == run || "$command" == start ||
-              "$command" == stop || "$command" == teardown ]]; then
+              "$command" == stop ]]; then
             _agents_live_agent_names
             return
         fi

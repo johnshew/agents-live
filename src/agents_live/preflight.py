@@ -71,6 +71,16 @@ def emit_typed_error(exc: BaseException, operation: str) -> None:
     )
 
 
+def emit_failure(operation: str, detail: str, *,
+                 code: str = "operation_failed",
+                 capability: str = "command") -> None:
+    """Emit a non-exception failure through the shared error envelope."""
+    emit_error(
+        CapabilityFailure(code, capability, operation, detail),
+        json_mode=json_mode(),
+    )
+
+
 def _probe_crontab(operation: str) -> CapabilityFailure | None:
     if shutil.which("crontab") is None:
         return CapabilityFailure(

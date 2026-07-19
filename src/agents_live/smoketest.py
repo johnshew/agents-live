@@ -15,10 +15,10 @@ import socket
 import subprocess
 import sys
 import time
-import traceback
 from pathlib import Path
 from typing import TextIO
 
+from . import preflight
 from .headless import (
     AgentsLiveError,
     cron_is_active,
@@ -79,7 +79,10 @@ def _acquire_smoketest_lock(runtime: str, model: str) -> TextIO | None:
     except BlockingIOError:
         lock_file.seek(0)
         owner = lock_file.read().strip() or "owner metadata unavailable"
-        print(f"BUSY: another framework smoketest is running ({owner})", file=sys.stderr)
+        preflight.emit_failure(
+            "smoketest",
+            f"another framework smoketest is running ({owner})",
+            code="resource_busy")
         lock_file.close()
         return None
 
@@ -344,16 +347,16 @@ def cleanup() -> tuple[list[str], list[str]]:
     for name in SMOKETEST_AGENT_NAMES:
         try:
             result = subprocess.run(
-                [*_module_argv("teardown"), "--name", name],
+                [*_module_argv("stop"), "--name", name],
                 cwd=repo_root(), check=False, capture_output=True, text=True,
                 timeout=CLEANUP_COMMAND_TIMEOUT_S,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            diagnostics.append(f"teardown {name}: {exc}")
+            diagnostics.append(f"stop {name}: {exc}")
             continue
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-            diagnostics.append(f"teardown {name}: {detail[:200]}")
+            diagnostics.append(f"stop {name}: {detail[:200]}")
     # Teardown only stops scheduling; remove smoketest files ourselves
     for name in SMOKETEST_AGENT_NAMES:
         prompt = agents_dir() / f"{name}.md"
@@ -433,7 +436,9 @@ def main() -> int:
             print(f"WARNING: preflight cleanup: {diagnostic}", file=sys.stderr)
         if stale_residue:
             reason = "; ".join(stale_residue)
-            print(f"FAIL: stale smoketest cleanup failed: {reason}", file=sys.stderr)
+            preflight.emit_failure(
+                "smoketest", f"stale smoketest cleanup failed: {reason}",
+                code="cleanup_failed")
             _write_verdict("FAIL", failed_step=current_step, reason=reason[:500],
                            started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         else:
@@ -442,19 +447,19 @@ def main() -> int:
             result = _run_locked(args, started_at, model_for_verdict)
     except (KeyboardInterrupt, SmokeInterrupted) as exc:
         reason = str(exc) or "interrupted"
-        print(f"INTERRUPTED: {reason}; cleaning up", file=sys.stderr)
+        preflight.emit_failure(
+            "smoketest", f"{reason}; cleaning up", code="interrupted")
         _write_verdict("INTERRUPTED", failed_step="interrupted", reason=reason,
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         result = 130
     except Exception as exc:
         reason = f"unexpected {type(exc).__name__}: {exc}"
-        print(f"FAIL: {reason}", file=sys.stderr)
-        traceback.print_exc()
+        preflight.emit_failure("smoketest", reason)
         _write_verdict("FAIL", failed_step="unexpected exception", reason=reason[:500],
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         result = 1
     finally:
-        # Once teardown starts, repeated terminal signals must not interrupt it.
+        # Once stop starts, repeated terminal signals must not interrupt it.
         sigint_handler = signal.getsignal(signal.SIGINT)
         for signum in (*handled_signals, signal.SIGINT):
             signal.signal(signum, signal.SIG_IGN)
@@ -464,7 +469,9 @@ def main() -> int:
                 print(f"WARNING: final cleanup: {diagnostic}", file=sys.stderr)
             if final_residue:
                 reason = "; ".join(final_residue)
-                print(f"FAIL: final smoketest cleanup failed: {reason}", file=sys.stderr)
+                preflight.emit_failure(
+                    "smoketest", f"final smoketest cleanup failed: {reason}",
+                    code="cleanup_failed")
                 _write_verdict("FAIL", failed_step="final cleanup", reason=reason[:500],
                                started_at=started_at, runtime=args.runtime, model=model_for_verdict)
                 result = 1
@@ -473,22 +480,31 @@ def main() -> int:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
             _release_smoketest_lock(lock_file)
+    if preflight.json_mode():
+        try:
+            verdict = json.loads(
+                (logs_root() / "smoketest-framework-result.json").read_text(
+                    encoding="utf-8"))
+            print(json.dumps(verdict))
+        except (OSError, json.JSONDecodeError):
+            pass
     return result
 
 
 def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: str) -> int:
     """Run the framework test while the caller owns the exclusive lock."""
 
-    # Refuse to run inside the VS Code chat-tool sandbox: cgroup teardown
+    # Refuse to run inside the VS Code chat-tool sandbox: cgroup stop
     # kills the watcher daemon mid-claude-call, so steps 6/11/12 never
     # complete and the failure mode is opaque.
     in_sandbox, sandbox_reason = _in_vscode_sandbox()
     if in_sandbox:
-        msg = (f"FAIL: refusing to run inside VS Code sandbox ({sandbox_reason}). "
-               "The watcher daemon is killed when the tool call ends. "
-               "Rerun with requestUnsandboxedExecution=true, or whitelist this "
-               "command via chat.tools.terminal.autoApprove.")
-        print(msg, file=sys.stderr)
+        msg = (f"refusing to run inside VS Code sandbox ({sandbox_reason}); "
+               "the watcher daemon is killed when the tool call ends; rerun "
+               "with requestUnsandboxedExecution=true, or whitelist this "
+               "command via chat.tools.terminal.autoApprove")
+        preflight.emit_failure(
+            "smoketest", msg, code="sandbox_unsupported")
         _write_verdict("FAIL", failed_step="preflight", reason=sandbox_reason,
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 1
@@ -496,7 +512,11 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
     # Pre-flight: fail fast if environment can't support the smoketest.
     # Avoids burning 90s on watcher timeouts in sandboxed environments.
     if not shutil.which("inotifywait"):
-        print("FAIL: inotifywait not found. Install: sudo apt install inotify-tools")
+        preflight.emit_failure(
+            "smoketest",
+            "inotifywait not found; install it with "
+            "`sudo apt install inotify-tools`",
+            code="dependency_missing")
         _write_verdict("FAIL", failed_step="preflight", reason="inotifywait missing",
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 1
@@ -512,13 +532,19 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # exit code 2 = timeout (expected), 0 = event detected, both fine
         if probe.returncode not in (0, 1, 2):
             msg = f"inotifywait unusable (exit {probe.returncode})"
-            print(f"FAIL: {msg}. This smoketest requires unsandboxed execution.")
+            preflight.emit_failure(
+                "smoketest",
+                f"{msg}; this smoketest requires unsandboxed execution",
+                code="sandbox_unsupported")
             _write_verdict("FAIL", failed_step="preflight", reason=msg,
                            started_at=started_at, runtime=args.runtime, model=model_for_verdict)
             return 1
     except (subprocess.TimeoutExpired, OSError) as e:
-        print(f"FAIL: inotifywait blocked ({e}). "
-              "This smoketest requires unsandboxed execution.")
+        preflight.emit_failure(
+            "smoketest",
+            f"inotifywait blocked ({e}); this smoketest requires "
+            "unsandboxed execution",
+            code="sandbox_unsupported")
         _write_verdict("FAIL", failed_step="preflight", reason=f"inotifywait blocked: {e}",
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 1
@@ -953,7 +979,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         )
         # Cleanup pipeline test artifacts
         subprocess.run(
-            [*_module_argv("teardown"), "--name", pipeline_name],
+            [*_module_argv("stop"), "--name", pipeline_name],
             cwd=repo_root(), check=False, capture_output=True, text=True,
         )
         (agents_dir() / f"{pipeline_name}.md").unlink(missing_ok=True)
@@ -1030,7 +1056,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Cleanup spawn test artifacts
         spawn_result_file.unlink(missing_ok=True)
-        subprocess.run([*_module_argv("teardown"), "--name", spawn_agent_name],
+        subprocess.run([*_module_argv("stop"), "--name", spawn_agent_name],
                        cwd=repo_root(), check=False, capture_output=True, text=True)
         (agents_dir() / f"{spawn_agent_name}.md").unlink(missing_ok=True)
         print("  Spawn module (detached dispatch): PASS")
@@ -1160,19 +1186,19 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Cleanup debounce test
         stop_watcher(debounce_name)
-        subprocess.run([*_module_argv("teardown"), "--name", debounce_name],
+        subprocess.run([*_module_argv("stop"), "--name", debounce_name],
                        cwd=repo_root(), check=False, capture_output=True, text=True)
         (agents_dir() / f"{debounce_name}.md").unlink(missing_ok=True)
         debounce_trigger.unlink(missing_ok=True)
         debounce_result_file.unlink(missing_ok=True)
 
         print("")
-        current_step = "13/13 teardown"
+        current_step = "13/13 stop"
         print("[13/13] Tearing down test agents...")
         stop_watcher(watcher_name)
-        subprocess.run([*_module_argv("teardown"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([*_module_argv("teardown"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([*_module_argv("teardown"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("stop"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("stop"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        subprocess.run([*_module_argv("stop"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, text=True)
         # Teardown only stops scheduling; remove smoketest files ourselves
         for name in (cron_name, watcher_name, preprocessor_name):
             prompt = agents_dir() / f"{name}.md"
@@ -1192,7 +1218,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             if agent.get("name") in {cron_name, watcher_name, preprocessor_name}
         ])
         if remaining != 0:
-            fail("Agents still appear in status after teardown")
+            fail("Agents still appear in status after stop")
         print("  Cleanup verified: all agents removed from disk and status")
         print("  Log files preserved in Agents/logs/")
 
@@ -1202,12 +1228,12 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"  post-processor -> file write -> watcher detect -> auto-run -> confirm outputs ->")
         print(f"  pre-processor -> post-processor (agent:none) -> skip gating ->")
         print(f"  mode: pipeline (PipelineMcp side-channel) ->")
-        print(f"  spawn module (detached dispatch) -> debounced dispatch (quiet window) -> teardown")
+        print(f"  spawn module (detached dispatch) -> debounced dispatch (quiet window) -> stop")
         _write_verdict("PASS", failed_step=None, reason=None,
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 0
     except (SmokeFailure, AgentsLiveError, json.JSONDecodeError) as exc:
-        print(f"  FAIL: {exc}", file=sys.stderr)
+        preflight.emit_failure("smoketest", str(exc))
         _write_verdict("FAIL", failed_step=current_step, reason=str(exc)[:500],
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 1

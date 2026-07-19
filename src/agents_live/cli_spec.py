@@ -45,7 +45,7 @@ GLOBAL_ARGS = (
 COMMANDS = (
     Cmd(
         "run", "Execute an agent once.", "run", "in-process",
-        root="auto-marker", name_sugar=True, default_notice=True,
+        root="auto-marker", json=True, name_sugar=True, default_notice=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
@@ -55,7 +55,7 @@ COMMANDS = (
     Cmd(
         "start", "Activate cron and watcher triggers.", "activate", "in-process",
         root="auto-marker", probes=("crontab", "inotify"),
-        dynamic_probes="start", name_sugar=True, default_notice=True,
+        dynamic_probes="start", json=True, name_sugar=True, default_notice=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value"),
             Arg(("--all",), "Activate all configured agents."),
@@ -72,9 +72,9 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "stop", "Deactivate triggers and keep configuration.", "teardown",
-        "in-process", aliases=("teardown",), probes=("crontab",),
-        name_sugar=True, default_notice=True,
+        "stop", "Deactivate triggers and keep configuration.", "stop",
+        "in-process", probes=("crontab",), json=True, name_sugar=True,
+        default_notice=True,
         args=(Arg(("--name",), "Agent name.", kind="value", required=True),),
     ),
     Cmd(
@@ -82,17 +82,16 @@ COMMANDS = (
         json=True, all_repos=True,
         args=(
             Arg(("name",), "Optional agent name.", kind="positional"),
-            Arg(("--json",), "Emit JSON."),
             Arg(("--all-repos",), "Read every registered repository."),
         ),
     ),
     Cmd(
         "logs", "Query logs and correlated event timelines.", "qlog.py",
-        "subprocess",
+        "subprocess", json=True,
         subcommands=(
             Cmd(
                 "timeline", "Show a correlated event timeline.", "timeline.py",
-                "subprocess",
+                "subprocess", json=True,
                 args=(
                     Arg(("filter",), "Agent or content filter.",
                         kind="positional"),
@@ -129,28 +128,27 @@ COMMANDS = (
     ),
     Cmd(
         "smoketest", "Run end-to-end validation.", "smoketest", "in-process",
-        probes=("crontab", "inotify"), default_notice=True,
+        probes=("crontab", "inotify"), json=True, default_notice=True,
         args=(
             Arg(("--runtime",), "Agent runtime.", kind="value"),
             Arg(("--model",), "Model override.", kind="value"),
         ),
     ),
     Cmd(
-        "doctor", "Check environment and installation readiness.", "prereqs",
-        "in-process", aliases=("prereqs",), root="markerless", json=True,
+        "doctor", "Check environment and installation readiness.", "doctor",
+        "in-process", root="markerless", json=True,
         all_repos=True, update_notice=False,
         args=(
-            Arg(("--json",), "Emit a JSON summary."),
             Arg(("--all-repos",), "Check every registered repository."),
         ),
     ),
     Cmd(
         "init", "Initialize the project layout.", "init", "in-process",
-        root="none",
+        root="none", json=True,
     ),
     Cmd(
         "upgrade", "Upgrade runtime and project skill payloads.", "upgrade",
-        "in-process", root="none", update_notice=False,
+        "in-process", root="none", json=True, update_notice=False,
         args=(
             Arg(("--runtime-only",), "Upgrade only the runtime."),
             Arg(("--skills-only",), "Refresh only skill payloads."),
@@ -158,7 +156,7 @@ COMMANDS = (
     ),
     Cmd(
         "migrate", "Converge persisted runtime invocations.", "migrate",
-        "in-process", probes=("crontab",), default_notice=True,
+        "in-process", probes=("crontab",), json=True, default_notice=True,
         args=(Arg(("--dry-run", "-n"), "Print the plan without mutating."),),
     ),
     Cmd(
@@ -190,7 +188,7 @@ COMMANDS = (
     ),
     Cmd(
         "repos", "Manage registered repositories.", "repos", "in-process",
-        root="none",
+        root="none", json=True,
         subcommands=(
             Cmd("list", "List registered repositories.", "repos", "in-process",
                 root="none"),
@@ -377,9 +375,11 @@ def render_grammar() -> str:
     public = [command for command in COMMANDS if not command.hidden]
     names = " | ".join(command.name for command in public)
     lines = [
-        'invocation   ::= "agents-live" global* ( command | help_word )',
+        'invocation   ::= "agents-live" pre_command*'
+        ' ( command post_command* | help_word )',
         'help_word    ::= "-h" | "--help" | "help" | "--version" | ""',
-        'global       ::= "--json" | "--repo" ( PATH | ALIAS )',
+        'pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )',
+        'post_command ::= "--json"',
         f"command      ::= {names}",
     ]
     for command in public:
@@ -479,4 +479,56 @@ def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
             return option
         if option in takes_value and "=" not in token:
             skip_value = True
+    return None
+
+
+def validation_error(command: Cmd, argv: list[str]) -> str | None:
+    """Return a concise spec-derived usage error, or None."""
+    if command.name == "start":
+        if "--yes" in argv and "--all" in argv:
+            return "--yes requires a targeted name and cannot be used with --all"
+        if "--all" not in argv and "--name" not in argv and (
+                not argv or argv[0].startswith("-")):
+            return "start requires NAME, --name NAME, or --all"
+    if command.name == "upgrade":
+        if "--runtime-only" in argv and "--skills-only" in argv:
+            return "--runtime-only and --skills-only are mutually exclusive"
+    current = command
+    if command.subcommands and argv:
+        child = next(
+            (item for item in command.subcommands if item.name == argv[0]),
+            None,
+        )
+        if child is not None:
+            current = child
+            argv = argv[1:]
+        elif command.name == "repos":
+            return "repos requires one of: " + ", ".join(
+                item.name for item in command.subcommands if not item.hidden)
+    elif command.name == "repos":
+        return "repos requires one of: " + ", ".join(
+            item.name for item in command.subcommands if not item.hidden)
+    for argument in current.args:
+        if argument.hidden:
+            continue
+        if argument.kind == "positional":
+            values = [value for value in argv if not value.startswith("-")]
+            if argument.required and not values:
+                return f"{argument.flags[0]} is required"
+            if values and argument.choices and values[0] not in argument.choices:
+                return (
+                    f"{argument.flags[0]} must be one of: "
+                    + ", ".join(argument.choices)
+                )
+        elif argument.kind == "value":
+            for flag in argument.flags:
+                if flag not in argv:
+                    continue
+                index = argv.index(flag)
+                if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                    return f"{flag} requires a value"
+            if argument.required and not any(
+                    flag in argv for flag in argument.flags):
+                if not command.name_sugar or not argv or argv[0].startswith("-"):
+                    return f"{argument.flags[0]} is required"
     return None

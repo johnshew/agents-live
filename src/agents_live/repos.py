@@ -17,6 +17,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+try:
+    from . import preflight
+except ImportError:
+    import preflight
+
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COLLECT_WORKERS = 4
 
@@ -348,13 +353,28 @@ def main(argv: list[str] | None = None) -> int:
             _remove(args.repo)
         else:
             registry = load()
-            if not registry["repos"]:
+            if preflight.json_mode():
+                print(json.dumps({
+                    "ok": True,
+                    "repositories": [
+                        {
+                            "name": alias,
+                            "path": path,
+                            "default": alias == registry["default_repo"],
+                            "available": error is None,
+                            "error": error,
+                        }
+                        for alias, path, error in entries(registry)
+                    ],
+                }))
+            elif not registry["repos"]:
                 print("No repositories registered")
-            for alias, path, error in entries(registry):
+            for alias, path, error in (
+                    [] if preflight.json_mode() else entries(registry)):
                 marker = " (default)" if alias == registry["default_repo"] else ""
                 suffix = f" [unavailable: {error}]" if error else ""
                 print(f"{alias}{marker}\t{path}{suffix}")
         return 0
     except (OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        preflight.emit_failure("repos", str(exc))
         return 1

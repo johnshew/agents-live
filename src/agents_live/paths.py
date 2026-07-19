@@ -30,7 +30,7 @@ config home. (Names renamed from triggered-tasks 2026-07-12, R1a of the
 convergence plan - clean break, no legacy names read.)
 
 stdlib-only on purpose: every sibling script (headless, ownership, qlog,
-timeline, prereqs) imports this module flat from the same directory.
+timeline, doctor) imports this module flat from the same directory.
 """
 from __future__ import annotations
 

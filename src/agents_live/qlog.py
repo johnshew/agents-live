@@ -65,6 +65,11 @@ from pathlib import Path
 
 import duckdb
 
+try:
+    from . import preflight
+except ImportError:
+    import preflight
+
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -352,8 +357,8 @@ def main() -> int:
     if args.check_schema:
         violations = check_schema(con)
         if violations:
-            for violation in violations:
-                print(f"schema error: {violation}", file=sys.stderr)
+            preflight.emit_failure(
+                "logs", "; ".join(violations), code="schema_error")
             return 2
         print("schema OK")
         return 0
@@ -378,12 +383,11 @@ def main() -> int:
         if conflicting:
             flags = ", ".join(flag for flag, _ in conflicting)
             where_frag = " AND ".join(frag for _, frag in conflicting)
-            print(
-                f"error: --sql is exclusive with filter flags ({flags}).\n"
-                f"Move them into your SQL WHERE clause, e.g.:\n"
-                f"    WHERE {where_frag}",
-                file=sys.stderr,
-            )
+            preflight.emit_failure(
+                "logs",
+                f"--sql is exclusive with filter flags ({flags}); move them "
+                f"into the SQL WHERE clause, for example: WHERE {where_frag}",
+                code="usage_error")
             return 2
         q = args.sql
     else:
@@ -410,8 +414,8 @@ def main() -> int:
     try:
         rel = con.sql(q)
     except duckdb.Error as e:
-        print(f"query error: {e}", file=sys.stderr)
-        print(f"  sql: {q}", file=sys.stderr)
+        preflight.emit_failure(
+            "logs", f"{e}; sql: {q}", code="query_error")
         return 2
 
     if args.format == "jsonl":

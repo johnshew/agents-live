@@ -6,7 +6,7 @@ description: Runbook for separating source, wheel, and published-tool validation
 ## What deserves a test
 
 The smoke suite is the backbone: it drives the full chain (create,
-frontmatter, dispatch, watcher detect, teardown) against temp
+frontmatter, dispatch, watcher detect, stop) against temp
 projects. Add a focused test beside it only when a failure would be
 high-impact and either silent or combinatorial beyond what the smoke
 suite can enumerate (flag matrices, format parsing, error

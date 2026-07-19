@@ -26,10 +26,11 @@ longer exist are reported and left alone - orphan pruning stays
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import sys
 
-from . import headless
+from . import headless, preflight
 from .headless import (
     AgentsLiveError,
     build_reboot_watcher_line,
@@ -122,6 +123,11 @@ def main() -> int:
 
     if rewrites == 0:
         print("All entries already canonical; nothing to migrate.")
+        if preflight.json_mode():
+            print(json.dumps({
+                "ok": True, "dry_run": args.dry_run,
+                "rewrites": 0, "plan": plan,
+            }))
         return 0
 
     from . import activate
@@ -153,6 +159,11 @@ def main() -> int:
 
     done = "planned" if args.dry_run else "migrated"
     print(f"\n{rewrites} entr{'y' if rewrites == 1 else 'ies'} {done}.")
+    if preflight.json_mode():
+        print(json.dumps({
+            "ok": True, "dry_run": args.dry_run,
+            "rewrites": rewrites, "plan": plan,
+        }))
     return 0
 
 

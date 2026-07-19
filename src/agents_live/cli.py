@@ -16,18 +16,17 @@ lifecycle operation is a subcommand:
 
     cli.py run <name> [...]          execute an agent once (run.py)
     cli.py start <name>|--all [...]  activate cron/watcher (activate.py)
-    cli.py stop <name>               deactivate, keep config (teardown.py)
-    cli.py teardown <name>           same as stop (teardown.py)
+    cli.py stop <name>               deactivate, keep config
     cli.py status [...]              list agents and state (status.py)
     cli.py smoketest [...]           end-to-end validation (smoketest.py)
-    cli.py doctor [...]              environment/install checks (prereqs.py)
+    cli.py doctor [...]              environment/install checks
     cli.py logs [timeline] [...]     query logs (qlog.py / timeline.py)
     cli.py dashboard [...]           interactive control panel (dashboard.py)
 
 Global flag: ``--repo <path-or-alias>`` (before the subcommand) pins the
 project root. Without it, resolution follows paths.py.
 
-``run``/``start``/``stop``/``teardown`` accept the agent name positionally
+``run``/``start``/``stop`` accept the agent name positionally
 (``cli.py run foo`` == ``cli.py run --name foo``).
 
 ``logs`` and ``dashboard`` delegate via ``uv run --script`` so their
@@ -37,6 +36,9 @@ other subcommands dispatch in-process to the module's ``main()``.
 from __future__ import annotations
 
 import os
+import contextlib
+import io
+import json
 import shutil
 import subprocess
 import sys
@@ -54,6 +56,7 @@ from .cli_spec import (
     command_help,
     render_usage,
     unknown_flag,
+    validation_error,
 )
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
@@ -97,6 +100,55 @@ def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
         update_check.launch_if_stale()
         if notice:
             print(f"\n{notice}", file=sys.stderr)
+    return code
+
+
+def _emit_failure(code: str, operation: str, detail: str,
+                  *, json_mode: bool) -> None:
+    preflight.emit_error(
+        preflight.CapabilityFailure(
+            code, "command", operation, detail.strip() or "command failed"),
+        json_mode=json_mode,
+    )
+
+
+def _captured_result(code: int, cmd: str, stdout: str, stderr: str) -> int:
+    """Emit one JSON value for a captured JSON-capable command."""
+    text = stdout.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed_lines = []
+        for line in text.splitlines():
+            try:
+                parsed_lines.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        parsed = None
+        if parsed_lines:
+            parsed = (
+                {"ok": code == 0, "operation": cmd, "records": parsed_lines}
+                if cmd == "logs" and code == 0 else parsed_lines[-1]
+            )
+            if code != 0:
+                parsed = next(
+                    (item for item in reversed(parsed_lines)
+                     if isinstance(item, dict) and "error" in item),
+                    parsed,
+                )
+    if code != 0 and not (
+            isinstance(parsed, dict) and isinstance(parsed.get("error"), dict)):
+        _emit_failure(
+            "operation_failed", cmd, stderr.strip() or text,
+            json_mode=True,
+        )
+    elif parsed is not None:
+        print(json.dumps(parsed))
+    else:
+        payload = {"ok": True, "operation": cmd}
+        if text:
+            payload["detail"] = text
+        print(json.dumps(payload))
     return code
 
 
@@ -190,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if args[0] == "--repo":
             if len(args) < 2:
-                print("error: --repo requires a path or alias", file=sys.stderr)
+                _emit_failure(
+                    "usage_error", "--repo", "--repo requires a path or alias",
+                    json_mode=json_mode)
                 return 2
             try:
                 root = paths.resolve_root(args[1])
@@ -213,18 +267,40 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd, rest = args[0], args[1:]
     command = COMMAND_BY_NAME.get(cmd)
+    if command is None:
+        _emit_failure(
+            "unknown_command", cmd, f"unknown command '{cmd}'",
+            json_mode=json_mode)
+        return 2
+    if "--json" in rest:
+        json_mode = True
+        os.environ[preflight.JSON_ENV_VAR] = "1"
+        rest = [argument for argument in rest if argument != "--json"]
+    if json_mode and not command.json:
+        _emit_failure(
+            "usage_error", cmd, f"{cmd} does not support --json",
+            json_mode=True)
+        return 2
     if command is not None and any(arg in ("-h", "--help") for arg in rest):
         print(command_help(command, cmd), end="")
         return _finish(0, cmd, rest, json_mode=json_mode)
     if command is not None:
         unknown = unknown_flag(command, rest)
         if unknown is not None:
-            print(f"error: unrecognized argument: {unknown}", file=sys.stderr)
+            _emit_failure(
+                "usage_error", cmd, f"unrecognized argument: {unknown}",
+                json_mode=json_mode)
             return 2
     all_repos = "--all-repos" in rest
     if all_repos and (command is None or not command.all_repos):
-        print(f"error: {cmd} does not support --all-repos; select one repository",
-              file=sys.stderr)
+        _emit_failure(
+            "usage_error", cmd,
+            f"{cmd} does not support --all-repos; select one repository",
+            json_mode=json_mode)
+        return 2
+    invalid = validation_error(command, rest)
+    if invalid is not None:
+        _emit_failure("usage_error", cmd, invalid, json_mode=json_mode)
         return 2
 
     # Resolve the project root ONCE before dispatch so a missing root is a
@@ -292,11 +368,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             if subcommand is not None:
                 script, rest = subcommand.module, rest[1:]
+        if json_mode and cmd == "logs" and script == "qlog.py":
+            if "--format" not in rest:
+                rest.extend(("--format", "jsonl"))
         uv = shutil.which("uv") or "uv"
         try:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
+                **({"capture_output": True, "text": True} if json_mode else {}),
             )
         except KeyboardInterrupt:
             # Ctrl-C reaches the child (same process group) which handles
@@ -306,11 +386,10 @@ def main(argv: list[str] | None = None) -> int:
         code = completed.returncode
         if code < 0:
             code = 128 - code  # signal death -> conventional 128+signum
+        if json_mode:
+            return _captured_result(
+                code, cmd, completed.stdout, completed.stderr)
         return _finish(code, cmd, rest, json_mode=json_mode)
-
-    if command is None:
-        print(f"error: unknown command '{cmd}'\n\n{_usage()}", file=sys.stderr)
-        return 2
 
     import importlib
     # Package-aware dispatch (Phase 4): as loose scripts the modules are
@@ -321,13 +400,21 @@ def main(argv: list[str] | None = None) -> int:
     module = importlib.import_module(module_name)
     sys.argv = [f"agents-live {cmd}", *rest]
     try:
+        if json_mode:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = module.main()
+            return _captured_result(
+                code, cmd, stdout.getvalue(), stderr.getvalue())
         code = module.main()
         return _finish(code, cmd, rest, json_mode=json_mode)
     except Exception as exc:
         # Layer-2 safety net: a typed error that escapes a subcommand's
         # own handling still leaves as the envelope, never a traceback.
-        if getattr(exc, "category", None) is None:
-            raise
         preflight.emit_typed_error(exc, cmd)
         return 1
 

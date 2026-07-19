@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from . import paths, plugins
+from . import paths, plugins, preflight
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -255,7 +255,7 @@ def main() -> int:
         if plugins.converge([root]):
             print("Converged declared plugins in the agents-live tool environment")
     except (OSError, ValueError, plugins.PluginError) as exc:
-        print(f"error: plugin convergence failed: {exc}", file=sys.stderr)
+        preflight.emit_failure("init", f"plugin convergence failed: {exc}")
         return 1
     skill_status = install_skill(root)
     if skill_status == "installed":
@@ -274,16 +274,16 @@ def main() -> int:
         "  docs: https://github.com/johnshew/agents-live\n")
 
     # Close with a read-only doctor run (§3.4 step 6) so a fresh install
-    # ends in a verified green state, not a hopeful one. Reload: prereqs
+    # ends in a verified green state, not a hopeful one. Reload: doctor
     # resolves its repo root at import time, and init may target a root
     # the process hadn't resolved before.
     paths.clear_cache()
     import importlib
-    from . import prereqs
-    prereqs = importlib.reload(prereqs)
+    from . import doctor
+    doctor = importlib.reload(doctor)
     sys.argv = ["agents-live doctor"]
     print("Running doctor...")
-    return prereqs.main()
+    return doctor.main()
 
 
 if __name__ == "__main__":

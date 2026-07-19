@@ -99,7 +99,7 @@ agents-live run my-agent        # test once, in the foreground
 agents-live start my-agent      # activate cron/watcher triggers
 agents-live status
 agents-live logs
-agents-live teardown my-agent   # deactivate — remove its triggers
+agents-live stop my-agent       # deactivate and keep its configuration
 ```
 
 Projects that need plugin-provided adapters or registry ownership declare the
