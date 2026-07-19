@@ -22,6 +22,9 @@ history is retained in the source repository.
 - fix: accept Vixie cron name fields such as `MON-FRI` and `JAN-DEC` in agent schedules. (#68)
 - fix: run framework smoketest status checks through the supported JSON environment contract. (#67)
 - fix: list every agent name in generated shell completions instead of only the last. (#70)
+- fix: stop requiring a literal versioned docs link in the CLI during release preparation.
+  The CLI derives its documentation links from the package version at runtime,
+  so the release tool rewrites only real version surfaces.
 - fix: enforce major release bumps for conventional breaking markers. (#62)
   Release previews recognize `type!:` and scoped `type(scope)!:` entries, plus
   `BREAKING CHANGE:` footers.
