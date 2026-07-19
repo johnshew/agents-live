@@ -363,14 +363,15 @@ class TestProjectPlugins(_TempProject):
         return wheel
 
     def test_declared_plugin_uses_wheel_metadata_identity(self) -> None:
-        wheel = self._wheel()
+        version = "1.2.3"
+        wheel = self._wheel(version=version)
         (self.root / ".agents-live.toml").write_text(
             f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root)}" }}\n',
             encoding="utf-8",
         )
         plugin = plugins.declared(self.root)["example-plugin"]
         self.assertEqual(plugin.name, "example-plugin")
-        self.assertEqual(plugin.version, "1.2.3")
+        self.assertEqual(plugin.version, version)
 
     def test_doctor_fails_for_missing_plugin_and_registry_backend(self) -> None:
         wheel = self._wheel()
@@ -1779,14 +1780,19 @@ class TestInstallSkill(_TempProject):
             mock.patch.object(plugins, "_integrity_error", return_value=None),
             mock.patch.object(
                 plugins, "_receipt_requirements",
-                return_value={"co-installed": "/repo/co-installed.whl"}),
+                return_value=(
+                    plugins.ReceiptRequirement("agents-live==0.3.1"),
+                    {"co-installed": plugins.ReceiptRequirement(
+                        "/repo/co-installed.whl")},
+                )),
             mock.patch.object(plugins, "find_uv", return_value="/usr/bin/uv"),
             mock.patch.object(plugins.subprocess, "run", return_value=completed) as run,
         ):
             self.assertTrue(plugins.converge([self.root]))
         run.assert_called_once_with(
             [
-                "/usr/bin/uv", "tool", "install", "--force", "agents-live@latest",
+                "/usr/bin/uv", "tool", "install", "--force",
+                "agents-live==0.3.1",
                 "--with", "/repo/co-installed.whl",
                 "--with", "/repo/first.whl",
                 "--with", "/repo/second.whl",

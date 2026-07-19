@@ -647,7 +647,9 @@ use `[tool.agents-live.plugins]`.
 `init` and a non-dry-run `start` converge the selected project's declarations.
 `upgrade` unions declarations across registered repositories because the uv
 tool environment is host-global. Existing receipt-recorded co-installed
-requirements are preserved. `repos add` never changes the environment; it
+requirements and the primary agents-live install source are preserved, so
+convergence does not turn an editable or pinned install into a PyPI install.
+`repos add` never changes the environment; it
 reports missing declarations as pending for `init`, `start`, or `upgrade`.
 `doctor` is read-only and makes a missing distribution, broken agents-live
 entry point, integrity mismatch, or declared registry mode without a resolving

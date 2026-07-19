@@ -218,6 +218,8 @@ def _toml_value(key: str, value: object) -> str:
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return "[" + ", ".join(json.dumps(v) for v in value) + "]"
     if isinstance(value, dict):
+        # JSON basic strings are valid quoted TOML keys, including plugin
+        # distribution names containing '-' or '.'.
         return "{ " + ", ".join(
             f"{json.dumps(str(k))} = {_toml_value(f'{key}.{k}', v)}"
             for k, v in value.items()

@@ -30,6 +30,12 @@ class Plugin:
     version: str
 
 
+@dataclass(frozen=True)
+class ReceiptRequirement:
+    value: str
+    editable: bool = False
+
+
 def _canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
@@ -172,23 +178,39 @@ def _receipt_requirement(requirement: dict) -> str:
     return name
 
 
-def _receipt_requirements() -> dict[str, str]:
+def _receipt_requirements() -> tuple[
+        ReceiptRequirement, dict[str, ReceiptRequirement]]:
     receipt = _receipt_path()
     if receipt is None:
-        return {}
+        raise PluginError(
+            "plugin convergence requires an uv tool installation of agents-live; "
+            "run `uv tool install agents-live`, then retry")
     try:
         with receipt.open("rb") as handle:
             requirements = tomllib.load(handle)["tool"]["requirements"]
-    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         raise PluginError(f"uv tool receipt is unreadable: {receipt}: {exc}") from exc
+    except (KeyError, TypeError) as exc:
+        raise PluginError(
+            f"uv tool receipt has no valid tool.requirements table: {receipt}") from exc
     result = {}
+    primary = None
     for requirement in requirements:
         name = requirement.get("name")
         if not isinstance(name, str):
             raise PluginError(f"uv tool receipt has an invalid requirement: {receipt}")
-        if _canonical(name) != "agents-live":
-            result[_canonical(name)] = _receipt_requirement(requirement)
-    return result
+        parsed = ReceiptRequirement(
+            _receipt_requirement(requirement),
+            editable=bool(requirement.get("editable", False)),
+        )
+        if _canonical(name) == "agents-live":
+            primary = parsed
+        else:
+            result[_canonical(name)] = parsed
+    if primary is None:
+        raise PluginError(
+            f"uv tool receipt has no agents-live requirement: {receipt}")
+    return primary, result
 
 
 def converge(roots: list[Path]) -> bool:
@@ -200,21 +222,28 @@ def converge(roots: list[Path]) -> bool:
     }
     if not pending:
         return False
+    # inspect() includes integrity, and a mismatch must fail before uv sees the
+    # artifact rather than being treated like an installable stale plugin.
     for plugin in declarations.values():
         integrity_error = _integrity_error(plugin)
         if integrity_error:
             raise PluginError(integrity_error)
-    requirements = _receipt_requirements()
+    primary, requirements = _receipt_requirements()
     requirements.update({
-        key: str(plugin.path) for key, plugin in declarations.items()
+        key: ReceiptRequirement(str(plugin.path))
+        for key, plugin in declarations.items()
     })
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
         raise PluginError(str(exc)) from exc
-    command = [uv, "tool", "install", "--force", "agents-live@latest"]
+    command = [uv, "tool", "install", "--force"]
+    if primary.editable:
+        command.append("--editable")
+    command.append(primary.value)
     for requirement in requirements.values():
-        command.extend(["--with", requirement])
+        flag = "--with-editable" if requirement.editable else "--with"
+        command.extend([flag, requirement.value])
     completed = subprocess.run(command, check=False)
     if completed.returncode:
         raise PluginError(
