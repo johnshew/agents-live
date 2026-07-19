@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+Prerequisites for agents-live (host: <HOST>):
+
+  Project checks skipped until `agents-live init` creates a project config.
+
+  [PASS] crontab  (available)
+  [WARN] optional integration
+         fix: install integration
+
+OK (required checks pass); 1 optional missing: optional integration
+--- stderr ---
