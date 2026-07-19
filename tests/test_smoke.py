@@ -579,7 +579,10 @@ class TestAgentParsing(_TempProject):
             with self.assertRaisesRegex(headless.AgentsLiveError,
                                         "invalid schedule"):
                 headless.load_agent_config("sched")
-        for benign in ("@reboot", "*/5 8-18 * * 1-5", TEST_CRON_SCHEDULE):
+        for benign in ("@reboot", "*/5 8-18 * * 1-5", TEST_CRON_SCHEDULE,
+                       # Vixie cron name vocabulary is legal and carries
+                       # no injection risk (letters only).
+                       "0 9 * * MON-FRI", "30 6 * JAN-DEC SUN"):
             self.write_agent("sched", AGENT_DEFINITION.replace(
                 TEST_CRON_SCHEDULE, benign))
             config = headless.load_agent_config("sched")
@@ -1010,6 +1013,7 @@ class TestCliContract(_TempProject):
             "run": ["fixture"],
             "start": ["fixture"],
             "stop": ["fixture"],
+            "internal": ["list-reboot-watchers"],
             "repos": ["list"],
             "completions": ["bash"],
         }.get(command, [])
@@ -1097,6 +1101,54 @@ class TestCliContract(_TempProject):
                         cli.main([command.name, "--contract-unknown"]), 2)
                 self.assertIn("unrecognized argument", stderr.getvalue())
 
+    def test_flag_spellings_argparse_accepts_pass_the_spec_gate(self) -> None:
+        # The pre-dispatch gate must accept every spelling the target
+        # module's argparse accepts: --flag=value and attached short
+        # option values (-n20).
+        run_cmd = cli.COMMAND_BY_NAME["run"]
+        logs_cmd = cli.COMMAND_BY_NAME["logs"]
+        self.assertIsNone(cli.validation_error(run_cmd, ["--name=fixture"]))
+        self.assertIsNone(cli.unknown_flag(logs_cmd, ["-n20"]))
+        self.assertIsNone(cli.unknown_flag(run_cmd, ["--name=fixture"]))
+        self.assertEqual(cli.unknown_flag(logs_cmd, ["-x2"]), "-x2")
+        self.assertEqual(
+            cli.validation_error(run_cmd, []), "--name is required")
+
+    def test_spec_constraints_are_declared_not_hardcoded(self) -> None:
+        start = cli.COMMAND_BY_NAME["start"]
+        repos_cmd = cli.COMMAND_BY_NAME["repos"]
+        internal = cli.COMMAND_BY_NAME["internal"]
+        self.assertEqual(
+            cli.validation_error(start, ["--yes", "--all"]),
+            "--yes and --all are mutually exclusive")
+        self.assertEqual(
+            cli.validation_error(start, []),
+            "start requires NAME, --name NAME, or --all")
+        self.assertIsNone(cli.validation_error(start, ["--name=fixture"]))
+        self.assertEqual(
+            cli.validation_error(repos_cmd, []),
+            "repos requires one of: list, add, default, remove")
+        for argv in (["watch-loop", "x"], ["ensure-watcher", "x"],
+                     ["list-reboot-watchers"]):
+            self.assertIsNone(cli.validation_error(internal, argv))
+            self.assertIsNone(cli.unknown_flag(internal, argv))
+
+    def test_records_shape_is_stable_for_zero_one_and_many_rows(self) -> None:
+        # A records-shaped command (logs) must present one envelope
+        # shape regardless of row count.
+        for stdout_text, expected in (
+            ("", []),
+            ('{"a": 1}\n', [{"a": 1}]),
+            ('{"a": 1}\n{"a": 2}\n', [{"a": 1}, {"a": 2}]),
+        ):
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                cli._captured_result(0, "logs", stdout_text, "",
+                                     shape="records")
+            payload = json.loads(captured.getvalue())
+            self.assertEqual(payload["records"], expected)
+            self.assertTrue(payload["ok"])
+
     def test_all_repos_capability_follows_spec(self) -> None:
         for command in COMMANDS:
             if command.all_repos:
@@ -1127,48 +1179,48 @@ class TestCliContract(_TempProject):
 
     def test_required_root_commands_emit_no_project_envelope(self) -> None:
         saved_cwd = Path.cwd()
-        saved_root = os.environ.pop(paths.ENV_VAR, None)
-        saved_config = os.environ.get("XDG_CONFIG_HOME")
         try:
             with tempfile.TemporaryDirectory() as outside:
                 os.chdir(outside)
-                os.environ["XDG_CONFIG_HOME"] = str(
+                environ = {
+                    key: value for key, value in os.environ.items()
+                    if key not in (paths.ENV_VAR, "AGENTS_LIVE_JSON")
+                }
+                environ["XDG_CONFIG_HOME"] = str(
                     Path(outside) / "isolated-config")
-                for command in COMMANDS:
-                    if command.root != "required":
-                        continue
-                    with self.subTest(command=command.name):
-                        paths.clear_cache()
-                        stdout = io.StringIO()
-                        stderr = io.StringIO()
-                        argv = (
-                            ["--json", command.name,
-                             *self._valid_args(command.name)]
-                            if command.json else [
-                                command.name, *self._valid_args(command.name)]
-                        )
-                        with (
-                            mock.patch("sys.stdout", stdout),
-                            mock.patch("sys.stderr", stderr),
-                        ):
-                            self.assertEqual(
-                                cli.main(argv), 2)
-                        if command.json:
-                            envelope = json.loads(stdout.getvalue())
-                            self.assertEqual(
-                                envelope["error"]["code"], "no_project_root")
-                        else:
-                            self.assertIn(
-                                "error [no_project_root]", stderr.getvalue())
+                with mock.patch.dict(os.environ, environ, clear=True):
+                    for command in COMMANDS:
+                        if command.root != "required":
+                            continue
+                        with self.subTest(command=command.name):
+                            paths.clear_cache()
+                            stdout = io.StringIO()
+                            stderr = io.StringIO()
+                            argv = (
+                                ["--json", command.name,
+                                 *self._valid_args(command.name)]
+                                if command.json else [
+                                    command.name,
+                                    *self._valid_args(command.name)]
+                            )
+                            with (
+                                mock.patch("sys.stdout", stdout),
+                                mock.patch("sys.stderr", stderr),
+                            ):
+                                self.assertEqual(
+                                    cli.main(argv), 2)
+                            if command.json:
+                                envelope = json.loads(stdout.getvalue())
+                                self.assertEqual(
+                                    envelope["error"]["code"],
+                                    "no_project_root")
+                            else:
+                                self.assertIn(
+                                    "error [no_project_root]",
+                                    stderr.getvalue())
+                            os.environ.pop("AGENTS_LIVE_JSON", None)
         finally:
             os.chdir(saved_cwd)
-            if saved_root is not None:
-                os.environ[paths.ENV_VAR] = saved_root
-            if saved_config is None:
-                os.environ.pop("XDG_CONFIG_HOME", None)
-            else:
-                os.environ["XDG_CONFIG_HOME"] = saved_config
-            os.environ.pop("AGENTS_LIVE_JSON", None)
             paths.clear_cache()
 
     def test_declared_aliases_dispatch_like_canonical_names(self) -> None:
@@ -1218,7 +1270,9 @@ class TestCliContract(_TempProject):
 
     def test_json_commands_emit_typed_failure_envelopes(self) -> None:
         fake_module = mock.Mock()
-        fake_module.main.side_effect = RuntimeError("contract failure")
+        typed_error = RuntimeError("contract failure")
+        typed_error.category = "agent_error"
+        fake_module.main.side_effect = typed_error
         completed = subprocess.CompletedProcess(
             [], 1, stdout="", stderr="contract failure")
         for command in COMMANDS:
@@ -1244,7 +1298,11 @@ class TestCliContract(_TempProject):
                 self.assertIn("contract failure",
                               envelope["error"]["detail"])
 
-    def test_nonzero_machine_result_is_normalized_to_error_envelope(self) -> None:
+    def test_nonzero_structured_result_passes_through_unwrapped(self) -> None:
+        # A failing command's structured payload (doctor's
+        # {ok: false, checks: [...]}, a FAIL verdict) is the result a
+        # machine caller asked for; wrapping it in an operation_failed
+        # envelope would destroy the detail exactly when it matters.
         fake_module = mock.Mock()
         fake_module.main.side_effect = (
             lambda: print('{"verdict": "FAIL"}') or 1)
@@ -1256,7 +1314,49 @@ class TestCliContract(_TempProject):
         ):
             self.assertEqual(cli.main(["run", "fixture", "--json"]), 1)
         payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload, {"verdict": "FAIL"})
+
+    def test_nonzero_unstructured_result_is_normalized_to_error_envelope(
+            self) -> None:
+        fake_module = mock.Mock()
+        fake_module.main.side_effect = (
+            lambda: print("plain text failure") or 1)
+        stdout = io.StringIO()
+        with (
+            mock.patch("importlib.import_module", return_value=fake_module),
+            mock.patch.object(preflight, "check", return_value=None),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertEqual(cli.main(["run", "fixture", "--json"]), 1)
+        payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["error"]["code"], "operation_failed")
+
+    def test_uncategorized_exceptions_reraise_with_traceback(self) -> None:
+        # Programming bugs must stay diagnosable: only typed errors
+        # (carrying a category) are flattened into envelopes.
+        fake_module = mock.Mock()
+        fake_module.main.side_effect = KeyError("latent bug")
+        with (
+            mock.patch("importlib.import_module", return_value=fake_module),
+            mock.patch.object(preflight, "check", return_value=None),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(KeyError):
+                cli.main(["run", "fixture", "--json"])
+
+    def test_json_argparse_exit_emits_usage_envelope(self) -> None:
+        # A subcommand's own argparse rejecting argv inside the capture
+        # must surface as an envelope, never an empty-output exit.
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(preflight, "check", return_value=None),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = cli.main(["--json", "status", "fixture", "extra"])
+        self.assertEqual(code, 2)
+        envelope = json.loads(stdout.getvalue())
+        self.assertEqual(envelope["error"]["code"], "usage_error")
+        self.assertIn("unrecognized arguments", envelope["error"]["detail"])
 
     def test_removed_duplicate_verbs_are_unknown(self) -> None:
         help_text = cli._usage()
@@ -1709,7 +1809,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         with (
             mock.patch.object(heartbeat, "is_wsl", return_value=False),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
-            mock.patch.object(uninstall.shutil, "which",
+            mock.patch.object(uninstall, "find_uv",
                               return_value="/usr/bin/uv"),
             mock.patch.object(uninstall.subprocess, "run",
                               return_value=completed) as uv_uninstall,
@@ -2026,7 +2126,9 @@ class TestUpdateCheck(unittest.TestCase):
             mock.patch.object(update_check, "consume_notice") as consume,
             mock.patch.object(update_check, "launch_if_stale") as launch,
         ):
-            self.assertEqual(cli._finish(7, "status", [], json_mode=False), 7)
+            self.assertEqual(
+                cli._finish(7, cli.COMMAND_BY_NAME["status"], [],
+                            json_mode=False), 7)
             consume.assert_not_called()
             launch.assert_not_called()
         with (
@@ -2034,8 +2136,9 @@ class TestUpdateCheck(unittest.TestCase):
             mock.patch.object(update_check, "consume_notice") as consume,
             mock.patch.object(update_check, "launch_if_stale") as launch,
         ):
-            cli._finish(0, "run", ["--quiet"], json_mode=False)
-            cli._finish(0, "status", ["--json"], json_mode=False)
+            cli._finish(0, cli.COMMAND_BY_NAME["run"], ["--quiet"],
+                        json_mode=False)
+            cli._finish(0, cli.COMMAND_BY_NAME["status"], [], json_mode=True)
             consume.assert_not_called()
             launch.assert_not_called()
 
@@ -2542,7 +2645,7 @@ class TestInstallSkill(_TempProject):
         ):
             self.assertEqual(upgrade.main(), 0)
         runtime.assert_called_once_with([target])
-        refresh.assert_called_once_with(target)
+        refresh.assert_called_once_with()
         install.assert_not_called()
 
     def test_skills_only_continues_after_project_refresh_failure(self) -> None:
