@@ -60,9 +60,20 @@ def _wheel_identity(path: Path) -> tuple[str, str]:
     return name, version
 
 
+_sha256_cache: dict[tuple[str, int, int], str] = {}
+
+
 def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+    """Digest of *path*, memoized per process on (path, size, mtime) so
+    one command never hashes the same unchanged wheel twice."""
+    stat = path.stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    digest = _sha256_cache.get(key)
+    if digest is None:
+        with path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        _sha256_cache[key] = digest
+    return digest
 
 
 def declared(root: Path) -> dict[str, Plugin]:
@@ -124,6 +135,11 @@ def inspect(plugin: Plugin) -> tuple[bool, str]:
     integrity_error = _integrity_error(plugin)
     if integrity_error:
         return False, integrity_error
+    return _installed_state(plugin)
+
+
+def _installed_state(plugin: Plugin) -> tuple[bool, str]:
+    """Installed-environment convergence, without artifact integrity."""
     try:
         distribution = importlib.metadata.distribution(plugin.name)
     except importlib.metadata.PackageNotFoundError:
@@ -221,14 +237,19 @@ def converge(roots: list[Path]) -> bool:
     Return True when plugins were installed and False when already converged.
     """
     declarations = union(roots)
+    # Pending detection deliberately skips artifact hashing: when every
+    # plugin is installed at its declared version there is nothing to
+    # install, so the wheels are not consumed and re-verifying them on
+    # every activation buys nothing (doctor still surfaces mismatches).
     pending = {
         key: plugin for key, plugin in declarations.items()
-        if not inspect(plugin)[0]
+        if not _installed_state(plugin)[0]
     }
     if not pending:
         return False
-    # inspect() includes integrity, and a mismatch must fail before uv sees the
-    # artifact rather than being treated like an installable stale plugin.
+    # An install will consume the artifacts: an integrity mismatch must
+    # fail before uv sees any of them rather than being treated like an
+    # installable stale plugin.
     for plugin in declarations.values():
         integrity_error = _integrity_error(plugin)
         if integrity_error:
