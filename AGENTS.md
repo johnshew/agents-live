@@ -64,6 +64,11 @@ uv run --script tools/release.py --publish --yes          # publish prepared
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.
+- **Do branch work in a git worktree, not the primary checkout.**
+  Any task that creates a branch and commits (a PR, an experiment)
+  belongs in its own worktree so the primary checkout stays on a
+  clean `main` for the agents sharing it. Quick reads and
+  investigation can happen in place.
 - **No backward-compatibility shims.** Clean break, migrate all
   consumers; ask the developer before adding any compat code.
 - **Keep agent memory to pointers.** Canonical facts live in the
