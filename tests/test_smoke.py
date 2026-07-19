@@ -369,6 +369,84 @@ class TestOwnershipKernel(_TempProject):
             ownership.load_owners(rate_limit_secs=10**9)
 
 
+class TestStartOwnership(_TempProject):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        self.config = headless.load_agent_config("smoke-fixture")
+
+    def _ownership_context(self):
+        return (
+            mock.patch.object(ownership, "local_only", return_value=False),
+            mock.patch.object(ownership, "current_host",
+                              return_value="current-host"),
+            mock.patch.object(ownership, "load_owners",
+                              return_value={"smoke-fixture": "owning-host"}),
+            mock.patch.object(ownership, "set_owner"),
+            mock.patch.object(activate, "log_event"),
+        )
+
+    def test_interactive_start_prompts_before_takeover(self) -> None:
+        local, host, load, set_owner, log = self._ownership_context()
+        with (
+            local, host, load, set_owner as set_owner_mock, log,
+            mock.patch.object(activate.sys, "stdin",
+                              mock.Mock(isatty=mock.Mock(return_value=True))),
+            mock.patch("builtins.input", return_value="y") as prompt,
+        ):
+            self.assertTrue(activate._resolve_activation_ownership(
+                self.config, batch_mode=False, transfer_to=None))
+        prompt.assert_called_once_with(
+            "smoke-fixture is owned by owning-host; "
+            "take ownership and activate here? [y/N] ")
+        set_owner_mock.assert_called_once_with("smoke-fixture", "current-host")
+
+    def test_yes_bypasses_takeover_prompt(self) -> None:
+        local, host, load, set_owner, log = self._ownership_context()
+        with (
+            local, host, load, set_owner as set_owner_mock, log,
+            mock.patch("builtins.input") as prompt,
+        ):
+            self.assertTrue(activate._resolve_activation_ownership(
+                self.config, batch_mode=False, transfer_to=None,
+                assume_yes=True))
+        prompt.assert_not_called()
+        set_owner_mock.assert_called_once_with("smoke-fixture", "current-host")
+
+    def test_non_tty_start_refuses_takeover(self) -> None:
+        local, host, load, set_owner, log = self._ownership_context()
+        with (
+            local, host, load, set_owner as set_owner_mock, log,
+            mock.patch.object(activate.sys, "stdin",
+                              mock.Mock(isatty=mock.Mock(return_value=False))),
+            mock.patch("builtins.input") as prompt,
+        ):
+            self.assertFalse(activate._resolve_activation_ownership(
+                self.config, batch_mode=False, transfer_to=None))
+        prompt.assert_not_called()
+        set_owner_mock.assert_not_called()
+
+    def test_yes_does_not_mask_unavailable_registry(self) -> None:
+        with (
+            mock.patch.object(ownership, "local_only", return_value=False),
+            mock.patch.object(
+                ownership, "load_owners",
+                side_effect=ownership.OwnershipUnavailableError("unavailable")),
+        ):
+            with self.assertRaises(ownership.OwnershipUnavailableError):
+                activate._resolve_activation_ownership(
+                    self.config, batch_mode=False, transfer_to=None,
+                    assume_yes=True)
+
+    def test_all_rejects_yes(self) -> None:
+        with (
+            mock.patch("sys.argv", ["agents-live start", "--all", "--yes"]),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            activate.main()
+        self.assertEqual(raised.exception.code, 2)
+
+
 class TestProjectPlugins(_TempProject):
     def _wheel(self, name: str = "example-plugin", version: str = "1.2.3") -> Path:
         wheel = (
