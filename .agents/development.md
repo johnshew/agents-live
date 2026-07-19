@@ -87,10 +87,13 @@ Pending work is tracked as GitHub issues on this repo (`gh issue
 list`), deliberately not as in-tree docs. File bugs and design
 questions there; reference them from commit messages (`Fixes #N`).
 
-## Upstream note
+## Source of truth
 
-This tree matches the assembled release layout described in
-[release-process.md](../src/agents_live/skill/docs/release-process.md),
-which is generated from a private source repository. Before large
-refactors of the vendored skill payload, consider whether the change
-belongs upstream; small fixes and doc corrections are fine here.
+Since 2026-07-18 this repository is the definitive source for the
+agents-live framework; the earlier flow that assembled releases from a
+private source repository is retired
+([release-process.md](../src/agents_live/skill/docs/release-process.md)
+describes it for historical context). Consumer repositories receive the
+skill payload through `agents-live init`/`upgrade`; never treat an
+installed payload as a source checkout or propose back-porting changes
+into one.

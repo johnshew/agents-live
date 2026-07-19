@@ -1,9 +1,15 @@
 ---
 title: Agents Live Release Process
 description: Assemble, audit, build, and publish the agents-live Python package
-ms.date: 2026-07-18
+ms.date: 2026-07-19
 ms.topic: how-to
 ---
+
+> **Historical.** This document describes the assembly flow used before
+> 2026-07-18, when releases were exported from a private source
+> repository. That flow is retired: the public agents-live repository is
+> now the definitive source, and releases follow the repository's
+> release checklist in `.agents/release.md`.
 
 ## Release boundary
 
