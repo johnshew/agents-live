@@ -9,6 +9,9 @@ history is retained in the source repository.
 - fix: organize GitHub release notes into curated, generated, and reference sections.
   New publications and retries show `Curated Summary` first, GitHub's pull
   request list next, and changelog plus version-range links last.
+- chore: require reviewable commits and pre-PR branch history checks.
+  Plans stay outside git, unshared branches drop empty or superseded commits,
+  and synchronization avoids incidental merges from `origin/main`.
 
 ## 1.0.0 - 2026-07-19
 
