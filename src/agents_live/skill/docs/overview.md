@@ -8,10 +8,10 @@ ms.topic: overview
 > What the system is, the design principles behind it, and how it compares
 > to other agent-automation offerings. Written 2026-07-11 09:25 PDT from a
 > landscape review; refresh the comparison section before citing it externally.
-> **This document describes the end state** (single-command package
-> published, skill thin, deployments consuming the package). For what
-> remains before that state, see the release sequence in
-> backlog.md.
+> **This document describes the shipped state**: the single-command
+> package is published, the skill is thin, and deployments consume the
+> package. Remaining work is tracked as GitHub issues on the
+> agents-live repository.
 
 ---
 
@@ -187,7 +187,8 @@ stable and continuously improving.
 5. **Everything is logged and queryable.** JSONL per agent plus a system log,
    with phase, status, duration, model, token counts, and cost on every
    agent run. Logs age into monthly Parquet archives and are queried
-   through one query tool (`qlog.py`) and a correlated timeline view.
+   through one query tool (`agents-live logs`) and a correlated
+   timeline view (`agents-live logs timeline`).
    Logs live in the user-level XDG state home, not the project tree:
    repos sync between machines, so machine-local logs in the tree were an
    export hazard, and user-level state lets the tool log and repair before
@@ -307,5 +308,5 @@ deployments (this one included) consume released versions and extend
 through plugin entry points (private agent adapters, multi-host
 ownership); agents and handlers stay in the consuming repo, while
 machine-local logs live in the user-level state home.
-Remaining sequencing lives in the release-sequence section of
-backlog.md.
+Remaining work is tracked as GitHub issues on the agents-live
+repository.

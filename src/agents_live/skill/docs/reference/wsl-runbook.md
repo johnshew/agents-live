@@ -145,7 +145,7 @@ If interop is missing after a config change or WSL update:
 
 ```bash
 # Recent correlated events for a specific task
-wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs timeline smoketest-mcp-work --limit 20'
+wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs timeline smoketest-mcp-work --last 20'
 
 # Run artifacts (stdout, stderr, transcripts) in the repo's state directory
 wsl -d Ubuntu --cd ~ -e bash -lc 'ls -lt ~/.local/state/agents-live/repos/<target-project>-*/logs/runs/smoketest-mcp-work-*.* | head -5'
