@@ -73,6 +73,10 @@ uv tool install agents-live
 agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
 ```
 
+A bare `uv tool install` does not carry project-declared plugin wheels;
+if any project declares them, follow with `agents-live upgrade` (the
+hourly `agents-live health-check` pass also converges them).
+
 Registration is idempotent. It replaces a stale canonical action, starts the
 new task, and waits for a fresh global beacon. Only after that verification
 succeeds does it remove the legacy `WSL Heartbeat` task. If verification fails,

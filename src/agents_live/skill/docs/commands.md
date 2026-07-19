@@ -621,9 +621,11 @@ Parse the user's description to extract:
 
 ---
 
-## `release` -- Audit, Assemble, and Publish
+## `release` -- Audit and Publish
 
-Package the agents-live system as a standalone, shareable release.
+Releases are cut from the definitive agents-live source repository;
+consumer repositories receive updates through `agents-live upgrade`,
+never by assembling or back-porting a payload.
 
 ### Steps
 
@@ -631,27 +633,16 @@ Package the agents-live system as a standalone, shareable release.
    since the latest tag, complete issue hygiene, and select the recommended
    semantic version bump. Commit any changelog update before continuing.
 
-2. **Pre-release audit** -- scan for personal data, secrets, and portability issues:
+2. **Release gates** -- from the repository root:
    ```bash
-   uv run --script .claude/skills/agents-live/scripts/pre-release-audit.py
+   uv run --script tools/pre-release-audit.py
+   uv run --with-editable . --script tests/test_smoke.py
+   uv run --with-editable . agents-live smoketest
    ```
-   All checks must pass before proceeding.
+   All gates must pass; `tools/release.py` reruns them itself during
+   preparation and publication.
 
-3. **Assemble** -- copy release-included files into a clean directory:
-   ```bash
-   bash .claude/skills/agents-live/scripts/assemble-release.sh [output-dir]
-   ```
-   Default output: `/tmp/agents-live`.
-
-4. **Verify** -- audit and test from the assembled directory:
-   ```bash
-   cd /tmp/agents-live
-   uv run tools/pre-release-audit.py
-   uv run --with-editable . python -m unittest tests.test_smoke
-   ```
-
-5. **Publish** -- from the assembled public release repository, preview and
-   run the guarded release workflow:
+3. **Publish** -- preview and run the guarded release workflow:
 
    ```bash
    uv run --script tools/release.py --dry-run --bump patch
@@ -668,7 +659,8 @@ Package the agents-live system as a standalone, shareable release.
    release with one first-line summary per changelog entry plus a link to the
    full tagged changelog. The release triggers PyPI publishing.
 
-Full details: [release-process.md](release-process.md)
+Historical context for the retired assembly flow:
+[release-process.md](release-process.md)
 
 ---
 
