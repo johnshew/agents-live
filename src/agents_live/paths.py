@@ -53,6 +53,18 @@ _cached_default_source: str | None = None
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+def _repos_module():
+    """The repos module under either layout. qlog/timeline are dispatched
+    via ``uv run --script`` (decision 6.4) and import this module flat, so
+    a bare ``from . import repos`` here crashes with "no known parent
+    package" the moment resolution reaches the registry (issue #48)."""
+    try:
+        from . import repos
+    except ImportError:
+        import repos
+    return repos
+
+
 def resolve_root(explicit: str | Path | None = None) -> Path:
     """Return the repository/project root per the resolution order above.
 
@@ -68,7 +80,7 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
             # registered repo always means that repository, never a
             # same-named directory that happens to exist under the
             # caller's CWD (which would make the target flip with CWD).
-            from . import repos
+            repos = _repos_module()
             if explicit in repos.load()["repos"]:
                 return repos.resolve_name(explicit)
             if not Path(explicit).expanduser().is_dir():
@@ -93,7 +105,7 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
         _cached_default_source = "marker"
         return _cached_default_root
 
-    from . import repos
+    repos = _repos_module()
     default = repos.default_root()
     if default is not None:
         _cached_default_root = default
