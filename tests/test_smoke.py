@@ -2411,23 +2411,71 @@ class TestReleaseTool(unittest.TestCase):
             )
             existing = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout='{"url":"https://example.test/release"}\n')
+            existing_body = (
+                "- fix: keep this standalone summary.\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "**Diffs**: https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3"
+            )
+            expected_body = (
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
+                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3)\n"
+            )
+            edited_bodies = []
+
+            def capture_existing_run(argv, *, capture=False):
+                if argv[:3] == ["gh", "release", "view"]:
+                    return existing_body
+                if argv[:3] == ["gh", "release", "edit"]:
+                    notes_path = Path(argv[argv.index("--notes-file") + 1])
+                    edited_bodies.append(notes_path.read_text(encoding="utf-8"))
+                return ""
+
             with (
                 mock.patch.object(module, "_require_tools"),
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=existing),
-                mock.patch.object(module, "_run") as run,
+                mock.patch.object(
+                    module, "_run", side_effect=capture_existing_run
+                ) as run,
                 mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
                 module.publish()
-            run.assert_not_called()
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertFalse(any(command[0] == "uv" for command in commands))
+            self.assertEqual(edited_bodies, [expected_body])
 
             missing = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
             release_bodies = []
+            edited_bodies.clear()
+            generated_body = (
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n"
+                "- feat!: replace the old contract.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "**Full Changelog**: https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3"
+            )
 
             def capture_run(argv, *, capture=False):
                 if argv[:3] == ["gh", "release", "create"]:
                     notes_path = Path(argv[argv.index("--notes-file") + 1])
                     release_bodies.append(notes_path.read_text(encoding="utf-8"))
+                if argv[:3] == ["gh", "release", "view"]:
+                    return generated_body
+                if argv[:3] == ["gh", "release", "edit"]:
+                    notes_path = Path(argv[argv.index("--notes-file") + 1])
+                    edited_bodies.append(notes_path.read_text(encoding="utf-8"))
                 return ""
 
             with (
@@ -2448,12 +2496,40 @@ class TestReleaseTool(unittest.TestCase):
             self.assertEqual(
                 release_bodies,
                 [
+                "## Curated Summary\n\n"
                 "- fix: keep this standalone summary.\n"
-                "- feat!: replace the old contract.\n\n"
-                "[Full changelog](https://github.com/johnshew/agents-live/"
-                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n"
+                "- feat!: replace the old contract.\n"
                 ],
             )
+            self.assertEqual(
+                edited_bodies,
+                [
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n"
+                "- feat!: replace the old contract.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
+                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3)\n"
+                ],
+            )
+
+            edited_bodies.clear()
+
+            def capture_normalized_run(argv, *, capture=False):
+                if argv[:3] == ["gh", "release", "view"]:
+                    return expected_body.rstrip()
+                if argv[:3] == ["gh", "release", "edit"]:
+                    edited_bodies.append(argv)
+                return ""
+
+            with mock.patch.object(
+                module, "_run", side_effect=capture_normalized_run
+            ):
+                module._normalize_release_body("v1.2.3")
+            self.assertEqual(edited_bodies, [])
 
 
 class TestInstallSkill(_TempProject):

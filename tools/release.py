@@ -30,6 +30,14 @@ CHANGELOG_URL = (
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
+GENERATED_COMPARE_RE = re.compile(
+    r"(?m)^\*\*(?:Full Changelog|Diffs)\*\*: "
+    r"(https://github\.com/johnshew/agents-live/compare/(\S+))$"
+)
+CURATED_CHANGELOG_RE = re.compile(
+    r"(?m)^\[Full changelog\]\(https://github\.com/johnshew/agents-live/"
+    r"blob/[^/]+/src/agents_live/skill/docs/changelog\.md\)$\n*"
+)
 
 
 class ReleaseError(RuntimeError):
@@ -111,11 +119,34 @@ def _release_notes(version: str) -> str:
     ]
     if not summaries:
         raise ReleaseError(f"changelog section for {version} has no bullet entries")
-    tag = f"v{version}"
-    return (
-        "\n".join(summaries)
-        + f"\n\n[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
+    return "## Curated Summary\n\n" + "\n".join(summaries)
+
+
+def _normalize_release_body(tag: str) -> None:
+    body = _run(
+        ["gh", "release", "view", tag, "--json", "body", "--jq", ".body"],
+        capture=True,
     )
+    updated = body
+    if not updated.startswith("## Curated Summary\n"):
+        updated = "## Curated Summary\n\n" + updated
+    updated = CURATED_CHANGELOG_RE.sub("", updated)
+    changelog_link = f"[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
+
+    def replace_comparison(match: re.Match[str]) -> str:
+        return f"{changelog_link} | [{match.group(2)}]({match.group(1)})"
+
+    updated, replacements = GENERATED_COMPARE_RE.subn(replace_comparison, updated)
+    if replacements == 0 and CHANGELOG_URL.format(tag=tag) not in updated:
+        updated = updated.rstrip() + f"\n\n{changelog_link}"
+    if updated == body:
+        return
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".md", delete_on_close=False
+    ) as notes_file:
+        notes_file.write(updated + "\n")
+        notes_file.close()
+        _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
 
 
 def _minimum_bump(notes: str) -> str:
@@ -311,6 +342,7 @@ def publish() -> None:
         text=True,
     )
     if existing.returncode == 0:
+        _normalize_release_body(tag)
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
         return
     notes = _release_notes(version)
@@ -333,6 +365,7 @@ def publish() -> None:
             "--notes-file", notes_file.name,
             "--title", f"agents-live {tag}",
         ])
+    _normalize_release_body(tag)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
 
