@@ -33,9 +33,10 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, headless, heartbeat, init, migrate,
-        ownership, paths, plugins, prereqs, repos, spawn, status, uninstall,
-        update_check, upgrade,
+        ownership, paths, plugins, preflight, prereqs, repos, spawn, status,
+        uninstall, update_check, upgrade,
     )
+    from agents_live.cli_spec import COMMANDS
 except ImportError:  # flat checkout layout
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,6 +50,7 @@ except ImportError:  # flat checkout layout
     import ownership
     import paths
     import plugins
+    import preflight
     import prereqs
     import repos
     import spawn
@@ -56,6 +58,7 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
+    from cli_spec import COMMANDS
 
 
 class _TempProject(unittest.TestCase):
@@ -926,6 +929,108 @@ class TestCliContract(_TempProject):
         self.assertIn("--version", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_each_command_help_comes_from_spec(self) -> None:
+        for command in COMMANDS:
+            with self.subTest(command=command.name):
+                stdout = io.StringIO()
+                with mock.patch("sys.stdout", stdout):
+                    self.assertEqual(cli.main([command.name, "--help"]), 0)
+                self.assertIn(command.summary, stdout.getvalue())
+
+    def test_each_command_rejects_unknown_flags(self) -> None:
+        for command in COMMANDS:
+            with self.subTest(command=command.name):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    self.assertEqual(
+                        cli.main([command.name, "--contract-unknown"]), 2)
+                self.assertIn("unrecognized argument", stderr.getvalue())
+
+    def test_all_repos_capability_follows_spec(self) -> None:
+        for command in COMMANDS:
+            if command.all_repos:
+                continue
+            with self.subTest(command=command.name):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    self.assertEqual(
+                        cli.main([command.name, "--all-repos"]), 2)
+                self.assertIn("does not support --all-repos", stderr.getvalue())
+
+    def test_root_none_commands_do_not_resolve_a_project(self) -> None:
+        fake_module = mock.Mock()
+        fake_module.main.return_value = 0
+        for command in COMMANDS:
+            if command.root != "none":
+                continue
+            with (
+                self.subTest(command=command.name),
+                mock.patch("importlib.import_module",
+                           return_value=fake_module),
+                mock.patch.object(paths, "resolve_root") as resolve_root,
+            ):
+                self.assertEqual(cli.main([command.name]), 0)
+                resolve_root.assert_not_called()
+
+    def test_required_root_commands_emit_no_project_envelope(self) -> None:
+        saved_cwd = Path.cwd()
+        saved_root = os.environ.pop(paths.ENV_VAR, None)
+        saved_config = os.environ.get("XDG_CONFIG_HOME")
+        try:
+            with tempfile.TemporaryDirectory() as outside:
+                os.chdir(outside)
+                os.environ["XDG_CONFIG_HOME"] = str(
+                    Path(outside) / "isolated-config")
+                for command in COMMANDS:
+                    if command.root != "required":
+                        continue
+                    with self.subTest(command=command.name):
+                        paths.clear_cache()
+                        stdout = io.StringIO()
+                        with mock.patch("sys.stdout", stdout):
+                            self.assertEqual(
+                                cli.main(["--json", command.name]), 2)
+                        envelope = json.loads(stdout.getvalue())
+                        self.assertEqual(
+                            envelope["error"]["code"], "no_project_root")
+        finally:
+            os.chdir(saved_cwd)
+            if saved_root is not None:
+                os.environ[paths.ENV_VAR] = saved_root
+            if saved_config is None:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+            else:
+                os.environ["XDG_CONFIG_HOME"] = saved_config
+            os.environ.pop("AGENTS_LIVE_JSON", None)
+            paths.clear_cache()
+
+    def test_declared_aliases_dispatch_like_canonical_names(self) -> None:
+        for command in COMMANDS:
+            for alias in command.aliases:
+                calls: list[list[str]] = []
+                fake_module = mock.Mock()
+                fake_module.main.side_effect = (
+                    lambda: calls.append(sys.argv[1:]) or 0)
+                with (
+                    self.subTest(command=command.name, alias=alias),
+                    mock.patch("importlib.import_module",
+                               return_value=fake_module),
+                    mock.patch.object(preflight, "check", return_value=None),
+                ):
+                    self.assertEqual(cli.main([command.name]), 0)
+                    self.assertEqual(cli.main([alias]), 0)
+                self.assertEqual(calls, [[], []])
+
+    def test_subprocess_dispatch_uses_declared_modules(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(
+                cli.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(cli.main(["logs", "--limit", "1"]), 0)
+            self.assertEqual(cli.main(["logs", "timeline", "--last", "1"]), 0)
+            self.assertEqual(cli.main(["dashboard", "--dev"]), 0)
+        scripts = [Path(call.args[0][3]).name for call in run.call_args_list]
+        self.assertEqual(scripts, ["qlog.py", "timeline.py", "dashboard.py"])
+
     def test_version_works_outside_repository(self) -> None:
         saved = Path.cwd()
         selected_root = os.environ.pop(paths.ENV_VAR, None)
@@ -1371,6 +1476,38 @@ class TestTimeline(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("ImportError", result.stderr)
         self.assertIn("registry-agent", result.stdout)
+
+    def test_bare_subprocess_scripts_use_isolated_registry(self) -> None:
+        log = self.root / "Agents" / "logs" / "solo.log"
+        log.write_text(json.dumps({
+            "log_schema": 5, "ts": "2026-07-18T20:00:00Z",
+            "agent_name": "registry-agent", "phase": "done", "status": "ok",
+        }) + "\n", encoding="utf-8")
+        xdg = self.root / "isolated-config"
+        (xdg / "agents-live").mkdir(parents=True)
+        (xdg / "agents-live" / "config.toml").write_text(
+            f'default_repo = "proj"\n\n[repos]\nproj = "{self.root}"\n',
+            encoding="utf-8")
+        env = {key: value for key, value in os.environ.items()
+               if key != paths.ENV_VAR}
+        env["XDG_CONFIG_HOME"] = str(xdg)
+        scripts = Path(headless.__file__).parent
+        with tempfile.TemporaryDirectory() as bare_cwd:
+            query = subprocess.run(
+                ["uv", "run", "--script", str(scripts / "qlog.py"),
+                 "--all", "--format", "jsonl", "--limit", "1"],
+                capture_output=True, text=True, timeout=120,
+                cwd=bare_cwd, env=env)
+            dashboard_help = subprocess.run(
+                ["uv", "run", "--script", str(scripts / "dashboard.py"),
+                 "--help"],
+                capture_output=True, text=True, timeout=120,
+                cwd=bare_cwd, env=env)
+        self.assertEqual(query.returncode, 0, query.stderr)
+        self.assertIn("registry-agent", query.stdout)
+        self.assertEqual(
+            dashboard_help.returncode, 0, dashboard_help.stderr)
+        self.assertIn("--all-repos", dashboard_help.stdout)
 
 
 class TestUpdateCheck(unittest.TestCase):

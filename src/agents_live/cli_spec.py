@@ -45,7 +45,7 @@ GLOBAL_ARGS = (
 COMMANDS = (
     Cmd(
         "run", "Execute an agent once.", "run", "in-process",
-        root="auto-marker", json=True, name_sugar=True, default_notice=True,
+        root="auto-marker", name_sugar=True, default_notice=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
@@ -55,7 +55,7 @@ COMMANDS = (
     Cmd(
         "start", "Activate cron and watcher triggers.", "activate", "in-process",
         root="auto-marker", probes=("crontab", "inotify"),
-        dynamic_probes="start", json=True, name_sugar=True, default_notice=True,
+        dynamic_probes="start", name_sugar=True, default_notice=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value"),
             Arg(("--all",), "Activate all configured agents."),
@@ -73,7 +73,7 @@ COMMANDS = (
     ),
     Cmd(
         "stop", "Deactivate triggers and keep configuration.", "teardown",
-        "in-process", aliases=("teardown",), probes=("crontab",), json=True,
+        "in-process", aliases=("teardown",), probes=("crontab",),
         name_sugar=True, default_notice=True,
         args=(Arg(("--name",), "Agent name.", kind="value", required=True),),
     ),
@@ -238,3 +238,59 @@ def command_map() -> dict[str, Cmd]:
 
 
 COMMAND_BY_NAME = command_map()
+
+
+def visible_args(command: Cmd) -> tuple[Arg, ...]:
+    return tuple(argument for argument in command.args if not argument.hidden)
+
+
+def command_help(command: Cmd, invoked_as: str | None = None) -> str:
+    """Render compact per-command help from the command spec."""
+    name = invoked_as or command.name
+    usage_parts = [f"usage: agents-live {name}"]
+    if command.subcommands:
+        usage_parts.append(
+            "{" + ",".join(sub.name for sub in command.subcommands
+                           if not sub.hidden) + "}")
+    if visible_args(command):
+        usage_parts.append("[options]")
+    lines = [" ".join(usage_parts), "", command.summary]
+    arguments = visible_args(command)
+    if arguments:
+        lines.extend(("", "arguments:"))
+        for argument in arguments:
+            flags = ", ".join(argument.flags)
+            lines.append(f"  {flags:<24} {argument.help}")
+    return "\n".join(lines) + "\n"
+
+
+def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
+    """Return the first option not declared for a command or subcommand."""
+    current = command
+    if argv:
+        child = next(
+            (item for item in command.subcommands if item.name == argv[0]),
+            None,
+        )
+        if child is not None:
+            current = child
+            argv = argv[1:]
+    arguments = (*command.args, *(current.args if current is not command else ()))
+    known = {flag for argument in arguments for flag in argument.flags
+             if flag.startswith("-")}
+    known.add("--all-repos")
+    takes_value = {
+        flag for argument in arguments if argument.kind == "value"
+        for flag in argument.flags if flag.startswith("-")
+    }
+    skip_value = False
+    for token in argv:
+        if skip_value:
+            skip_value = False
+            continue
+        option = token.split("=", 1)[0]
+        if option.startswith("-") and option not in known:
+            return option
+        if option in takes_value and "=" not in token:
+            skip_value = True
+    return None

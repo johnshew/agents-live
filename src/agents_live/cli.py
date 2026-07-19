@@ -49,7 +49,7 @@ from . import paths
 from . import preflight
 from . import update_check
 from . import __version__
-from .cli_spec import COMMAND_BY_NAME
+from .cli_spec import COMMAND_BY_NAME, command_help, unknown_flag
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 # inside a git repository that has no marker write the minimal local-mode
@@ -240,6 +240,14 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd, rest = args[0], args[1:]
     command = COMMAND_BY_NAME.get(cmd)
+    if command is not None and any(arg in ("-h", "--help") for arg in rest):
+        print(command_help(command, cmd), end="")
+        return _finish(0, cmd, rest, json_mode=json_mode)
+    if command is not None:
+        unknown = unknown_flag(command, rest)
+        if unknown is not None:
+            print(f"error: unrecognized argument: {unknown}", file=sys.stderr)
+            return 2
     all_repos = "--all-repos" in rest
     if all_repos and (command is None or not command.all_repos):
         print(f"error: {cmd} does not support --all-repos; select one repository",
