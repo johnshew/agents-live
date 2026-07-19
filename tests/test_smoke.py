@@ -351,7 +351,9 @@ class TestOwnershipKernel(_TempProject):
 
 class TestProjectPlugins(_TempProject):
     def _wheel(self, name: str = "example-plugin", version: str = "1.2.3") -> Path:
-        wheel = self.root / "Agents" / "plugins" / f"{name}-1.2.3-py3-none-any.whl"
+        wheel = (
+            self.root / "Agents" / "plugins"
+            / f"{name}-{version}-py3-none-any.whl")
         wheel.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(wheel, "w") as archive:
             archive.writestr(
@@ -391,7 +393,9 @@ class TestProjectPlugins(_TempProject):
             mock.patch.object(prereqs.subprocess, "run", return_value=no_crontab),
             mock.patch.object(
                 plugins, "checks",
-                return_value=[("example-plugin", False, "distribution is not installed")]),
+                return_value=[(
+                    "example-plugin", False,
+                    "distribution example-plugin is not installed")]),
             mock.patch.object(ownership, "registry_available", return_value=False),
         ):
             checks = {check["name"]: check for check in prereqs.collect()}

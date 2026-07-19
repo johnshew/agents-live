@@ -130,11 +130,12 @@ def inspect(plugin: Plugin) -> tuple[bool, str]:
     ]
     if not entry_points:
         return False, "distribution exposes no agents-live entry points"
-    try:
-        for entry_point in entry_points:
+    for entry_point in entry_points:
+        try:
             entry_point.load()
-    except Exception as exc:
-        return False, f"entry point {entry_point.group}:{entry_point.name} failed: {exc}"
+        except Exception as exc:
+            return False, (
+                f"entry point {entry_point.group}:{entry_point.name} failed: {exc}")
     return True, (
         f"version {plugin.version}; entry points "
         + ", ".join(f"{ep.group}:{ep.name}" for ep in entry_points))

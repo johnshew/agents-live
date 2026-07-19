@@ -219,7 +219,7 @@ def _toml_value(key: str, value: object) -> str:
         return "[" + ", ".join(json.dumps(v) for v in value) + "]"
     if isinstance(value, dict):
         return "{ " + ", ".join(
-            f"{json.dumps(str(k))} = {_toml_value(str(k), v)}"
+            f"{json.dumps(str(k))} = {_toml_value(f'{key}.{k}', v)}"
             for k, v in value.items()
         ) + " }"
     raise ValueError(

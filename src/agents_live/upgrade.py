@@ -102,13 +102,13 @@ def main() -> int:
 
     try:
         targets, errors = _targets()
-        plugin_roots = [root for _, root in targets]
+        target_roots = [root for _, root in targets]
         if os.environ.get(paths.ENV_VAR, "").strip():
             for alias, value, error in repos.entries():
                 if error:
                     errors.append(f"{alias}: {error}")
                 else:
-                    plugin_roots.append(Path(value))
+                    target_roots.append(Path(value))
     except (OSError, ValueError) as exc:
         # The message already names its source (registry file vs an
         # invalid AGENTS_LIVE_REPO); no prefix that could mislabel it.
@@ -116,7 +116,7 @@ def main() -> int:
         return 1
 
     if not args.skills_only:
-        runtime_status = _upgrade_runtime(list(dict.fromkeys(plugin_roots)))
+        runtime_status = _upgrade_runtime(list(dict.fromkeys(target_roots)))
         if runtime_status != 0 or args.runtime_only:
             return runtime_status
 
