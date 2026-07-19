@@ -2954,6 +2954,37 @@ class TestHealthCheckLoop(_TempProject):
         self.assertTrue(result["ownership_degraded"])
         self.assertTrue(result["registry_prune_abstained"])
 
+    def test_sweep_stdout_stays_pure_json_when_pruning_prints(self) -> None:
+        # activate.prune_orphans reports each pruned entry on stdout; the
+        # sweep's stdout contract is exactly one JSON document (the host
+        # loop parses it), so in-process prints must be diverted.
+        def noisy_prune() -> list[str]:
+            print("Removed cron entries for 'legacy-agent'")
+            return ["legacy-agent"]
+
+        with (
+            mock.patch.object(activate, "prune_orphans", noisy_prune),
+            mock.patch.object(health_check, "_converge_crontab",
+                              return_value=True),
+            mock.patch.object(health_check, "_origin_main_synced",
+                              return_value=False),
+            mock.patch.object(
+                health_check.ownership, "load_owners",
+                side_effect=health_check.ownership.OwnershipUnavailableError(
+                    "no backend")),
+            mock.patch.object(sys, "argv",
+                              ["agents-live health-check", "--sweep"]),
+        ):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (contextlib.redirect_stdout(stdout),
+                  contextlib.redirect_stderr(stderr)):
+                code = health_check.main()
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())  # exactly one JSON document
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("legacy-agent", stderr.getvalue())
+
     def test_host_command_is_declared(self) -> None:
         command = cli.COMMAND_BY_NAME["health-check"]
         self.assertEqual(command.module, "health_check")
