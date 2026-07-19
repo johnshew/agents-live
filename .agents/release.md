@@ -38,6 +38,11 @@ uv build
 
 The audit must report no personal information, secrets, or nonportable
 paths, and its adapter-resolution and doc-link checks must pass.
+For machine-specific names that generic patterns cannot detect, create the
+gitignored `.agents-live-machine-names` file at the repository root. Put one
+literal machine name on each line; blank lines and lines beginning with `#`
+are ignored. The names remain local, while the audit reports every
+case-insensitive match in shipped text with its file and line number.
 Inspect the wheel and sdist: `agents-live --help` reports the
 documented commands, `agents-live init` installs the vendored skill,
 and no private adapter or deployment-specific agent is present.

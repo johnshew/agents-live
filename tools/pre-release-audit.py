@@ -35,6 +35,7 @@ INCLUDED_DIRS = [
     "tools",
 ]
 INCLUDED_FILES = ["AGENTS.md", "README.md", "pyproject.toml"]
+MACHINE_NAMES_FILE = ".agents-live-machine-names"
 
 # Directories/files that are always excluded even inside included dirs
 EXCLUDED_PATTERNS = {
@@ -244,12 +245,29 @@ def collect_files(root: Path) -> list[Path]:
     return files
 
 
+def load_machine_names(root: Path) -> list[str]:
+    """Load optional local machine names, ignoring blank and comment lines."""
+    path = root / MACHINE_NAMES_FILE
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    names = []
+    for line in lines:
+        name = line.strip()
+        if name and not name.startswith("#"):
+            names.append(name)
+    return names
+
+
 def is_safe_match(line: str) -> bool:
     """Return True if the match is a known false positive."""
     return any(pat.search(line) for pat in SAFE_PATTERNS)
 
 
-def scan_file(path: Path, root: Path) -> list[str]:
+def scan_file(
+    path: Path, root: Path, machine_names: list[str] | None = None,
+) -> list[str]:
     """Scan a single file and return a list of findings."""
     findings: list[str] = []
     try:
@@ -259,8 +277,19 @@ def scan_file(path: Path, root: Path) -> list[str]:
 
     relative = path.relative_to(root)
     lines = content.splitlines()
+    names = machine_names or []
 
     for line_num, line in enumerate(lines, 1):
+        if path.suffix.lower() == ".md" and "—" in line:
+            findings.append(f"  {relative}:{line_num}: Em dash in shipped Markdown")
+
+        folded = line.casefold()
+        for name in names:
+            if name.casefold() in folded:
+                findings.append(
+                    f"  {relative}:{line_num}: Known machine name from "
+                    f"{MACHINE_NAMES_FILE} ({name!r})")
+
         if is_safe_match(line):
             continue
 
@@ -282,6 +311,7 @@ def scan_file(path: Path, root: Path) -> list[str]:
 def main() -> int:
     root = repo_root()
     files = collect_files(root)
+    machine_names = load_machine_names(root)
 
     if not files:
         print("No files found to scan.", file=sys.stderr)
@@ -289,7 +319,7 @@ def main() -> int:
 
     all_findings: list[str] = []
     for path in files:
-        all_findings.extend(scan_file(path, root))
+        all_findings.extend(scan_file(path, root, machine_names))
 
     # Release-shape-only checks: they validate THE ASSEMBLED EXPORT
     # (adapter resolution against the packaged registry, links against

@@ -30,6 +30,7 @@ import argparse
 import json
 import shlex
 import sys
+from pathlib import Path
 
 from . import headless, preflight
 from .headless import (
@@ -106,13 +107,134 @@ def plan_migration(lines: list[str]) -> dict:
     return plan
 
 
+def _line_belongs_to_root(line: str, root: Path) -> bool:
+    """Whether *line* carries an exact ``cd`` or ``--repo`` root token."""
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+    value = str(root)
+    roots = [
+        second
+        for first, second in zip(tokens, tokens[1:])
+        if first in {"cd", "--repo"}
+    ]
+    return bool(roots) and all(candidate == value for candidate in roots)
+
+
+def plan_adoption(lines: list[str], old_root: Path) -> dict:
+    """Plan canonical replacements for trigger entries from *old_root*."""
+    from . import activate
+
+    candidates = [line for line in lines if _line_belongs_to_root(line, old_root)]
+    schedule: dict[str, list[str]] = {}
+    watcher: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+    for line in candidates:
+        name = _token_pair_value(line, "--name")
+        watcher_name = (
+            _token_pair_value(line, "ensure-watcher")
+            or _token_pair_value(line, "--ensure-watcher")
+        )
+        if name:
+            schedule.setdefault(name, []).append(line)
+        elif watcher_name:
+            watcher.setdefault(watcher_name, []).append(line)
+        else:
+            unmatched.append(line)
+
+    plan: dict = {"schedule": {}, "watcher": {}, "unmatched": unmatched}
+    for name, old in sorted(schedule.items()):
+        if not agent_file_exists(name):
+            plan["unmatched"].extend(old)
+            continue
+        try:
+            new = activate.build_cron_lines(name)
+        except AgentsLiveError:
+            plan["unmatched"].extend(old)
+            continue
+        plan["schedule"][name] = (old, new)
+    for name, old in sorted(watcher.items()):
+        if not agent_file_exists(name):
+            plan["unmatched"].extend(old)
+            continue
+        plan["watcher"][name] = (old, [build_reboot_watcher_line(name)])
+    return plan
+
+
+def _apply_adoption(lines: list[str], plan: dict) -> list[str]:
+    replaced = {
+        line
+        for kind in ("schedule", "watcher")
+        for old, _new in plan[kind].values()
+        for line in old
+    }
+    canonical = [
+        line
+        for kind in ("schedule", "watcher")
+        for _old, new in plan[kind].values()
+        for line in new
+    ]
+    return [line for line in lines if line not in replaced] + canonical
+
+
+def _print_adoption(plan: dict, *, dry_run: bool) -> int:
+    verb = "Would adopt" if dry_run else "Adopting"
+    for line in plan["unmatched"]:
+        print(f"Unmatched old-root entry left unchanged:\n  {line}")
+    for kind, label in (("schedule", "schedule"), ("watcher", "@reboot watcher")):
+        for name, (old, new) in plan[kind].items():
+            print(f"{verb} {label} entries for '{name}':")
+            for line in old:
+                print(f"  - {line}")
+            for line in new:
+                print(f"  + {line}")
+    return len(plan["schedule"]) + len(plan["watcher"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Converge persisted cron/watcher entries to the "
                     "canonical invocation form.")
     parser.add_argument("--dry-run", "-n", action="store_true",
                         help="Print the plan without mutating anything.")
+    parser.add_argument(
+        "--adopt", metavar="OLD_ROOT",
+        help="Adopt trigger entries from a moved, nonexistent project root.")
     args = parser.parse_args()
+
+    if args.adopt:
+        old_root = Path(args.adopt).expanduser().resolve()
+        if old_root.exists():
+            raise AgentsLiveError(
+                f"cannot adopt {old_root}: the old project root still exists; "
+                "move or remove it before adopting its triggers")
+        if args.dry_run:
+            lines = headless.current_crontab_lines()
+            if lines is None:
+                raise AgentsLiveError("crontab is not accessible")
+            plan = plan_adoption(lines, old_root)
+        else:
+            with headless.crontab_lock():
+                lines = headless.current_crontab_lines()
+                if lines is None:
+                    raise AgentsLiveError("crontab is not accessible")
+                plan = plan_adoption(lines, old_root)
+                rewritten = _apply_adoption(lines, plan)
+                if rewritten != lines:
+                    headless.install_crontab(rewritten)
+        rewrites = _print_adoption(plan, dry_run=args.dry_run)
+        if rewrites == 0:
+            print("No matching old-root entries to adopt.")
+        else:
+            done = "planned" if args.dry_run else "adopted"
+            print(f"\n{rewrites} entr{'y' if rewrites == 1 else 'ies'} {done}.")
+        if preflight.json_mode():
+            print(json.dumps({
+                "ok": True, "dry_run": args.dry_run,
+                "rewrites": rewrites, "plan": plan,
+            }))
+        return 0
 
     lines = headless.current_crontab_lines()
     if lines is None:

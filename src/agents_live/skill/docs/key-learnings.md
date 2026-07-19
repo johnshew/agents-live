@@ -99,7 +99,7 @@ the on-disk file, applies the patch, and writes atomically.
    tokens (markdown + JSON escaping); a structured patch for the same
    edit costs 100–200 tokens. That's a 20–40× reduction per call.
 2. **Byte-level corruption surface.** Any section the agent re-emits
-   verbatim is a section it can subtly mangle — dropped table rows,
+   verbatim is a section it can subtly mangle - dropped table rows,
    smart-quoted dashes, reflowed line breaks, mid-stream truncation
    on long outputs. A patch keeps pipeline-deterministic sections
    (e.g. CNS Budget, Safety Check, forward-simulated Then days,
@@ -130,7 +130,7 @@ genuinely needs to rewrite.
 
 - Name the *operations* (omit / reorder / replace) and the *target
   scope* (which section keys they apply to). Avoid generic JSON-patch
-  ops — they let the agent reach anywhere.
+  ops - they let the agent reach anywhere.
 - Set `additionalProperties: false` everywhere so the schema rejects
   fields you don't intend to support.
 - Define a stable *identifier* for each editable item (e.g. activity
@@ -677,20 +677,20 @@ refresh before citing externally.
   plus the standard's `user-invocable`, `disable-model-invocation`,
   `target`) parsed, listed, and **ran** in both CLIs. Nothing guarantees
   future versions stay tolerant and unknown-field behavior is
-  undocumented in both — pin in smoketests, fail clearly in `doctor`,
+  undocumented in both - pin in smoketests, fail clearly in `doctor`,
   and treat a platform change as a compatibility event.
 - **Both CLIs run `.claude/agents/` files headlessly**:
   `claude --agent <name> -p` and `copilot --agent <name> -p` each
   executed the same probe. The Copilot read of `.claude/agents/` is
   **undocumented** (official docs list only `.github/agents/`, org
-  repos, and `~/.copilot/agents`) — pin it in the smoketest and treat it
+  repos, and `~/.copilot/agents`) - pin it in the smoketest and treat it
   as revocable; the fallback is a `git mv` to `.github/agents/`, not an
   architecture change.
 - **Claude Code never reads `.github/agents/`.** So `.claude/agents/`
   is the near-universal local location; choose `.github/agents/` only
   when github.com cloud-agent visibility is wanted.
 - **`copilot --agent` fails fast** with an available-agents listing
-  before any model call — cheap validation for runner integration.
+  before any model call - cheap validation for runner integration.
 - **`target: vscode` and `user-invocable: false` do not filter the
   Copilot CLI listing.** Do not rely on either to hide an agent from
   the CLI.
@@ -703,7 +703,7 @@ refresh before citing externally.
   - MCP config key: `mcpServers` (Claude, camelCase) vs `mcp-servers`
     (the standard). Files use the key of their directory's owner; the
     adapter translates both.
-  - `model`: string only — the array form crashes the Copilot CLI
+  - `model`: string only - the array form crashes the Copilot CLI
     (copilot-cli#2133). Cross-parser value resolution is unverified.
   - Names: Claude requires lowercase letters and hyphens.
 - **Copilot silently skips some Claude-format files.** Literal `\n`
@@ -725,6 +725,6 @@ refresh before citing externally.
 - **Pipeline mode: the sandbox converges, the orchestration stays
   ours.** Tool narrowing maps to `tools: ['pipeline/*']` and the
   side-channel MCP to a frontmatter server entry, but a static
-  frontmatter block cannot mint per-run credentials — triggered runs
+  frontmatter block cannot mint per-run credentials - triggered runs
   keep injecting per-run config (`--additional-mcp-config`); the
   frontmatter form serves interactive dev/test only.

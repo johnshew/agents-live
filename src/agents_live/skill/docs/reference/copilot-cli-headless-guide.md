@@ -1,9 +1,9 @@
 # Running GitHub Copilot CLI Headless: Practical Guide and Gotchas
 
-> Status: **draft** — intended for public gist
+> Status: **draft** - intended for public gist
 
 A field guide to running `copilot` in headless mode (`-p`) for automated
-tasks — cron jobs, file watchers, CI pipelines. Collected from building a
+tasks - cron jobs, file watchers, CI pipelines. Collected from building a
 agents-live system that runs agents on schedules.
 
 ## Basic Headless Invocation
@@ -42,13 +42,13 @@ output=$(cat /tmp/output.txt)
 **This is the most important thing in this guide.**
 
 The Copilot CLI auto-loads all MCP servers from `.mcp.json` on every
-session — including headless `-p` invocations. Each MCP server registers its
+session - including headless `-p` invocations. Each MCP server registers its
 full tool catalog, and those tool definitions count against your context
 window.
 
 MCP servers with large APIs (Microsoft Graph, databases, cloud providers)
 can register hundreds of tools. In our case, workspace MCP servers contributed
-**211K tokens** of tool definitions — more than the available context — before
+**211K tokens** of tool definitions - more than the available context - before
 the first message was even sent.
 
 ### Symptoms
@@ -185,7 +185,7 @@ pattern. See `smoketest.py` for the working implementation.
 ### Empty output on first attempt
 
 Headless invocations occasionally return empty or minimal output even with
-correct flags. This is non-deterministic — retry usually works. Build
+correct flags. This is non-deterministic - retry usually works. Build
 retry logic into your automation:
 
 ```python
@@ -239,13 +239,13 @@ down the entire WSL instance.
 
 ### Prevention
 
-1. **Set `appendWindowsPath=false`** in `/etc/wsl.conf` `[interop]` — stops
+1. **Set `appendWindowsPath=false`** in `/etc/wsl.conf` `[interop]` - stops
    30+ `/mnt/c/...` path probes on every command
-2. **Use Linux-native git credentials** (`gh auth git-credential`) — never
+2. **Use Linux-native git credentials** (`gh auth git-credential`) - never
    `credential.helper=/mnt/c/.../git-credential-manager.exe`
-3. **Don't duplicate MCP servers** — if a server is in workspace `.mcp.json`,
+3. **Don't duplicate MCP servers** - if a server is in workspace `.mcp.json`,
    don't also pass it via `--mcp` flag (spawns duplicate proxy processes)
-4. **Ensure `npx` is in PATH** — cron doesn't source nvm; resolve node
+4. **Ensure `npx` is in PATH** - cron doesn't source nvm; resolve node
    binaries from `~/.nvm/versions/node/*/bin/` as a fallback
 
 ### Diagnosis
@@ -266,11 +266,11 @@ wsl -d Ubuntu -e bash -lc 'uptime; dmesg 2>/dev/null | grep -c p9io'
 
 ## What Would Help (Feature Requests)
 
-1. **`--no-workspace-mcps`** — Disable all `.mcp.json` servers in one
+1. **`--no-workspace-mcps`** - Disable all `.mcp.json` servers in one
    flag, analogous to `--disable-builtin-mcps` for built-in servers.
-2. **Don't auto-load workspace MCPs in headless mode** — `-p` invocations
+2. **Don't auto-load workspace MCPs in headless mode** - `-p` invocations
    should only load explicitly requested `--mcp` servers.
-3. **Lazy tool loading** — Register tool definitions on first use rather than
+3. **Lazy tool loading** - Register tool definitions on first use rather than
    at session start (as suggested in
    [copilot-cli#2627](https://github.com/github/copilot-cli/issues/2627)).
 

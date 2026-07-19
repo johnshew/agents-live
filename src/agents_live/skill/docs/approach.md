@@ -156,13 +156,13 @@ schedule: "0 * * * *"          # cron expression (scheduled agent)
 | `post-processor` | no | *(none)* | Alias for `handler` (takes precedence when both are set) |
 | `env` | no | *(none)* | Map of env vars passed to the agent process |
 | `mcps` | no | *(none)* | List of MCP server names (agency agents only) |
-| `schedule` | one of | — | Cron expression (makes the agent scheduled) |
-| `watchPath` | these | — | Repo-relative path(s) to monitor (string or list; makes the agent watch-triggered) |
+| `schedule` | one of | - | Cron expression (makes the agent scheduled) |
+| `watchPath` | these | - | Repo-relative path(s) to monitor (string or list; makes the agent watch-triggered) |
 | `watchIgnore` | no | *(none)* | Glob patterns to exclude from watcher events (string or list) |
 | `debounce` | no | *(none)* | Seconds of quiet before watcher dispatch (Layer 2 debounce, timed in-process) |
 | `timeout` | no | `120` | Max seconds for agent execution |
 | `transcript` | no | `true` | Capture full session transcript (copilot: `--share`). Set `false` to disable for noisy/stable agents |
-| `output-schema` | no | *(none)* | Safe-output (§3.9): JSON Schema the agent output must satisfy — inline mapping, or a `.json` file reference beside the agent. Failure = `agent_output_invalid`; the post-processor never runs |
+| `output-schema` | no | *(none)* | Safe-output (§3.9): JSON Schema the agent output must satisfy - inline mapping, or a `.json` file reference beside the agent. Failure = `agent_output_invalid`; the post-processor never runs |
 | `output-max-bytes` | no | `1048576` | Safe-output: cap on raw agent stdout bytes (always enforced; this key overrides the default) |
 | `output-path-roots` | no | *(none)* | Safe-output: repo-relative roots; every `path` field in the agent's JSON must resolve under one of them (the `write-files.sh` pattern) |
 | `output-provenance` | no | *(none)* | Safe-output: `strict` requires the whole stdout to be a single unrepaired JSON document (extraction record `source=stdout, repaired=false, candidates=1`); default remains accept-and-act |
@@ -170,7 +170,7 @@ schedule: "0 * * * *"          # cron expression (scheduled agent)
 The three opt-in safe-output keys validate stdout and are rejected on
 `mode: pipeline` agents (pipeline output flows through the PipelineMcp
 store, not stdout). Every agent run also logs an `extraction record`
-event (source, repaired, candidate count, output digest — never the
+event (source, repaired, candidate count, output digest - never the
 candidate text) for provenance forensics.
 
 **Defaults:** `runtime` is required. If `mode` is omitted, it defaults to
@@ -267,7 +267,7 @@ file a complete decommission:
   where the health check's own entry is the broken one.
 
 A host that has not yet pulled the deletion still has the file, so it does not
-prune — correct, because the agent is still defined there. Once the deletion
+prune - correct, because the agent is still defined there. Once the deletion
 syncs in, the file is gone and the orphan is pruned. The mechanism is
 idempotent: an agent whose file still exists is never touched.
 
@@ -312,7 +312,7 @@ JSONL with `component: "pipeline-mcp"`, and shutdown emits one
 `op: "final-state"` line with call counts.
 
 Current surface area: `put(path, value)` and
-`get(path)` — a path-addressed key/value store. Liveness uses
+`get(path)` - a path-addressed key/value store. Liveness uses
 the `/ping` path (put then get) rather than a dedicated ping tool.
 `$schema` binding rules and Draft 2020-12 JSON-Schema validation are
 already implemented; future phases can extend that schema support further.
@@ -372,7 +372,7 @@ declared artifact's integrity.
   `agency copilot`, etc.).
 
 2. **Agent as skill runner**: Copilot reads SKILL.md via AGENTS.md and invokes
-   the same scripts conversationally — no slash command needed.
+   the same scripts conversationally - no slash command needed.
 
 ### Agent-specific behavior
 
@@ -501,8 +501,8 @@ All logs use JSONL format (one JSON object per line) in `Agents/logs/`.
 
 | File | Purpose |
 |------|---------|
-| `Agents/logs/<name>.log` | Per-agent execution log — start, agent output, handler output, done |
-| `Agents/logs/agents-live.log` | System-wide summary — every agent activation, completion, error |
+| `Agents/logs/<name>.log` | Per-agent execution log - start, agent output, handler output, done |
+| `Agents/logs/agents-live.log` | System-wide summary - every agent activation, completion, error |
 
 ### JSONL schema
 

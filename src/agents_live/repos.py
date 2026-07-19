@@ -24,6 +24,7 @@ except ImportError:
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COLLECT_WORKERS = 4
+SKIP_UPDATE_CHECK_ENV = "AGENTS_LIVE_SKIP_UPDATE_CHECK"
 
 
 def config_path() -> Path:
@@ -233,9 +234,13 @@ def _cli_base() -> list[str]:
 
 
 def _child_json(alias: str, path: str, command: str) -> dict:
+    env = None
+    if command == "doctor":
+        env = os.environ.copy()
+        env[SKIP_UPDATE_CHECK_ENV] = "1"
     completed = subprocess.run(
         [*_cli_base(), "--repo", path, command, "--json"],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
     try:
         payload = json.loads(completed.stdout)
@@ -297,6 +302,7 @@ def collect_doctor() -> dict:
     with tempfile.TemporaryDirectory() as empty:
         env = os.environ.copy()
         env.pop("AGENTS_LIVE_REPO", None)
+        env.pop(SKIP_UPDATE_CHECK_ENV, None)
         env["XDG_CONFIG_HOME"] = empty
         host_run = subprocess.run(
             [*_cli_base(), "--json", "doctor"],

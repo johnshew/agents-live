@@ -67,10 +67,10 @@ try:
     REPO_ROOT = headless.repo_root()
 except ValueError:
     REPO_ROOT = None
-LOGS_DIR = REPO_ROOT / "Agents" / "logs" if REPO_ROOT else Path("Agents/logs")
+LOGS_DIR = REPO_ROOT / "Agents" / "logs" if REPO_ROOT else None
 HEALTH_OK_PATH = (
     REPO_ROOT / "Agents" / "data" / "health.ok"
-    if REPO_ROOT else Path("Agents/data/health.ok")
+    if REPO_ROOT else None
 )
 # The health-check worker is scheduled hourly; allow a little slack before
 # treating the beacon as stale (a missed run shouldn't flap the header).
@@ -81,6 +81,14 @@ HEALTH_STALE_MINUTES = 70
 WORKER_TIMEOUT = 480
 
 STATE: dict = {"last_refresh": datetime.now(timezone.utc)}
+
+
+def _require_repo_path(path: Path | None) -> Path:
+    if path is None:
+        raise RuntimeError(
+            "single-repository dashboard requires a project root; "
+            "use --all-repos outside an initialized project")
+    return path
 
 
 # --- Data ---------------------------------------------------------------
@@ -105,7 +113,7 @@ def last_runs(name: str) -> tuple[str, str, str]:
     drives the health colour the same way the DASHBOARD.md "OK" column
     does: an agent whose last run errored is unhealthy.
     """
-    log_file = LOGS_DIR / f"{name}.log"
+    log_file = _require_repo_path(LOGS_DIR) / f"{name}.log"
     if not log_file.is_file():
         return ("-", "-", "")
     last_ok: str | None = None
@@ -147,7 +155,7 @@ def agent_cost(name: str) -> tuple[str, str]:
     recently); an agent that ran in the last week but not the last day
     shows "$0.00" for the 24h figure.
     """
-    log_file = LOGS_DIR / f"{name}.log"
+    log_file = _require_repo_path(LOGS_DIR) / f"{name}.log"
     if not log_file.is_file():
         return ("-", "-")
     now = datetime.now(timezone.utc)
@@ -247,8 +255,8 @@ def trigger_summary(agent: dict) -> str:
 
 # --- Actions ------------------------------------------------------------
 
-DASHBOARD_LOG = LOGS_DIR / "dashboard.log"
-DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log"
+DASHBOARD_LOG = LOGS_DIR / "dashboard.log" if LOGS_DIR else None
+DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log" if LOGS_DIR else None
 
 
 # Script file -> CLI subcommand, for packaged execution where the flat
@@ -280,7 +288,7 @@ def _run_script(script: str, args: list[str],
     try:
         proc = subprocess.run(
             _script_argv(script, args),
-            cwd=REPO_ROOT,
+            cwd=_require_repo_path(REPO_ROOT),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -302,7 +310,7 @@ def _log_action(label: str, script: str, args: list[str], code: int,
     stderr so a failed Activate/Run can be reviewed after the fact.
     """
     headless.log_event(
-        DASHBOARD_LOG,
+        _require_repo_path(DASHBOARD_LOG),
         level="info" if code == 0 else "error",
         phase="action",
         action=label,
@@ -317,9 +325,10 @@ def _log_action(label: str, script: str, args: list[str], code: int,
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = " ".join([script, *args])
     header = f"\n===== {ts} {label}: {cmd} (exit {code}) =====\n"
+    transcript = _require_repo_path(DASHBOARD_TRANSCRIPT)
     try:
-        DASHBOARD_TRANSCRIPT.parent.mkdir(parents=True, exist_ok=True)
-        with DASHBOARD_TRANSCRIPT.open("a", encoding="utf-8") as handle:
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        with transcript.open("a", encoding="utf-8") as handle:
             handle.write(header)
             if out:
                 handle.write(out if out.endswith("\n") else out + "\n")
@@ -489,16 +498,17 @@ def system_health() -> dict:
     ``text`` label for the header, and a longer ``tip`` tooltip.
     """
     now = datetime.now(timezone.utc)
-    if not HEALTH_OK_PATH.is_file():
+    health_ok_path = _require_repo_path(HEALTH_OK_PATH)
+    if not health_ok_path.is_file():
         return {"level": "down", "text": "unhealthy: no beacon",
                 "tip": "Agents/data/health.ok is missing - the health-check "
                        "worker has never written a healthy beacon. "
                        "Run the health check."}
-    mtime = datetime.fromtimestamp(HEALTH_OK_PATH.stat().st_mtime, timezone.utc)
+    mtime = datetime.fromtimestamp(health_ok_path.stat().st_mtime, timezone.utc)
     age_min = (now - mtime).total_seconds() / 60
     ago = _ago(mtime.isoformat(), now)
     try:
-        data = json.loads(HEALTH_OK_PATH.read_text(encoding="utf-8"))
+        data = json.loads(health_ok_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
     if not isinstance(data, dict):

@@ -161,7 +161,7 @@ mediated-output boundary, not OS-level isolation. The agent can affect the
 world only through `put` and `get`, which deterministic pre/post-processors
 mediate. The side-channel is ephemeral and scoped to one agent run.
 
-The MCP supports `put(path, value)` and `get(path)` —
+The MCP supports `put(path, value)` and `get(path)` -
 a path-addressed key/value store. Schema metadata is supported via put and get on `<path>/$schema` with Draft 2020-12 JSON-Schema
 validation on `put` content.
 
