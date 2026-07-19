@@ -1904,7 +1904,7 @@ class TestReleaseTool(unittest.TestCase):
             '__version__ = "1.2.3"\n',
             'blob = "https://example.test/blob/v1.2.3/docs"\n',
             "1.2.3\n",
-            "# Changelog\n\n## Unreleased\n\nA fix.\n\n## 1.2.3\n\nOld.\n",
+            "# Changelog\n\n## Unreleased\n\nA fix.\n\n## 1.2.3 - 2026-07-18\n\nOld.\n",
         )
         for path, content in zip(module.RELEASE_FILES, contents):
             path.parent.mkdir(parents=True, exist_ok=True)
