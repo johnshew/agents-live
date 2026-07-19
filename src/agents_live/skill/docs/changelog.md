@@ -9,6 +9,34 @@ history is retained in the source repository.
 - fix: organize GitHub release notes into curated, generated, and reference sections.
   New publications and retries show `Curated Summary` first, GitHub's pull
   request list next, and changelog plus version-range links last.
+- feat!: ship the check-and-repair loop as the built-in `agents-live health-check` command.
+  The loop no longer depends on a consumer-project agent: it self-installs
+  its `@reboot` + hourly crontab entries, converges declared plugin wheels
+  into the tool environment, sweeps every registered repository (crontab
+  convergence, orphan and registry pruning, ownership enforcement, dead
+  watcher restarts), gates the framework smoketest on a content
+  fingerprint, and writes the host health beacon. An unavailable ownership
+  backend now degrades the beacon and abstains instead of aborting the
+  pass. Doctor gains a "health-check loop installed" check and its repair
+  hints target the built-in; the dashboard health panel and button use it
+  too. `uninstall` removes the loop's entries; `upgrade` converges them
+  but never installs - a host opts in by running the command once.
+  BREAKING CHANGE: the per-project health-check agent pattern is retired;
+  delete such agents and run `agents-live health-check` once per host.
+- feat!: move machine-local runtime state to the user-level XDG state home.
+  Logs, run artifacts, beacons, watch hashes, and the smoketest lock now
+  live under `$XDG_STATE_HOME/agents-live/` (default
+  `~/.local/state/agents-live/`), host-level plus one directory per
+  repository, so project trees no longer carry machine state that could
+  sync or export, and the tool works with no initialized project.
+  `Agents/` keeps only git-tracked content and the git-synced ownership
+  registry `Agents/data/agent-owners.json`; `init` no longer creates
+  `Agents/logs/`. `agents-live logs --all` unions the repository's logs
+  with the host-level logs.
+  BREAKING CHANGE: `agents-live migrate` (run by every hourly health-check
+  pass) moves legacy in-tree state to the new locations; tooling that read
+  `Agents/logs/` or `Agents/data/health.ok` directly must switch to
+  `agents-live logs` or the state-home paths.
 
 ## 1.0.0 - 2026-07-19
 
