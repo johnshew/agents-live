@@ -209,8 +209,10 @@ def load_config(root: Path | None = None) -> dict:
     ``.agents-live.toml`` at the root is the whole config and wins
     outright when present; otherwise the ``[tool.agents-live]``
     table of ``pyproject.toml``; otherwise ``{}`` (a project that never
-    opted into any setting). Raises ValueError when an existing file
-    that would supply config cannot be read or parsed - callers decide
+    opted into any setting). Plugin declarations are validated here, including
+    their repository-relative wheel paths and optional SHA-256 syntax. Raises
+    ValueError when an existing file that would supply config cannot be read,
+    parsed, or validated - callers decide
     whether that is fatal (ownership: fail closed) or ignorable
     (agent-directory extras: fall back to the default)."""
     base = resolve_root() if root is None else Path(root)

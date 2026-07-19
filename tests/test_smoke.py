@@ -366,7 +366,8 @@ class TestProjectPlugins(_TempProject):
         version = "1.2.3"
         wheel = self._wheel(version=version)
         (self.root / ".agents-live.toml").write_text(
-            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root)}" }}\n',
+            f'[plugins]\nexample-plugin = '
+            f'{{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
             encoding="utf-8",
         )
         plugin = plugins.declared(self.root)["example-plugin"]
@@ -377,7 +378,8 @@ class TestProjectPlugins(_TempProject):
         wheel = self._wheel()
         (self.root / ".agents-live.toml").write_text(
             'ownership = "registry"\n'
-            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root)}" }}\n',
+            f'[plugins]\nexample-plugin = '
+            f'{{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
             encoding="utf-8",
         )
         no_crontab = subprocess.CompletedProcess(

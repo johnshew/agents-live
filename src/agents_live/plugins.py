@@ -161,6 +161,7 @@ def _receipt_path() -> Path | None:
 
 
 def _receipt_requirement(requirement: dict) -> str:
+    """Reconstruct a uv receipt requirement as a PEP 508/path argument."""
     for field in ("path", "directory", "url"):
         if field in requirement:
             return str(requirement[field])
@@ -246,6 +247,8 @@ def converge(roots: list[Path]) -> bool:
         command.append("--editable")
     command.append(primary.value)
     for requirement in requirements.values():
+        # uv distinguishes the positional tool's --editable flag from the
+        # --with-editable option used for co-installed requirements.
         flag = "--with-editable" if requirement.editable else "--with"
         command.extend([flag, requirement.value])
     completed = subprocess.run(command, check=False)
