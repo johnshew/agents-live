@@ -46,6 +46,11 @@ def _module_argv(module: str) -> list[str]:
         return [sys.executable, "-m", f"{__package__}.{module}"]
     return [sys.executable, str(SCRIPT_DIR / f"{module}.py")]
 SMOKETEST_LOCK_PATH = paths.repo_state_dir(repo_root()) / "smoketest-framework.lock"
+# Ephemeral fixture files the smoketest's agents and handlers write via
+# repo-relative paths. These must stay inside the repository (watch
+# paths are validated to; the write-files.sh handler writes relative to
+# the repo root), so they cannot follow the logs to the state home.
+FIXTURES_REL = "Agents/_smoketest-tmp"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
 SMOKETEST_AGENT_NAMES = (
@@ -369,15 +374,15 @@ def cleanup() -> tuple[list[str], list[str]]:
     for name in SMOKETEST_AGENT_NAMES:
         prompt = agents_dir() / f"{name}.md"
         prompt.unlink(missing_ok=True)
-    trigger_dir = logs_root() / "_smoketest-watcher"
+    trigger_dir = repo_root() / FIXTURES_REL / "_smoketest-watcher"
     trigger_file = trigger_dir / "trigger.txt"
     trigger_file.unlink(missing_ok=True)
     # Clean up debounce test artifacts
-    debounce_dir = logs_root() / "_smoketest-debounce"
+    debounce_dir = repo_root() / FIXTURES_REL / "_smoketest-debounce"
     (debounce_dir / "trigger.txt").unlink(missing_ok=True)
-    (logs_root() / "_smoketest-debounce-result.txt").unlink(missing_ok=True)
+    (repo_root() / FIXTURES_REL / "_smoketest-debounce-result.txt").unlink(missing_ok=True)
     # Clean up spawn test artifacts
-    (logs_root() / "_smoketest-spawn-child-result.txt").unlink(missing_ok=True)
+    (repo_root() / FIXTURES_REL / "_smoketest-spawn-child-result.txt").unlink(missing_ok=True)
     # Clean up pre-processor smoketest artifacts
     for fname in SMOKETEST_HANDLER_NAMES:
         handler = repo_root() / "Agents" / "handlers" / fname
@@ -388,7 +393,7 @@ def cleanup() -> tuple[list[str], list[str]]:
     for legacy in ("smoketest-preprocessor-prep.py", "smoketest-preprocessor-post.sh"):
         (repo_root() / "Agents" / "handlers" / legacy).unlink(missing_ok=True)
     # Remove empty smoketest directories
-    for d in (trigger_dir, debounce_dir):
+    for d in (trigger_dir, debounce_dir, repo_root() / FIXTURES_REL):
         try:
             d.rmdir()
         except OSError:
@@ -561,7 +566,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
     cron_name = "_smoketest-cron"
     watcher_name = "_smoketest-watcher"
-    trigger_dir = logs_root() / watcher_name
+    trigger_dir = repo_root() / FIXTURES_REL / watcher_name
     trigger_file = trigger_dir / "trigger.txt"
     current_step = "preflight"
 
@@ -599,7 +604,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                     "",
                     "## Required output",
                     "",
-                    '{"files":[{"path":"Agents/logs/_smoketest-watcher/trigger.txt","content":"smoketest-trigger-fired"}],"summary":"Smoketest trigger file written","magic":"xyzzy"}',
+                    f'{{"files":[{{"path":"{FIXTURES_REL}/_smoketest-watcher/trigger.txt","content":"smoketest-trigger-fired"}}],"summary":"Smoketest trigger file written","magic":"xyzzy"}}',
                 ]
             ),
             encoding="utf-8",
@@ -617,7 +622,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                     f"runtime: {args.runtime}",
                     f"model: {model}",
                     "mode: plan",
-                    f"watchPath: Agents/logs/{watcher_name}/",
+                    f"watchPath: {FIXTURES_REL}/{watcher_name}/",
                     "---",
                     "",
                     "# Smoketest Watcher Agent",
@@ -627,7 +632,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                     "",
                     "## Steps",
                     "",
-                    "1. Read the file `Agents/logs/_smoketest-watcher/trigger.txt`",
+                    f"1. Read the file `{FIXTURES_REL}/_smoketest-watcher/trigger.txt`",
                     '2. Verify its content is "smoketest-trigger-fired"',
                     '3. Build the JSON object shown below, setting status to "pass" or "fail"',
                     '4. Keep the "trigger" and "magic" fields exactly as shown',
@@ -664,7 +669,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         if watcher_status.get("type") != "watcher":
             fail("Expected type=watcher")
         wp = watcher_status.get("watchPath")
-        expected_wp = f"Agents/logs/{watcher_name}/"
+        expected_wp = f"{FIXTURES_REL}/{watcher_name}/"
         if wp != [expected_wp] and wp != expected_wp:
             fail(f"Expected watchPath=[{expected_wp!r}], got {wp!r}")
         print("  Watcher agent: fields verified")
@@ -1009,7 +1014,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Create a minimal agent for spawn to invoke
         spawn_agent_name = "_smoketest-spawn-child"
-        spawn_result_file = logs_root() / f"{spawn_agent_name}-result.txt"
+        spawn_result_file = repo_root() / FIXTURES_REL / f"{spawn_agent_name}-result.txt"
         spawn_result_file.unlink(missing_ok=True)
         (agents_dir() / f"{spawn_agent_name}.md").write_text(
             "\n".join([
@@ -1027,7 +1032,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 "the file from the JSON response after you finish.",
                 "Output exactly this JSON:",
                 "",
-                f'{{"files":[{{"path":"Agents/logs/{spawn_agent_name}-result.txt","content":"spawn-passed"}}],"summary":"Spawn child completed","magic":"spawn-xyzzy"}}',
+                f'{{"files":[{{"path":"{FIXTURES_REL}/{spawn_agent_name}-result.txt","content":"spawn-passed"}}],"summary":"Spawn child completed","magic":"spawn-xyzzy"}}',
             ]),
             encoding="utf-8",
         )
@@ -1077,7 +1082,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # window expires. Trigger multiple times, verify only one agent run
         # happens after the quiet window.
         debounce_name = "_smoketest-debounce"
-        debounce_dir = logs_root() / debounce_name
+        debounce_dir = repo_root() / FIXTURES_REL / debounce_name
         debounce_dir.mkdir(parents=True, exist_ok=True)
         debounce_trigger = debounce_dir / "trigger.txt"
         debounce_trigger.unlink(missing_ok=True)
@@ -1092,7 +1097,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 f"model: {model}",
                 "mode: plan",
                 "post-processor: write-files.sh",
-                f"watchPath: Agents/logs/{debounce_name}/",
+                f"watchPath: {FIXTURES_REL}/{debounce_name}/",
                 "debounce: 5",
                 "---",
                 "",
@@ -1105,14 +1110,14 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 "",
                 "## Steps",
                 "",
-                f'1. Read the file `Agents/logs/{debounce_name}/trigger.txt`',
+                f'1. Read the file `{FIXTURES_REL}/{debounce_name}/trigger.txt`',
                 "2. Build the JSON object shown below",
                 '3. Keep the magic field exactly "debounce-xyzzy"',
                 "4. Output the JSON object only",
                 "",
                 "## Required output",
                 "",
-                f'{{"files":[{{"path":"Agents/logs/{debounce_name}-result.txt","content":"debounce-passed"}}],"summary":"Debounce test passed","magic":"debounce-xyzzy"}}',
+                f'{{"files":[{{"path":"{FIXTURES_REL}/{debounce_name}-result.txt","content":"debounce-passed"}}],"summary":"Debounce test passed","magic":"debounce-xyzzy"}}',
             ]),
             encoding="utf-8",
         )
@@ -1150,7 +1155,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Wait for the quiet window to expire and the agent to complete.
         # Third trigger batches at ~T=6, window expires at T=6 + debounce(5) = T~11.
         # Plus agent runtime = ~30-60s total from last trigger.
-        debounce_result_file = logs_root() / f"{debounce_name}-result.txt"
+        debounce_result_file = repo_root() / FIXTURES_REL / f"{debounce_name}-result.txt"
         max_wait = 120
         poll_interval = 3
         waited = 0
@@ -1228,7 +1233,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         if remaining != 0:
             fail("Agents still appear in status after stop")
         print("  Cleanup verified: all agents removed from disk and status")
-        print("  Log files preserved in Agents/logs/")
+        print(f"  Log files preserved in {logs_root()}/")
 
         print("")
         print(f"PASS - full chain validated ({args.runtime}):")
