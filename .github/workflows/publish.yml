@@ -17,7 +17,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,4 +28,10 @@ jobs:
       - run: uv run --script tools/pre-release-audit.py
       - run: uv run --with-editable . python -m unittest tests.test_smoke
       - run: uv build
+      # Attach the exact artifacts going to PyPI before publishing, so a
+      # failed upload can be rerun without hitting PyPI's duplicate check.
+      - run: gh release upload "$TAG" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
       - run: uv publish --trusted-publishing always

@@ -71,10 +71,13 @@ uv run --script tools/release.py --publish --yes
 
 For the initial push, publication reruns all gates, requires the tagged release
 commit to be exactly one commit ahead of `origin/main`, pushes the commit and
-tag atomically, and creates the GitHub release.
+tag atomically, and creates the GitHub release. The release body starts with
+the version's changelog section, followed by GitHub's generated notes (merged
+pull requests and the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
-which rebuilds and publishes to PyPI through trusted publishing. Wait for that
+which rebuilds, attaches the wheel and sdist to the GitHub release, and
+publishes the same artifacts to PyPI through trusted publishing. Wait for that
 workflow to succeed, verify the exact version on PyPI, then run the installed
 tool checks in [testing.md](testing.md). Use an exact version and `--refresh`
 when uv's index cache has not observed the new release yet.

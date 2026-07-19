@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -85,6 +86,18 @@ def _unreleased_notes(changelog: str | None = None) -> str:
     notes = re.split(r"(?m)^## ", content.split(marker, 1)[1], maxsplit=1)[0].strip()
     if not notes:
         raise ReleaseError("changelog Unreleased section has no release notes")
+    return notes
+
+
+def _version_notes(version: str) -> str:
+    content = CHANGELOG.read_text(encoding="utf-8")
+    heading = re.compile(rf"(?m)^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}\n")
+    match = heading.search(content)
+    if match is None:
+        raise ReleaseError(f"changelog has no section for {version}")
+    notes = re.split(r"(?m)^## ", content[match.end():], maxsplit=1)[0].strip()
+    if not notes:
+        raise ReleaseError(f"changelog section for {version} is empty")
     return notes
 
 
@@ -210,7 +223,8 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
         f"git push --atomic origin main {tag}",
-        f"gh release create {tag} --verify-tag --generate-notes",
+        f"gh release create {tag} --verify-tag --generate-notes "
+        "--notes-file <changelog section>",
     )
     for command in commands:
         print(f"  {command}")
@@ -278,15 +292,25 @@ def publish() -> None:
     if existing.returncode == 0:
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
         return
+    notes = _version_notes(version)
     _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
     _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
     _run(["uv", "build"])
     if needs_push:
         _run(["git", "push", "--atomic", "origin", "main", tag])
-    _run([
-        "gh", "release", "create", tag,
-        "--verify-tag", "--generate-notes", "--title", f"agents-live {tag}",
-    ])
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".md", delete_on_close=False
+    ) as notes_file:
+        notes_file.write(notes + "\n")
+        notes_file.close()
+        # gh prepends the file's notes to the --generate-notes body, so the
+        # release shows the curated changelog first, then the PR list.
+        _run([
+            "gh", "release", "create", tag,
+            "--verify-tag", "--generate-notes",
+            "--notes-file", notes_file.name,
+            "--title", f"agents-live {tag}",
+        ])
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
 
