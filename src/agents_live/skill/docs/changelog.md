@@ -9,6 +9,14 @@ history is retained in the source repository.
 - feat: make `repos default <path>` register an existing unregistered
   repository before selecting it as the fallback.
 
+## 0.3.1 - 2026-07-18
+
+- fix: register the Windows heartbeat task through the packaged
+  `run-hidden.vbs` wrapper (`wscript.exe`), so the five-minute cadence
+  no longer flashes a visible console window. `doctor` flags direct
+  `wsl.exe` registrations and recommends re-running
+  `agents-live heartbeat install`, which replaces the action in place.
+
 ## 0.3.0 - 2026-07-18
 
 - fix: refuse to modify the crontab when it cannot be read. A transient
