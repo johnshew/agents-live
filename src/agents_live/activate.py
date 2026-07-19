@@ -203,11 +203,14 @@ def _dispatch_run_once(name: str, changed_files: list[str]) -> None:
             stdout=out_f,
             stderr=err_f,
         )
+        # Absolute paths: run captures live in the user-level state
+        # home, not the repository, so repo-relative rendering raises
+        # ValueError (crashing the watcher mid-dispatch, 2026-07-19).
         log_event(system_log(), level="info", agent_name=name,
                   phase="dispatch", status="start",
                   child_pid=proc.pid,
-                  stdout=str(out_path.relative_to(repo_root())),
-                  stderr=str(err_path.relative_to(repo_root())))
+                  stdout=str(out_path),
+                  stderr=str(err_path))
         rc = proc.wait()
     duration_s = round(time.monotonic() - dispatch_started, 1)
     exit_signal = (signal.Signals(-rc).name
