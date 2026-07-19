@@ -169,12 +169,20 @@ def fail(message: str) -> None:
 
 
 def run_status(*args: str) -> str:
+    # status.py has no --json flag of its own; JSON mode is the env
+    # contract the CLI sets (preflight.JSON_ENV_VAR), so translate the
+    # conventional flag into that contract for the direct module child.
+    argv = [arg for arg in args if arg != "--json"]
+    env = None
+    if len(argv) != len(args):
+        env = {**os.environ, preflight.JSON_ENV_VAR: "1"}
     completed = subprocess.run(
-        [*_module_argv("status"), *args],
+        [*_module_argv("status"), *argv],
         cwd=repo_root(),
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if completed.returncode != 0:
         raise SmokeFailure(completed.stderr.strip() or completed.stdout.strip() or "status failed")

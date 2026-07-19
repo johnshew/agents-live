@@ -53,6 +53,7 @@ from . import update_check
 from . import __version__
 from .cli_spec import (
     COMMAND_BY_NAME,
+    Cmd,
     command_help,
     render_usage,
     unknown_flag,
@@ -87,12 +88,11 @@ def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
     return rest
 
 
-def _finish(code: int, cmd: str, rest: list[str], *, json_mode: bool) -> int:
-    command = COMMAND_BY_NAME.get(cmd)
+def _finish(code: int, command: Cmd | None, rest: list[str],
+            *, json_mode: bool) -> int:
     if (
         (command is None or command.update_notice)
         and not json_mode
-        and "--json" not in rest
         and "--quiet" not in rest
         and update_check.interactive()
     ):
@@ -112,36 +112,43 @@ def _emit_failure(code: str, operation: str, detail: str,
     )
 
 
-def _captured_result(code: int, cmd: str, stdout: str, stderr: str) -> int:
+def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
+                     shape: str = "object") -> int:
     """Emit one JSON value for a captured JSON-capable command."""
     text = stdout.strip()
+    lines = []
+    for line in text.splitlines():
+        try:
+            lines.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if shape == "records" and code == 0:
+        # One record per stdout line; the envelope always carries a
+        # ``records`` list so consumers see one shape for 0, 1, or N
+        # rows. Failures use the shared error handling below.
+        print(json.dumps({"ok": True, "operation": cmd, "records": lines}))
+        return code
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        parsed_lines = []
-        for line in text.splitlines():
-            try:
-                parsed_lines.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        parsed = None
-        if parsed_lines:
-            parsed = (
-                {"ok": code == 0, "operation": cmd, "records": parsed_lines}
-                if cmd == "logs" and code == 0 else parsed_lines[-1]
+        parsed = lines[-1] if lines else None
+        if code != 0:
+            parsed = next(
+                (item for item in reversed(lines)
+                 if isinstance(item, dict) and "error" in item),
+                parsed,
             )
-            if code != 0:
-                parsed = next(
-                    (item for item in reversed(parsed_lines)
-                     if isinstance(item, dict) and "error" in item),
-                    parsed,
-                )
-    if code != 0 and not (
-            isinstance(parsed, dict) and isinstance(parsed.get("error"), dict)):
-        _emit_failure(
-            "operation_failed", cmd, stderr.strip() or text,
-            json_mode=True,
-        )
+    if code != 0:
+        # A structured payload (an error envelope, or a result document
+        # like doctor's {ok: false, checks: [...]}) passes through
+        # untouched; only unstructured output becomes an envelope.
+        if isinstance(parsed, dict):
+            print(json.dumps(parsed))
+        else:
+            _emit_failure(
+                "operation_failed", cmd, stderr.strip() or text,
+                json_mode=True,
+            )
     elif parsed is not None:
         print(json.dumps(parsed))
     else:
@@ -263,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args or args[0] in ("-h", "--help", "help"):
         print(_usage())
-        return _finish(0, "help", [], json_mode=json_mode)
+        return _finish(0, None, [], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
     command = COMMAND_BY_NAME.get(cmd)
@@ -276,23 +283,21 @@ def main(argv: list[str] | None = None) -> int:
         json_mode = True
         os.environ[preflight.JSON_ENV_VAR] = "1"
         rest = [argument for argument in rest if argument != "--json"]
-    if json_mode and not command.json:
-        _emit_failure(
-            "usage_error", cmd, f"{cmd} does not support --json",
-            json_mode=True)
-        return 2
-    if command is not None and any(arg in ("-h", "--help") for arg in rest):
+    # Commands without envelope support (command.json False) still accept
+    # --json: the env var carries envelope mode to any typed errors, and
+    # the command's own output passes through uncaptured.
+    capture = json_mode and command.json
+    if any(arg in ("-h", "--help") for arg in rest):
         print(command_help(command, cmd), end="")
-        return _finish(0, cmd, rest, json_mode=json_mode)
-    if command is not None:
-        unknown = unknown_flag(command, rest)
-        if unknown is not None:
-            _emit_failure(
-                "usage_error", cmd, f"unrecognized argument: {unknown}",
-                json_mode=json_mode)
-            return 2
+        return _finish(0, command, rest, json_mode=json_mode)
+    unknown = unknown_flag(command, rest)
+    if unknown is not None:
+        _emit_failure(
+            "usage_error", cmd, f"unrecognized argument: {unknown}",
+            json_mode=json_mode)
+        return 2
     all_repos = "--all-repos" in rest
-    if all_repos and (command is None or not command.all_repos):
+    if all_repos and not command.all_repos:
         _emit_failure(
             "usage_error", cmd,
             f"{cmd} does not support --all-repos; select one repository",
@@ -306,10 +311,9 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module.
-    if (command is None or command.root != "none") and not all_repos:
+    if command.root != "none" and not all_repos:
         if (
-            command is not None
-            and command.root == "auto-marker"
+            command.root == "auto-marker"
             and not os.environ.get(paths.ENV_VAR, "").strip()
             and paths._walk_for_marker(Path.cwd()) is None
         ):
@@ -318,13 +322,11 @@ def main(argv: list[str] | None = None) -> int:
             paths.resolve_root()
         except ValueError as exc:
             allow_markerless_invocation = (
-                command is not None
-                and command.root == "markerless"
+                command.root == "markerless"
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
             if not allow_markerless_invocation and (
-                    command is None
-                    or command.root != "auto-marker"
+                    command.root != "auto-marker"
                     or _adopt_git_root(cmd) is None):
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),
@@ -332,21 +334,18 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         if (
             paths.resolution_source() == "default"
-            and command is not None
             and command.default_notice
         ):
             print(f"agents-live: using default repo {paths.resolve_root()}",
                   file=sys.stderr)
 
-    rest = _apply_name_sugar(
-        command.name_sugar if command is not None else False, rest)
+    rest = _apply_name_sugar(command.name_sugar, rest)
 
     # Static capability preflight for host-mutating commands (§3.6).
     # Advisory layer 1 of 3: the operation itself still converts failures,
     # and post-verification confirms state. For a targeted `start` the
     # probe set derives from the agent's own triggers.
-    if command is not None and (
-            command.probes or command.dynamic_probes is not None):
+    if command.probes or command.dynamic_probes is not None:
         capabilities = (
             _start_capabilities(rest)
             if command.dynamic_probes == "start"
@@ -359,7 +358,8 @@ def main(argv: list[str] | None = None) -> int:
             preflight.emit_error(failure, json_mode=json_mode)
             return 2
 
-    if command is not None and command.dispatch == "subprocess":
+    if command.dispatch == "subprocess":
+        active = command
         script = command.module
         if rest:
             subcommand = next(
@@ -367,16 +367,18 @@ def main(argv: list[str] | None = None) -> int:
                 None,
             )
             if subcommand is not None:
-                script, rest = subcommand.module, rest[1:]
-        if json_mode and cmd == "logs" and script == "qlog.py":
-            if "--format" not in rest:
-                rest.extend(("--format", "jsonl"))
+                active, script, rest = subcommand, subcommand.module, rest[1:]
+        if capture and active.json_args:
+            lead = active.json_args[0]
+            if not any(token == lead or token.startswith(f"{lead}=")
+                       for token in rest):
+                rest.extend(active.json_args)
         uv = shutil.which("uv") or "uv"
         try:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
-                **({"capture_output": True, "text": True} if json_mode else {}),
+                **({"capture_output": True, "text": True} if capture else {}),
             )
         except KeyboardInterrupt:
             # Ctrl-C reaches the child (same process group) which handles
@@ -386,10 +388,11 @@ def main(argv: list[str] | None = None) -> int:
         code = completed.returncode
         if code < 0:
             code = 128 - code  # signal death -> conventional 128+signum
-        if json_mode:
+        if capture:
             return _captured_result(
-                code, cmd, completed.stdout, completed.stderr)
-        return _finish(code, cmd, rest, json_mode=json_mode)
+                code, cmd, completed.stdout, completed.stderr,
+                shape=active.json_shape)
+        return _finish(code, command, rest, json_mode=json_mode)
 
     import importlib
     # Package-aware dispatch (Phase 4): as loose scripts the modules are
@@ -400,21 +403,39 @@ def main(argv: list[str] | None = None) -> int:
     module = importlib.import_module(module_name)
     sys.argv = [f"agents-live {cmd}", *rest]
     try:
-        if json_mode:
+        if capture:
             stdout = io.StringIO()
             stderr = io.StringIO()
-            with (
-                contextlib.redirect_stdout(stdout),
-                contextlib.redirect_stderr(stderr),
-            ):
-                code = module.main()
+            try:
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    code = module.main()
+            except SystemExit as exc:
+                # A subcommand's own argparse exits inside the redirect;
+                # surface its captured message as an envelope instead of
+                # exiting with empty stdout and stderr.
+                code = exc.code if isinstance(exc.code, int) else (
+                    1 if exc.code else 0)
+                if code != 0:
+                    _emit_failure(
+                        "usage_error", cmd,
+                        stderr.getvalue().strip() or stdout.getvalue().strip(),
+                        json_mode=True)
+                    return code
             return _captured_result(
-                code, cmd, stdout.getvalue(), stderr.getvalue())
+                code, cmd, stdout.getvalue(), stderr.getvalue(),
+                shape=command.json_shape)
         code = module.main()
-        return _finish(code, cmd, rest, json_mode=json_mode)
+        return _finish(code, command, rest, json_mode=json_mode)
     except Exception as exc:
         # Layer-2 safety net: a typed error that escapes a subcommand's
         # own handling still leaves as the envelope, never a traceback.
+        # Untyped exceptions are programming bugs; re-raise so the crash
+        # site stays diagnosable.
+        if getattr(exc, "category", None) is None:
+            raise
         preflight.emit_typed_error(exc, cmd)
         return 1
 

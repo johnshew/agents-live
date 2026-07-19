@@ -410,12 +410,9 @@ def main() -> int:
             stream.event(level="error", phase="done", status="error",
                          message=msg, error_category=error_category,
                          duration_s=duration_s, **phase_durations)
-        if preflight.json_mode():
-            # Layer 2 (§3.6): with --json the typed error leaves as the
-            # envelope on stdout, not prose on stderr.
-            preflight.emit_typed_error(exc, "run")
-        else:
-            preflight.emit_typed_error(exc, "run")
+        # Layer 2 (§3.6): emit_typed_error branches on json mode itself -
+        # envelope on stdout with --json, one prose line on stderr without.
+        preflight.emit_typed_error(exc, "run")
         return 1
     finally:
         pipeline_stack.close()

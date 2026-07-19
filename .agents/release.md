@@ -33,11 +33,16 @@ Semantic versioning; the version lives in `pyproject.toml`.
 ```bash
 uv run --script tools/pre-release-audit.py
 uv run --with-editable . --script tests/test_smoke.py
+uv run --with-editable . agents-live smoketest
 uv build
 ```
 
 The audit must report no personal information, secrets, or nonportable
 paths, and its adapter-resolution and doc-link checks must pass.
+The framework smoketest must pass end to end: it exercises the real
+trigger/run/status loop in this checkout, catching integration breaks
+the unit suite cannot. `tools/release.py` runs all of these gates
+itself during `--prepare` and `--publish`.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`

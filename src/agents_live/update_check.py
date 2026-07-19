@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, paths
 
 CACHE_INTERVAL = 60 * 60  # Check hourly so available releases are reported promptly.
 NETWORK_TIMEOUT = 1.0
@@ -50,18 +50,11 @@ def _read_cache() -> dict[str, Any] | None:
 
 
 def _write_cache(value: dict[str, Any]) -> bool:
-    path = cache_path()
-    temporary = path.with_suffix(f".{os.getpid()}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        paths.atomic_write_text(
+            cache_path(), json.dumps(value, sort_keys=True) + "\n")
         return True
     except OSError:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
 

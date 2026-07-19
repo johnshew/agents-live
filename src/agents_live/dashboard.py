@@ -53,10 +53,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if (SCRIPTS_DIR / "__init__.py").is_file():
     if str(SCRIPTS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
-    from agents_live import headless, ownership, repos  # noqa: E402
+    from agents_live import cli_spec, headless, ownership, repos  # noqa: E402
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
+    import cli_spec  # noqa: E402
     import headless  # noqa: E402
     import ownership  # noqa: E402
     import repos  # noqa: E402
@@ -261,13 +262,13 @@ DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log" if LOGS_DIR else No
 
 # Script file -> CLI subcommand, for packaged execution where the flat
 # script files cannot be uv-run (their relative imports need the
-# package). The shim re-enters the same module in-process - the same
-# branch spawn takes for its packaged run invocation.
+# package). Derived from the command spec so a module rename or new
+# action never needs a hand-edit here (verb-to-module wiring has one
+# source of truth).
 _CLI_SUBCOMMAND = {
-    "doctor.py": "doctor",
-    "activate.py": "start",
-    "run.py": "run",
-    "stop.py": "stop",
+    f"{command.module}.py": command.name
+    for command in cli_spec.COMMANDS
+    if command.dispatch == "in-process" and not command.hidden
 }
 
 

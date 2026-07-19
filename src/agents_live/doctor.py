@@ -528,8 +528,7 @@ def collect() -> list[dict]:
             _add_windows_heartbeat_checks(add)
         return checks
 
-    if REPO is None:
-        return checks
+    # project_checks implies REPO is not None (_project_checks_enabled).
     add("Agents/ directory", (REPO / "Agents").is_dir(), True, "repo layout issue")
     add("Agents/handlers/ directory", (REPO / "Agents" / "handlers").is_dir(), True,
         "repo layout issue")

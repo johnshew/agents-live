@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -81,8 +82,9 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
             # same-named directory that happens to exist under the
             # caller's CWD (which would make the target flip with CWD).
             repos = _repos_module()
-            if explicit in repos.load()["repos"]:
-                return repos.resolve_name(explicit)
+            registry = repos.load()
+            if explicit in registry["repos"]:
+                return repos.resolve_name(explicit, registry)
             if not Path(explicit).expanduser().is_dir():
                 raise ValueError(
                     f"repo {explicit!r} is not registered; run "
@@ -239,11 +241,17 @@ def load_config(root: Path | None = None) -> dict:
     else:
         table = _pyproject_table(base / PYPROJECT, on_error="raise")
         config = table if table is not None else {}
-    validated_plugins(base, config.get("plugins", {}))
+    # Shape-only validation: a malformed plugins table is a config error
+    # every command should fail on, but a declared wheel missing from
+    # disk (a gitignored dist/ on a fresh clone) must not break agent
+    # discovery - existence is enforced by the plugin operations that
+    # consume the artifact.
+    validated_plugins(base, config.get("plugins", {}), require_exists=False)
     return config
 
 
-def validated_plugins(root: Path, values: object) -> dict[str, dict[str, object]]:
+def validated_plugins(root: Path, values: object, *,
+                      require_exists: bool = True) -> dict[str, dict[str, object]]:
     """Validate and resolve project-declared plugin wheels."""
     if not isinstance(values, dict):
         raise ValueError("plugins must be a table")
@@ -270,7 +278,7 @@ def validated_plugins(root: Path, values: object) -> dict[str, dict[str, object]
         except ValueError as exc:
             raise ValueError(
                 f"plugin {name!r} path escapes the repository: {value}") from exc
-        if not resolved.is_file():
+        if require_exists and not resolved.is_file():
             raise ValueError(f"plugin {name!r} wheel does not exist: {value}")
         if resolved.suffix != ".whl":
             raise ValueError(f"plugin {name!r} path must name a .whl file: {value}")
@@ -281,6 +289,33 @@ def validated_plugins(root: Path, values: object) -> dict[str, dict[str, object]
                 f"plugin {name!r} sha256 must be exactly 64 hexadecimal characters")
         result[name] = {"path": resolved, "sha256": digest}
     return result
+
+
+def atomic_write_text(path: Path, content: str, *,
+                      mode: int | None = None) -> None:
+    """Write-temp-then-rename so readers never observe a partial file.
+
+    The temp file lives in the target directory (same filesystem, so
+    ``os.replace`` is atomic), is fsynced before the rename, and is
+    removed on any failure. ``mode`` restricts permissions before any
+    content is written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent, text=True)
+    try:
+        if mode is not None:
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def validated_agent_directories(root: Path, values: object) -> list[Path]:

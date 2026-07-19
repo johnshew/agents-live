@@ -22,6 +22,16 @@ try:
 except ImportError:
     import preflight
 
+
+def _paths_module():
+    """The paths module under either layout (see preflight above: this
+    module is also imported flat by ``uv run --script`` dispatches)."""
+    try:
+        from . import paths
+    except ImportError:
+        import paths
+    return paths
+
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COLLECT_WORKERS = 4
 SKIP_UPDATE_CHECK_ENV = "AGENTS_LIVE_SKIP_UPDATE_CHECK"
@@ -67,8 +77,11 @@ def load() -> dict:
     return {"repos": normalized, "default_repo": default}
 
 
-def resolve_name(name: str) -> Path:
-    registry = load()
+def resolve_name(name: str, registry: dict | None = None) -> Path:
+    """Resolve a registered alias. Pass an already-loaded *registry* to
+    avoid a second read (see :func:`entries`)."""
+    if registry is None:
+        registry = load()
     if name not in registry["repos"]:
         raise ValueError(
             f"repo {name!r} is not registered; run `agents-live repos list`")
@@ -126,8 +139,6 @@ def _registry_lock() -> Iterator[None]:
 
 
 def _write(registry: dict) -> None:
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     if registry["default_repo"] is not None:
         lines.append(f"default_repo = {json.dumps(registry['default_repo'])}")
@@ -135,21 +146,8 @@ def _write(registry: dict) -> None:
     lines.append("[repos]")
     for alias, value in sorted(registry["repos"].items()):
         lines.append(f"{json.dumps(alias)} = {json.dumps(value)}")
-    content = "\n".join(lines) + "\n"
-    fd, temporary = tempfile.mkstemp(prefix=".config.", dir=path.parent, text=True)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    _paths_module().atomic_write_text(
+        config_path(), "\n".join(lines) + "\n", mode=0o600)
 
 
 def _register_path(registry: dict, value: str) -> str:
@@ -228,9 +226,11 @@ def _cli_base() -> list[str]:
     """
     if importlib.util.find_spec("agents_live") is not None:
         return [sys.executable, "-m", "agents_live.cli"]
-    shim = shutil.which("agents-live") or str(
-        Path.home() / ".local" / "bin" / "agents-live")
-    return [shim]
+    try:
+        from . import headless
+    except ImportError:
+        import headless
+    return [str(headless.cli_shim_path())]
 
 
 def _child_json(alias: str, path: str, command: str) -> dict:
@@ -375,11 +375,12 @@ def main(argv: list[str] | None = None) -> int:
                 }))
             elif not registry["repos"]:
                 print("No repositories registered")
-            for alias, path, error in (
-                    [] if preflight.json_mode() else entries(registry)):
-                marker = " (default)" if alias == registry["default_repo"] else ""
-                suffix = f" [unavailable: {error}]" if error else ""
-                print(f"{alias}{marker}\t{path}{suffix}")
+            else:
+                for alias, path, error in entries(registry):
+                    marker = (" (default)"
+                              if alias == registry["default_repo"] else "")
+                    suffix = f" [unavailable: {error}]" if error else ""
+                    print(f"{alias}{marker}\t{path}{suffix}")
         return 0
     except (OSError, ValueError) as exc:
         preflight.emit_failure("repos", str(exc))
