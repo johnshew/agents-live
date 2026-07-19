@@ -25,7 +25,7 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json"
-command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | heartbeat | uninstall | repos | completions | dashboard
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | health-check | heartbeat | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
 stop         ::= "stop" ( NAME | "--name" NAME )
@@ -38,6 +38,7 @@ doctor       ::= "doctor" [ "--all-repos" ]
 init         ::= "init"
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
 migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ] [ "--adopt" VALUE ]
+health-check ::= "health-check" [ "--quiet" ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
@@ -60,6 +61,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | init | in-process | none |  | yes |  |  |  | Initialize the project layout. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
 | migrate | in-process | required | crontab | yes |  |  | --dry-run, -n, --adopt | Converge persisted runtime invocations. |
+| health-check | in-process | none | crontab | yes |  |  | --quiet | Run the host check-and-repair loop. |
 | heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
 | heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
 | heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |
@@ -89,6 +91,7 @@ directory loaded by your shell configuration.
 
 - [install -- Installation Instructions](#install----installation-instructions)
 - [doctor -- Check Environment Readiness](#doctor----check-environment-readiness)
+- [health-check -- Host Check-and-Repair Loop](#health-check----host-check-and-repair-loop)
 - [smoketest -- End-to-End Validation](#smoketest----end-to-end-validation)
 - [create -- Create an Agent](#create----create-an-agent)
 - [release -- Audit, Assemble, and Publish](#release----audit-assemble-and-publish)
@@ -198,9 +201,11 @@ re-run.
 4. **Activate owned agents.** `agents-live start --all` -- installs the
    cron lines and starts the file-watchers for agents this host owns. Safe on
    every machine: it activates only what this host owns.
-5. **Bootstrap the health beacon.** `agents-live run
-   agents-live-health-check` -- writes `Agents/data/health.ok`. Until
-   this runs the beacon is missing and the dashboard reads "unhealthy".
+5. **Opt into the check-and-repair loop.** `agents-live health-check` --
+   runs the built-in host loop once, installs its own `@reboot` + hourly
+   crontab entries, and writes the host beacon
+   `~/.local/state/agents-live/health.ok`. Until this runs the beacon is
+   missing and the dashboard reads "unhealthy".
 6. **(WSL only) Register one distro-level Windows heartbeat.** Run
    `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"` so cron fires
    when the machine is idle -- see
@@ -233,12 +238,13 @@ referencing this repo, since the crontab is host-global), every active
 watcher covered by an `@reboot` respawn line (check 13 below), and the
 health beacon fresh within 75 minutes - a stale beacon means the
 boot/hourly check-and-repair loop itself is not firing, which is
-exactly the state no in-band check can report. `doctor`
+exactly the state no in-band check can report. A separate check reports
+whether the health-check loop's own crontab entries are installed on
+this host. `doctor`
 never mutates host state; `init` closes by running it so a fresh
 install ends verified green. Repairs are one step away: `migrate`
-converges stale crontab entries, then running the
-`agents-live-health-check` agent once re-verifies and refreshes the
-beacon.
+converges stale crontab entries, then running
+`agents-live health-check` once re-verifies and refreshes the beacon.
 
 Before `init`, a markerless `doctor` runs host readiness checks only (including
 cron, inotifywait, and agent CLIs) and notes that project checks are skipped.
@@ -465,6 +471,49 @@ ignore an `agency` WARN.
 
 ---
 
+## `health-check` -- Host Check-and-Repair Loop
+
+The built-in boot/hourly check-and-repair loop. It replaced the earlier
+consumer-project `agents-live-health-check` agent: the loop is host-scoped
+(host-global crontab, host-global uv tool environment, every registered
+repository), so it ships with the package and keeps its state in the
+user-level XDG state home, never inside any project tree.
+
+```bash
+agents-live health-check [--quiet]
+```
+
+Each pass:
+
+1. **Converges its own crontab entries.** The loop self-installs an
+   `@reboot` and an hourly entry of the form
+   `@reboot PATH=... <shim> health-check --quiet 2>&1` (no `cd`, no
+   `--repo`: the loop resolves registered repositories itself). Hosts opt
+   in by running `agents-live health-check` once; `upgrade` converges the
+   entries when present but never installs them, and `uninstall` removes
+   them.
+2. **Converges declared plugin wheels** into the host-global uv tool
+   environment.
+3. **Sweeps every registered repository**, each in its own subprocess
+   (`agents-live --repo <root> health-check --sweep`): converges persisted
+   crontab entries via `migrate`, prunes orphans, prunes fleet-wide
+   registry orphans, enforces multi-host ownership, and restarts dead
+   watchers.
+4. **Gates the framework smoketest on a content fingerprint** and runs it
+   against the default registered repository only when smoke-relevant
+   content changed.
+5. **Checks the Windows heartbeat** on WSL.
+6. **Writes the host health beacon** `~/.local/state/agents-live/health.ok`,
+   embedding the per-repo sweep summaries and the smoketest verdict.
+
+Unavailable ownership degrades the beacon and abstains from enforcement;
+it never aborts the loop. Events are logged to
+`~/.local/state/agents-live/logs/health-check.log`. `doctor` verifies both
+beacon freshness and that the loop's crontab entries are installed
+("health-check loop installed").
+
+---
+
 ## `smoketest` -- End-to-End Validation
 
 Validates the full chain: create -> frontmatter -> status -> agent CLI -> JSON
@@ -533,12 +582,7 @@ Parse the user's description to extract:
 
 ### Steps
 
-1. Ensure logs directory exists:
-   ```bash
-   mkdir -p "Agents/logs"
-   ```
-
-2. Generate the agent file in `.claude/agents/` or `.github/agents/` with YAML
+1. Generate the agent file in `.claude/agents/` or `.github/agents/` with YAML
    frontmatter and agent instructions.
    Include frontmatter with all config fields. If using a post-processor, include the
    JSON output section in the prompt body:
@@ -564,7 +608,7 @@ Parse the user's description to extract:
    }
    ```
 
-3. Show the user what was created and suggest next steps:
+2. Show the user what was created and suggest next steps:
    ```
     Created agent "<name>":
        prompt:   .claude/agents/<name>.md
@@ -674,6 +718,12 @@ in the current project, using the same crontab lock and canonical builders as
 normal activation. Unmatched entries and entries for every other project are
 reported and left unchanged.
 
+Transitional (to be removed after fleet convergence): `migrate` also
+performs a one-time move of legacy in-tree state into the user-level XDG
+state home - `Agents/logs/*` and watch-hash files move, and stale
+`health.ok` / smoketest lock files are deleted.
+`Agents/data/agent-owners.json` is untouched (git-synced shared state).
+
 ### Repository selection
 
 The user registry is
@@ -777,9 +827,8 @@ the "ownership never changes implicitly" contract below).
    happen via `ownership.set_owner()`, which the git-backed backend
   persists with a commit and a detached background `git push`
   so the new owner sees the change within seconds.
-- A scheduled health-check agent makes a good backstop: this
-   deployment runs one that deactivates agents owned by another host
-   every cron cycle (≤1h).
+- The built-in health-check loop is the backstop: its hourly per-repo
+   sweep deactivates agents owned by another host.
 
 ---
 
@@ -852,7 +901,7 @@ hard-codes CLI flags -- all flag mapping is in one place.
 |----------|---------|
 | `load_agent_config(name)` | Load an agent definition into a typed `AgentConfig` |
 | `AgentConfig.trigger_type` | Returns `cron`, `watcher`, or `multi` from frontmatter |
-| `AgentConfig.transcript_log` | Path to transcript file: `Agents/logs/<name>-transcript.md` |
+| `AgentConfig.transcript_log` | Path to the transcript file `<name>-transcript.md` in the repo's state-home logs directory |
 | `list_agents` | Lists all discovered agent names from configured and native agent directories |
 | `_build_runtime_flags(runtime, mode)` | CLI flags for runtime and execution mode |
 | `_build_agent_command(config, prompt)` | Full command arguments (incl. `--share` when transcript enabled) |

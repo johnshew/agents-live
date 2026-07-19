@@ -1,7 +1,7 @@
 ---
 title: Agents Live WSL Operational Runbook
 description: Diagnose, recover, and verify agents-live infrastructure on WSL
-ms.date: 2026-07-12
+ms.date: 2026-07-19
 ms.topic: troubleshooting
 ---
 
@@ -147,8 +147,8 @@ If interop is missing after a config change or WSL update:
 # Recent correlated events for a specific task
 wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs timeline smoketest-mcp-work --limit 20'
 
-# Run artifacts (stdout, stderr, transcripts)
-wsl -d Ubuntu --cd ~ -e bash -lc 'ls -lt ~/repos/<target-project>/Agents/logs/runs/smoketest-mcp-work-*.* | head -5'
+# Run artifacts (stdout, stderr, transcripts) in the repo's state directory
+wsl -d Ubuntu --cd ~ -e bash -lc 'ls -lt ~/.local/state/agents-live/repos/<target-project>-*/logs/runs/smoketest-mcp-work-*.* | head -5'
 
 # Errors across all tasks in last hour
 wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs --errors --since 1h --limit 10'
@@ -164,7 +164,7 @@ wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs --erro
 | p9io crash loop every ~37s | 9P bridge overload | Check for Windows PATH, credential helper, duplicate MCPs |
 | Watchers missing after reboot | `@reboot` registration missing or failed | `agents-live doctor`, then `agents-live start --all` |
 | `tool_definitions_tokens > 50K` | Workspace MCPs flooding context | Verify `--disable-mcp-server` flags in task command |
-| Empty agent output | Non-deterministic CLI behavior | Built-in retry (1 attempt); check `Agents/logs/runs/` |
+| Empty agent output | Non-deterministic CLI behavior | Built-in retry (1 attempt); check the state-home `logs/runs/` directory |
 | OOM kills in dmesg | Memory exhaustion | Check `.wslconfig` limits; look for runaway inotifywait |
 
 ## Configuration files reference
@@ -178,4 +178,4 @@ wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs --erro
 | `~/.gitconfig` | Linux home | Git credential helper config |
 | `.agents-live.toml` | Repo (Linux) | Project marker, task directories, and ownership mode |
 | crontab `@reboot` entries | Host (Linux) | Durable watcher respawn intent |
-| `Agents/data/health.ok` | Repo (Linux) | Written by health check when all tasks healthy |
+| `~/.local/state/agents-live/health.ok` | Host (Linux) | Host beacon written by the built-in health-check loop; embeds per-repo sweep summaries and the smoketest verdict |

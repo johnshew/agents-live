@@ -10,14 +10,15 @@ lists every agent with its live state and ownership, and exposes per-agent
 Run / Activate / Pause / Claim buttons that shell the existing scripts
 (`run.py`, `activate.py`, `stop.py`), plus a top-bar Health check
 that verifies prerequisites (`doctor.py`), activates everything owned by
-this host (`activate.py --all`), then runs the `agents-live-health-check`
-worker (watchers, cron, framework smoketest) and refreshes the health
-beacon. The header health label reflects the real beacon
-(`Agents/data/health.ok`): healthy, degraded (infra up but smoketest
-failing), or unhealthy (beacon missing or stale). State and last-run
-times are read straight from `Agents/logs/` and the agent configs - no new
-data layer. Every action is logged to `Agents/logs/dashboard.log` (JSONL)
-with the full transcript in `Agents/logs/dashboard-transcript.log`.
+this host (`activate.py --all`), then runs the built-in `agents-live
+health-check` loop (watchers, cron, framework smoketest) and refreshes
+the health beacon. The header health label reflects the real host
+beacon (`health.ok` under the user-level state home): healthy, degraded
+(infra up but smoketest failing), or unhealthy (beacon missing or
+stale). State and last-run times are read straight from this repo's log
+directory in the state home and the agent configs - no new data layer.
+Every action is logged to `dashboard.log` (JSONL) there, with the full
+transcript in `dashboard-transcript.log`.
 
 Scope: this build acts on the *local* host. Health check activates
 agents owned by this host or `*`; per-agent Claim transfers an agent's
@@ -53,13 +54,14 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if (SCRIPTS_DIR / "__init__.py").is_file():
     if str(SCRIPTS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
-    from agents_live import cli_spec, headless, ownership, repos  # noqa: E402
+    from agents_live import cli_spec, headless, ownership, paths, repos  # noqa: E402
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
     import cli_spec  # noqa: E402
     import headless  # noqa: E402
     import ownership  # noqa: E402
+    import paths  # noqa: E402
     import repos  # noqa: E402
 from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
@@ -68,11 +70,10 @@ try:
     REPO_ROOT = headless.repo_root()
 except ValueError:
     REPO_ROOT = None
-LOGS_DIR = REPO_ROOT / "Agents" / "logs" if REPO_ROOT else None
-HEALTH_OK_PATH = (
-    REPO_ROOT / "Agents" / "data" / "health.ok"
-    if REPO_ROOT else None
-)
+LOGS_DIR = paths.repo_state_dir(REPO_ROOT) / "logs" if REPO_ROOT else None
+# The health beacon is host-scoped (written by `agents-live
+# health-check`), so the panel works with or without a selected repo.
+HEALTH_OK_PATH = paths.health_beacon_path()
 # The health-check worker is scheduled hourly; allow a little slack before
 # treating the beacon as stale (a missed run shouldn't flap the header).
 HEALTH_STALE_MINUTES = 70
@@ -391,9 +392,10 @@ async def health_check() -> None:
        of as a cryptic mid-activation error).
     2. `activate.py --all` - ensure every agent owned by this host (or `*`)
        with a trigger is actually registered and running.
-    3. The `agents-live-health-check` worker - confirm each watcher
-       and cron job is alive (self-healing any that died), refresh the
-       `health.ok` beacon, and run the framework smoketest.
+    3. The built-in `agents-live health-check` loop - confirm each
+       watcher and cron job is alive (self-healing any that died),
+       refresh the host `health.ok` beacon, and run the framework
+       smoketest.
 
     The header label then reflects the refreshed beacon (`system_health`),
     and a final notification summarises infrastructure + smoketest so the
@@ -410,13 +412,11 @@ async def health_check() -> None:
 
     await do_action("Activate", "activate.py", ["--all"])
     await do_action(
-        "Health check", "run.py",
-        ["--name", "agents-live-health-check", "--quiet"],
-        agent_name="agents-live-health-check",
+        "Health check", "health_check.py", ["--quiet"],
         timeout=WORKER_TIMEOUT,
     )
     # Summarise the refreshed beacon so the user sees infra + smoketest,
-    # not just exit codes. system_health reads Agents/data/health.ok.
+    # not just exit codes. system_health reads the host health.ok beacon.
     h = system_health()
     severity = {"ok": "positive", "degraded": "warning", "down": "negative"}
     _safe_ui(
@@ -484,27 +484,27 @@ def agent_rows() -> list[dict]:
 
 
 def system_health() -> dict:
-    """Real infrastructure health, read from the health-check worker beacon.
+    """Real infrastructure health, read from the host health beacon.
 
-    The worker (`agents-live-health-check`) writes
-    `Agents/data/health.ok` only after confirming every intended watcher
-    is alive (self-healing any that died), so a *fresh* beacon
-    means the infrastructure is genuinely up. A missing or stale beacon
-    means the worker has not confirmed health within the hour. The nested
-    smoketest verdict is surfaced as a distinct *degraded* state: the
-    framework end-to-end test is failing even though watcher/cron
-    infrastructure is healthy.
+    The built-in loop (`agents-live health-check`) writes the host
+    `health.ok` beacon (under the user-level state home) only after
+    confirming every intended watcher is alive (self-healing any that
+    died), so a *fresh* beacon means the infrastructure is genuinely up.
+    A missing or stale beacon means the loop has not confirmed health
+    within the hour. The nested smoketest verdict is surfaced as a
+    distinct *degraded* state: the framework end-to-end test is failing
+    even though watcher/cron infrastructure is healthy.
 
     Returns a dict with ``level`` ("ok" | "degraded" | "down"), a short
     ``text`` label for the header, and a longer ``tip`` tooltip.
     """
     now = datetime.now(timezone.utc)
-    health_ok_path = _require_repo_path(HEALTH_OK_PATH)
+    health_ok_path = HEALTH_OK_PATH
     if not health_ok_path.is_file():
         return {"level": "down", "text": "unhealthy: no beacon",
-                "tip": "Agents/data/health.ok is missing - the health-check "
-                       "worker has never written a healthy beacon. "
-                       "Run the health check."}
+                "tip": "the host health.ok beacon is missing - "
+                       "`agents-live health-check` has never written a "
+                       "healthy beacon. Run the health check."}
     mtime = datetime.fromtimestamp(health_ok_path.stat().st_mtime, timezone.utc)
     age_min = (now - mtime).total_seconds() / 60
     ago = _ago(mtime.isoformat(), now)

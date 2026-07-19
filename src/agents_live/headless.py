@@ -593,7 +593,13 @@ def _all_agent_dirs() -> list[Path]:
 
 
 def logs_root() -> Path:
-    return repo_root() / "Agents" / "logs"
+    """This repo's log directory in the user-level state home.
+
+    Logs are machine-local runtime state, so they live under
+    ``$XDG_STATE_HOME/agents-live/repos/<key>/logs`` - never inside the
+    project tree, which syncs between machines and exports to archives.
+    """
+    return paths.repo_state_dir(repo_root()) / "logs"
 
 
 # ---------------------------------------------------------------------------
@@ -2537,10 +2543,17 @@ def current_crontab_lines() -> list[str] | None:
     for <user>`` on stderr) is an empty crontab, not an unavailable one,
     and returns ``[]``.
     """
+    # The crontab is host-global; the cwd only guards against a deleted
+    # process CWD. Host-scoped callers (health-check loop, uninstall)
+    # legitimately run with no project root.
+    try:
+        cwd = repo_root()
+    except ValueError:
+        cwd = Path.home()
     try:
         completed = subprocess.run(
             ["crontab", "-l"],
-            cwd=repo_root(),
+            cwd=cwd,
             capture_output=True,
             text=True,
             check=False,
@@ -2556,10 +2569,16 @@ def current_crontab_lines() -> list[str] | None:
 
 def install_crontab(lines: list[str]) -> None:
     payload = "\n".join(lines) + "\n" if lines else ""
+    # Root-optional for the same reason as current_crontab_lines: the
+    # crontab is host-global and host-scoped callers may have no project.
+    try:
+        cwd = repo_root()
+    except ValueError:
+        cwd = Path.home()
     try:
         subprocess.run(
             ["crontab", "-"],
-            cwd=repo_root(),
+            cwd=cwd,
             input=payload,
             text=True,
             capture_output=True,

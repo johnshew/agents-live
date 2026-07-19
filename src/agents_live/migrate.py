@@ -236,6 +236,12 @@ def main() -> int:
             }))
         return 0
 
+    # TRANSITIONAL (2026-07-19): move legacy in-tree runtime state to the
+    # user-level state home. Delete this call and state_migration.py once
+    # the fleet has converged on the v2 layout.
+    from . import state_migration
+    state_migration.apply(headless.repo_root(), dry_run=args.dry_run)
+
     lines = headless.current_crontab_lines()
     if lines is None:
         raise AgentsLiveError("crontab is not accessible")

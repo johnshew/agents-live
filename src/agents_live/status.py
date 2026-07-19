@@ -17,6 +17,7 @@ import subprocess
 from .headless import (
     AgentsLiveError, agent_details, list_agents, load_agent_config, logs_root,
 )
+from . import paths
 from . import repos
 from . import preflight
 
@@ -91,7 +92,7 @@ def _agent_log_location(agent: dict[str, Any]) -> tuple[str, Path]:
     name = agent["name"]
     if agent.get("repoPath"):
         base = name.split("/", 1)[1] if "/" in name else name
-        return base, Path(agent["repoPath"]) / "Agents" / "logs"
+        return base, paths.repo_state_dir(Path(agent["repoPath"])) / "logs"
     return name, logs_root()
 
 

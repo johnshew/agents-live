@@ -25,15 +25,20 @@ The markers ARE the config home (§3.2 decision, 2026-07-12): project
 config lives at the repo root in ``.agents-live.toml``
 (authoritative when both exist) or the ``[tool.agents-live]`` table
 of ``pyproject.toml``. :func:`load_config` reads it; ``init`` writes it.
-``Agents/data/`` holds runtime state only and is no longer a marker or a
-config home. (Names renamed from triggered-tasks 2026-07-12, R1a of the
-convergence plan - clean break, no legacy names read.)
+Runtime state (logs, beacons, watch hashes) lives OUTSIDE the project
+tree in the user-level XDG state home (:func:`state_home`,
+:func:`repo_state_dir`); ``Agents/`` holds git-tracked content plus the
+git-synced shared ownership registry ``Agents/data/agent-owners.json``.
+(Names renamed from triggered-tasks 2026-07-12, R1a of the convergence
+plan; state moved out of the tree 2026-07-19 - clean break, no legacy
+locations read.)
 
 stdlib-only on purpose: every sibling script (headless, ownership, qlog,
 timeline, doctor) imports this module flat from the same directory.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -145,6 +150,50 @@ def clear_cache() -> None:
 def resolution_source() -> str | None:
     """Source used by the cached implicit resolution."""
     return _cached_default_source
+
+
+def state_home() -> Path:
+    """The user-level runtime-state root (§ user-level state, 2026-07-19):
+    ``$XDG_STATE_HOME/agents-live`` (default ``~/.local/state/agents-live``).
+
+    Host-scoped runtime artifacts live directly here (health beacon, the
+    health-check loop's own log, the Windows heartbeat beacon); per-repo
+    runtime state lives under :func:`repo_state_dir`. Runtime state never
+    lives inside a project tree: repositories sync between machines and
+    export to archives, and machine-local logs must not travel with them.
+    """
+    root = os.environ.get("XDG_STATE_HOME", "").strip()
+    base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
+    return base / "agents-live"
+
+
+def host_logs_dir() -> Path:
+    """Host-level log directory (health-check loop and other host-scoped
+    operations that run with no project selected)."""
+    return state_home() / "logs"
+
+
+def health_beacon_path() -> Path:
+    """The host health beacon written by ``agents-live health-check``."""
+    return state_home() / "health.ok"
+
+
+def repo_state_key(root: Path) -> str:
+    """Stable per-repo state-directory name: ``<basename>-<hash8>``.
+
+    The basename keeps the directory browsable; the hash of the resolved
+    absolute path keeps same-named repos in different locations distinct.
+    A moved repository gets a fresh state directory (old logs are
+    abandoned, not corrupted) - acceptable for machine-local state.
+    """
+    resolved = Path(root).resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+    return f"{resolved.name}-{digest}"
+
+
+def repo_state_dir(root: Path) -> Path:
+    """Per-repo runtime-state directory under the user-level state home."""
+    return state_home() / "repos" / repo_state_key(root)
 
 
 def _is_name_candidate(value: str) -> bool:

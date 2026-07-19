@@ -55,8 +55,11 @@ _SKILL_PAYLOAD = ("SKILL.md", "VERSION", "docs", "templates")
 def initialize(root: Path) -> bool:
     """Create the standard project layout (idempotent): the root config
     marker (``.agents-live.toml``, unless ``pyproject.toml`` already
-    declares ``[tool.agents-live]``) plus ``Agents/data/`` and
-    ``Agents/logs/``. Returns True if the config marker was created.
+    declares ``[tool.agents-live]``) plus ``Agents/data/`` (git-synced
+    shared state such as ``agent-owners.json``) and ``Agents/handlers/``.
+    Logs and other machine-local runtime state live in the user-level
+    XDG state home (``paths.repo_state_dir``), never in the tree.
+    Returns True if the config marker was created.
     THE single initialization code path - ``init`` runs it from the CLI
     and activate's ``--transfer-to`` bootstrap runs it before declaring
     registry mode.
@@ -74,7 +77,6 @@ def initialize(root: Path) -> bool:
             _DOTFILE_HEADER, encoding="utf-8")
     agents_dir = root / "Agents"
     (agents_dir / "data").mkdir(parents=True, exist_ok=True)
-    (agents_dir / "logs").mkdir(parents=True, exist_ok=True)
     (agents_dir / "handlers").mkdir(parents=True, exist_ok=True)
     return created
 
@@ -271,6 +273,8 @@ def main() -> int:
         "    into .claude/agents/<agent-name>.md and edit its frontmatter\n"
         "  - `agents-live run <agent-name>` to test it once\n"
         "  - `agents-live start <agent-name>` to activate its triggers\n"
+        "  - `agents-live health-check` to start the hourly check-and-repair\n"
+        "    loop (installs its own @reboot + hourly crontab entries)\n"
         "  docs: https://github.com/johnshew/agents-live\n")
 
     # Close with a read-only doctor run (§3.4 step 6) so a fresh install

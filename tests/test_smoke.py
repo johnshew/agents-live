@@ -32,9 +32,10 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, agent_adapters, cli, completions, headless, heartbeat, init,
-        migrate, ownership, paths, plugins, preflight, doctor, repos, spawn,
-        status, uninstall, update_check, upgrade,
+        activate, agent_adapters, cli, completions, headless, health_check,
+        heartbeat, init, migrate, ownership, paths, plugins, preflight,
+        doctor, repos, spawn, state_migration, status, uninstall,
+        update_check, upgrade,
     )
     from agents_live.cli_spec import COMMANDS, render_docs_block
 except ImportError:  # flat checkout layout
@@ -45,9 +46,11 @@ except ImportError:  # flat checkout layout
     import cli
     import completions
     import headless
+    import health_check
     import heartbeat
     import init
     import migrate
+    import state_migration
     import ownership
     import paths
     import plugins
@@ -70,9 +73,12 @@ class _TempProject(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         (self.root / ".agents-live.toml").write_text("", encoding="utf-8")
         (self.root / "Agents" / "data").mkdir(parents=True)
-        (self.root / "Agents" / "logs").mkdir(parents=True)
         self._saved_env = os.environ.get(paths.ENV_VAR)
         os.environ[paths.ENV_VAR] = str(self.root)
+        # Isolate user-level runtime state (logs, beacons, watch hashes)
+        # so tests never touch the developer's real state home.
+        self._saved_state_home = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(self.root / "xdg-state")
         paths.clear_cache()
 
     def tearDown(self) -> None:
@@ -80,6 +86,10 @@ class _TempProject(unittest.TestCase):
             os.environ.pop(paths.ENV_VAR, None)
         else:
             os.environ[paths.ENV_VAR] = self._saved_env
+        if self._saved_state_home is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self._saved_state_home
         paths.clear_cache()
         self._tmp.cleanup()
 
@@ -1577,9 +1587,13 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 assert module.REPO_ROOT is None
 assert module.LOGS_DIR is None
-assert module.HEALTH_OK_PATH is None
 assert module.DASHBOARD_LOG is None
 assert module.DASHBOARD_TRANSCRIPT is None
+# The health beacon is host-scoped now: absolute, under the state home,
+# and available with no repository selected.
+from agents_live import paths
+assert module.HEALTH_OK_PATH == paths.health_beacon_path()
+assert module.HEALTH_OK_PATH.is_absolute()
 """
         with tempfile.TemporaryDirectory() as outside:
             result = subprocess.run(
@@ -1809,6 +1823,9 @@ class TestWindowsHeartbeat(unittest.TestCase):
         with (
             mock.patch.object(heartbeat, "is_wsl", return_value=False),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
+            mock.patch.object(uninstall.health_check,
+                              "remove_health_cron_lines",
+                              return_value=True) as remove_loop,
             mock.patch.object(uninstall, "find_uv",
                               return_value="/usr/bin/uv"),
             mock.patch.object(uninstall.subprocess, "run",
@@ -1817,6 +1834,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         ):
             self.assertEqual(uninstall.main([]), 0)
         host_cleanup.assert_not_called()
+        remove_loop.assert_called_once_with()
         uv_uninstall.assert_called_once_with(
             ["/usr/bin/uv", "tool", "uninstall", "agents-live"], check=False)
 
@@ -1906,7 +1924,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
 
 class TestTimeline(_TempProject):
     def test_bare_timeline_keeps_valid_rows_among_invalid_rows(self) -> None:
-        log = self.root / "Agents" / "logs" / "mixed.log"
+        log = headless.logs_root() / "mixed.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         rows = [
             {"log_schema": 5, "ts": "2026-07-18T20:00:00Z",
              "agent_name": "valid-agent", "phase": "done", "status": "ok"},
@@ -1945,7 +1964,8 @@ class TestTimeline(_TempProject):
         # has no parent package. The crash fires only on the
         # registry-default branch, which the rest of the suite never
         # reaches because it pins AGENTS_LIVE_REPO.
-        log = self.root / "Agents" / "logs" / "solo.log"
+        log = paths.repo_state_dir(self.root) / "logs" / "solo.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "log_schema": 5, "ts": "2026-07-18T20:00:00Z",
             "agent_name": "registry-agent", "phase": "done", "status": "ok",
@@ -1973,7 +1993,8 @@ class TestTimeline(_TempProject):
         self.assertIn("registry-agent", result.stdout)
 
     def test_bare_subprocess_scripts_use_isolated_registry(self) -> None:
-        log = self.root / "Agents" / "logs" / "solo.log"
+        log = paths.repo_state_dir(self.root) / "logs" / "solo.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(json.dumps({
             "log_schema": 5, "ts": "2026-07-18T20:00:00Z",
             "agent_name": "registry-agent", "phase": "done", "status": "ok",
@@ -2695,6 +2716,173 @@ class TestSpawnInvocation(_TempProject):
         if headless.packaged_execution():
             self.skipTest("packaged layout resolves via the shim")
         self.assertIsNone(spawn._run_invocation(self.root, "demo"))
+
+
+class TestStateHome(_TempProject):
+    def test_state_home_honors_xdg_env(self) -> None:
+        self.assertEqual(
+            paths.state_home(), self.root / "xdg-state" / "agents-live")
+        self.assertEqual(paths.host_logs_dir(), paths.state_home() / "logs")
+        self.assertEqual(
+            paths.health_beacon_path(), paths.state_home() / "health.ok")
+
+    def test_repo_state_key_is_stable_and_distinct(self) -> None:
+        key = paths.repo_state_key(self.root)
+        self.assertEqual(key, paths.repo_state_key(self.root))
+        self.assertTrue(key.startswith(f"{self.root.name}-"))
+        other = self.root / "Agents"
+        self.assertNotEqual(key, paths.repo_state_key(other))
+
+    def test_logs_root_lives_under_state_home_not_the_tree(self) -> None:
+        root = headless.logs_root()
+        self.assertEqual(root, paths.repo_state_dir(self.root) / "logs")
+        self.assertNotIn(str(self.root / "Agents"), str(root))
+
+    def test_state_migration_moves_legacy_state(self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        (legacy_logs / "archive").mkdir(parents=True)
+        (legacy_logs / "demo.log").write_text("{}\n", encoding="utf-8")
+        (legacy_logs / "archive" / "old.parquet").write_bytes(b"pq")
+        data = self.root / "Agents" / "data"
+        (data / "health.ok").write_text("{}\n", encoding="utf-8")
+        (data / "smoketest-framework.lock").write_text("", encoding="utf-8")
+        (data / "demo-watch-hashes.json").write_text("{}", encoding="utf-8")
+        (data / "agent-owners.json").write_text("{}", encoding="utf-8")
+
+        from_module = state_migration.apply(self.root)
+        self.assertGreater(from_module, 0)
+
+        state_dir = paths.repo_state_dir(self.root)
+        self.assertTrue((state_dir / "logs" / "demo.log").is_file())
+        self.assertTrue(
+            (state_dir / "logs" / "archive" / "old.parquet").is_file())
+        self.assertTrue((state_dir / "demo-watch-hashes.json").is_file())
+        self.assertFalse((data / "health.ok").exists())
+        self.assertFalse((data / "smoketest-framework.lock").exists())
+        # Shared git-synced state stays in the tree.
+        self.assertTrue((data / "agent-owners.json").is_file())
+        # Emptied legacy directory is tidied away; second pass is a no-op.
+        self.assertFalse(legacy_logs.exists())
+        self.assertEqual(state_migration.apply(self.root), 0)
+
+    def test_state_migration_merges_colliding_logs_legacy_first(self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        (legacy_logs / "demo.log").write_text("old\n", encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("new\n", encoding="utf-8")
+        state_migration.apply(self.root)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "old\nnew\n")
+        self.assertFalse((legacy_logs / "demo.log").exists())
+
+
+_HEALTH_SHIM = Path("/opt/agents-live/bin/agents-live")
+
+
+class TestHealthCheckLoop(_TempProject):
+    def _canonical_lines(self) -> list[str]:
+        with mock.patch.object(
+                health_check, "cli_shim_path", return_value=_HEALTH_SHIM):
+            return health_check.build_health_cron_lines()
+
+    def test_cron_lines_are_host_scoped(self) -> None:
+        lines = self._canonical_lines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("@reboot "))
+        self.assertTrue(lines[1].startswith("0 * * * * "))
+        for line in lines:
+            # Host-level: no `cd` into a project and no pinned --repo.
+            self.assertNotIn(" cd ", f" {line}")
+            self.assertNotIn("--repo", line)
+            self.assertIn("health-check --quiet", line)
+            self.assertTrue(health_check.health_cron_line_matches(line))
+
+    def test_matcher_ignores_legacy_agent_and_foreign_lines(self) -> None:
+        legacy = ("0 * * * * cd /some/project && PATH=/usr/bin "
+                  "/usr/local/bin/agents-live --repo /some/project run "
+                  "--name agents-live-health-check --quiet 2>&1")
+        self.assertFalse(health_check.health_cron_line_matches(legacy))
+        self.assertFalse(health_check.health_cron_line_matches(
+            "0 * * * * /usr/bin/backup health-check 2>&1"))
+
+    def test_ensure_converges_and_respects_opt_in(self) -> None:
+        installed: dict[str, list[str]] = {}
+        foreign = "0 1 * * * /usr/bin/foreign-job 2>&1"
+        stale = "@reboot PATH=/old /old/bin/agents-live health-check --quiet 2>&1"
+
+        def fake_install(lines: list[str]) -> None:
+            installed["lines"] = list(lines)
+
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=[foreign]),
+            mock.patch.object(health_check, "install_crontab", fake_install),
+        ):
+            # Not installed + install=False: never adds (opt-in stays
+            # with an explicit health-check run).
+            self.assertFalse(
+                health_check.ensure_health_cron_lines(install=False))
+            self.assertNotIn("lines", installed)
+            # Opt-in installs both entries and keeps foreign lines.
+            self.assertTrue(health_check.ensure_health_cron_lines())
+            self.assertEqual(
+                installed["lines"], [foreign] + self._canonical_lines())
+
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=[stale, foreign]),
+            mock.patch.object(health_check, "install_crontab", fake_install),
+        ):
+            # Present but stale: converged even with install=False (an
+            # upgrade re-homes the pinned shim path).
+            self.assertTrue(
+                health_check.ensure_health_cron_lines(install=False))
+            self.assertEqual(
+                installed["lines"], [foreign] + self._canonical_lines())
+
+    def test_remove_deletes_only_health_lines(self) -> None:
+        installed: dict[str, list[str]] = {}
+        foreign = "0 1 * * * /usr/bin/foreign-job 2>&1"
+        with (
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=[foreign] + self._canonical_lines()),
+            mock.patch.object(health_check, "install_crontab",
+                              lambda lines: installed.update(lines=list(lines))),
+        ):
+            self.assertTrue(health_check.remove_health_cron_lines())
+            self.assertEqual(installed["lines"], [foreign])
+        with mock.patch.object(health_check, "current_crontab_lines",
+                               return_value=[foreign]):
+            self.assertFalse(health_check.remove_health_cron_lines())
+
+    def test_sweep_reports_degraded_ownership_without_aborting(self) -> None:
+        # The 2026-07-19 incident class: ownership unavailable must
+        # degrade the sweep, never kill the loop.
+        with (
+            mock.patch.object(
+                health_check.ownership, "load_owners",
+                side_effect=health_check.ownership.OwnershipUnavailableError(
+                    "no backend")),
+            mock.patch.object(health_check, "_converge_crontab",
+                              return_value=True),
+            mock.patch.object(health_check, "_origin_main_synced",
+                              return_value=False),
+        ):
+            result = health_check.sweep()
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["ownership_degraded"])
+        self.assertTrue(result["registry_prune_abstained"])
+
+    def test_host_command_is_declared(self) -> None:
+        command = cli.COMMAND_BY_NAME["health-check"]
+        self.assertEqual(command.module, "health_check")
+        self.assertEqual(command.root, "none")
+        self.assertIn("crontab", command.probes)
 
 
 if __name__ == "__main__":

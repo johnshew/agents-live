@@ -5,9 +5,10 @@
 # ///
 """timeline - correlated view of agents-live processing events.
 
-Backend for ``cli.py logs timeline``. Reads all JSONL logs in
-Agents/logs/ (and optionally Exercise/data/log/) and merges adjacent
-info+status entries into single readable lines.
+Backend for ``cli.py logs timeline``. Reads all JSONL logs in this
+repo's log directory under the user-level state home, plus the
+host-level logs, and merges adjacent info+status entries into single
+readable lines.
 
 Works for any agent: exercise, taskflow, flagged-email, todo, etc.
 
@@ -18,10 +19,9 @@ resort, so it must run in a sandbox with no network and no wheel cache
 changelog entry). Keep it stdlib-only.
 
 Usage:
-    uv run --script .claude/skills/agents-live/scripts/timeline.py
-    uv run --script .claude/skills/agents-live/scripts/timeline.py exercise-state-update --since 2026-05-01T12:00
-    uv run --script .claude/skills/agents-live/scripts/timeline.py --all --since 2026-05-01T16:00
-    uv run --script .claude/skills/agents-live/scripts/timeline.py flagged-email --last 30
+    agents-live logs timeline
+    agents-live logs timeline <agent-name> --since 2026-05-01T12:00
+    agents-live logs timeline --all --since 2026-05-01T16:00
 """
 from __future__ import annotations
 
@@ -32,11 +32,11 @@ import re
 import sys
 from pathlib import Path
 
-from paths import resolve_root
+from paths import host_logs_dir, repo_state_dir, resolve_root
 
 REPO = resolve_root()
-LOGS_DIR = REPO / "Agents" / "logs"
-EXERCISE_LOGS = REPO / "Exercise" / "data" / "log"
+LOGS_DIR = repo_state_dir(REPO) / "logs"
+HOST_LOGS = host_logs_dir()
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +55,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--all", action="store_true", help="Show all agents (no filter)")
     p.add_argument("--since", help="Start time (ISO-8601 UTC)")
     p.add_argument("--last", type=int, default=50, help="Last N events (default 50)")
-    p.add_argument("--logs", nargs="*", help="Specific log files to read (default: all in Agents/logs/)")
+    p.add_argument("--logs", nargs="*", help="Specific log files to read "
+                   "(default: all of this repo's logs plus host-level logs)")
     return p.parse_args()
 
 
@@ -64,8 +65,8 @@ def find_log_files(specific: list[str] | None) -> list[Path]:
     if specific:
         return [Path(f) for f in specific if Path(f).exists()]
     files = sorted(LOGS_DIR.glob("*.log")) if LOGS_DIR.exists() else []
-    if EXERCISE_LOGS.exists():
-        files.extend(sorted(EXERCISE_LOGS.glob("*.log")))
+    if HOST_LOGS.exists():
+        files.extend(sorted(HOST_LOGS.glob("*.log")))
     return files
 
 

@@ -191,6 +191,15 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "health-check", "Run the host check-and-repair loop.", "health_check",
+        "in-process", root="none", probes=("crontab",), json=True,
+        update_notice=False,
+        args=(
+            Arg(("--quiet",), "Suppress progress output."),
+            Arg(("--sweep",), "Internal per-repo sweep mode.", hidden=True),
+        ),
+    ),
+    Cmd(
         "heartbeat", "Run or manage the host heartbeat.", "heartbeat",
         "in-process", root="none",
         subcommands=(

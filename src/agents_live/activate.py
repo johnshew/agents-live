@@ -48,6 +48,7 @@ from .headless import (
 )
 
 from . import ownership
+from . import paths
 from . import preflight
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -65,7 +66,7 @@ def _hash_file_content(filepath: Path) -> str | None:
 
 
 def _watch_hash_path(name: str) -> Path:
-    return repo_root() / "Agents" / "data" / f"{name}-watch-hashes.json"
+    return paths.repo_state_dir(repo_root()) / f"{name}-watch-hashes.json"
 
 
 def _load_watch_hashes(name: str) -> dict:

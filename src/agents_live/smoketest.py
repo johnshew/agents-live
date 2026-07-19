@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from . import preflight
+from . import paths, preflight
 from .headless import (
     AgentsLiveError,
     cron_is_active,
@@ -45,7 +45,7 @@ def _module_argv(module: str) -> list[str]:
     if __package__:
         return [sys.executable, "-m", f"{__package__}.{module}"]
     return [sys.executable, str(SCRIPT_DIR / f"{module}.py")]
-SMOKETEST_LOCK_PATH = repo_root() / "Agents" / "data" / "smoketest-framework.lock"
+SMOKETEST_LOCK_PATH = paths.repo_state_dir(repo_root()) / "smoketest-framework.lock"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
 SMOKETEST_AGENT_NAMES = (
