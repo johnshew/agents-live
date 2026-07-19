@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep the health-check sweep's stdout contract pure JSON when in-process work prints.
+  The first pass on a host that prunes retired agent entries no longer
+  fails with "sweep emitted non-JSON output"; pruning notices are
+  forwarded to stderr and the loop's log instead.
+
 ## 2.0.0 - 2026-07-19
 
 - fix: organize GitHub release notes into curated, generated, and reference sections.
