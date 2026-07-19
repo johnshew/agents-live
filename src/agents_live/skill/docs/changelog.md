@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-18
+
 - fix: register the Windows heartbeat task through the packaged
   `run-hidden.vbs` wrapper (`wscript.exe`), so the five-minute cadence
   no longer flashes a visible console window. `doctor` flags direct
