@@ -36,7 +36,7 @@ GENERATED_COMPARE_RE = re.compile(
 )
 CURATED_CHANGELOG_RE = re.compile(
     r"(?m)^\[Full changelog\]\(https://github\.com/johnshew/agents-live/"
-    r"blob/[^/]+/src/agents_live/skill/docs/changelog\.md\)\n*"
+    r"blob/[^/]+/src/agents_live/skill/docs/changelog\.md\)$\n*"
 )
 
 

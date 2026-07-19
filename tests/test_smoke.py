@@ -2516,6 +2516,21 @@ class TestReleaseTool(unittest.TestCase):
                 ],
             )
 
+            edited_bodies.clear()
+
+            def capture_normalized_run(argv, *, capture=False):
+                if argv[:3] == ["gh", "release", "view"]:
+                    return expected_body.rstrip()
+                if argv[:3] == ["gh", "release", "edit"]:
+                    edited_bodies.append(argv)
+                return ""
+
+            with mock.patch.object(
+                module, "_run", side_effect=capture_normalized_run
+            ):
+                module._normalize_release_body("v1.2.3")
+            self.assertEqual(edited_bodies, [])
+
 
 class TestInstallSkill(_TempProject):
     def test_install_then_noop_then_refresh(self) -> None:
