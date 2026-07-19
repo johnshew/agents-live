@@ -1704,7 +1704,7 @@ class TestInstallSkill(_TempProject):
         output.assert_any_call(
             f"{self.root}: skill payload already matches the installed package")
 
-    def test_runtime_upgrade_preserves_uv_receipt_requirements(self) -> None:
+    def test_runtime_upgrade_preserves_receipt_and_converges_plugins(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0)
         with (
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),

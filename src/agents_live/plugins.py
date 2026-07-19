@@ -15,6 +15,7 @@ from pathlib import Path
 from . import paths
 from .spawn import find_uv
 
+# Kernel extension points a declared distribution must provide.
 ENTRY_POINT_GROUPS = frozenset({"agents_live.agents", "agents_live.ownership"})
 
 
@@ -214,7 +215,10 @@ def _receipt_requirements() -> tuple[
 
 
 def converge(roots: list[Path]) -> bool:
-    """Install missing or stale declarations, preserving receipt requirements."""
+    """Converge the host-global uv tool environment.
+
+    Return True when plugins were installed and False when already converged.
+    """
     declarations = union(roots)
     pending = {
         key: plugin for key, plugin in declarations.items()

@@ -104,8 +104,9 @@ def main() -> int:
         targets, errors = _targets()
         target_roots = [root for _, root in targets]
         if os.environ.get(paths.ENV_VAR, "").strip():
-            # --repo narrows payload refresh, but plugins share one host-global
-            # tool environment and must still include every registered project.
+            # Explicit --repo and AGENTS_LIVE_REPO both set this environment
+            # value. They narrow payload refresh, but plugins share one
+            # host-global tool and still include every registered project.
             for alias, value, error in repos.entries():
                 if error:
                     errors.append(f"{alias}: {error}")
