@@ -2795,6 +2795,26 @@ class TestSpawnInvocation(_TempProject):
 
 
 class TestStateHome(_TempProject):
+    def test_watcher_dispatch_logs_state_home_captures_without_crashing(self) -> None:
+        # Run captures live outside the repository now; rendering them
+        # repo-relative raised ValueError and killed the watcher process
+        # on its first dispatch (2026-07-19).
+        completed = mock.Mock(pid=4242)
+        completed.wait.return_value = 0
+        events: list[dict] = []
+        with (
+            mock.patch.object(activate.subprocess, "Popen",
+                              return_value=completed),
+            mock.patch.object(activate, "log_event",
+                              lambda _log, **fields: events.append(fields)),
+            mock.patch.object(activate, "run_invocation",
+                              return_value=["true"]),
+        ):
+            activate._dispatch_run_once("demo", ["some/file.md"])
+        start = next(e for e in events if e.get("status") == "start")
+        self.assertTrue(Path(start["stdout"]).is_absolute())
+        self.assertIn(str(paths.repo_state_dir(self.root)), start["stdout"])
+
     def test_state_home_honors_xdg_env(self) -> None:
         self.assertEqual(
             paths.state_home(), self.root / "xdg-state" / "agents-live")
