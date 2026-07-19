@@ -6,8 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- feat: make `repos default <path>` register an existing unregistered
-  repository before selecting it as the fallback.
+- fix: resolve the repository registry in subprocess-dispatched
+  commands. `logs` and `logs timeline` crashed with an ImportError
+  whenever the project resolved through a registered alias or the
+  default repository rather than an explicit `--repo`, environment
+  override, or local marker. (#48)
 - fix: preserve uv receipt-recorded co-installed requirements during
   `agents-live upgrade`, so upgrading the runtime no longer removes plugin
   wheels from the tool environment.
@@ -15,6 +18,8 @@ history is retained in the source repository.
   pins. `init`, `start`, and `upgrade` converge declarations into the
   host-global tool environment; `doctor` reports missing or broken providers,
   and `repos add` remains read-only. (#34)
+- feat: make `repos default <path>` register an existing unregistered
+  repository before selecting it as the fallback.
 
 ## 0.3.1 - 2026-07-18
 
