@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.0.0 - 2026-07-19
+
 - fix: organize GitHub release notes into curated, generated, and reference sections.
   New publications and retries show `Curated Summary` first, GitHub's pull
   request list next, and changelog plus version-range links last.
