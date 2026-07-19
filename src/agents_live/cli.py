@@ -49,7 +49,12 @@ from . import paths
 from . import preflight
 from . import update_check
 from . import __version__
-from .cli_spec import COMMAND_BY_NAME, command_help, unknown_flag
+from .cli_spec import (
+    COMMAND_BY_NAME,
+    command_help,
+    render_usage,
+    unknown_flag,
+)
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 # inside a git repository that has no marker write the minimal local-mode
@@ -70,39 +75,7 @@ DOCS_URL = "https://github.com/johnshew/agents-live"
 
 
 def _usage() -> str:
-    # Doc links pinned per §3.5 (repin from main to the release tag at
-    # packaging time, Phase 4).
-    blob = f"{DOCS_URL}/blob/v0.3.1/src/agents_live/skill/docs"
-    return (
-        "usage: agents-live [--json] [--repo PATH] <command> [args]\n"
-        "       agents-live --version\n\n"
-        "commands:\n"
-        "  run <name>          execute an agent once (verbose)\n"
-        "  start <name>|--all  activate cron/watcher triggers\n"
-        "  stop <name>         deactivate triggers, keep config\n"
-        "  teardown <name>     same as stop\n"
-        "  status [name]       list agents and runtime state\n"
-        "  logs [timeline]     query logs / correlated event timeline\n"
-        "  smoketest           end-to-end validation\n"
-        "  doctor              environment and install checks\n"
-        "  init                initialize the project layout\n"
-        "  upgrade             upgrade runtime and project skill payloads\n"
-        "  migrate             converge cron/watcher entries to the\n"
-        "                      canonical invocation form\n"
-        "  heartbeat           run or manage the WSL host heartbeat\n"
-        "  uninstall           remove host integrations, then the uv tool\n"
-        "  repos               manage registered repositories\n"
-        "  dashboard           interactive control panel\n\n"
-        "global flags:\n"
-        "  --json              machine-readable output and error envelopes\n"
-        "  --repo PATH|ALIAS   pin a path or registered repository (else\n"
-        "                      AGENTS_LIVE_REPO, local marker, then default)\n"
-        "  --version           show the installed version and exit\n\n"
-        f"docs: {DOCS_URL}\n"
-        f"  commands reference  {blob}/commands.md\n"
-        f"  architecture        {blob}/approach.md\n"
-        f"  diagnostics         {blob}/diagnostics.md\n"
-    )
+    return render_usage(__version__, DOCS_URL)
 
 
 def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:

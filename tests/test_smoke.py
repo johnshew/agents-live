@@ -36,7 +36,7 @@ try:  # installed package layout
         ownership, paths, plugins, preflight, prereqs, repos, spawn, status,
         uninstall, update_check, upgrade,
     )
-    from agents_live.cli_spec import COMMANDS
+    from agents_live.cli_spec import COMMANDS, render_docs_block
 except ImportError:  # flat checkout layout
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,7 +58,7 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
-    from cli_spec import COMMANDS
+    from cli_spec import COMMANDS, render_docs_block
 
 
 class _TempProject(unittest.TestCase):
@@ -936,6 +936,21 @@ class TestCliContract(_TempProject):
                 with mock.patch("sys.stdout", stdout):
                     self.assertEqual(cli.main([command.name, "--help"]), 0)
                 self.assertIn(command.summary, stdout.getvalue())
+
+    def test_usage_uses_package_version_and_links_grammar(self) -> None:
+        with mock.patch.object(cli, "__version__", "9.8.7"):
+            usage = cli._usage()
+        self.assertIn("/blob/v9.8.7/", usage)
+        self.assertIn("commands.md#cli-grammar", usage)
+
+    def test_generated_command_docs_have_not_drifted(self) -> None:
+        commands_doc = (
+            Path(headless.__file__).parent / "skill" / "docs" / "commands.md"
+        ).read_text(encoding="utf-8")
+        start = commands_doc.index("<!-- BEGIN GENERATED CLI -->")
+        end_marker = "<!-- END GENERATED CLI -->"
+        end = commands_doc.index(end_marker, start) + len(end_marker)
+        self.assertEqual(commands_doc[start:end], render_docs_block())
 
     def test_each_command_rejects_unknown_flags(self) -> None:
         for command in COMMANDS:

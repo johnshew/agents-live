@@ -14,6 +14,62 @@ Agents Live operates the Claude Code and GitHub Copilot agents you already
 use. These commands add and manage local triggers around standard agent
 definitions; they do not introduce a separate agent format or runtime.
 
+<!-- BEGIN GENERATED CLI -->
+## CLI grammar
+
+The public command surface is generated from the declarative command
+spec. `VALUE`, `NAME`, `PATH`, and `ALIAS` are terminal values.
+
+```ebnf
+invocation   ::= "agents-live" global* ( command | help_word )
+help_word    ::= "-h" | "--help" | "help" | "--version" | ""
+global       ::= "--json" | "--repo" ( PATH | ALIAS )
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | heartbeat | uninstall | repos | dashboard
+run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
+start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
+stop         ::= "stop" ( NAME | "--name" NAME )
+status       ::= "status" [ NAME ] [ "--json" ] [ "--all-repos" ]
+logs         ::= "logs" ( query | "timeline" timeline_args )
+query        ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" VALUE ] [ "--check-schema" ]
+timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
+smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
+doctor       ::= "doctor" [ "--json" ] [ "--all-repos" ]
+init         ::= "init"
+upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
+migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ]
+heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
+uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
+repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
+```
+
+## CLI command and flag table
+
+| command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
+|---|---|---|---|---|---|---|---|---|
+| run | in-process | auto-marker |  |  |  | yes | --name, --changed-files, --quiet | Execute an agent once. |
+| start | in-process | auto-marker | crontab, inotify |  |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
+| stop (aliases: teardown) | in-process | required | crontab |  |  | yes | --name | Deactivate triggers and keep configuration. |
+| status | in-process | required |  | yes | yes |  | --json, --all-repos | List agents and runtime state. |
+| logs | subprocess | required |  |  |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
+| logs timeline | subprocess | required |  |  |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
+| smoketest | in-process | required | crontab, inotify |  |  |  | --runtime, --model | Run end-to-end validation. |
+| doctor (aliases: prereqs) | in-process | markerless |  | yes | yes |  | --json, --all-repos | Check environment and installation readiness. |
+| init | in-process | none |  |  |  |  |  | Initialize the project layout. |
+| upgrade | in-process | none |  |  |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
+| migrate | in-process | required | crontab |  |  |  | --dry-run, -n | Converge persisted runtime invocations. |
+| heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
+| heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
+| heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |
+| uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
+| repos | in-process | none |  |  |  |  |  | Manage registered repositories. |
+| repos list | in-process | none |  |  |  |  |  | List registered repositories. |
+| repos add | in-process | none |  |  |  |  |  | Register a repository. |
+| repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
+| repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
+| dashboard | subprocess | required |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
+<!-- END GENERATED CLI -->
+
 ## Contents
 
 - [install -- Installation Instructions](#install----installation-instructions)

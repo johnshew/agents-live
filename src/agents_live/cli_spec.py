@@ -264,6 +264,175 @@ def command_help(command: Cmd, invoked_as: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_usage(version: str, docs_url: str) -> str:
+    """Render top-level usage and links from the public command spec."""
+    commands = []
+    for command in COMMANDS:
+        if command.hidden:
+            continue
+        name = command.name
+        if command.aliases:
+            name += f" ({', '.join(command.aliases)})"
+        commands.append(f"  {name:<24} {command.summary}")
+    globals_text = [
+        f"  {', '.join(argument.flags):<24} {argument.help}"
+        for argument in GLOBAL_ARGS
+    ]
+    blob = f"{docs_url}/blob/v{version}/src/agents_live/skill/docs"
+    return "\n".join([
+        "usage: agents-live [--json] [--repo PATH] <command> [args]",
+        "       agents-live --version",
+        "",
+        "commands:",
+        *commands,
+        "",
+        "global flags:",
+        *globals_text,
+        "",
+        f"docs: {docs_url}",
+        f"  commands reference  {blob}/commands.md",
+        f"  CLI grammar         {blob}/commands.md#cli-grammar",
+        f"  architecture        {blob}/approach.md",
+        f"  diagnostics         {blob}/diagnostics.md",
+        "",
+    ])
+
+
+def _ebnf_flags(command: Cmd, *, skip: frozenset[str] = frozenset()) -> str:
+    parts: list[str] = []
+    for argument in visible_args(command):
+        if any(flag in skip for flag in argument.flags):
+            continue
+        if argument.kind == "positional":
+            token = argument.flags[0].upper()
+            parts.append(token if argument.required else f"[ {token} ]")
+            continue
+        flags = " | ".join(f'"{flag}"' for flag in argument.flags)
+        if len(argument.flags) > 1:
+            flags = f"( {flags} )"
+        if argument.kind == "value":
+            flags += " VALUE"
+        parts.append(f"[ {flags} ]")
+    return " ".join(parts)
+
+
+def _ebnf_command(command: Cmd) -> list[str]:
+    prefix = f'{command.name:<12} ::= "{command.name}"'
+    if command.name_sugar:
+        name_arg = next(
+            argument for argument in command.args
+            if "--name" in argument.flags)
+        alternatives = ['NAME', '"--name" NAME']
+        has_all = any("--all" in argument.flags for argument in command.args)
+        if has_all:
+            alternatives.append('"--all"')
+        selector = "( " + " | ".join(alternatives) + " )"
+        if not name_arg.required and not has_all:
+            selector = f"[ {selector} ]"
+        suffix = _ebnf_flags(
+            command, skip=frozenset({"--name", "--all"}))
+        return [f"{prefix} {selector}" + (f" {suffix}" if suffix else "")]
+    if command.name == "logs":
+        query = _ebnf_flags(command)
+        lines = [f'{prefix} ( query | "timeline" timeline_args )']
+        lines.append(f"query        ::= {query}")
+        timeline = command.subcommands[0]
+        lines.append(f"timeline_args ::= {_ebnf_flags(timeline)}")
+        return lines
+    if command.subcommands:
+        alternatives = []
+        for child in command.subcommands:
+            if child.hidden:
+                continue
+            suffix = _ebnf_flags(child)
+            alternatives.append(
+                f'"{child.name}"' + (f" {suffix}" if suffix else ""))
+        group = "( " + " | ".join(alternatives) + " )"
+        if command.name == "heartbeat":
+            group = f"[ {group} ]"
+        return [f"{prefix} {group}"]
+    suffix = _ebnf_flags(command)
+    return [prefix + (f" {suffix}" if suffix else "")]
+
+
+def render_grammar() -> str:
+    """Render the non-hidden command surface as EBNF."""
+    public = [command for command in COMMANDS if not command.hidden]
+    names = " | ".join(command.name for command in public)
+    lines = [
+        'invocation   ::= "agents-live" global* ( command | help_word )',
+        'help_word    ::= "-h" | "--help" | "help" | "--version" | ""',
+        'global       ::= "--json" | "--repo" ( PATH | ALIAS )',
+        f"command      ::= {names}",
+    ]
+    for command in public:
+        lines.extend(_ebnf_command(command))
+    return "\n".join(lines)
+
+
+def render_command_table() -> str:
+    """Render the command policy and flag table for the reference docs."""
+    header = (
+        "| command | dispatch | root | probes | JSON | all repos | "
+        "name sugar | flags | summary |\n"
+        "|---|---|---|---|---|---|---|---|---|"
+    )
+    rows = [header]
+    for command in COMMANDS:
+        if command.hidden:
+            continue
+        name = command.name
+        if command.aliases:
+            name += f" (aliases: {', '.join(command.aliases)})"
+        flags = ", ".join(
+            flag for argument in visible_args(command)
+            for flag in argument.flags if flag.startswith("-")
+        ) or ""
+        rows.append(
+            f"| {name} | {command.dispatch} | {command.root} | "
+            f"{', '.join(command.probes)} | "
+            f"{'yes' if command.json else ''} | "
+            f"{'yes' if command.all_repos else ''} | "
+            f"{'yes' if command.name_sugar else ''} | {flags} | "
+            f"{command.summary} |"
+        )
+        for child in command.subcommands:
+            if child.hidden:
+                continue
+            child_flags = ", ".join(
+                flag for argument in visible_args(child)
+                for flag in argument.flags if flag.startswith("-")
+            )
+            rows.append(
+                f"| {command.name} {child.name} | {child.dispatch} | "
+                f"{child.root} | {', '.join(child.probes)} | "
+                f"{'yes' if child.json else ''} | "
+                f"{'yes' if child.all_repos else ''} |  | {child_flags} | "
+                f"{child.summary} |"
+            )
+    return "\n".join(rows)
+
+
+def render_docs_block() -> str:
+    """Render the exact generated block embedded in commands.md."""
+    return "\n".join([
+        "<!-- BEGIN GENERATED CLI -->",
+        "## CLI grammar",
+        "",
+        "The public command surface is generated from the declarative command",
+        "spec. `VALUE`, `NAME`, `PATH`, and `ALIAS` are terminal values.",
+        "",
+        "```ebnf",
+        render_grammar(),
+        "```",
+        "",
+        "## CLI command and flag table",
+        "",
+        render_command_table(),
+        "<!-- END GENERATED CLI -->",
+    ])
+
+
 def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
     """Return the first option not declared for a command or subcommand."""
     current = command
