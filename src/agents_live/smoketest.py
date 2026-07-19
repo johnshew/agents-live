@@ -178,11 +178,11 @@ def run_status(*args: str) -> str:
     return completed.stdout.strip()
 
 
-def run_agent(name: str, changed_file: str | None = None) -> str:
+def run_agent(name: str, changed_files: list[str] | None = None) -> str:
     """Execute an agent via run.py and return its stdout."""
     cmd = [*_module_argv("run"), "--name", name]
-    if changed_file:
-        cmd.extend(["--changed-file", changed_file])
+    if changed_files:
+        cmd.extend(["--changed-files", json.dumps(changed_files)])
     completed = subprocess.run(
         cmd, cwd=repo_root(), capture_output=True, text=True, check=False,
     )

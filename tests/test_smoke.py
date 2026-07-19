@@ -99,6 +99,26 @@ Smoke fixture body.
 FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
+class TestSmoketestDispatch(_TempProject):
+    def test_changed_files_round_trip_uses_run_contract(self) -> None:
+        smoketest = importlib.import_module(
+            f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
+        completed = subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
+        with mock.patch.object(smoketest.subprocess, "run",
+                               return_value=completed) as run:
+            self.assertEqual(
+                smoketest.run_agent("fixture", ["src/a.py", "src/b.py"]),
+                "ok\n",
+            )
+
+        command = run.call_args.args[0]
+        flag_index = command.index("--changed-files")
+        self.assertEqual(
+            json.loads(command[flag_index + 1]),
+            ["src/a.py", "src/b.py"],
+        )
+
+
 class TestPathsResolver(_TempProject):
     def test_env_var_pins_root(self) -> None:
         self.assertEqual(paths.resolve_root(), self.root)
