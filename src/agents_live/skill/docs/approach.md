@@ -81,16 +81,24 @@ weekly-summary    cron     0 8 * * 0     agency copilot   plan  stopped
  .claude/agents/                     # canonical standard agent definitions
 └── ai-news-digest.md                # frontmatter carries agents-live triggers
 
-Agents/                              # runtime artifacts
+Agents/                              # git-tracked content only
 ├── handlers/                        # deterministic pre/post-processors
 │   ├── write-files.sh               # generic: JSON files[] → disk
 │   └── ms-todo-to-md.sh             # agent-specific: To Do JSON → .md files
-├── logs/                            # JSONL log files (one per agent + system log)
-│   ├── agents-live.log              # system-wide lifecycle events
-│   ├── todo-sync.log                # per-agent execution log
-│   ├── todo-index.log
-│   └── archive/                     # monthly Parquet archives
-│       └── 2026-05.parquet          # unified monthly archive, all agents
+└── data/
+    └── agent-owners.json            # git-synced shared multi-host ownership state
+
+~/.local/state/agents-live/          # machine-local runtime state (XDG state home)
+├── logs/                            # host-level logs (health-check.log)
+├── health.ok                        # host health beacon
+├── heartbeat.ok                     # WSL keep-alive beacon
+└── repos/<name>-<hash>/             # per-repo state (watch hashes, smoketest lock)
+    └── logs/                        # JSONL log files (one per agent + system log)
+        ├── agents-live.log          # system-wide lifecycle events
+        ├── todo-sync.log            # per-agent execution log
+        ├── runs/                    # per-run stdout/stderr/transcript artifacts
+        └── archive/                 # monthly Parquet archives
+            └── 2026-05.parquet      # unified monthly archive, all agents
 
 .claude/skills/agents-live/       # skill definition
 ├── SKILL.md
@@ -226,9 +234,10 @@ The JSON output includes all frontmatter fields plus computed state:
 | promptPath | Discovered standard agent definition |
 | state | `crontab -l` for cron, process list inspection for watchers |
 
-Watcher runs ignore changes under hidden `.*` directories, `__pycache__/`, and
-`Agents/logs/` so repo-root watchers do not loop on Git metadata or their own
-runtime log writes.
+Watcher runs ignore changes under hidden `.*` directories and `__pycache__/`
+so repo-root watchers do not loop on Git metadata. Runtime log writes land in
+the user-level state home, outside the watched tree, so they cannot
+re-trigger watchers.
 
 ### How running agents are identified (and orphan pruning)
 
@@ -253,12 +262,13 @@ file a complete decommission:
   tears down (cron + watcher + desired-state entries) any name with no backing
   standard agent file. It is also run at the start of `activate.py --all`, so
   a reconcile both activates defined agents and removes deleted ones.
-- The health-check handler (hourly, and on boot) calls `--prune-orphans` before
+- The built-in health-check loop (`agents-live health-check`, hourly and on
+  boot) calls `--prune-orphans` in its per-repo sweep before
   reconciling. Removing an agent with `git rm` therefore decommissions it:
   every host self-cleans on its next health check, with no manual
   per-host stop. Cron entries (which survive reboots) and watcher processes
   (which do not) are both handled.
-- The health-check handler also runs `migrate.py` at the start of every pass
+- The health-check sweep also runs `migrate` at the start of every pass
   (idempotent convergence): a persisted cron entry that survives reboot can
   still point at a moved or deleted script and fail silently, since `run.py` -
   the logger - is what the entry can no longer reach. Convergence repairs
@@ -495,14 +505,21 @@ Use `agents-live doctor` to verify all are installed.
 
 ## 4. Logging
 
-All logs use JSONL format (one JSON object per line) in `Agents/logs/`.
+All logs use JSONL format (one JSON object per line) and live in the
+user-level XDG state home, never in the project tree: this repo's logs are
+under `~/.local/state/agents-live/repos/<name>-<hash>/logs/`, and host-level
+logs (the built-in health-check loop) under
+`~/.local/state/agents-live/logs/`. Repos sync between machines, so
+machine-local logs in the tree were a safety and export hazard; keeping
+state at the user level also lets infrastructure commands log before any
+repo is resolved, and the tool work with no initialized project.
 
 ### Log files
 
 | File | Purpose |
 |------|---------|
-| `Agents/logs/<name>.log` | Per-agent execution log - start, agent output, handler output, done |
-| `Agents/logs/agents-live.log` | System-wide summary - every agent activation, completion, error |
+| `logs/<name>.log` | Per-agent execution log - start, agent output, handler output, done |
+| `logs/agents-live.log` | System-wide summary - every agent activation, completion, error |
 
 ### JSONL schema
 
@@ -573,7 +590,7 @@ agents-live logs timeline --all --since 2026-05-01T16:00
 **Quick agent view** (live logs only, no archive):
 
 ```bash
-# Table view (positional name resolves to Agents/logs/<name>.log)
+# Table view (positional name resolves to <name>.log in the repo's state-home logs directory)
 agents-live logs todo-pull --limit 20
 ```
 
@@ -582,9 +599,9 @@ agents-live logs todo-pull --limit 20
 The `log-rotate` agent (cron `0 3 * * 0`) runs
 weekly. The `Agents/handlers/log-rotate.py` pre-processor:
 
-1. Reads each `.log` file in `Agents/logs/` and `Exercise/data/log/`
+1. Reads each `.log` file in the repo's state-home logs directory
 2. Moves rows older than 7 days into unified monthly Parquet files at
-  `Agents/logs/archive/YYYY-MM.parquet` (ZSTD compressed)
+  `archive/YYYY-MM.parquet` under that directory (ZSTD compressed)
 3. Rewrites the live `.log` with only the last 7 days
 
 Monthly Parquet files are rewritten each rotation (union existing archive
@@ -594,7 +611,7 @@ archived Parquet transparently -- no flag needed.
 **Archive layout:**
 
 ```
-Agents/logs/archive/
+~/.local/state/agents-live/repos/<name>-<hash>/logs/archive/
   2026-04.parquet
   2026-05.parquet
   2026-06.parquet

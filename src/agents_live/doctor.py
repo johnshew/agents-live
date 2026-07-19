@@ -626,16 +626,41 @@ def collect() -> list[dict]:
     # coverage check above passes vacuously when zero watchers are running.
     if dead is not None:
         add("intended watchers are running", not dead, False,
-            "run `start <name>` to relaunch, or run the "
-            "agents-live-health-check agent once",
+            "run `start <name>` to relaunch, or run "
+            "`agents-live health-check` once",
             note=(f"dead watcher(s) with @reboot intent: {', '.join(dead)}"
                   if dead else "all intended watchers have live processes"))
+
+    # The built-in check-and-repair loop must be installed: its @reboot +
+    # hourly crontab entries are what keep everything above converged.
+    # The loop self-installs its entries on every run, so the repair is
+    # simply to run it once.
+    try:
+        from . import health_check  # noqa: PLC0415
+        completed = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        if completed.returncode != 0 and "no crontab for" not in (
+                completed.stderr or ""):
+            installed = None  # unreadable: skip, don't vouch
+        else:
+            lines = (completed.stdout.splitlines()
+                     if completed.returncode == 0 else [])
+            installed = any(health_check.health_cron_line_matches(line)
+                            for line in lines)
+    except Exception:
+        installed = None
+    if installed is not None:
+        add("health-check loop installed", installed, False,
+            "run `agents-live health-check` once (it installs its own "
+            "@reboot + hourly crontab entries)",
+            note=("@reboot + hourly entries present" if installed
+                  else "no health-check crontab entries on this host"))
 
     # Liveness of the check-and-repair loop itself. The health check (boot +
     # hourly) converges the crontab and restarts dead watchers; when its own
     # entry is broken nothing runs and nothing logs, so a stale beacon is the
     # one signal left. doctor is the out-of-band detector for that state.
-    beacon = REPO / "Agents" / "data" / "health.ok"
+    beacon = paths.health_beacon_path()
     if beacon.is_file():
         age_min = (time.time() - beacon.stat().st_mtime) / 60
         beacon_ok = age_min <= 75
@@ -644,8 +669,7 @@ def collect() -> list[dict]:
         beacon_ok = False
         beacon_note = "never written (health check has not run on this host)"
     add("health beacon fresh (check-and-repair loop alive)", beacon_ok, False,
-        "run `migrate`, then run the agents-live-health-check agent once "
-        "and re-check",
+        "run `agents-live health-check` and re-check",
         note=beacon_note)
 
     # Native-agent policy lints + platform tripwire (convergence C2).

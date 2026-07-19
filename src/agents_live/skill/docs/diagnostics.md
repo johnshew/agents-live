@@ -1,7 +1,7 @@
 ---
 title: Agents Live Log Diagnostics
 description: Log inventory and correlated diagnostic procedures for Agents Live agents
-ms.date: 2026-07-18
+ms.date: 2026-07-19
 ms.topic: troubleshooting
 ---
 
@@ -14,20 +14,27 @@ agent writing the same files.
 
 ## Log inventory
 
-All logs are **UTC JSONL**. There is one per-agent log for each discovered
-agent definition. Agents Live discovers standard definitions in
-`.claude/agents/` and `.github/agents/`; logs remain centralized at
-`Agents/logs/<name>.log`.
+All logs are **UTC JSONL** and live in the user-level XDG state home
+(`$XDG_STATE_HOME/agents-live/`, default `~/.local/state/agents-live/`),
+never in the project tree. Each repository gets its own state directory
+`repos/<basename>-<hash>/`; the paths below are relative to that
+directory unless marked host-level. There is one per-agent log for each
+discovered agent definition. Agents Live discovers standard definitions
+in `.claude/agents/` and `.github/agents/`; logs remain centralized at
+`logs/<name>.log` in the repo's state directory. `agents-live logs`
+resolves these locations for you; `--all` unions this repo's logs with
+the host-level logs.
 
 ### Infrastructure logs
 
 | Log | Type | What it tells you |
 |-----|------|-------------------|
-| `Agents/logs/agents-live.log` | runtime | **Every** agent's lifecycle: `watcher` debounce batches, `activate`, `start`, `done` with `status`, `duration_s`, `trigger`, `changed_files`. The join point for all diagnostics. |
+| `logs/agents-live.log` | runtime | **Every** agent's lifecycle: `watcher` debounce batches, `activate`, `start`, `done` with `status`, `duration_s`, `trigger`, `changed_files`. The join point for all diagnostics. |
+| `~/.local/state/agents-live/logs/health-check.log` | host-level | The built-in check-and-repair loop: per-repo sweep results, smoketest gating, beacon writes. |
 
 ### Per-agent logs (domain work)
 
-Each of your agents writes `Agents/logs/<name>.log`. Keep a short
+Each of your agents writes `logs/<name>.log`. Keep a short
 catalog of what each one means in your own repo -- during an incident,
 "which log is which" should not require reading agent definitions.
 
@@ -36,10 +43,10 @@ catalog of what each one means in your own repo -- during an incident,
 
 | Source | Use |
 |--------|-----|
-| `Agents/logs/runs/<agent>-<ts>.stdout.txt` | Full raw stdout from every agent run. |
-| `Agents/logs/runs/<agent>-<ts>.stderr.txt` | Full raw stderr from every agent run. |
-| `Agents/logs/runs/<agent>-<ts>.transcript.md` | Archived session transcript (copilot-family runtimes). |
-| `Agents/logs/<agent>-transcript.md` | Live session transcript (overwritten each run). |
+| `logs/runs/<agent>-<ts>.stdout.txt` | Full raw stdout from every agent run. |
+| `logs/runs/<agent>-<ts>.stderr.txt` | Full raw stderr from every agent run. |
+| `logs/runs/<agent>-<ts>.transcript.md` | Archived session transcript (copilot-family runtimes). |
+| `logs/<agent>-transcript.md` | Live session transcript (overwritten each run). |
 | Agent CLI session logs | Full raw transcript kept by the agent CLI itself; location depends on the CLI. |
 | `git log --pretty='%h %ai %s' -- <file>` | Committed state history. |
 | `crontab -l` | Active cron registrations (ground truth). |
@@ -53,11 +60,12 @@ transcript is the definitive source.
 **Quick check -- run output files:**
 
 ```bash
-# Recent runs for a specific agent
-ls -lt Agents/logs/runs/my-agent-* | head -10
+# Recent runs for a specific agent (in this repo's state directory)
+runs_dir=~/.local/state/agents-live/repos/<repo-key>/logs/runs
+ls -lt "$runs_dir"/my-agent-* | head -10
 
 # View the stdout of the most recent run
-cat "$(ls -t Agents/logs/runs/my-agent-*.stdout.txt | head -1)"
+cat "$(ls -t "$runs_dir"/my-agent-*.stdout.txt | head -1)"
 ```
 
 **Correlating with pipeline logs:**
@@ -111,16 +119,17 @@ smoketest agents, catalog them in your per-agent log inventory).
 
 | Name | What it is | Trigger | Where to look |
 |------|------------|---------|---------------|
-| `agents-live smoketest` | End-to-end system test. Creates the `_smoketest-*` agents below, exercises cron + watcher + debounce + spawn paths, then tears them down. Manual / CI only. | `agents-live smoketest --runtime <runtime>` | `Agents/logs/smoketest-framework-result.json` (verdict), stdout |
-| `_smoketest-cron` | Synthetic scheduled agent created by the smoketest. | created + run by the smoketest | `Agents/logs/_smoketest-cron.log` |
-| `_smoketest-watcher` | Synthetic watcher agent created by the smoketest. **Refuses to run inside the VS Code chat sandbox** (cgroup kills the daemon mid-Claude-call). | created + run by the smoketest | `Agents/logs/_smoketest-watcher.log` |
-| `_smoketest-spawn-child` / `_smoketest-debounce` / `_smoketest-preprocessor` / `_smoketest-pipeline` | Synthetic agents exercising spawn, debounce dispatch, pre/post processors, and pipeline mode. | created + run by the smoketest | `Agents/logs/_smoketest-*.log` |
+| `agents-live smoketest` | End-to-end system test. Creates the `_smoketest-*` agents below, exercises cron + watcher + debounce + spawn paths, then tears them down. Manual / CI only. | `agents-live smoketest --runtime <runtime>` | `logs/smoketest-framework-result.json` (verdict), stdout |
+| `_smoketest-cron` | Synthetic scheduled agent created by the smoketest. | created + run by the smoketest | `logs/_smoketest-cron.log` |
+| `_smoketest-watcher` | Synthetic watcher agent created by the smoketest. **Refuses to run inside the VS Code chat sandbox** (cgroup kills the daemon mid-Claude-call). | created + run by the smoketest | `logs/_smoketest-watcher.log` |
+| `_smoketest-spawn-child` / `_smoketest-debounce` / `_smoketest-preprocessor` / `_smoketest-pipeline` | Synthetic agents exercising spawn, debounce dispatch, pre/post processors, and pipeline mode. | created + run by the smoketest | `logs/_smoketest-*.log` |
 
 If the system smoketest fails, check `smoketest-framework-result.json`
 first -- it carries `verdict`, `failed_step`, and `reason`.
 
 `BUSY` (exit 75) is not a test failure. It means another system smoketest
-owns `Agents/data/smoketest-framework.lock`; the lock file contains its PID,
+owns `smoketest-framework.lock` in the repo's state directory; the lock
+file contains its PID,
 host, agent, model, and start time. Do not delete the lock file: kernel `flock`
 ownership, not file presence, determines whether it is held. After an
 uncatchable exit, the lock releases automatically and the next run removes

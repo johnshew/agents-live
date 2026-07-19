@@ -12,7 +12,8 @@
 Triggered tasks (headless runs via Agency + Copilot CLI) produce only a
 summary-level log (see
 [approach.md § 4. Logging](../approach.md#4-logging)
-for JSONL schema and querying). The JSONL entries in `Agents/logs/<name>.log`
+for JSONL schema and querying). The JSONL entries in `<name>.log` (in the
+repo's state-home logs directory)
 record `phase: agent` with the final output, token usage, and status - but
 not the full conversation: tool calls, tool results, agent reasoning steps, or
 intermediate outputs.
@@ -275,7 +276,7 @@ What gets exported:
 The flag is documented in the Agency CLI Reference.
 Agents Live adds `--share <path>` in `_build_agent_command()` when an
 agent definition enables `transcript: true`, writing the latest transcript
-to `Agents/logs/<name>-transcript.md`.
+to `<name>-transcript.md` in the repo's state-home logs directory.
 
 **Effort**: Small - ~10 lines in `headless.py` plus retention policy.
 
@@ -322,8 +323,9 @@ content is still redacted. Not a viable path.
 
 The `--share` flag is now integrated in `headless.py`. When `transcript: true`
 (the default) and the agent supports `--share`, the runner automatically
-captures a full session transcript to `Agents/logs/<name>-transcript.md`.
-Transcripts are archived per-run to `Agents/logs/runs/`.
+captures a full session transcript to `<name>-transcript.md` in the repo's
+state-home logs directory. Transcripts are archived per-run to `runs/`
+under the same directory.
 
 To disable for a specific task, set `transcript: false` in frontmatter.
 

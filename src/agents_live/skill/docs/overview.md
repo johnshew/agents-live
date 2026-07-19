@@ -188,8 +188,15 @@ stable and continuously improving.
    with phase, status, duration, model, token counts, and cost on every
    agent run. Logs age into monthly Parquet archives and are queried
    through one query tool (`qlog.py`) and a correlated timeline view.
-6. **Fail gracefully, self-heal, and self-optimize.** A health-check agent
-   restarts dead watchers, prunes orphans, and stamps a freshness marker.
+   Logs live in the user-level XDG state home, not the project tree:
+   repos sync between machines, so machine-local logs in the tree were an
+   export hazard, and user-level state lets the tool log and repair before
+   any project is resolved.
+6. **Fail gracefully, self-heal, and self-optimize.** A built-in
+   check-and-repair loop (`agents-live health-check`, self-installed on
+   `@reboot` + hourly crontab entries) sweeps every registered repository:
+   it restarts dead watchers, prunes orphans, converges persisted crontab
+   entries, enforces multi-host ownership, and stamps a host health beacon.
    A fire-rate circuit breaker stops accidental runaway watcher cascades.
    Automated outer loops continually monitor overall system behavior (using the
    indelible logs): an hourly diagnosis agent turns log errors into
@@ -298,6 +305,7 @@ Two artifacts, one source of truth:
 The public repo is the source of truth for all framework code. Private
 deployments (this one included) consume released versions and extend
 through plugin entry points (private agent adapters, multi-host
-ownership); agents, handlers, and logs stay in the consuming repo.
+ownership); agents and handlers stay in the consuming repo, while
+machine-local logs live in the user-level state home.
 Remaining sequencing lives in the release-sequence section of
 backlog.md.

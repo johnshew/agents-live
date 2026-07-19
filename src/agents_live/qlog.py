@@ -73,14 +73,18 @@ except ImportError:
 import re
 from datetime import datetime, timedelta, timezone
 
-from paths import resolve_root
+from paths import host_logs_dir, repo_state_dir, resolve_root
 
 REPO = resolve_root()
-DEFAULT_LOG = REPO / "Agents/logs/agents-live.log"
-ARCHIVE_DIR = REPO / "Agents/logs/archive"
+LOGS_DIR = repo_state_dir(REPO) / "logs"
+DEFAULT_LOG = LOGS_DIR / "agents-live.log"
+ARCHIVE_DIR = LOGS_DIR / "archive"
+# --all unions this repo's logs with the host-level logs (the built-in
+# health-check loop and other repo-less operations); other repos are a
+# --repo away.
 ALL_LOG_GLOBS = [
-    str(REPO / "Agents/logs/*.log"),
-    str(REPO / "Exercise/data/log/*.log"),
+    str(LOGS_DIR / "*.log"),
+    str(host_logs_dir() / "*.log"),
 ]
 
 NORMALIZED_COLUMN_TYPES = {
@@ -272,12 +276,13 @@ def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", nargs="?",
-                    help="agent name; resolves to Agents/logs/<name>.log if that "
-                         "file exists, otherwise used as --agent substring filter")
+                    help="agent name; resolves to <name>.log in this repo's "
+                         "log directory if that file exists, otherwise used "
+                         "as --agent substring filter")
     ap.add_argument("--log", default=None,
-                    help=f"log file or glob (default: {DEFAULT_LOG.relative_to(REPO)})")
+                    help=f"log file or glob (default: {DEFAULT_LOG})")
     ap.add_argument("--all", action="store_true",
-                    help="union all Agents/logs/*.log + Exercise/data/log/*.log")
+                    help="union this repo's logs with the host-level logs")
     ap.add_argument("--agent", help="filter by agent name (substring match)")
     ap.add_argument("--since", help="ts >= this (ISO-8601, UTC)")
     ap.add_argument("--until", help="ts < this (ISO-8601, UTC)")
@@ -311,8 +316,9 @@ def main() -> int:
                     help="validate normalized live-plus-archive column types")
     args = ap.parse_args()
 
-    # Resolve positional `name`: if Agents/logs/<name>.log exists, point
-    # --log at it; otherwise fall through to an --agent substring filter.
+    # Resolve positional `name`: if <name>.log exists in this repo's log
+    # directory, point --log at it; otherwise fall through to an --agent
+    # substring filter.
     if args.name and args.log is None and not args.all:
         candidate = DEFAULT_LOG.parent / f"{args.name}.log"
         if candidate.is_file():

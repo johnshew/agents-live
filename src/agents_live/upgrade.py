@@ -131,6 +131,20 @@ def main() -> int:
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)
 
+    # Converge the built-in health-check loop's crontab entries: a
+    # runtime upgrade can re-home the pinned shim path they carry. This
+    # branch runs in the freshly installed CLI, so the canonical lines
+    # are the new install's. Converge-only: hosts opt into the loop by
+    # running `agents-live health-check`, never as an upgrade side
+    # effect. Best-effort: no crontab is not fatal.
+    try:
+        from . import health_check  # noqa: PLC0415
+        if health_check.ensure_health_cron_lines(install=False):
+            print("Converged the health-check loop crontab entries")
+    except Exception as exc:
+        print(f"warning: could not converge health-check crontab entries: "
+              f"{exc}", file=sys.stderr)
+
     if not targets:
         print("No initialized or registered projects to refresh")
         return 1 if errors else 0

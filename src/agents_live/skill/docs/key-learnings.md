@@ -179,9 +179,10 @@ easy to miss when starting Python-based file watchers through `activate.py`.
 
 6. **Ignore watcher-generated noise to prevent loops.** Repo-root and broad
   directory watchers should continue to ignore hidden directories,
-  `__pycache__/`, `Agents/logs/`, and generated files like `_index_.md`.
-  Otherwise watchers can trigger on their own metadata churn and create noisy
-  or self-sustaining loops.
+  `__pycache__/`, and generated files like `_index_.md`. (Runtime logs now
+  live outside the tree in the user-level state home, so log writes can no
+  longer loop.) Otherwise watchers can trigger on their own metadata churn
+  and create noisy or self-sustaining loops.
 
 7. **Watch directories, not files -- atomic saves replace inodes.** When
   `inotifywait` watches a single file and an editor performs an atomic save
@@ -216,7 +217,8 @@ single biggest source of wasted agent runs and token spend.
 
 **Design:** The watcher dispatcher (`activate.py`) SHA-256 hashes each
 changed file after debouncing and compares against a per-task cache
-(`Agents/data/<task>-watch-hashes.json`). Files whose content is
+(`<task>-watch-hashes.json` in the repo's user-level state
+directory). Files whose content is
 unchanged since the last dispatch are **individually dropped** from the
 batch. If no files survive filtering, the entire dispatch is skipped.
 
@@ -278,7 +280,8 @@ Each attempt is logged as a warning so intermittent failures are visible.
 When an agent hits its timeout limit, `headless_agent()` retries up to
 `HEADLESS_TIMEOUT_RETRIES` times (default 1, configurable via env var)
 before giving up. Each timeout attempt persists any partial stdout/stderr
-to `Agents/logs/timeout-debug/` for post-mortem analysis by self-heal.
+to the repo's state-home `logs/runs/` directory (files suffixed
+`-timeout`) for post-mortem analysis by self-heal.
 The first timeout is logged as a warning; subsequent timeouts are errors.
 
 ## Session transcript capture (implemented)
@@ -304,8 +307,8 @@ schedule: "0 * * * *"
 
 | Agent | Mechanism | Transcript location |
 |-------|-----------|-------------------|
-| `copilot` | `--share <path>` flag | `Agents/logs/<name>-transcript.md` |
-| `agency copilot` | `--share <path>` flag | `Agents/logs/<name>-transcript.md` |
+| `copilot` | `--share <path>` flag | `<name>-transcript.md` in the repo's state-home logs directory |
+| `agency copilot` | `--share <path>` flag | `<name>-transcript.md` in the repo's state-home logs directory |
 | `claude` | Not yet available | Planned: `--output-format stream-json` |
 | `agency claude` | Not yet available | Planned: `--output-format stream-json` |
 

@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import heartbeat, preflight
+from . import health_check, heartbeat, preflight
 from .spawn import find_uv
 
 
@@ -33,6 +33,14 @@ def main(argv: list[str] | None = None) -> int:
         # Non-WSL hosts have no Windows heartbeat task to remove; a hard
         # dependency here would make uninstall impossible off WSL.
         print("no WSL host integrations to remove; uninstalling the tool")
+    # After host cleanup succeeded (never before: a failed uninstall must
+    # not strand an installed tool without its check-and-repair loop).
+    try:
+        if health_check.remove_health_cron_lines():
+            print("Removed the health-check loop crontab entries")
+    except Exception as exc:
+        print(f"warning: could not remove health-check crontab entries: "
+              f"{exc}", file=sys.stderr)
     try:
         uv = find_uv()
     except FileNotFoundError:

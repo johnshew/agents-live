@@ -70,7 +70,9 @@ Native agent directories hold no executables: agents there reference
 pre/post-processors by repo-relative path (e.g.
 `Agents/handlers/x.py`); bare names are rejected. In additional agent
 directories, bare names still resolve relative to the agent's own
-directory. Logs are always centralized in `Agents/logs/`. Agents in
+directory. Logs are centralized per repo in the user-level state home
+(`~/.local/state/agents-live/repos/<key>/logs/`), never in the project
+tree. Agents in
 `.claude/agents/` are visible to Claude Code as subagents - give each a
 description ending "Never delegate to this agent." plus
 `disable-model-invocation: true` (the doctor lints this).
@@ -106,6 +108,7 @@ not the user-facing contract.
 | `smoketest` | `agents-live smoketest` |
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
+| `health-check` | `agents-live health-check` (host check-and-repair loop; self-installs its `@reboot` + hourly crontab entries) |
 | `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
@@ -145,7 +148,8 @@ pre-processor -> agent -> post-processor
 - Pre-processor stdout is appended to the agent prompt as `pre-processor="<output>"`.
 - Output `{"skip": true}` to skip the agent call (status `skipped`).
 - With `runtime: none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
-- Watchers ignore `.*`, `__pycache__/`, and `Agents/logs/` to prevent loops.
+- Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
+  outside the project tree, so log writes cannot re-trigger watchers.
 - In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below).
 
 ## Pipeline mode (`mode: pipeline`)

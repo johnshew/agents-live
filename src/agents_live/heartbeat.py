@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import preflight
+from . import paths, preflight
 
 TASK_PREFIX = "Agents Live Heartbeat"
 LEGACY_TASK = "WSL Heartbeat"
@@ -21,8 +21,7 @@ INVALID_DISTRO_CHARS = ('"', "\n", "\r", "\0")
 
 
 def state_dir() -> Path:
-    root = os.environ.get("XDG_STATE_HOME")
-    return (Path(root).expanduser() if root else Path.home() / ".local" / "state") / "agents-live"
+    return paths.state_home()
 
 
 def beacon_path() -> Path:
