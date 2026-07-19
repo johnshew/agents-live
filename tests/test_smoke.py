@@ -104,6 +104,7 @@ Smoke fixture body.
 FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 GOLDEN_DIR = Path(__file__).with_name("golden")
 UPDATE_GOLDENS_ENV = "AGENTS_LIVE_UPDATE_GOLDENS"
+UPDATE_GOLDENS_VALUES = frozenset({"1", "true", "yes"})
 ISO_TIMESTAMP_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
@@ -1467,7 +1468,7 @@ class TestHumanOutputGoldens(_TempProject):
             f"{self._normalize(stderr, host=host)}"
         )
         path = GOLDEN_DIR / name
-        if os.environ.get(UPDATE_GOLDENS_ENV) == "1":
+        if os.environ.get(UPDATE_GOLDENS_ENV, "").lower() in UPDATE_GOLDENS_VALUES:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(actual, encoding="utf-8")
         self.assertEqual(
