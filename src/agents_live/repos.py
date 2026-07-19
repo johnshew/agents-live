@@ -146,7 +146,7 @@ def _write(registry: dict) -> None:
         raise
 
 
-def _add(value: str) -> None:
+def _register_path(registry: dict, value: str) -> str:
     path = Path(value).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"repo path is not an existing directory: {path}")
@@ -156,16 +156,21 @@ def _add(value: str) -> None:
             f"cannot register {path}: the directory name must start with an "
             "alphanumeric character and contain only letters, numbers, "
             "'.', '_', or '-'")
+    for existing, registered in registry["repos"].items():
+        if registered == str(path):
+            raise ValueError(f"{path} is already registered as {existing!r}")
+    if name in registry["repos"]:
+        raise ValueError(
+            f"a repo named {name!r} is already registered "
+            f"({registry['repos'][name]}); remove it first")
+    registry["repos"][name] = str(path)
+    return name
+
+
+def _add(value: str) -> None:
     with _registry_lock():
         registry = load()
-        for existing, registered in registry["repos"].items():
-            if registered == str(path):
-                raise ValueError(f"{path} is already registered as {existing!r}")
-        if name in registry["repos"]:
-            raise ValueError(
-                f"a repo named {name!r} is already registered "
-                f"({registry['repos'][name]}); remove it first")
-        registry["repos"][name] = str(path)
+        _register_path(registry, value)
         _write(registry)
 
 
@@ -185,7 +190,12 @@ def _resolve_ref(registry: dict, ref: str) -> str:
 def _set_default(ref: str) -> None:
     with _registry_lock():
         registry = load()
-        name = _resolve_ref(registry, ref)
+        try:
+            name = _resolve_ref(registry, ref)
+        except ValueError as exc:
+            if not Path(ref).expanduser().resolve().is_dir():
+                raise exc
+            name = _register_path(registry, ref)
         _validated_path(registry["repos"][name], name)
         registry["default_repo"] = name
         _write(registry)
@@ -311,8 +321,9 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument(
         "path",
         help="Repository root directory (registered under its directory name)")
-    default = subparsers.add_parser("default", help="Set the fallback repository")
-    default.add_argument("repo", help="Registered repository path or name")
+    default = subparsers.add_parser(
+        "default", help="Set the fallback repository, registering a path if needed")
+    default.add_argument("repo", help="Repository path or registered directory name")
     remove = subparsers.add_parser("remove", help="Remove a registered repository")
     remove.add_argument("repo", help="Registered repository path or name")
     subparsers.add_parser("help", help="Show this help message")

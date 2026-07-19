@@ -6,6 +6,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: make `repos default <path>` register an existing unregistered
+  repository before selecting it as the fallback.
+
 ## 0.3.0 - 2026-07-18
 
 - fix: refuse to modify the crontab when it cannot be read. A transient

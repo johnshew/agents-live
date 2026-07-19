@@ -168,10 +168,10 @@ class TestRepositoryRegistry(_TempProject):
         with self.assertRaisesRegex(ValueError, "not a registered repository"):
             repos._remove(str(other))
 
-    def test_cli_registers_and_defaults_by_path(self) -> None:
-        self.assertEqual(repos.main(["add", str(self.root)]), 0)
+    def test_cli_default_registers_unregistered_path(self) -> None:
         self.assertEqual(repos.main(["default", str(self.root)]), 0)
         registry = repos.load()
+        self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
         self.assertEqual(registry["default_repo"], self.root.name)
 
     def test_help_action_prints_usage(self) -> None:
