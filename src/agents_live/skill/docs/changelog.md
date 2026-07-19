@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 1.0.0 - 2026-07-19
+
 - fix: emit typed JSON envelopes for usage errors, structured failures, and log records. (#65)
   Under `--json`, argparse usage errors no longer exit with empty output,
   doctor's structured failure payloads pass through untouched, programming
