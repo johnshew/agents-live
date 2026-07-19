@@ -974,16 +974,13 @@ def activate_one(
 def main() -> int:
     from . import plugins
 
-    internal_parser = argparse.ArgumentParser(add_help=False)
-    internal_commands = internal_parser.add_subparsers(dest="internal_command")
-    internal_names = (
-        "watch-loop", "ensure-watcher", "list-reboot-watchers")
-    for command in internal_names:
+    parser = argparse.ArgumentParser()
+    internal_commands = parser.add_subparsers(dest="internal_command")
+    for command in ("watch-loop", "ensure-watcher", "list-reboot-watchers"):
         child = internal_commands.add_parser(command)
         if command != "list-reboot-watchers":
-            child.add_argument("internal_name")
+            child.add_argument("name")
 
-    parser = argparse.ArgumentParser()
     parser.add_argument("--name")
     parser.add_argument("--all", action="store_true", help="Activate all agents that have a schedule or watchPath")
     parser.add_argument(
@@ -1009,12 +1006,8 @@ def main() -> int:
              "definition file no longer exists, then exit. Implied at the "
              "start of --all so reconcile also decommissions deleted agents.",
     )
-    if len(sys.argv) > 1 and sys.argv[1] in internal_names:
-        args = internal_parser.parse_args()
-    else:
-        args = parser.parse_args()
-    if getattr(args, "yes", False) and (
-            getattr(args, "all", False) or not getattr(args, "name", None)):
+    args = parser.parse_args()
+    if args.yes and (args.all or not args.name):
         parser.error("--yes requires a targeted --name and cannot be used with --all")
 
     try:
@@ -1025,14 +1018,14 @@ def main() -> int:
 
         if getattr(args, "internal_command", None) == "ensure-watcher":
             # Guarded, idempotent respawn used by the @reboot crontab line.
-            pid = activate_watcher(args.internal_name)
-            print(f"Ensured watcher for '{args.internal_name}': pid {pid}")
+            pid = activate_watcher(args.name)
+            print(f"Ensured watcher for '{args.name}': pid {pid}")
             return 0
 
         if getattr(args, "internal_command", None) == "watch-loop":
-            agent_log = logs_root() / f"{args.internal_name}.log"
+            agent_log = logs_root() / f"{args.name}.log"
             try:
-                return watch_loop(args.internal_name)
+                return watch_loop(args.name)
             except Exception:
                 import traceback
                 ensure_logs_dir()

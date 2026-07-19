@@ -104,6 +104,8 @@ Smoke fixture body.
 FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 GOLDEN_DIR = Path(__file__).with_name("golden")
 UPDATE_GOLDENS_ENV = "AGENTS_LIVE_UPDATE_GOLDENS"
+ISO_TIMESTAMP_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
 
 
 class TestSmoketestDispatch(_TempProject):
@@ -971,6 +973,19 @@ class TestCliContract(_TempProject):
                     self.assertEqual(cli.main(["start", plumbing]), 2)
         self.assertNotIn("internal", cli._usage())
 
+    def test_internal_ensure_watcher_dispatches(self) -> None:
+        with (
+            mock.patch.object(preflight, "check", return_value=None),
+            mock.patch.object(activate, "activate_watcher",
+                              return_value=123) as ensure,
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(
+                cli.main(["internal", "ensure-watcher", "fixture"]), 0)
+        ensure.assert_called_once_with("fixture")
+        self.assertEqual(
+            stdout.getvalue(), "Ensured watcher for 'fixture': pid 123\n")
+
     def test_each_command_help_comes_from_spec(self) -> None:
         for command in COMMANDS:
             with self.subTest(command=command.name):
@@ -1433,11 +1448,7 @@ class TestHumanOutputGoldens(_TempProject):
         for value, replacement in replacements:
             if value:
                 text = text.replace(value, replacement)
-        text = re.sub(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z",
-            "<TIMESTAMP>",
-            text,
-        )
+        text = ISO_TIMESTAMP_PATTERN.sub("<TIMESTAMP>", text)
         return re.sub(r"\bpid \d+\b", "pid <PID>", text)
 
     def _assert_golden(
