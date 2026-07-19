@@ -2411,19 +2411,30 @@ class TestReleaseTool(unittest.TestCase):
             )
             existing = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout='{"url":"https://example.test/release"}\n')
-            generated_body = (
+            existing_body = (
                 "- fix: keep this standalone summary.\n\n"
-                "[Full changelog](https://example.test/changelog)\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n\n"
                 "## What's Changed\n"
                 "* Fix a bug in https://example.test/pull/1\n\n"
-                "**Full Changelog**: https://github.com/johnshew/agents-live/"
+                "**Diffs**: https://github.com/johnshew/agents-live/"
                 "compare/v1.2.2...v1.2.3"
+            )
+            expected_body = (
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
+                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3)\n"
             )
             edited_bodies = []
 
             def capture_existing_run(argv, *, capture=False):
                 if argv[:3] == ["gh", "release", "view"]:
-                    return generated_body
+                    return existing_body
                 if argv[:3] == ["gh", "release", "edit"]:
                     notes_path = Path(argv[argv.index("--notes-file") + 1])
                     edited_bodies.append(notes_path.read_text(encoding="utf-8"))
@@ -2441,14 +2452,20 @@ class TestReleaseTool(unittest.TestCase):
                 module.publish()
             commands = [call.args[0] for call in run.call_args_list]
             self.assertFalse(any(command[0] == "uv" for command in commands))
-            self.assertEqual(
-                edited_bodies,
-                [generated_body.replace("**Full Changelog**:", "**Diffs**:") + "\n"],
-            )
+            self.assertEqual(edited_bodies, [expected_body])
 
             missing = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
             release_bodies = []
             edited_bodies.clear()
+            generated_body = (
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n"
+                "- feat!: replace the old contract.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "**Full Changelog**: https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3"
+            )
 
             def capture_run(argv, *, capture=False):
                 if argv[:3] == ["gh", "release", "create"]:
@@ -2479,15 +2496,24 @@ class TestReleaseTool(unittest.TestCase):
             self.assertEqual(
                 release_bodies,
                 [
+                "## Curated Summary\n\n"
                 "- fix: keep this standalone summary.\n"
-                "- feat!: replace the old contract.\n\n"
-                "[Full changelog](https://github.com/johnshew/agents-live/"
-                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n"
+                "- feat!: replace the old contract.\n"
                 ],
             )
             self.assertEqual(
                 edited_bodies,
-                [generated_body.replace("**Full Changelog**:", "**Diffs**:") + "\n"],
+                [
+                "## Curated Summary\n\n"
+                "- fix: keep this standalone summary.\n"
+                "- feat!: replace the old contract.\n\n"
+                "## What's Changed\n"
+                "* Fix a bug in https://example.test/pull/1\n\n"
+                "[Full changelog](https://github.com/johnshew/agents-live/"
+                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
+                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3)\n"
+                ],
             )
 
 
