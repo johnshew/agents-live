@@ -268,7 +268,7 @@ def main() -> int:
     print(
         "\nNext steps:\n"
         "  - copy a starter from .claude/skills/agents-live/templates/\n"
-        "    into Agents/<agent-name>.md and edit its frontmatter\n"
+        "    into .claude/agents/<agent-name>.md and edit its frontmatter\n"
         "  - `agents-live run <agent-name>` to test it once\n"
         "  - `agents-live start <agent-name>` to activate its triggers\n"
         "  docs: https://github.com/johnshew/agents-live\n")

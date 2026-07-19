@@ -292,7 +292,7 @@ Two artifacts, one source of truth:
    existing agents live, debug runs, trace pipelines) and drives
    `agents-live <cmd>`. Installed as a Claude Code skill by `init`;
    the same doc serves Copilot via AGENTS.md. The skill is optional
-   support for the CLI — everything it does is an ordinary
+   support for the CLI - everything it does is an ordinary
    `agents-live` command, and the CLI is fully usable without it.
 
 The public repo is the source of truth for all framework code. Private

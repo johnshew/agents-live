@@ -172,7 +172,10 @@ COMMANDS = (
     Cmd(
         "migrate", "Converge persisted runtime invocations.", "migrate",
         "in-process", probes=("crontab",), json=True, default_notice=True,
-        args=(Arg(("--dry-run", "-n"), "Print the plan without mutating."),),
+        args=(
+            Arg(("--dry-run", "-n"), "Print the plan without mutating."),
+            Arg(("--adopt",), "Adopt entries from a moved root.", kind="value"),
+        ),
     ),
     Cmd(
         "heartbeat", "Run or manage the host heartbeat.", "heartbeat",

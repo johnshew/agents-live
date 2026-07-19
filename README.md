@@ -1,7 +1,7 @@
 # agents-live
 
 **Take your agents live.** agents-live adds safe, local automation to
-the Claude Code and GitHub Copilot agents you already use — cron and
+the Claude Code and GitHub Copilot agents you already use - cron and
 file-watch dispatch, deterministic pre/post processing, safety
 wrappers, and operations. It does not replace your agents: an agent
 stays one Markdown file with the same prompt. A few frontmatter fields
@@ -29,22 +29,22 @@ that touches your files is a deterministic handler you own.
 
 Write access is a ladder with an explicit final rung:
 
-1. **plan** (the default) — the agent runs read-only and emits JSON; a
+1. **plan** (the default) - the agent runs read-only and emits JSON; a
    runner validates it (JSON Schema, size caps, path roots, provenance)
    and hands it to your deterministic handler.
-2. **pipeline** — the agent's tool surface narrows to a schema-checked
+2. **pipeline** - the agent's tool surface narrows to a schema-checked
    `put`/`get` side-channel that your pre/post-processors mediate, over
    a token-protected loopback endpoint that exists only for the
    duration of one run.
-3. **write** — full write access: the last option, an explicit
+3. **write** - full write access: the last option, an explicit
    per-agent opt-in.
 
-This ladder is tool policy, not a sandbox — agents inherit your local
+This ladder is tool policy, not a sandbox - agents inherit your local
 account's privileges unless you configure stricter CLI or OS isolation.
 
 ## Lightweight
 
-No framework to learn, no APIs to call, no daemon to maintain — just
+No framework to learn, no APIs to call, no daemon to maintain - just
 things you use every day: git, files, markdown, cron, and scripts.
 Cron and inotifywait do the triggering; agents-live adds activation,
 debounce, concurrency, structured logs, and per-run token cost. If you
@@ -94,7 +94,7 @@ first-time project setup command.
 cd your-repo
 agents-live doctor    # verify cron, inotifywait, and agent CLIs
 agents-live init      # layout + config marker + skill payload
-# copy a starter from .claude/skills/agents-live/templates/ into Agents/
+# copy a starter from .claude/skills/agents-live/templates/ into .claude/agents/
 agents-live run my-agent        # test once, in the foreground
 agents-live start my-agent      # activate cron/watcher triggers
 agents-live status
@@ -156,4 +156,4 @@ usable without it.
 - [Architecture](src/agents_live/skill/docs/approach.md)
 - [Commands](src/agents_live/skill/docs/commands.md)
 - [Starter templates](src/agents_live/skill/templates/)
-- [SKILL.md](src/agents_live/skill/SKILL.md) — full reference
+- [SKILL.md](src/agents_live/skill/SKILL.md) - full reference

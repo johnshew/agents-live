@@ -698,10 +698,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [{state}] {item['name']} ({item['path']}){detail}")
         return 0 if payload["ok"] else 1
 
-    try:
-        update_check.refresh()
-    except OSError:
-        pass
+    if not os.environ.get(update_check.SKIP_REFRESH_ENV):
+        try:
+            update_check.refresh()
+        except OSError:
+            pass
     project_checks = _project_checks_enabled()
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]

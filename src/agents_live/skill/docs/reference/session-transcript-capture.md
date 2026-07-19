@@ -13,7 +13,7 @@ Triggered tasks (headless runs via Agency + Copilot CLI) produce only a
 summary-level log (see
 [approach.md § 4. Logging](../approach.md#4-logging)
 for JSONL schema and querying). The JSONL entries in `Agents/logs/<name>.log`
-record `phase: agent` with the final output, token usage, and status — but
+record `phase: agent` with the final output, token usage, and status - but
 not the full conversation: tool calls, tool results, agent reasoning steps, or
 intermediate outputs.
 
@@ -43,17 +43,17 @@ activate.py (cron/watcher lifecycle)
 
 ### What Gets Captured Per Agent Type
 
-#### `copilot` (bare) — PTY capture via `script -qc`
+#### `copilot` (bare) - PTY capture via `script -qc`
 
 | Data | Captured | How | Limitation |
 |------|----------|-----|------------|
 | Agent output | ✓ | PTY transcript file (ANSI-stripped) | `filtered_copilot_output()` keeps only first 20 non-noise lines when no JSON found |
 | stderr | ✓ | `completed.stderr` from `script` subprocess | Logged as `[:500]` only |
-| Tool calls | ✗ | Not in stdout — only visible in session logs | Lost to redacted `~/.agency/logs/` |
-| Agent reasoning | ✗ | Not in stdout — only visible in session logs | Same |
+| Tool calls | ✗ | Not in stdout - only visible in session logs | Lost to redacted `~/.agency/logs/` |
+| Agent reasoning | ✗ | Not in stdout - only visible in session logs | Same |
 | Token usage | ✓ | Parsed from stderr via `parse_usage_stats()` regex | Fragile regex matching |
 
-#### `agency copilot` — stdout capture (no PTY needed)
+#### `agency copilot` - stdout capture (no PTY needed)
 
 | Data | Captured | How | Limitation |
 |------|----------|-----|------------|
@@ -76,9 +76,9 @@ or `_run_agent_streaming()` (streaming).
 | Agent output | ✓ | `subprocess.run(capture_output=True)` stdout | `--output-format json` wraps output in JSON envelope |
 | stderr | ✓ | `completed.stderr` | Logged as `[:500]` |
 | JSON envelope | ✓ | `parse_claude_json_output()` extracts `result`, `usage`, `cost_usd`, `model` | JSON metadata discarded after extraction |
-| Tool calls | ✗ | Not in JSON envelope | Lost — `--output-format json` only returns final result |
+| Tool calls | ✗ | Not in JSON envelope | Lost - `--output-format json` only returns final result |
 | Agent reasoning | ✗ | Not in JSON envelope | Same |
-| Token usage | ✓ | Extracted from JSON `usage` field | High fidelity — structured data |
+| Token usage | ✓ | Extracted from JSON `usage` field | High fidelity - structured data |
 
 #### `claude` / `agency claude` (streaming, interactive mode)
 
@@ -107,7 +107,7 @@ or `_run_agent_streaming()` (streaming).
 
 **Key insight:** The `--quiet` flag in cron lines means run.py suppresses
 its own console output. All meaningful data reaches the JSONL log
-via `log_event()` calls, which write directly to disk — unaffected by
+via `log_event()` calls, which write directly to disk - unaffected by
 stdout/stderr redirection.
 
 #### Watcher invocations
@@ -125,13 +125,13 @@ subprocess.run(
 
 | Data | Fate |
 |------|------|
-| run.py stdout | Inherited from watcher process — which has stdout/stderr redirected to `/dev/null` (via `activate_watcher()` devnull_fd, line 305-316) |
-| run.py stderr | Same — goes to `/dev/null` |
-| JSONL logs | ✓ Written directly by run.py — unaffected |
-| return code | Ignored (`check=False`) — errors only captured via JSONL |
+| run.py stdout | Inherited from watcher process - which has stdout/stderr redirected to `/dev/null` (via `activate_watcher()` devnull_fd, line 305-316) |
+| run.py stderr | Same - goes to `/dev/null` |
+| JSONL logs | ✓ Written directly by run.py - unaffected |
+| return code | Ignored (`check=False`) - errors only captured via JSONL |
 
 **Key insight:** Watcher-spawned runs discard all terminal output
-(intentional — the watcher runs as a daemon). JSONL logging is the only
+(intentional - the watcher runs as a daemon). JSONL logging is the only
 record. This means the JSONL log quality is critical for watcher tasks.
 
 ### What's Captured in JSONL Logs Today
@@ -147,7 +147,7 @@ A successful agent run produces these JSONL entries:
 ```
 
 **What the JSONL captures well:**
-- ✓ Final agent output text (up to 1 MB — `MAX_LOG_FIELD_LENGTH`)
+- ✓ Final agent output text (up to 1 MB - `MAX_LOG_FIELD_LENGTH`)
 - ✓ Token usage (model, tokens_in, tokens_out, tokens_cached)
 - ✓ Cost (claude agents only, `cost_usd`)
 - ✓ Premium request count (copilot agents, `premium_requests`)
@@ -169,12 +169,12 @@ A successful agent run produces these JSONL entries:
 
 | Commit | What it fixed |
 |--------|---------------|
-| `c86462e` — stderr diagnostics | stderr excerpts + log context included in error messages |
-| `62aac55` — token usage logging | Parse token/model/cost from claude JSON + copilot stderr |
-| `0f0567d` — watcher JSONL logging | Watcher errors go to JSONL, not `.out` files |
-| `81bcca3` — SIGTERM handling | Clean watcher shutdown without spurious error logs |
-| `88115e4` — `--no-custom-instructions` | Prevents Copilot from reloading repo instructions in headless mode |
-| `3483f25` — CLI-version-aware flags | Detects `--no-default-mcps`/`--disable-mcp-server` support before using them |
+| `c86462e` - stderr diagnostics | stderr excerpts + log context included in error messages |
+| `62aac55` - token usage logging | Parse token/model/cost from claude JSON + copilot stderr |
+| `0f0567d` - watcher JSONL logging | Watcher errors go to JSONL, not `.out` files |
+| `81bcca3` - SIGTERM handling | Clean watcher shutdown without spurious error logs |
+| `88115e4` - `--no-custom-instructions` | Prevents Copilot from reloading repo instructions in headless mode |
+| `3483f25` - CLI-version-aware flags | Detects `--no-default-mcps`/`--disable-mcp-server` support before using them |
 
 **Assessment:** These fixes significantly improved the operational logging
 quality (errors, usage, lifecycle). But they did not address the core gap:
@@ -197,7 +197,7 @@ or how it reasoned.
 applies a static list of noise prefixes (●, │, └, ✗, etc.). If the agent's
 actual response is longer than 20 lines or starts with a filtered prefix,
 data is silently lost. This filter is only applied when JSON extraction
-fails — but for non-JSON tasks (analysis, reporting), it's the primary
+fails - but for non-JSON tasks (analysis, reporting), it's the primary
 extraction path.
 
 ### 3. stderr truncation
@@ -210,20 +210,20 @@ diagnostic info, MCP proxy logs, or auth messages that are lost.
 ### 4. PTY vs stdout confusion
 
 The `headless_agent()` function has three distinct capture paths:
-- `run_copilot_with_pty()` — for bare `copilot` only (line 726-727)
-- `_run_agent_streaming()` — for all agents when `stream=True` (line 728-729)
-- `subprocess.run(capture_output=True)` — for all agents when `stream=False` (line 730-739)
+- `run_copilot_with_pty()` - for bare `copilot` only (line 726-727)
+- `_run_agent_streaming()` - for all agents when `stream=True` (line 728-729)
+- `subprocess.run(capture_output=True)` - for all agents when `stream=False` (line 730-739)
 
 The bare `copilot` path is the only one that needs PTY wrapping (because
 copilot writes to `/dev/tty`). Agency copilot writes to stdout directly.
-This is correctly handled — agency copilot goes through the normal
+This is correctly handled - agency copilot goes through the normal
 subprocess paths.
 
 ### 5. Streaming mode discards structured output parsing
 
 When `stream=True` (interactive/non-quiet mode), `_run_agent_streaming()`
 tees stdout to the terminal and collects it. But the streaming path cannot
-use `capture_output=True` — it reads stdout line-by-line. This means for
+use `capture_output=True` - it reads stdout line-by-line. This means for
 claude agents, the `--output-format json` envelope is still captured
 (it's all on stdout), but the display shows raw JSON in the terminal
 rather than pretty output.
@@ -240,7 +240,7 @@ but can't handle multi-format or non-JSON outputs cleanly.
 
 ## Research Findings (Original 5 Areas)
 
-### 1. Agency Config — Redaction Bypass
+### 1. Agency Config - Redaction Bypass
 
 **Finding: No user-facing flag to disable redaction.**
 
@@ -277,7 +277,7 @@ Agents Live adds `--share <path>` in `_build_agent_command()` when an
 agent definition enables `transcript: true`, writing the latest transcript
 to `Agents/logs/<name>-transcript.md`.
 
-**Effort**: Small — ~10 lines in `headless.py` plus retention policy.
+**Effort**: Small - ~10 lines in `headless.py` plus retention policy.
 
 **Limitation**: Only covers copilot-based agents. Claude agents would need
 a separate approach (Claude CLI does not have `--share`).
@@ -291,7 +291,7 @@ The raw Agency log file contains TRACE-level entries with full tool
 arguments and results. A post-processor could extract a transcript, but
 the format is undocumented and may change between Agency versions.
 
-**Not recommended** — `--share` is simpler and more reliable.
+**Not recommended** - `--share` is simpler and more reliable.
 
 ### 4. Sentinel-Based Structured Result (TRIGGERED_TASK_RESULT)
 
@@ -338,7 +338,7 @@ Stderr often contains useful diagnostic data beyond the usage summary.
 Claude CLI supports `--output-format stream-json` which emits JSONL
 events during the session. This could provide tool-call-level
 granularity for claude/agency claude agents, analogous to `--share`
-for copilot agents. Needs investigation — may conflict with the
+for copilot agents. Needs investigation - may conflict with the
 current `--output-format json` used for result extraction.
 
 ### 4. Implement Sentinel Output (Separate Effort)
@@ -366,7 +366,7 @@ Independent of transcript capture.
 | Data | copilot | agency copilot | claude | agency claude | Notes |
 |------|---------|----------------|--------|---------------|-------|
 | Final output | ✓ PTY | ✓ stdout | ✓ JSON | ✓ JSON | Up to 1 MB |
-| Tool calls | ✗ | ✗ | ✗ | ✗ | Core gap — `--share` or `stream-json` would fix |
+| Tool calls | ✗ | ✗ | ✗ | ✗ | Core gap - `--share` or `stream-json` would fix |
 | Reasoning | ✗ | ✗ | ✗ | ✗ | Same |
 | Tokens | ✓ stderr regex | ✓ stderr regex | ✓ JSON | ✓ JSON | Good coverage |
 | Cost | ✗ | ✗ | ✓ JSON | ✓ JSON | Copilot uses premium requests |

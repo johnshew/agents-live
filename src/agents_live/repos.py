@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Iterator
 
 try:
-    from . import preflight
+    from . import preflight, update_check
 except ImportError:
     import preflight
+    import update_check
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COLLECT_WORKERS = 4
@@ -233,9 +234,13 @@ def _cli_base() -> list[str]:
 
 
 def _child_json(alias: str, path: str, command: str) -> dict:
+    env = None
+    if command == "doctor":
+        env = os.environ.copy()
+        env[update_check.SKIP_REFRESH_ENV] = "1"
     completed = subprocess.run(
         [*_cli_base(), "--repo", path, command, "--json"],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
     try:
         payload = json.loads(completed.stdout)
@@ -297,6 +302,7 @@ def collect_doctor() -> dict:
     with tempfile.TemporaryDirectory() as empty:
         env = os.environ.copy()
         env.pop("AGENTS_LIVE_REPO", None)
+        env.pop(update_check.SKIP_REFRESH_ENV, None)
         env["XDG_CONFIG_HOME"] = empty
         host_run = subprocess.run(
             [*_cli_base(), "--json", "doctor"],

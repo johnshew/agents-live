@@ -37,7 +37,7 @@ smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ]
 init         ::= "init"
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
-migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ]
+migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ] [ "--adopt" VALUE ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
@@ -59,7 +59,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  |  | Initialize the project layout. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
-| migrate | in-process | required | crontab | yes |  |  | --dry-run, -n | Converge persisted runtime invocations. |
+| migrate | in-process | required | crontab | yes |  |  | --dry-run, -n, --adopt | Converge persisted runtime invocations. |
 | heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
 | heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
 | heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |
@@ -650,6 +650,10 @@ agents-live status --all-repos       # repo-qualified, read-only aggregate
 agents-live doctor --all-repos       # host once + each registered project
 agents-live dashboard --all-repos    # read-only repository selector
 
+# Moved repository recovery
+agents-live migrate --adopt /old/project/root --dry-run
+agents-live migrate --adopt /old/project/root
+
 # User repository registry
 agents-live repos add ~/repos/<target-project>        # registered under its directory name
 agents-live repos list
@@ -662,6 +666,12 @@ agents-live smoketest --runtime claude
 agents-live smoketest --runtime copilot
 agents-live smoketest --runtime "agency copilot"
 ```
+
+`migrate --adopt` accepts only an old project root that no longer exists. It
+rewrites token-exact schedule and `@reboot` watcher entries for agents defined
+in the current project, using the same crontab lock and canonical builders as
+normal activation. Unmatched entries and entries for every other project are
+reported and left unchanged.
 
 ### Repository selection
 

@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from . import __version__
 
+SKIP_REFRESH_ENV = "AGENTS_LIVE_SKIP_UPDATE_CHECK"
 CACHE_INTERVAL = 60 * 60  # Check hourly so available releases are reported promptly.
 NETWORK_TIMEOUT = 1.0
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"

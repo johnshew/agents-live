@@ -521,10 +521,12 @@ class TestProjectPlugins(_TempProject):
             mock.patch("importlib.reload", return_value=mock.Mock(
                 main=mock.Mock(return_value=0))),
             mock.patch("sys.argv", ["agents-live init"]),
-            mock.patch("sys.stdout", new_callable=io.StringIO),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as init_stdout,
         ):
             self.assertEqual(init.main(), 0)
         converge.assert_called_once_with([self.root])
+        self.assertIn(
+            "into .claude/agents/<agent-name>.md", init_stdout.getvalue())
 
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         with (
@@ -874,6 +876,86 @@ class TestMigratePlanning(_TempProject):
                    "--name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([foreign])
         self.assertEqual(plan, {"schedule": {}, "watcher": {}, "missing": []})
+
+    def test_adopt_rewrites_defined_schedule_and_watcher_only(self) -> None:
+        self.write_agent(
+            "smoke-fixture",
+            AGENT_DEFINITION.replace(
+                f'schedule: "{TEST_CRON_SCHEDULE}"',
+                f'schedule: "{TEST_CRON_SCHEDULE}"\nwatchPath: inbox',
+            ),
+        )
+        old_root = self.root / "moved-project"
+        old_schedule = (
+            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
+            f"--repo {old_root} run --name smoke-fixture --quiet 2>&1")
+        old_watcher = (
+            f"@reboot cd {old_root} && agents-live --repo {old_root} "
+            "internal ensure-watcher smoke-fixture 2>&1")
+        undefined = (
+            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
+            f"--repo {old_root} run --name missing-agent --quiet 2>&1")
+        near_match = old_schedule.replace(str(old_root), f"{old_root}-other")
+        mixed_live = old_schedule.replace(
+            f"--repo {old_root}", f"--repo {self.root}")
+        live_entry = activate.build_cron_lines("smoke-fixture")[0]
+        lines = [
+            old_schedule, old_watcher, undefined, near_match, mixed_live,
+            live_entry,
+        ]
+
+        plan = migrate.plan_adoption(lines, old_root)
+        self.assertEqual(plan["schedule"]["smoke-fixture"][0], [old_schedule])
+        self.assertEqual(plan["watcher"]["smoke-fixture"][0], [old_watcher])
+        self.assertEqual(plan["unmatched"], [undefined])
+
+        rewritten = migrate._apply_adoption(lines, plan)
+        self.assertNotIn(old_schedule, rewritten)
+        self.assertNotIn(old_watcher, rewritten)
+        self.assertIn(undefined, rewritten)
+        self.assertIn(near_match, rewritten)
+        self.assertIn(mixed_live, rewritten)
+        self.assertIn(live_entry, rewritten)
+
+    def test_adopt_dry_run_and_install_use_safe_paths(self) -> None:
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        old_root = self.root / "moved-project"
+        old_line = (
+            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
+            f"--repo {old_root} run --name smoke-fixture --quiet 2>&1")
+        with (
+            mock.patch.object(
+                headless, "current_crontab_lines", return_value=[old_line]),
+            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch("sys.argv", ["agents-live migrate", "--adopt",
+                                    str(old_root), "--dry-run"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(migrate.main(), 0)
+        install.assert_not_called()
+
+        with (
+            mock.patch.object(
+                headless, "current_crontab_lines", return_value=[old_line]),
+            mock.patch.object(
+                headless, "crontab_lock",
+                return_value=contextlib.nullcontext()) as lock,
+            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch("sys.argv", ["agents-live migrate", "--adopt",
+                                    str(old_root)]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(migrate.main(), 0)
+        lock.assert_called_once()
+        install.assert_called_once()
+
+    def test_adopt_rejects_an_existing_old_root(self) -> None:
+        with (
+            mock.patch("sys.argv", ["agents-live migrate", "--adopt",
+                                    str(self.root)]),
+            self.assertRaisesRegex(headless.AgentsLiveError, "still exists"),
+        ):
+            migrate.main()
 
     def test_health_check_ignores_foreign_watcher_entries(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
@@ -1370,6 +1452,44 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
+    def test_rootless_all_repos_dashboard_has_no_relative_paths(self) -> None:
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        code = f"""
+import importlib.util
+import sys
+import types
+from unittest import mock
+from agents_live import headless, repos
+
+nicegui = types.ModuleType("nicegui")
+nicegui.app = mock.MagicMock()
+nicegui.ui = mock.MagicMock()
+nicegui.run = mock.MagicMock()
+sys.modules["nicegui"] = nicegui
+headless.repo_root = mock.Mock(side_effect=ValueError("no root"))
+repos.collect_status = mock.Mock(return_value={{"ok": True, "repos": []}})
+sys.argv = ["dashboard.py", "--all-repos"]
+spec = importlib.util.spec_from_file_location(
+    "agents_live._rootless_dashboard_test", {str(dashboard)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.REPO_ROOT is None
+assert module.LOGS_DIR is None
+assert module.HEALTH_OK_PATH is None
+assert module.DASHBOARD_LOG is None
+assert module.DASHBOARD_TRANSCRIPT is None
+"""
+        with tempfile.TemporaryDirectory() as outside:
+            result = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=outside,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((Path(outside) / "Agents").exists())
+
     def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
         with (
             mock.patch.object(doctor, "collect", return_value=[]),
@@ -1385,6 +1505,20 @@ class TestCliContract(_TempProject):
             self.assertEqual(doctor.main([]), 0)
         refresh.assert_called_once()
         status.assert_called_once()
+
+    def test_doctor_children_suppress_redundant_update_refresh(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout='{"ok": true}', stderr="")
+        with (
+            mock.patch.object(repos, "_cli_base", return_value=["agents-live"]),
+            mock.patch.object(
+                repos.subprocess, "run", return_value=completed) as run,
+        ):
+            result = repos._child_json("project", "/project", "doctor")
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            run.call_args.kwargs["env"][update_check.SKIP_REFRESH_ENV], "1")
+
 
     def test_doctor_json_suppresses_cached_update_result(self) -> None:
         with (
@@ -1418,6 +1552,46 @@ class TestCliContract(_TempProject):
             invoke(["--json", "doctor"]),
             invoke(["doctor", "--json"]),
         )
+
+
+class TestPreReleaseAudit(unittest.TestCase):
+    @staticmethod
+    def _module():
+        audit_path = (
+            Path(__file__).resolve().parents[1] / "tools" /
+            "pre-release-audit.py")
+        spec = importlib.util.spec_from_file_location(
+            "agents_live_pre_release_audit", audit_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_machine_name_file_absent_comments_and_matches(self) -> None:
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(audit.load_machine_names(root), [])
+            (root / audit.MACHINE_NAMES_FILE).write_text(
+                "\n# local names\nprivate-host-fixture\n", encoding="utf-8")
+            names = audit.load_machine_names(root)
+            self.assertEqual(names, ["private-host-fixture"])
+            shipped = root / "README.md"
+            shipped.write_text(
+                "Deployed on PRIVATE-HOST-FIXTURE.\n", encoding="utf-8")
+            findings = audit.scan_file(shipped, root, names)
+            self.assertEqual(len(findings), 1)
+            self.assertIn(audit.MACHINE_NAMES_FILE, findings[0])
+
+    def test_em_dash_in_markdown_is_rejected(self) -> None:
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shipped = root / "README.md"
+            shipped.write_text("left — right\n", encoding="utf-8")
+            self.assertIn(
+                "Em dash in shipped Markdown",
+                audit.scan_file(shipped, root)[0],
+            )
 
 
 class TestWindowsHeartbeat(unittest.TestCase):

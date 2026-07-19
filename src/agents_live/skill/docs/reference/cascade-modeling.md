@@ -22,7 +22,7 @@ Build a model any time two or more watchers can trigger each other:
 
 ### 1. Enumerate actors, files, and user stories
 
-Start with user stories — the behaviors the system must provide — not
+Start with user stories - the behaviors the system must provide - not
 implementation details. Stories create the circular dependencies; the model
 proves those circles terminate.
 
@@ -51,7 +51,7 @@ every inotify event, guard check, and file write.
 
 ### 3. Add guards at every re-trigger point
 
-Each point where a chain could loop needs a guard — a check that causes the
+Each point where a chain could loop needs a guard - a check that causes the
 re-trigger to be skipped. Guards are layered (defense in depth):
 
 | Layer | Guard type | Mechanism | Where |
@@ -100,13 +100,13 @@ Compact summary showing which guards fire for each trigger:
 The exercise cascade model was built after discovering a bug where the agent
 overrode checkbox state (Flow B), causing sync to undo user completions.
 The model made the bug obvious and showed exactly where G6 was needed.
-**Lesson:** build the model first — verify the design terminates before
+**Lesson:** build the model first - verify the design terminates before
 writing guards.
 
 ### Log every guard outcome
 
 Every guard must log when it fires (skip) and when it passes (proceed).
-Without this, cascade bugs are invisible — the system appears to work but
+Without this, cascade bugs are invisible - the system appears to work but
 burns tokens on redundant runs, or silently drops user edits.
 
 Guard log phrases to include:
@@ -135,9 +135,9 @@ output file.
 
 ### Direct-script testing misses G1
 
-<!-- NOTE: prep.py is illustrative — substitute your actual handler script -->
+<!-- NOTE: prep.py is illustrative - substitute your actual handler script -->
 When testing flows by running scripts directly (`uv run --script prep.py`),
-the dispatcher's G1 content-hash guard never fires — inotifywait isn't
+the dispatcher's G1 content-hash guard never fires - inotifywait isn't
 involved. This is fine for verifying G2–G6, but a live-watcher test is
 needed to validate the full chain including G1 and the debounce window.
 

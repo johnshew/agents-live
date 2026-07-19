@@ -81,7 +81,7 @@ In the assembled tree the audit additionally enforces two release gates
 (both skipped in the source checkout, where they resolve trivially):
 
 - **Adapter resolution**: every exported agent or template that declares
-  a `runtime:` must resolve through the exported adapter registry — the
+  a `runtime:` must resolve through the exported adapter registry - the
   packaged registry minus `private` adapters. A release must never ship
   an agency-dependent agent; ship public-adapter prompts or omit.
 - **Doc links**: every relative `.md` link in the export must resolve
