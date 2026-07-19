@@ -41,6 +41,10 @@ uv run --script tools/release.py --publish --yes          # publish prepared
 - **Keep the tree export-clean.** Everything here ships to PyPI. No
   personal information, secrets, or machine-specific paths - the
   pre-release audit enforces this, but don't rely on it to catch you.
+  Machine names (hostnames) are PII under this rule, and the rule
+  extends beyond the tree: they must not appear in GitHub issues, PR
+  bodies or comments, or commit messages either. Refer to hosts
+  generically (e.g. "a WSL deployment host", "the owning host").
 - **Tests must stay portable.** `tests/test_smoke.py` runs against
   temp projects only; never couple it to this checkout's `Agents/`
   directory or any specific host.

@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: make `repos default <path>` register an existing unregistered
+  repository before selecting it as the fallback.
 - fix: preserve uv receipt-recorded co-installed requirements during
   `agents-live upgrade`, so upgrading the runtime no longer removes plugin
   wheels from the tool environment.

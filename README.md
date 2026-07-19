@@ -114,7 +114,7 @@ the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
 
 ```bash
 agents-live repos add ~/repos/<target-project>   # registered under its directory name
-agents-live repos default ~/repos/<target-project>
+agents-live repos default ~/repos/<target-project> # registers the path if needed
 agents-live --repo <target-project> status       # directory name also works
 agents-live status --all-repos
 agents-live doctor --all-repos

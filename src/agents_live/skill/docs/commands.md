@@ -583,7 +583,7 @@ agents-live dashboard --all-repos    # read-only repository selector
 # User repository registry
 agents-live repos add ~/repos/<target-project>        # registered under its directory name
 agents-live repos list
-agents-live repos default ~/repos/<target-project>    # accepts a path or the directory name
+agents-live repos default ~/repos/<target-project>    # registers the path if needed
 agents-live --repo <target-project> status
 agents-live repos remove ~/repos/<target-project>
 
@@ -599,10 +599,11 @@ The user registry is
 `$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
 the platform-neutral fallback is `~/.config/agents-live/config.toml`.
 `repos add` requires an existing directory and stores its normalized absolute
-path under the directory's name; `repos default` and `repos remove` accept
-either that path or the name. Duplicate registrations, malformed
-configuration, unavailable paths, and removing the current default fail with
-an actionable error.
+path under the directory's name. `repos default` accepts either a registered
+name or an existing path, registering that path first when needed. `repos
+remove` accepts either the registered path or name. Duplicate registrations,
+malformed configuration, unavailable paths, and removing the current default
+fail with an actionable error.
 
 Targets resolve in this order:
 
