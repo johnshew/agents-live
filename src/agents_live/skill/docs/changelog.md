@@ -6,6 +6,20 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: stop crashing watchers on their first file-change dispatch.
+  The dispatch logger rendered its run-capture paths repo-relative, but
+  captures moved to the user-level state home in 2.0.0, so the watcher
+  process died with a ValueError on its first dispatch and dropped
+  events until the hourly health-check pass restarted it. Capture paths
+  are now logged absolute.
+- docs: retire stale references to the pre-package flow. (#75, #76, #77, #78)
+  overview.md points at GitHub issues and the logs commands instead of
+  retired files; the commands.md release section documents the
+  definitive-repo gates and guarded workflow; the WSL runbook's timeline
+  example uses --last; the Windows heartbeat guide warns that a bare
+  tool install drops declared plugin wheels and names the convergence
+  paths.
+
 ## 2.0.1 - 2026-07-19
 
 - fix: keep the health-check sweep's stdout contract pure JSON when in-process work prints.
