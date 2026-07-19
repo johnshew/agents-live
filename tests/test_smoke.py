@@ -527,6 +527,8 @@ class TestProjectPlugins(_TempProject):
         converge.assert_called_once_with([self.root])
         self.assertIn(
             "into .claude/agents/<agent-name>.md", init_stdout.getvalue())
+        self.assertNotIn(
+            "into Agents/<agent-name>.md", init_stdout.getvalue())
 
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         with (

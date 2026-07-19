@@ -207,7 +207,8 @@ def main() -> int:
         old_root = Path(args.adopt).expanduser().resolve()
         if old_root.exists():
             raise AgentsLiveError(
-                f"cannot adopt {old_root}: the old project root still exists")
+                f"cannot adopt {old_root}: the old project root still exists; "
+                "move or remove it before adopting its triggers")
         if args.dry_run:
             lines = headless.current_crontab_lines()
             if lines is None:

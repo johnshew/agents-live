@@ -252,11 +252,12 @@ def load_machine_names(root: Path) -> list[str]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return []
-    return [
-        line.strip()
-        for line in lines
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
+    names = []
+    for line in lines:
+        name = line.strip()
+        if name and not name.startswith("#"):
+            names.append(name)
+    return names
 
 
 def is_safe_match(line: str) -> bool:

@@ -85,7 +85,9 @@ STATE: dict = {"last_refresh": datetime.now(timezone.utc)}
 
 def _require_repo_path(path: Path | None) -> Path:
     if path is None:
-        raise RuntimeError("single-repository dashboard requires a project root")
+        raise RuntimeError(
+            "single-repository dashboard requires a project root; "
+            "use --all-repos outside an initialized project")
     return path
 
 
