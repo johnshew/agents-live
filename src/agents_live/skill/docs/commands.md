@@ -103,6 +103,10 @@ source <(agents-live completions bash)
 To install persistently, redirect the generated script to the completion
 directory loaded by your shell configuration.
 
+Generated completion covers every public command and alias, visible
+subcommand, declared option, finite argument choice, and universal help form.
+It also completes command targets after `agents-live help`.
+
 ## Contents
 
 - [install -- Installation Instructions](#install----installation-instructions)

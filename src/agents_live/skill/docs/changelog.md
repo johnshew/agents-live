@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: complete universal CLI help and shell-completion coverage. (#95)
+  Every command now lists and completes `--json`, `-h`, `--help`, and `help`;
+  top-level and help-target completion follows the full finite public grammar,
+  enforced by behavioral Bash and generated Zsh conformance tests.
+
 ## 2.1.0 - 2026-07-19
 
 - fix: `logs <name> --all` (and `logs timeline <name> --all`) apply the

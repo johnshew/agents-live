@@ -51,6 +51,10 @@ GLOBAL_ARGS = (
     Arg(("--version",), "Show the installed version and exit."),
 )
 
+HELP_ARG = Arg(("-h", "--help", "help"), "Show command help and exit.")
+
+POST_COMMAND_ARGS = (GLOBAL_ARGS[0], HELP_ARG)
+
 
 COMMANDS = (
     Cmd(
@@ -312,10 +316,10 @@ def command_help(command: Cmd, invoked_as: str | None = None) -> str:
         usage_parts.append(
             "{" + ",".join(sub.name for sub in command.subcommands
                            if not sub.hidden) + "}")
-    if visible_args(command):
+    arguments = (*visible_args(command), *POST_COMMAND_ARGS)
+    if arguments:
         usage_parts.append("[options]")
     lines = [" ".join(usage_parts), "", command.summary]
-    arguments = visible_args(command)
     if arguments:
         lines.extend(("", "arguments:"))
         for argument in arguments:
@@ -353,7 +357,7 @@ def render_usage(version: str, docs_url: str) -> str:
         commands.append(f"  {name:<24} {command.summary}")
     globals_text = [
         f"  {', '.join(argument.flags):<24} {argument.help}"
-        for argument in GLOBAL_ARGS
+        for argument in (*GLOBAL_ARGS, HELP_ARG)
     ]
     blob = f"{docs_url}/blob/v{version}/src/agents_live/skill/docs"
     return "\n".join([
