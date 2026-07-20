@@ -21,6 +21,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,10 @@ try:  # installed package layout
         doctor, repos, spawn, state_migration, status, uninstall,
         update_check, upgrade,
     )
-    from agents_live.cli_spec import COMMANDS, render_docs_block
+    from agents_live.cli_spec import (
+        COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS, render_docs_block,
+        visible_args,
+    )
 except ImportError:  # flat checkout layout
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,7 +66,10 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
-    from cli_spec import COMMANDS, render_docs_block
+    from cli_spec import (
+        COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS, render_docs_block,
+        visible_args,
+    )
 
 
 class _TempProject(unittest.TestCase):
@@ -1095,6 +1102,8 @@ class TestCliContract(_TempProject):
                 with mock.patch("sys.stdout", stdout):
                     self.assertEqual(cli.main([command.name, "--help"]), 0)
                 self.assertIn(command.summary, stdout.getvalue())
+                self.assertIn("--json", stdout.getvalue())
+                self.assertIn("-h, --help, help", stdout.getvalue())
 
     def test_all_help_covers_every_public_command(self) -> None:
         with mock.patch(
@@ -1105,13 +1114,22 @@ class TestCliContract(_TempProject):
             if command.hidden:
                 continue
             with self.subTest(command=command.name):
-                self.assertIn(f"usage: agents-live {command.name}", help_text)
+                start = help_text.index(
+                    f"usage: agents-live {command.name}")
+                end = help_text.find("\n\nusage: agents-live ", start)
+                section = help_text[start:end if end >= 0 else None]
+                self.assertIn("--json", section)
+                self.assertIn("-h, --help, help", section)
                 for child in command.subcommands:
                     if not child.hidden:
-                        self.assertIn(
-                            f"usage: agents-live {command.name} {child.name}",
-                            help_text,
-                        )
+                        child_start = help_text.index(
+                            f"usage: agents-live {command.name} {child.name}")
+                        child_end = help_text.find(
+                            "\n\nusage: agents-live ", child_start)
+                        child_section = help_text[
+                            child_start:child_end if child_end >= 0 else None]
+                        self.assertIn("--json", child_section)
+                        self.assertIn("-h, --help, help", child_section)
 
     def test_usage_uses_package_version_and_links_grammar(self) -> None:
         with mock.patch.object(cli, "__version__", "9.8.7"):
@@ -1448,9 +1466,84 @@ class TestCliContract(_TempProject):
                             for flag in argument.flags:
                                 if flag.startswith("-") and not argument.hidden:
                                     self.assertIn(flag, script)
+                    values = list(dict.fromkeys((
+                        *(child.name for child in command.subcommands
+                          if not child.hidden),
+                        *(value
+                          for item in (command, *command.subcommands)
+                          if not item.hidden
+                          for argument in visible_args(item)
+                          for value in (*argument.flags, *argument.choices)
+                          if value.startswith("-")
+                          or value in argument.choices),
+                        *(flag for argument in POST_COMMAND_ARGS
+                          for flag in argument.flags),
+                    )))
+                    names = "|".join((command.name, *command.aliases))
+                    expected_case = (
+                        f"    {names}) opts={' '.join(values)!r} ;;"
+                        if shell == "bash"
+                        else f"    {names}) values=({' '.join(values)}) ;;"
+                    )
+                    self.assertIn(expected_case, script)
                 self.assertIn("agents-live status --json", script)
+                self.assertIn("-h", script)
+                self.assertIn("--help", script)
+                self.assertIn("help", script)
+                self.assertIn("--all", script)
                 self.assertNotIn("--watch-loop", script)
                 self.assertNotIn("--ensure-watcher", script)
+
+    def test_bash_completion_conforms_to_public_grammar(self) -> None:
+        script = completions.bash()
+        public = [command for command in COMMANDS if not command.hidden]
+
+        def candidates(words: tuple[str, ...]) -> set[str]:
+            quoted_words = " ".join(shlex.quote(word) for word in words)
+            harness = (
+                f"{script}\n"
+                "_agents_live_agent_names() { :; }\n"
+                f"COMP_WORDS=({quoted_words})\n"
+                f"COMP_CWORD={len(words) - 1}\n"
+                "_agents_live\n"
+                "printf '%s\\n' \"${COMPREPLY[@]}\"\n"
+            )
+            completed = subprocess.run(
+                ["bash"], input=harness, capture_output=True,
+                text=True, check=True,
+            )
+            return set(completed.stdout.splitlines())
+
+        top_level = candidates(("agents-live", ""))
+        expected_top_level = {
+            *(name for command in public
+              for name in (command.name, *command.aliases)),
+            *(flag for argument in (*GLOBAL_ARGS, HELP_ARG)
+              for flag in argument.flags),
+        }
+        self.assertTrue(expected_top_level <= top_level)
+        self.assertEqual(candidates(("agents-live", "hel")), {"help"})
+
+        help_targets = candidates(("agents-live", "help", ""))
+        self.assertTrue(
+            {"--all", *(command.name for command in public)} <= help_targets)
+
+        for command in public:
+            expected = {
+                *(child.name for child in command.subcommands
+                  if not child.hidden),
+                *(value
+                  for item in (command, *command.subcommands)
+                  if not item.hidden
+                  for argument in visible_args(item)
+                  for value in (*argument.flags, *argument.choices)
+                  if value.startswith("-") or value in argument.choices),
+                *(flag for argument in POST_COMMAND_ARGS
+                  for flag in argument.flags),
+            }
+            with self.subTest(command=command.name):
+                actual = candidates(("agents-live", command.name, ""))
+                self.assertTrue(expected <= actual, expected - actual)
 
     def test_completions_command_prints_selected_shell(self) -> None:
         for shell, marker in (("bash", "complete -F"),

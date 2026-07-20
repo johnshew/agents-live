@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import argparse
 
-from .cli_spec import COMMANDS, GLOBAL_ARGS, Cmd, visible_args
+from .cli_spec import (
+    COMMANDS,
+    GLOBAL_ARGS,
+    HELP_ARG,
+    POST_COMMAND_ARGS,
+    Cmd,
+    visible_args,
+)
 
 
 def _command_words() -> list[str]:
@@ -16,15 +23,18 @@ def _command_words() -> list[str]:
     return words
 
 
-def _flags(command: Cmd) -> list[str]:
-    return list(dict.fromkeys(
-        flag
+def _values(command: Cmd) -> list[str]:
+    values = [
+        value
         for item in (command, *command.subcommands)
         if not item.hidden
         for argument in visible_args(item)
-        for flag in argument.flags
-        if flag.startswith("-")
-    ))
+        for value in (*argument.flags, *argument.choices)
+        if value.startswith("-") or value in argument.choices
+    ]
+    values.extend(
+        flag for argument in POST_COMMAND_ARGS for flag in argument.flags)
+    return list(dict.fromkeys(values))
 
 
 def _agent_name_condition() -> str:
@@ -56,14 +66,18 @@ def bash() -> str:
         names = "|".join((command.name, *command.aliases))
         flags = " ".join((
             *(child.name for child in command.subcommands if not child.hidden),
-            *_flags(command),
-            "help",
-            "--help",
+            *_values(command),
         ))
         cases.append(f"    {names}) opts={flags!r} ;;")
+    cases.append(
+        "    help) opts="
+        + repr(" ".join(("--all", *_command_words())))
+        + " ;;"
+    )
     commands = " ".join(_command_words())
     globals_text = " ".join(
-        flag for argument in GLOBAL_ARGS for flag in argument.flags)
+        flag for argument in (*GLOBAL_ARGS, HELP_ARG)
+        for flag in argument.flags)
     return f"""# bash completion for agents-live
 _agents_live_agent_names() {{
     agents-live status --json 2>/dev/null |
@@ -99,14 +113,16 @@ def zsh() -> str:
         names = "|".join((command.name, *command.aliases))
         flags = " ".join((
             *(child.name for child in command.subcommands if not child.hidden),
-            *_flags(command),
-            "help",
-            "--help",
+            *_values(command),
         ))
         cases.append(f"    {names}) values=({flags}) ;;")
+    cases.append(
+        "    help) values=(--all " + " ".join(_command_words()) + ") ;;"
+    )
     commands = " ".join(_command_words())
     globals_text = " ".join(
-        flag for argument in GLOBAL_ARGS for flag in argument.flags)
+        flag for argument in (*GLOBAL_ARGS, HELP_ARG)
+        for flag in argument.flags)
     return f"""#compdef agents-live
 
 _agents_live_agent_names() {{
