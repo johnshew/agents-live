@@ -208,19 +208,45 @@ def run_agent(name: str, changed_files: list[str] | None = None) -> str:
     return completed.stdout
 
 
-def read_agent_output_from_log(name: str) -> str:
+def read_agent_output_from_log(
+    name: str, *, start_offset: int = 0, require_done: bool = False,
+    required_trigger: str | None = None,
+) -> str:
     """Read the most recent agent output from the agent's JSONL log."""
     log_path = logs_root() / f"{name}.log"
     if not log_path.is_file():
         raise SmokeFailure(f"No log file found: {log_path.name}")
     agent_output = ""
-    for line in log_path.read_text(encoding="utf-8").strip().splitlines():
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if entry.get("phase") == "agent" and entry.get("status") == "ok":
-            agent_output = entry.get("output", "")
+    eligible_run_ids: set[str] = set()
+    pending_outputs: dict[str, str] = {}
+    with log_path.open("rb") as log_file:
+        log_file.seek(start_offset)
+        for raw_line in log_file:
+            try:
+                entry = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            run_id = entry.get("run_id")
+            if (
+                require_done
+                and isinstance(run_id, str)
+                and entry.get("phase") == "start"
+                and (required_trigger is None or entry.get("trigger") == required_trigger)
+            ):
+                eligible_run_ids.add(run_id)
+            elif entry.get("phase") == "agent" and entry.get("status") == "ok":
+                if not require_done:
+                    agent_output = entry.get("output", "")
+                elif isinstance(run_id, str) and run_id in eligible_run_ids:
+                    pending_outputs[run_id] = entry.get("output", "")
+            elif (
+                require_done
+                and isinstance(run_id, str)
+                and entry.get("phase") == "done"
+            ):
+                pending_output = pending_outputs.pop(run_id, "")
+                if entry.get("status") == "ok" and pending_output:
+                    agent_output = pending_output
     if not agent_output:
         raise SmokeFailure(f"No successful agent output found in {log_path.name}")
     return agent_output
@@ -696,6 +722,11 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("")
         current_step = "4/13 activate watcher"
         print(f"[4/13] Activating watcher via activate.py for \"{watcher_name}\"...")
+        watcher_log = logs_root() / f"{watcher_name}.log"
+        try:
+            watcher_log_offset = watcher_log.stat().st_size
+        except FileNotFoundError:
+            watcher_log_offset = 0
         if not shutil.which("inotifywait"):
             fail("inotifywait not found. Install with: sudo apt install inotify-tools")
         activate_result = subprocess.run(
@@ -734,22 +765,21 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("[6/13] Waiting for watcher to detect change and run agent...")
         # The watcher (started via activate.py) should detect the trigger file
         # written by step 5's handler and automatically invoke run.py.
-        watcher_log = logs_root() / f"{watcher_name}.log"
         max_wait = 90
         poll_interval = 3
         waited = 0
         watcher_output = ""
         while waited < max_wait:
             if watcher_log.is_file():
-                for line in watcher_log.read_text(encoding="utf-8").strip().splitlines():
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("phase") == "agent" and entry.get("status") == "ok":
-                        watcher_output = entry.get("output", "")
-                    if entry.get("phase") == "done":
-                        break
+                try:
+                    watcher_output = read_agent_output_from_log(
+                        watcher_name,
+                        start_offset=watcher_log_offset,
+                        require_done=True,
+                        required_trigger="file-change",
+                    )
+                except SmokeFailure:
+                    pass
                 if watcher_output:
                     break
             time.sleep(poll_interval)

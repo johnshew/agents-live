@@ -1605,11 +1605,11 @@ def _extract_json_value(text: str) -> ExtractionRecord:
             if isinstance(parsed, (dict, list)):
                 return ExtractionRecord(whole, "stdout", False, 1)
 
-    # Try all code fences; pick the largest one that parses as valid JSON.
+    # Try all code fences; pick the last one that parses as valid JSON.
     # The agent may output JSON via a shell tool (with unescaped inner quotes)
-    # AND also echo valid JSON in its own response text.
+    # AND also echo valid JSON in its final response text.
     fenced_matches = list(re.finditer(r"```json\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE))
-    best_fenced: str = ""
+    last_fenced: str = ""
     fenced_ok = 0
     largest_failed: str = ""
     for fenced_match in fenced_matches:
@@ -1619,18 +1619,17 @@ def _extract_json_value(text: str) -> ExtractionRecord:
         try:
             json.loads(candidate)
             fenced_ok += 1
-            if len(candidate) > len(best_fenced):
-                best_fenced = candidate
+            last_fenced = candidate
         except json.JSONDecodeError:
             _diag = candidate[:200] if len(candidate) > 200 else candidate
             sys.stderr.write(f"[extract_json] code fence found ({len(candidate)} chars) but JSON parse failed; first 200: {repr(_diag)}\n")
             if len(candidate) > len(largest_failed):
                 largest_failed = candidate
-    if best_fenced:
-        return ExtractionRecord(best_fenced, "fence", False, fenced_ok)
+    if last_fenced:
+        return ExtractionRecord(last_fenced, "fence", False, fenced_ok)
 
     # If the largest code fence failed to parse, attempt repair
-    if largest_failed and len(largest_failed) > len(best_fenced):
+    if largest_failed:
         repaired = _repair_json_quotes(largest_failed)
         if repaired:
             sys.stderr.write(f"[extract_json] repaired JSON from code fence ({len(largest_failed)} -> {len(repaired)} chars)\n")

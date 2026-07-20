@@ -140,6 +140,60 @@ class TestSmoketestDispatch(_TempProject):
             ["src/a.py", "src/b.py"],
         )
 
+    def test_watcher_log_read_starts_at_current_run_and_waits_for_done(
+            self) -> None:
+        smoketest = importlib.import_module(
+            f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
+        log_path = headless.logs_root() / "_smoketest-watcher.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        historical = {
+            "run_id": "old",
+            "phase": "agent",
+            "status": "ok",
+            "output": '{"status":"fail"}',
+        }
+        done = {"run_id": "old", "phase": "done", "status": "ok"}
+        log_path.write_text(
+            f"{json.dumps(historical)}\n{json.dumps(done)}\n",
+            encoding="utf-8",
+        )
+        current_run_offset = log_path.stat().st_size
+        current_events = [
+            {"run_id": "watch", "phase": "start", "trigger": "file-change"},
+            {
+                "run_id": "watch",
+                "phase": "agent",
+                "status": "ok",
+                "output": '{"status":"pass"}',
+            },
+            {"run_id": "manual", "phase": "start", "trigger": "manual"},
+            {"run_id": "manual", "phase": "done", "status": "ok"},
+        ]
+        with log_path.open("a", encoding="utf-8") as log_file:
+            for event in current_events:
+                log_file.write(f"{json.dumps(event)}\n")
+
+        with self.assertRaises(smoketest.SmokeFailure):
+            smoketest.read_agent_output_from_log(
+                "_smoketest-watcher",
+                start_offset=current_run_offset,
+                require_done=True,
+                required_trigger="file-change",
+            )
+
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(
+                f"{json.dumps({'run_id': 'watch', 'phase': 'done', 'status': 'ok'})}\n")
+        self.assertEqual(
+            smoketest.read_agent_output_from_log(
+                "_smoketest-watcher",
+                start_offset=current_run_offset,
+                require_done=True,
+                required_trigger="file-change",
+            ),
+            '{"status":"pass"}',
+        )
+
 
 class TestPathsResolver(_TempProject):
     def test_env_var_pins_root(self) -> None:
@@ -576,6 +630,21 @@ class TestAgentParsing(_TempProject):
         config = headless.load_agent_config("smoke-fixture")
         self.assertEqual(config.name, "smoke-fixture")
         self.assertEqual(config.schedule, [TEST_CRON_SCHEDULE])
+
+    def test_json_extraction_prefers_final_valid_fence(self) -> None:
+        output = "\n".join([
+            '```json\n{"status":"fail","detail":"provisional"}\n```',
+            '```json\n{"status":"pass"}\n```',
+        ])
+        record = headless._extract_json_value(output)
+        self.assertEqual(json.loads(record.text), {"status": "pass"})
+        self.assertEqual(record.candidate_count, 2)
+
+    def test_watcher_ignores_generated_index_files(self) -> None:
+        self.assertTrue(activate.should_ignore_watch_change(
+            self.root / "Agents" / "notes" / "_index_.md"))
+        self.assertFalse(activate.should_ignore_watch_change(
+            self.root / "Agents" / "notes" / "trigger.txt"))
 
     def test_unknown_runtime_fails_closed(self) -> None:
         self.write_agent("bad-runtime", AGENT_DEFINITION.replace("runtime: none",
