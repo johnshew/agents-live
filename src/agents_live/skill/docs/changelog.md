@@ -28,6 +28,9 @@ history is retained in the source repository.
   reporting a healthy zero-repo sweep.
 - fix: release gates pin `AGENTS_LIVE_REPO` to the checkout so they
   cannot fall through to the registry-default repository. (#85)
+- feat: make CLI help available around commands and generate the full public command surface. (#93)
+  Completion help includes persistent Bash and Zsh installation commands,
+  and upgrades report the installed agents-live version before running.
 - docs: repair stale skill-doc references (retired scripts tree,
   removed `release` verb, dead cross-links) and add the missing
   `repos add` step to the host bring-up workflow.
