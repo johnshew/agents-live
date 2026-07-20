@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve UTC instants across qlog display and filtering. (#99, #100)
+  Canonical writers remain RFC 3339 UTC with `Z`; qlog normalizes aware and
+  legacy naive timestamps to UTC, keeps `--since` and `--until` independently
+  optional, and rejects invalid bounds without an internal traceback.
+
 ## 2.1.1 - 2026-07-19
 
 - fix: complete universal CLI help and shell-completion coverage. (#95)
