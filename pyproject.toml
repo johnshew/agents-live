@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-live"
-version = "2.1.1"
+version = "2.1.2"
 description = "Take your agents live: cron and file-watch dispatch, safety wrappers, and operations for standard agent definitions"
 readme = "README.md"
 requires-python = ">=3.12"
