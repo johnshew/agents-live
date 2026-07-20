@@ -6,3 +6,4 @@ uv.lock
 .agents-live-machine-names
 Agents/logs/*
 !Agents/logs/.gitkeep
+Agents/**/_smoketest*
