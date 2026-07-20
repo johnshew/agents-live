@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- docs: clarify post-publish verification and artifact inspection.
+  Release checks distinguish PyPI JSON publication from Simple API propagation,
+  avoid interactive workflow watchers in automation, and identify the generic
+  `Agents/` fixtures intentionally included in the source distribution.
+
 ## 2.1.1 - 2026-07-19
 
 - fix: complete universal CLI help and shell-completion coverage. (#95)
