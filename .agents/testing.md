@@ -86,8 +86,10 @@ tar -tzf "dist/agents_live-${version}.tar.gz"
 ```
 
 Confirm that package modules, the vendored skill payload, tests, and release
-tools are present, and that deployment-specific agents, logs, data, and private
-adapters are absent.
+tools are present. The source distribution intentionally includes the generic
+`Agents/handlers/write-files.sh` fixture and `Agents/logs/.gitkeep`; no other
+`Agents/` logs or data, deployment-specific agents, or private adapters should
+be present. The wheel contains only the installable package and its metadata.
 
 ## Validate the installed tool
 
@@ -154,16 +156,24 @@ repeat the installed-tool checks:
 
 ```bash
 version="$(uv version --short)"
-uvx --refresh --from "agents-live==$version" agents-live --version
+curl -fsS "https://pypi.org/pypi/agents-live/${version}/json" >/dev/null
+uvx --refresh --index-url https://pypi.org/simple \
+	--from "agents-live==$version" agents-live --version
 agents-live upgrade
 uv tool list
+agents-live --version
 agents-live --repo ~/repos/<target-project> doctor
 ```
 
-The isolated exact-version check plus `--refresh` avoids a false negative while
-uv's index cache is catching up without pinning the user-level tool. The global
-upgrade then validates the normal consumer workflow. This final pass proves the
-artifact that PyPI consumers receive, not only the local wheel.
+The versioned JSON request confirms that trusted publishing created the PyPI
+release record. The isolated exact-version check bypasses uv's cache and
+confirms that PyPI's Simple API can resolve the release without pinning the
+user-level tool. These endpoints may propagate at different times: if JSON
+succeeds while `uvx` reports no matching version, retry `uvx` after the Simple
+API catches up rather than republishing. Run the global upgrade only after
+exact resolution succeeds; it validates the normal consumer workflow. This
+final pass proves the artifact that PyPI consumers receive, not only the local
+wheel.
 
 ## Recover an editable tool install
 

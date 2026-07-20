@@ -92,9 +92,19 @@ the compare link).
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
 which rebuilds, attaches the wheel and sdist to the GitHub release, and
 publishes the same artifacts to PyPI through trusted publishing. Wait for that
-workflow to succeed, verify the exact version on PyPI, then run the installed
-tool checks in [testing.md](testing.md). Use an exact version and `--refresh`
-when uv's index cache has not observed the new release yet.
+workflow to succeed, verify both artifacts are attached, then follow the
+two-stage PyPI and installed-tool checks in [testing.md](testing.md). In an
+interactive terminal, `gh run watch <run-id> --exit-status` can wait for the
+workflow. Automation should use noninteractive run-status APIs or
+`GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
+over the terminal's alternate screen.
+
+PyPI's versioned JSON endpoint can expose a release before the Simple API used
+by package resolvers. A successful workflow and HTTP 200 from the versioned
+JSON endpoint confirm publication. Exact-version `uvx` resolution separately
+confirms consumer availability. If JSON succeeds while `uvx` reports that the
+version does not exist, allow the Simple API to propagate and retry the exact
+check. Do not republish or alter the tag.
 
 If a failure or interruption occurs before the release commit, the script
 restores every version file and clears its staged changes. A failure after the
