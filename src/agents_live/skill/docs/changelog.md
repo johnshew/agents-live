@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.1.1 - 2026-07-19
+
 - fix: complete universal CLI help and shell-completion coverage. (#95)
   Every command now lists and completes `--json`, `-h`, `--help`, and `help`;
   top-level and help-target completion follows the full finite public grammar,
