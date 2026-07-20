@@ -146,31 +146,50 @@ class TestSmoketestDispatch(_TempProject):
             f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
         log_path = headless.logs_root() / "_smoketest-watcher.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        historical = {"phase": "agent", "status": "ok", "output": '{"status":"fail"}'}
-        done = {"phase": "done", "status": "ok"}
+        historical = {
+            "run_id": "old",
+            "phase": "agent",
+            "status": "ok",
+            "output": '{"status":"fail"}',
+        }
+        done = {"run_id": "old", "phase": "done", "status": "ok"}
         log_path.write_text(
             f"{json.dumps(historical)}\n{json.dumps(done)}\n",
             encoding="utf-8",
         )
         current_run_offset = log_path.stat().st_size
-        current = {"phase": "agent", "status": "ok", "output": '{"status":"pass"}'}
+        current_events = [
+            {"run_id": "watch", "phase": "start", "trigger": "file-change"},
+            {
+                "run_id": "watch",
+                "phase": "agent",
+                "status": "ok",
+                "output": '{"status":"pass"}',
+            },
+            {"run_id": "manual", "phase": "start", "trigger": "manual"},
+            {"run_id": "manual", "phase": "done", "status": "ok"},
+        ]
         with log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(f"{json.dumps(current)}\n")
+            for event in current_events:
+                log_file.write(f"{json.dumps(event)}\n")
 
         with self.assertRaises(smoketest.SmokeFailure):
             smoketest.read_agent_output_from_log(
                 "_smoketest-watcher",
                 start_offset=current_run_offset,
                 require_done=True,
+                required_trigger="file-change",
             )
 
         with log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(f"{json.dumps(done)}\n")
+            log_file.write(
+                f"{json.dumps({'run_id': 'watch', 'phase': 'done', 'status': 'ok'})}\n")
         self.assertEqual(
             smoketest.read_agent_output_from_log(
                 "_smoketest-watcher",
                 start_offset=current_run_offset,
                 require_done=True,
+                required_trigger="file-change",
             ),
             '{"status":"pass"}',
         )
