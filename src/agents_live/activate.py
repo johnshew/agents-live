@@ -270,6 +270,8 @@ def should_ignore_watch_change(changed_file: str, watch_ignore: list[str] | None
         return True
     if any(part == "__pycache__" for part in relative.parts):
         return True
+    if relative.name == "_index_.md":
+        return True
     # Ignore JSONL log files written by the agents-live system itself
     # (prevents recursive triggers), but allow other files under Agents/logs/
     # so watcher agents that deliberately watch subdirectories still fire.
