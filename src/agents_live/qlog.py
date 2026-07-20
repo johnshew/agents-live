@@ -28,8 +28,10 @@ Custom SQL (filters in WHERE; --sql is exclusive with filter flags):
                    WHERE ts > now() - INTERVAL 1 HOUR
                    GROUP BY 1 ORDER BY 2 DESC"
 
---since/--until accept ISO-8601 or relative forms: 30m, 2h, 1d,
-"1 hour ago", "2 days ago".
+--since/--until are independently optional and accept ISO-8601 or relative
+forms: 30m, 2h, 1d, "1 hour ago", "2 days ago". ISO timestamps without an
+offset use the Agents Live legacy UTC convention. qlog normalizes all accepted
+forms to UTC before filtering and display.
 
 Schema of the `log` view
 ------------------------
@@ -95,6 +97,46 @@ NORMALIZED_COLUMN_TYPES = {
     "log_schema": "INTEGER",
 }
 
+_RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
+_RELATIVE_WORDS = re.compile(
+    r"^(\d+)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
+    r"(?:\s+ago)?$",
+    re.IGNORECASE,
+)
+_UNIT_TO_DELTA = {
+    "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
+    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    "d": "d", "day": "d", "days": "d",
+}
+
+
+def _resolve_ts(value: str | None) -> str | None:
+    """Normalize a relative or ISO-8601 bound to an aware UTC timestamp."""
+    if value is None:
+        return None
+    text = value.strip()
+    match = _RELATIVE_COMPACT.match(text) or _RELATIVE_WORDS.match(text)
+    if match:
+        count = int(match.group(1))
+        unit = _UNIT_TO_DELTA[match.group(2).lower()]
+        delta = {
+            "m": timedelta(minutes=count),
+            "h": timedelta(hours=count),
+            "d": timedelta(days=count),
+        }[unit]
+        parsed = datetime.now(timezone.utc) - delta
+    else:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid timestamp {value!r}; expected ISO-8601 or a relative "
+                "duration such as 30m, 2h, or '1 day ago'"
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 def _expand(patterns: list[str]) -> list[str]:
     files: list[str] = []
@@ -132,6 +174,11 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str]) -> None:
 
     Adds `_src` (filename) for provenance.
     """
+    # Agents Live JSONL timestamps are UTC. DuckDB infers homogeneous ISO
+    # strings as naive TIMESTAMP values in its session timezone, so pin the
+    # session to UTC before ingestion to preserve aware instants and give
+    # offset-free legacy rows a deterministic UTC interpretation.
+    con.sql("SET TimeZone='UTC'")
     files = _expand(patterns)
     if not files:
         raise SystemExit(f"no log files matched: {patterns}")
@@ -284,8 +331,8 @@ def main() -> int:
     ap.add_argument("--all", action="store_true",
                     help="union this repo's logs with the host-level logs")
     ap.add_argument("--agent", help="filter by agent name (substring match)")
-    ap.add_argument("--since", help="ts >= this (ISO-8601, UTC)")
-    ap.add_argument("--until", help="ts < this (ISO-8601, UTC)")
+    ap.add_argument("--since", help="ts >= this (ISO-8601 or relative; UTC)")
+    ap.add_argument("--until", help="ts < this (ISO-8601 or relative; UTC)")
     ap.add_argument("--phase", help="filter by phase (start|done|watcher|activate|...)")
     ap.add_argument("--status", help="filter by status (ok|error|skipped|...)")
     ap.add_argument("--trigger", help="filter by trigger (cron|file-change|...)")
@@ -316,6 +363,13 @@ def main() -> int:
                     help="validate normalized live-plus-archive column types")
     args = ap.parse_args()
 
+    try:
+        since = _resolve_ts(args.since)
+        until = _resolve_ts(args.until)
+    except ValueError as exc:
+        preflight.emit_failure("logs", str(exc), code="usage_error")
+        return 2
+
     # Resolve positional `name`: if <name>.log exists in this repo's log
     # directory, point --log at it; otherwise fall through to an --agent
     # substring filter. With --all there is no single file to prefer, so
@@ -336,34 +390,6 @@ def main() -> int:
     con = duckdb.connect(":memory:")
     build_view(con, ALL_LOG_GLOBS if args.all else [args.log])
 
-    # Resolve relative time specs to ISO timestamps. Accepts compact
-    # forms (`30m`, `2h`, `1d`) and natural forms (`1 hour ago`,
-    # `2 days ago`, `30 min ago`).
-    _RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
-    _RELATIVE_WORDS = re.compile(
-        r"^(\d+)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
-        r"(?:\s+ago)?$",
-        re.IGNORECASE,
-    )
-    _UNIT_TO_DELTA = {
-        "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
-        "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
-        "d": "d", "day": "d", "days": "d",
-    }
-    def _resolve_ts(val: str | None) -> str | None:
-        if val is None:
-            return None
-        s = val.strip()
-        m = _RELATIVE_COMPACT.match(s) or _RELATIVE_WORDS.match(s)
-        if m:
-            n = int(m.group(1))
-            unit = _UNIT_TO_DELTA[m.group(2).lower()]
-            delta = {"m": timedelta(minutes=n),
-                     "h": timedelta(hours=n),
-                     "d": timedelta(days=n)}[unit]
-            return (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return s
-
     if args.check_schema:
         violations = check_schema(con)
         if violations:
@@ -380,8 +406,8 @@ def main() -> int:
         # SQL.
         filter_map = [
             ("--agent", args.agent, lambda v: f"agent_name LIKE '%{v}%'"),
-            ("--since", args.since, lambda v: f"ts >= '{_resolve_ts(v)}'"),
-            ("--until", args.until, lambda v: f"ts < '{_resolve_ts(v)}'"),
+            ("--since", since, lambda v: f"ts >= '{v}'"),
+            ("--until", until, lambda v: f"ts < '{v}'"),
             ("--phase", args.phase, lambda v: f"phase = '{v}'"),
             ("--status", args.status, lambda v: f"status = '{v}'"),
             ("--trigger", args.trigger, lambda v: f"trigger = '{v}'"),
@@ -403,8 +429,8 @@ def main() -> int:
     else:
         where = []
         if args.agent:   where.append(f"agent_name LIKE '%{args.agent}%'")
-        if args.since:   where.append(f"ts >= '{_resolve_ts(args.since)}'")
-        if args.until:   where.append(f"ts < '{_resolve_ts(args.until)}'")
+        if since:        where.append(f"ts >= '{since}'")
+        if until:        where.append(f"ts < '{until}'")
         if args.phase:   where.append(f"phase = '{args.phase}'")
         if args.status:  where.append(f"status = '{args.status}'")
         if args.trigger: where.append(f"trigger = '{args.trigger}'")
@@ -423,25 +449,24 @@ def main() -> int:
 
     try:
         rel = con.sql(q)
-    except duckdb.Error as e:
+        if args.format == "jsonl":
+            import json
+            cols = rel.columns
+            for row in rel.fetchall():
+                print(json.dumps(dict(zip(cols, row, strict=True)), default=str))
+        elif args.format == "csv":
+            print(",".join(rel.columns))
+            for row in rel.fetchall():
+                print(",".join("" if v is None else str(v).replace(",", ";") for v in row))
+        else:
+            # Widen display so columns aren't hidden or truncated.
+            # max_width=500 lets the table exceed terminal width (wraps naturally).
+            # max_col_width=80 keeps individual columns readable.
+            rel.show(max_col_width=80, max_width=500)
+    except duckdb.Error as exc:
         preflight.emit_failure(
-            "logs", f"{e}; sql: {q}", code="query_error")
+            "logs", f"{exc}; sql: {q}", code="query_error")
         return 2
-
-    if args.format == "jsonl":
-        import json
-        cols = rel.columns
-        for row in rel.fetchall():
-            print(json.dumps(dict(zip(cols, row, strict=True)), default=str))
-    elif args.format == "csv":
-        print(",".join(rel.columns))
-        for row in rel.fetchall():
-            print(",".join("" if v is None else str(v).replace(",", ";") for v in row))
-    else:
-        # Widen display so columns aren't hidden or truncated.
-        # max_width=500 lets the table exceed terminal width (wraps naturally).
-        # max_col_width=80 keeps individual columns readable.
-        rel.show(max_col_width=80, max_width=500)
 
     # When --errors is active and format is table, show tracebacks separately
     if args.errors and args.format == "table" and not args.sql:
