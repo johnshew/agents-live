@@ -22,9 +22,9 @@ spec. `VALUE`, `NAME`, `PATH`, and `ALIAS` are terminal values.
 
 ```ebnf
 invocation   ::= "agents-live" pre_command* ( command post_command* | help_word )
-help_word    ::= "-h" | "--help" | "help" | "--version" | ""
+help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
-post_command ::= "--json"
+post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | health-check | heartbeat | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
@@ -74,6 +74,22 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | completions | in-process | none |  |  |  |  |  | Generate shell completion scripts. |
 | dashboard | subprocess | required |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
 <!-- END GENERATED CLI -->
+
+## Review the command surface
+
+Generate detailed help for every public command and nested command from the
+declarative CLI specification:
+
+```bash
+agents-live help --all
+```
+
+Help is also available before or after a command name:
+
+```bash
+agents-live help completions
+agents-live completions help
+```
 
 ## Shell completions
 

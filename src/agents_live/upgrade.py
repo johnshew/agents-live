@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import init, paths, plugins, preflight, repos
+from . import __version__, init, paths, plugins, preflight, repos
 from .spawn import find_uv
 
 
@@ -97,6 +97,7 @@ def main() -> int:
         help="Refresh project skill payloads without upgrading the uv tool",
     )
     args = parser.parse_args()
+    print(f"Installed agents-live version: {__version__}")
 
     try:
         targets, errors = _targets()

@@ -42,6 +42,7 @@ class Cmd:
     # one JSON document, "records" = one JSON document per line).
     json_args: tuple[str, ...] = ()
     json_shape: str = "object"
+    help_details: str = ""
 
 
 GLOBAL_ARGS = (
@@ -255,6 +256,19 @@ COMMANDS = (
     Cmd(
         "completions", "Generate shell completion scripts.", "completions",
         "in-process", root="none",
+        help_details="""Install for the current shell session:
+    source <(agents-live completions bash)
+    source <(agents-live completions zsh)
+
+Install persistently:
+    bash:
+        mkdir -p ~/.local/share/bash-completion/completions
+        agents-live completions bash > ~/.local/share/bash-completion/completions/agents-live
+    zsh:
+        mkdir -p ~/.zfunc
+        agents-live completions zsh > ~/.zfunc/_agents-live
+
+For zsh, add ~/.zfunc to fpath and run compinit from ~/.zshrc.""",
         args=(
             Arg(("shell",), "Shell name.", kind="positional", required=True,
                 choices=("bash", "zsh")),
@@ -307,7 +321,24 @@ def command_help(command: Cmd, invoked_as: str | None = None) -> str:
         for argument in arguments:
             flags = ", ".join(argument.flags)
             lines.append(f"  {flags:<24} {argument.help}")
+    if command.help_details:
+        lines.extend(("", command.help_details))
     return "\n".join(lines) + "\n"
+
+
+def all_command_help(version: str, docs_url: str) -> str:
+    """Render top-level and detailed help for every public command."""
+    sections = [render_usage(version, docs_url).rstrip()]
+    for command in COMMANDS:
+        if command.hidden:
+            continue
+        sections.append(command_help(command).rstrip())
+        sections.extend(
+            command_help(child, f"{command.name} {child.name}").rstrip()
+            for child in command.subcommands
+            if not child.hidden
+        )
+    return "\n\n".join(sections) + "\n"
 
 
 def render_usage(version: str, docs_url: str) -> str:
@@ -327,6 +358,8 @@ def render_usage(version: str, docs_url: str) -> str:
     blob = f"{docs_url}/blob/v{version}/src/agents_live/skill/docs"
     return "\n".join([
         "usage: agents-live [--json] [--repo PATH] <command> [args]",
+        "       agents-live help [command]",
+        "       agents-live help --all",
         "       agents-live --version",
         "",
         "commands:",
@@ -425,9 +458,10 @@ def render_grammar() -> str:
     lines = [
         'invocation   ::= "agents-live" pre_command*'
         ' ( command post_command* | help_word )',
-        'help_word    ::= "-h" | "--help" | "help" | "--version" | ""',
+        'help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ]'
+        ' | "--version" | ""',
         'pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )',
-        'post_command ::= "--json"',
+        'post_command ::= "--json" | "-h" | "--help" | "help"',
         f"command      ::= {names}",
     ]
     for command in public:
