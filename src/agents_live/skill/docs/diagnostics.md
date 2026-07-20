@@ -1,7 +1,7 @@
 ---
 title: Agents Live Log Diagnostics
 description: Log inventory and correlated diagnostic procedures for Agents Live agents
-ms.date: 2026-07-19
+ms.date: 2026-07-20
 ms.topic: troubleshooting
 ---
 
@@ -14,7 +14,10 @@ agent writing the same files.
 
 ## Log inventory
 
-All logs are **UTC JSONL** and live in the user-level XDG state home
+All logs are **UTC JSONL**. Canonical writers use RFC 3339 timestamps with a
+`Z` suffix. `agents-live logs` normalizes equivalent aware ISO 8601 forms and
+offset-free legacy UTC timestamps before filtering and display. Logs live in
+the user-level XDG state home
 (`$XDG_STATE_HOME/agents-live/`, default `~/.local/state/agents-live/`),
 never in the project tree. Each repository gets its own state directory
 `repos/<basename>-<hash>/`; the paths below are relative to that
@@ -95,6 +98,27 @@ to the full transcript:
    parser log) shows what the pipeline saw at run time.
 
 6. **Cross-check with git.** `git log --pretty='%h %ai %s' -- <file>`.
+
+### Recent error review
+
+For a retrospective review, capture one UTC end time and derive the start time
+from it so the result does not move while you investigate. Use both bounds when
+you need that fixed window:
+
+```bash
+agents-live logs --errors --all --since <start> --until <end>
+```
+
+The flags remain independent. `--since` alone means events at or after its
+value, and `--until` alone means events before its value. Relative values such
+as `8h` are supported; the literal `now` is not. Prefer explicit aware ISO 8601
+values when recording incident evidence.
+
+Count unique `event_id` values for physical events and `run_id` values for
+agent executions. The same operational condition can appear in the central
+runtime log and a per-agent log, so raw row counts can overstate impact. After
+reviewing historical errors, run `agents-live doctor` to distinguish a current
+outage from a recovered condition.
 
 ## Common patterns
 

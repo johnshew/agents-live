@@ -1,7 +1,7 @@
 ---
 title: Agents Live Command Reference
 description: Installation, lifecycle, validation, and logging commands for agents-live
-ms.date: 2026-07-19
+ms.date: 2026-07-20
 ms.topic: reference
 ---
 
@@ -931,7 +931,7 @@ Each JSONL log entry is a flat JSON object. Key fields:
 
 | Field | Type | When |
 |-------|------|------|
-| `ts` | string | Always -- ISO 8601 UTC timestamp |
+| `ts` | string | Always -- RFC 3339 UTC timestamp with a `Z` suffix |
 | `run_id` | string | All events emitted during one `run.py` execution; absent on historical and lifecycle-only rows |
 | `event_id` | string | Every schema-v4-and-later event -- unique physical JSONL row identifier |
 | `agent_name` | string | Always -- Agents Live agent name |
@@ -961,6 +961,12 @@ normalized query view across live JSONL and archived Parquet, using typed
 casts where a current field can have multiple physical representations. The
 new project starts at schema v5, so readers do not carry transition logic for
 pre-v5 logs.
+
+Canonical writers emit UTC with a `Z` suffix. The query view preserves the
+instant from equivalent aware ISO 8601 forms, including numeric offsets, and
+normalizes it to UTC before filtering and display. Offset-free historical
+timestamps use the legacy UTC convention; malformed timestamps normalize to
+`NULL` and fail `--check-schema` for schema-v5 JSONL rows.
 
 **Procedure for schema changes:**
 

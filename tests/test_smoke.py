@@ -28,6 +28,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -2070,6 +2071,107 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertIn("uv shim not found", completed.stderr)
 
 
+class TestQlog(_TempProject):
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        script = Path(headless.__file__).with_name("qlog.py")
+        env = os.environ.copy()
+        env["TZ"] = "America/Los_Angeles"
+        return subprocess.run(
+            ["uv", "run", "--script", str(script), "--all", *args],
+            capture_output=True, text=True, timeout=120, env=env)
+
+    def _write_rows(self, name: str, rows: list[dict]) -> None:
+        log = headless.logs_root() / f"{name}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n",
+            encoding="utf-8")
+
+    def test_canonical_agent_writer_emits_utc_z_timestamp(self) -> None:
+        log = headless.logs_root() / "canonical-writer.log"
+
+        headless.log_event(log, phase="test", status="ok")
+
+        row = json.loads(log.read_text(encoding="utf-8"))
+        self.assertEqual(row["log_schema"], 5)
+        self.assertTrue(row["ts"].endswith("Z"))
+        parsed = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+        self.assertEqual(parsed.utcoffset(), timedelta(0))
+
+    def test_time_filters_preserve_instants_and_independent_bounds(self) -> None:
+        rows = [
+            {"log_schema": 5, "ts": "2026-07-20T19:00:00Z",
+             "agent_name": "before", "event_id": "before"},
+            {"log_schema": 5, "ts": "2026-07-20T20:00:03Z",
+             "agent_name": "zulu", "event_id": "zulu"},
+            {"log_schema": 5, "ts": "2026-07-20T13:00:03-07:00",
+             "agent_name": "offset", "event_id": "offset"},
+            {"log_schema": 5, "ts": "2026-07-20T20:00:03",
+             "agent_name": "legacy", "event_id": "legacy"},
+            {"log_schema": 5, "ts": "2026-07-20T21:00:00+00:00",
+             "agent_name": "after", "event_id": "after"},
+        ]
+        self._write_rows("time-formats", rows)
+
+        since = self._run(
+            "--since", "2026-07-20T20:00:03Z", "--format", "jsonl",
+            "--columns", "ts,event_id", "--asc")
+        until = self._run(
+            "--until", "2026-07-20T20:00:03Z", "--format", "jsonl",
+            "--columns", "ts,event_id", "--asc")
+        bounded = self._run(
+            "--since", "2026-07-20T19:30:00Z",
+            "--until", "2026-07-20T20:30:00Z", "--format", "jsonl",
+            "--columns", "ts,event_id", "--asc")
+
+        for result in (since, until, bounded):
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [json.loads(line)["event_id"] for line in since.stdout.splitlines()],
+            ["zulu", "offset", "legacy", "after"])
+        self.assertEqual(
+            [json.loads(line)["event_id"] for line in until.stdout.splitlines()],
+            ["before"])
+        bounded_rows = [json.loads(line) for line in bounded.stdout.splitlines()]
+        self.assertEqual(
+            [row["event_id"] for row in bounded_rows],
+            ["zulu", "offset", "legacy"])
+        self.assertTrue(all(row["ts"].endswith("+00:00")
+                            for row in bounded_rows))
+
+    def test_relative_since_uses_utc_instants(self) -> None:
+        now = datetime.now(timezone.utc)
+        self._write_rows("relative-time", [
+            {"log_schema": 5,
+             "ts": (now - timedelta(hours=9)).isoformat().replace("+00:00", "Z"),
+             "agent_name": "stale", "event_id": "stale"},
+            {"log_schema": 5,
+             "ts": (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+             "agent_name": "recent", "event_id": "recent"},
+        ])
+
+        result = self._run(
+            "--since", "8h", "--format", "jsonl", "--columns", "event_id")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [json.loads(line)["event_id"] for line in result.stdout.splitlines()],
+            ["recent"])
+
+    def test_invalid_time_filter_returns_usage_error(self) -> None:
+        self._write_rows("invalid-time", [{
+            "log_schema": 5, "ts": "2026-07-20T20:00:03Z",
+            "agent_name": "fixture", "event_id": "fixture",
+        }])
+
+        result = self._run("--until", "now")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage_error", result.stderr)
+        self.assertIn("invalid timestamp 'now'", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
 class TestTimeline(_TempProject):
     def test_bare_timeline_keeps_valid_rows_among_invalid_rows(self) -> None:
         log = headless.logs_root() / "mixed.log"
@@ -2358,6 +2460,26 @@ class TestPipelineMcpStore(unittest.TestCase):
         result = put(path="/output", value={"anything": 1})
         self.assertFalse(result["ok"])
         self.assertIn("not host-seeded", result["error"])
+
+    def test_event_writer_emits_utc_z_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "pipeline.log"
+            try:
+                from agents_live.pipeline_mcp import PipelineMcp
+            except ImportError:
+                from pipeline_mcp import PipelineMcp
+            server = PipelineMcp(agent_log=log)
+            app = server._build_app()
+
+            result = app._tool_manager.get_tool("put").fn(
+                path="/output", value={"done": True})
+
+            self.assertTrue(result["ok"])
+            row = json.loads(log.read_text(encoding="utf-8"))
+            self.assertEqual(row["log_schema"], 5)
+            self.assertTrue(row["ts"].endswith("Z"))
+            parsed = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+            self.assertEqual(parsed.utcoffset(), timedelta(0))
 
 
 class TestReleaseTool(unittest.TestCase):
