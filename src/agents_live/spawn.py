@@ -121,8 +121,15 @@ def spawn_agent(
     if operations:
         env["TASKFLOW_AGENT_OPS"] = json.dumps(operations)
 
-    # Log stderr to a file so spawned-process failures are diagnosable
-    logs_dir = root / "Agents" / "logs"
+    # Log stderr to a file so spawned-process failures are diagnosable.
+    # Runtime state lives in the user-level state home, never in the
+    # project tree (paths.py is stdlib-only, so the lazy import keeps
+    # this module import-safe for standalone consumers).
+    try:
+        from .paths import repo_state_dir
+    except ImportError:
+        from paths import repo_state_dir
+    logs_dir = repo_state_dir(root) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     stderr_log = logs_dir / "spawn-stderr.log"
 

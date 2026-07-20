@@ -63,10 +63,17 @@ def apply(root: Path, *, dry_run: bool = False) -> int:
         if dest.exists():
             if dest.suffix == ".log":
                 # Both exist: the new location already collected events
-                # after the upgrade. Legacy content is older, so it goes
-                # first; qlog/timeline order by timestamp regardless.
-                merged = src.read_bytes() + dest.read_bytes()
-                dest.write_bytes(merged)
+                # after the upgrade. Append the legacy content rather
+                # than rewriting dest, so concurrent appenders at the new
+                # home are never truncated; qlog/timeline order by
+                # timestamp, not file position. Guard the join so a
+                # legacy file cut mid-write cannot fuse two JSONL records
+                # into one unparseable line.
+                legacy = src.read_bytes()
+                if legacy and not legacy.endswith(b"\n"):
+                    legacy += b"\n"
+                with dest.open("ab") as merged:
+                    merged.write(legacy)
                 src.unlink()
             else:
                 src.unlink()  # regenerated at the new home already; drop

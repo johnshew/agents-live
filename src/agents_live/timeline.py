@@ -27,12 +27,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
 from paths import host_logs_dir, repo_state_dir, resolve_root
+
+try:
+    from . import preflight
+except ImportError:
+    import preflight
 
 REPO = resolve_root()
 LOGS_DIR = repo_state_dir(REPO) / "logs"
@@ -263,7 +267,9 @@ def print_timeline(events: list[dict]) -> None:
 
 def main() -> None:
     args = parse_args()
-    text_filter = args.filter if not args.all else None
+    # --all widens the log set; it must not discard an explicit
+    # positional filter (#89).
+    text_filter = args.filter
     log_files = find_log_files(args.logs)
 
     # Load all matching entries from all log files
@@ -292,7 +298,7 @@ def main() -> None:
             continue
         deduped.append(ev)
 
-    if os.environ.get("AGENTS_LIVE_JSON") == "1":
+    if preflight.json_mode():
         print(json.dumps({"ok": True, "events": deduped}))
         return
 
