@@ -54,6 +54,7 @@ from . import __version__
 from .cli_spec import (
     COMMAND_BY_NAME,
     Cmd,
+    all_command_help,
     command_help,
     render_usage,
     unknown_flag,
@@ -268,9 +269,25 @@ def main(argv: list[str] | None = None) -> int:
             continue
         break
 
-    if not args or args[0] in ("-h", "--help", "help"):
+    if not args or args[0] in ("-h", "--help"):
         print(_usage())
         return _finish(0, None, [], json_mode=json_mode)
+
+    if args[0] == "help":
+        if len(args) == 1:
+            print(_usage())
+            return _finish(0, None, [], json_mode=json_mode)
+        if args[1] == "--all":
+            print(all_command_help(__version__, DOCS_URL), end="")
+            return _finish(0, None, args[2:], json_mode=json_mode)
+        command = COMMAND_BY_NAME.get(args[1])
+        if command is None:
+            _emit_failure(
+                "unknown_command", args[1],
+                f"unknown command '{args[1]}'", json_mode=json_mode)
+            return 2
+        print(command_help(command, args[1]), end="")
+        return _finish(0, command, args[2:], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
     command = COMMAND_BY_NAME.get(cmd)
@@ -287,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     # --json: the env var carries envelope mode to any typed errors, and
     # the command's own output passes through uncaptured.
     capture = json_mode and command.json
-    if any(arg in ("-h", "--help") for arg in rest):
+    if any(arg in ("-h", "--help", "help") for arg in rest):
         print(command_help(command, cmd), end="")
         return _finish(0, command, rest, json_mode=json_mode)
     unknown = unknown_flag(command, rest)

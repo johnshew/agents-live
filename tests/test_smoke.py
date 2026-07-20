@@ -1044,18 +1044,25 @@ class TestCliContract(_TempProject):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_help_exits_zero(self) -> None:
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            mock.patch("sys.stdout", stdout),
-            mock.patch("sys.stderr", stderr),
-        ):
-            self.assertEqual(cli.main(["--help"]), 0)
-        self.assertIn("usage: agents-live", stdout.getvalue())
-        self.assertIn("upgrade", stdout.getvalue())
-        self.assertIn("--version", stdout.getvalue())
-        self.assertEqual(stderr.getvalue(), "")
+    def test_help_entry_points(self) -> None:
+        cases = (
+            ([], "usage: agents-live", "--version"),
+            (["--help"], "usage: agents-live", "upgrade"),
+            (["help"], "usage: agents-live", "commands:"),
+            (["help", "upgrade"], "usage: agents-live upgrade", "--skills-only"),
+            (["upgrade", "--help"], "usage: agents-live upgrade", "--runtime-only"),
+            (["upgrade", "help"], "usage: agents-live upgrade", "--runtime-only"),
+        )
+        for argv, usage, detail in cases:
+            with (
+                self.subTest(argv=argv),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                self.assertEqual(cli.main(argv), 0)
+                self.assertIn(usage, stdout.getvalue())
+                self.assertIn(detail, stdout.getvalue())
+                self.assertEqual(stderr.getvalue(), "")
 
     def test_start_surface_rejects_internal_plumbing(self) -> None:
         help_text = cli.command_help(
@@ -1088,6 +1095,23 @@ class TestCliContract(_TempProject):
                 with mock.patch("sys.stdout", stdout):
                     self.assertEqual(cli.main([command.name, "--help"]), 0)
                 self.assertIn(command.summary, stdout.getvalue())
+
+    def test_all_help_covers_every_public_command(self) -> None:
+        with mock.patch(
+                "sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(cli.main(["help", "--all"]), 0)
+        help_text = stdout.getvalue()
+        for command in COMMANDS:
+            if command.hidden:
+                continue
+            with self.subTest(command=command.name):
+                self.assertIn(f"usage: agents-live {command.name}", help_text)
+                for child in command.subcommands:
+                    if not child.hidden:
+                        self.assertIn(
+                            f"usage: agents-live {command.name} {child.name}",
+                            help_text,
+                        )
 
     def test_usage_uses_package_version_and_links_grammar(self) -> None:
         with mock.patch.object(cli, "__version__", "9.8.7"):
@@ -1437,6 +1461,20 @@ class TestCliContract(_TempProject):
             ):
                 self.assertEqual(cli.main(["completions", shell]), 0)
                 self.assertIn(marker, stdout.getvalue())
+
+    def test_completions_help_explains_installation(self) -> None:
+        for argv in (["completions", "help"], ["completions", "--help"],
+                     ["help", "completions"]):
+            with (
+                self.subTest(argv=argv),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(cli.main(argv), 0)
+                self.assertIn(
+                    "~/.local/share/bash-completion/completions/agents-live",
+                    stdout.getvalue(),
+                )
+                self.assertIn("~/.zfunc/_agents-live", stdout.getvalue())
 
     def test_repos_list_and_migrate_expose_structured_results(self) -> None:
         config_home = self.root / "contract-config"
@@ -2607,6 +2645,8 @@ class TestInstallSkill(_TempProject):
             self.assertEqual(upgrade.main(), 0)
         output.assert_any_call(
             f"{self.root}: upgraded skill payload to match the installed package")
+        output.assert_any_call(
+            f"Installed agents-live version: {upgrade.__version__}")
 
         with (
             mock.patch.object(init, "install_skill", return_value=None),

@@ -57,6 +57,7 @@ def bash() -> str:
         flags = " ".join((
             *(child.name for child in command.subcommands if not child.hidden),
             *_flags(command),
+            "help",
             "--help",
         ))
         cases.append(f"    {names}) opts={flags!r} ;;")
@@ -99,6 +100,7 @@ def zsh() -> str:
         flags = " ".join((
             *(child.name for child in command.subcommands if not child.hidden),
             *_flags(command),
+            "help",
             "--help",
         ))
         cases.append(f"    {names}) values=({flags}) ;;")
