@@ -6,6 +6,32 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: `logs <name> --all` (and `logs timeline <name> --all`) apply the
+  positional name as an agent filter over the log union instead of
+  silently ignoring it. (#89)
+- fix: `--json logs` rejects an explicit non-jsonl `--format` with a
+  usage error instead of returning an empty-but-ok records envelope.
+- fix: `start --all` treats an unavailable ownership registry as
+  per-agent abstention again, never a mid-batch abort, so health sweeps
+  degrade instead of erroring.
+- fix: dashboard actions run children with stdin closed, and the
+  ownership-takeover prompt requires an interactive stdout, so a
+  captured action can never hang on an invisible question.
+- fix: spawned-agent stderr logs write to the user-level state home,
+  not the project tree, so the transitional state migration converges
+  and synced repos stay clean.
+- fix: the state migration appends colliding legacy logs
+  (newline-guarded) instead of rewriting the destination file under
+  live appenders.
+- fix: the health beacon is written atomically and reports `degraded`
+  with a warning when no repositories are registered, instead of
+  reporting a healthy zero-repo sweep.
+- fix: release gates pin `AGENTS_LIVE_REPO` to the checkout so they
+  cannot fall through to the registry-default repository. (#85)
+- docs: repair stale skill-doc references (retired scripts tree,
+  removed `release` verb, dead cross-links) and add the missing
+  `repos add` step to the host bring-up workflow.
+
 ## 2.0.2 - 2026-07-19
 
 - fix: stop crashing watchers on their first file-change dispatch.
