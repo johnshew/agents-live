@@ -201,23 +201,28 @@ re-run.
 4. **Activate owned agents.** `agents-live start --all` -- installs the
    cron lines and starts the file-watchers for agents this host owns. Safe on
    every machine: it activates only what this host owns.
-5. **Opt into the check-and-repair loop.** `agents-live health-check` --
+5. **Register the repository.** `agents-live repos add <path>` -- records
+   the repo in the user-level registry. The hourly loop runs from cron
+   (not from the repo directory), so only registered repositories are
+   swept; an unregistered host sweeps nothing and its beacon reports
+   `degraded` with "no registered repositories".
+6. **Opt into the check-and-repair loop.** `agents-live health-check` --
    runs the built-in host loop once, installs its own `@reboot` + hourly
    crontab entries, and writes the host beacon
    `~/.local/state/agents-live/health.ok`. Until this runs the beacon is
    missing and the dashboard reads "unhealthy".
-6. **(WSL only) Register one distro-level Windows heartbeat.** Run
+7. **(WSL only) Register one distro-level Windows heartbeat.** Run
    `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"` so cron fires
    when the machine is idle -- see
    [windows-heartbeat.md](windows-heartbeat.md). Without it, cron only runs
    while a WSL session is open.
-7. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
+8. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
    warning `events`. On agency hosts the system `smoketest` also validates
    the agent path end-to-end; it is recorded as `skipped` (not `fail`) on
    agency-less hosts.
 
 Keyring/Secret Service setup for agent-CLI logins is a separate one-time
-host step -- see `.agents/new-machine-setup.md` ("Credential storage").
+host step.
 
 ---
 

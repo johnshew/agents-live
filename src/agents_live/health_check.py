@@ -712,6 +712,14 @@ def run_host_loop(quiet: bool) -> int:
         _err(f"WARNING: could not converge health-check crontab entries: {exc}")
 
     targets = _registered_roots()
+    if not targets:
+        # Cron runs from $HOME, so an unregistered host resolves no
+        # repository at all: the loop would sweep nothing yet still
+        # report healthy. Surface the misconfiguration instead.
+        msg = ("no registered repositories; run `agents-live repos add "
+               "<path>` so the health-check loop has something to sweep")
+        _err(f"WARNING: {msg}")
+        events.append({"level": "warning", "phase": "sweep", "message": msg})
 
     # Converge declared plugin wheels: a bare tool reinstall drops
     # co-installed plugins, and with ownership = "registry" a missing
@@ -782,25 +790,26 @@ def run_host_loop(quiet: bool) -> int:
         beacon_status = (
             "degraded"
             if smoketest_field.get("status") == "fail" or ownership_degraded
-            or crontab_degraded
+            or crontab_degraded or not targets
             else "healthy"
         )
-        beacon = paths.health_beacon_path()
-        beacon.parent.mkdir(parents=True, exist_ok=True)
-        beacon.write_text(
-            json.dumps({
-                "status": beacon_status,
-                "ts": _now_iso(),
-                "host": ownership.current_host(),
-                "watchers": watcher_total,
-                "cron": cron_total,
-                "ownership": "unavailable" if ownership_degraded else "ok",
-                "crontab": "stale" if crontab_degraded else "ok",
-                "smoketest": smoketest_field,
-                "repos": {alias: {k: v for k, v in s.items() if k != "events"}
-                          for alias, s in sweeps.items()},
-            }, indent=2) + "\n",
-            encoding="utf-8",
+        payload = {
+            "status": beacon_status,
+            "ts": _now_iso(),
+            "host": ownership.current_host(),
+            "watchers": watcher_total,
+            "cron": cron_total,
+            "ownership": "unavailable" if ownership_degraded else "ok",
+            "crontab": "stale" if crontab_degraded else "ok",
+            "smoketest": smoketest_field,
+            "repos": {alias: {k: v for k, v in s.items() if k != "events"}
+                      for alias, s in sweeps.items()},
+        }
+        if not targets:
+            payload["reason"] = "no registered repositories"
+        paths.atomic_write_text(
+            paths.health_beacon_path(),
+            json.dumps(payload, indent=2) + "\n",
         )
 
     summary = {

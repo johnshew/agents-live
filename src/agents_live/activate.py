@@ -853,7 +853,7 @@ def _resolve_activation_ownership(
     # machine callers consent with --yes.
     take_over = assume_yes
     if (not batch_mode and not take_over and sys.stdin.isatty()
-            and not preflight.json_mode()):
+            and sys.stdout.isatty() and not preflight.json_mode()):
         answer = input(
             f"{name} is owned by {owner}; take ownership and activate here? "
             "[y/N] ")
@@ -1072,6 +1072,12 @@ def main() -> int:
                     activated = activate_one(name, batch_mode=True, dry_run=args.dry_run)
                     if activated:
                         total += 1
+                except ownership.OwnershipUnavailableError as exc:
+                    # A missing/corrupt registry is per-agent abstention,
+                    # never a batch abort: the remaining agents still get
+                    # reconciled and the sweep degrades instead of erroring.
+                    print(f"  '{name}': ownership registry unavailable; "
+                          f"refusing to activate ({exc})", file=sys.stderr)
                 except AgentsLiveError as exc:
                     print(f"  FAILED {name}: {exc}", file=sys.stderr)
                     errors.append(name)

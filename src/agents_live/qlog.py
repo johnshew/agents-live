@@ -318,13 +318,17 @@ def main() -> int:
 
     # Resolve positional `name`: if <name>.log exists in this repo's log
     # directory, point --log at it; otherwise fall through to an --agent
-    # substring filter.
-    if args.name and args.log is None and not args.all:
-        candidate = DEFAULT_LOG.parent / f"{args.name}.log"
-        if candidate.is_file():
-            args.log = str(candidate)
-        else:
+    # substring filter. With --all there is no single file to prefer, so
+    # the name always narrows the union as an agent filter (#89).
+    if args.name and args.log is None:
+        if args.all:
             if not args.agent:
+                args.agent = args.name
+        else:
+            candidate = DEFAULT_LOG.parent / f"{args.name}.log"
+            if candidate.is_file():
+                args.log = str(candidate)
+            elif not args.agent:
                 args.agent = args.name
     if args.log is None:
         args.log = str(DEFAULT_LOG)

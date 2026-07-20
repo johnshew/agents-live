@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import shutil
@@ -52,6 +53,11 @@ def _run(argv: list[str], *, capture: bool = False) -> str:
         check=True,
         text=True,
         capture_output=capture,
+        # Pin the gate commands to this checkout: the repository root
+        # carries no project marker, so an unpinned `agents-live`
+        # invocation would fall through to the user-level registry
+        # default and run against an unrelated repository (#85).
+        env={**os.environ, "AGENTS_LIVE_REPO": str(ROOT)},
     )
     return result.stdout.strip() if capture else ""
 

@@ -370,9 +370,23 @@ def main(argv: list[str] | None = None) -> int:
                 active, script, rest = subcommand, subcommand.module, rest[1:]
         if capture and active.json_args:
             lead = active.json_args[0]
-            if not any(token == lead or token.startswith(f"{lead}=")
-                       for token in rest):
+            required = active.json_args[1] if len(active.json_args) > 1 else None
+            explicit = None
+            for index, token in enumerate(rest):
+                if token == lead:
+                    explicit = rest[index + 1] if index + 1 < len(rest) else ""
+                elif token.startswith(f"{lead}="):
+                    explicit = token.split("=", 1)[1]
+            if explicit is None:
                 rest.extend(active.json_args)
+            elif required is not None and explicit != required:
+                # The envelope parses stdout as JSON lines; any other
+                # format silently yields an empty-but-ok result.
+                _emit_failure(
+                    "usage_error", cmd,
+                    f"--json requires {lead} {required} (got {explicit!r})",
+                    json_mode=json_mode)
+                return 2
         uv = shutil.which("uv") or "uv"
         try:
             completed = subprocess.run(

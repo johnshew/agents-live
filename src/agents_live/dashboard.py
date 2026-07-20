@@ -294,6 +294,10 @@ def _run_script(script: str, args: list[str],
             capture_output=True,
             text=True,
             timeout=timeout,
+            # Never hand children the dashboard's tty: a child that
+            # prompts (ownership takeover) would block forever with its
+            # question swallowed into the captured pipe.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         captured = (exc.stdout or "") + (exc.stderr or "")

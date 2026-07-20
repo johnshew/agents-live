@@ -10,7 +10,7 @@ ms.topic: concept
 > Add cron and file-watch automation to your existing agents with `/agents-live`.
 > Supports `claude` and `copilot` out of the box; installed plugins can
 > register additional adapters (e.g. `agency claude`, `agency copilot`).  
-> **Platform: Linux (Ubuntu on WSL)** | Last updated: May 2026
+> **Platform: Linux (Ubuntu on WSL)** | Last updated: July 2026
 
 ---
 
@@ -32,7 +32,7 @@ Then manage it:
 /agents-live run ai-news-digest
 /agents-live start ai-news-digest
 /agents-live status
-/agents-live stop ai-news-digest
+/agents-live logs ai-news-digest
 /agents-live stop ai-news-digest
 ```
 
@@ -54,7 +54,6 @@ Another example:
 | `logs <name>` | Show recent output |
 | `doctor` | Check environment readiness |
 | `smoketest` | End-to-end validation |
-| `release` | Audit, assemble, verify, publish portable release |
 
 ### Lifecycle
 
@@ -100,22 +99,23 @@ Agents/                              # git-tracked content only
         └── archive/                 # monthly Parquet archives
             └── 2026-05.parquet      # unified monthly archive, all agents
 
-.claude/skills/agents-live/       # skill definition
-├── SKILL.md
-├── docs/
+.claude/skills/agents-live/          # installed skill payload (docs and
+├── SKILL.md                         # templates; the executable runtime is
+├── VERSION                          # the installed agents-live package,
+├── docs/                            # not scripts in the tree)
 │   └── approach.md
-└── scripts/
-    ├── cli.py                   # agents-live command dispatcher
-    ├── paths.py                 # root resolution (explicit -> env -> marker -> default)
-    ├── repos.py                 # XDG registry + isolated read-only aggregation
-    ├── headless.py              # shared helper (env, flags, frontmatter parsing)
-    ├── activate.py              # start cron or watcher (auto-detects type)
-    ├── run.py                   # execute an agent once with verbose output
-    ├── qlog.py                  # query live and archived logs
-    ├── stop.py              # stop + remove an agent
-    ├── status.py                # list all agents + state (--json for structured output)
-    └── smoketest.py             # end-to-end validation (all agents)
+└── templates/
 ```
+
+The runtime lives in the installed `agents_live` package: `cli.py`
+(spec-driven command dispatcher), `paths.py` (root resolution: explicit ->
+env -> marker -> default), `repos.py` (XDG registry + isolated read-only
+aggregation), `headless.py` (shared helpers: env, flags, frontmatter
+parsing), `activate.py` (start cron or watcher, auto-detects type),
+`run.py` (execute an agent once), `qlog.py` (query live and archived
+logs), `stop.py` (stop + remove an agent), `status.py` (list agents and
+state, `--json` for structured output), and `smoketest.py` (end-to-end
+validation).
 
 Each process still operates on one immutable repository root. The user-level
 XDG registry only selects that root. Multi-repository status, doctor, and
@@ -326,9 +326,8 @@ Current surface area: `put(path, value)` and
 the `/ping` path (put then get) rather than a dedicated ping tool.
 `$schema` binding rules and Draft 2020-12 JSON-Schema validation are
 already implemented; future phases can extend that schema support further.
-See `Agents/docs/proposal-pipeline-side-channel.md` for the design and
-`.claude/skills/agents-live/scripts/pipeline_runtime.py` for the lifecycle. Coverage:
-`smoketest.py` step `[10/13]`.
+See `pipeline_runtime.py` in the installed `agents_live` package for the
+lifecycle. Coverage: `smoketest.py` step `[10/13]`.
 
 ### Smoketest lifecycle isolation
 
@@ -460,8 +459,7 @@ Supports all agents via `--agent`. Stops and cleans up on failure.
 ### MCP server resolution (source of truth + override)
 
 `.vscode/mcp.json` is the **single source of truth** for MCP server
-definitions, projected to `.mcp.json` and `agency.toml` by
-`Agents/scripts/gen-mcp-config.py` (see .agents/mcp.md).
+definitions; agents-live reads it directly (`mcp_config_loader.py`).
 Most servers are **disabled by default** in the master.
 
 An agent's `mcps:` frontmatter list is resolved **against the master**, not
@@ -594,10 +592,10 @@ agents-live logs timeline --all --since 2026-05-01T16:00
 agents-live logs todo-pull --limit 20
 ```
 
-### Log rotation (implemented)
+### Log rotation (pattern)
 
-The `log-rotate` agent (cron `0 3 * * 0`) runs
-weekly. The `Agents/handlers/log-rotate.py` pre-processor:
+A weekly `log-rotate` agent (cron `0 3 * * 0`) with a handler-only
+pre-processor:
 
 1. Reads each `.log` file in the repo's state-home logs directory
 2. Moves rows older than 7 days into unified monthly Parquet files at

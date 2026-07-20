@@ -406,6 +406,8 @@ class TestStartOwnership(_TempProject):
             local, host, load, set_owner as set_owner_mock, log,
             mock.patch.object(activate.sys, "stdin",
                               mock.Mock(isatty=mock.Mock(return_value=True))),
+            mock.patch.object(activate.sys, "stdout",
+                              mock.Mock(isatty=mock.Mock(return_value=True))),
             mock.patch("builtins.input", return_value="y") as prompt,
         ):
             self.assertTrue(activate._resolve_activation_ownership(
@@ -1367,6 +1369,21 @@ class TestCliContract(_TempProject):
         envelope = json.loads(stdout.getvalue())
         self.assertEqual(envelope["error"]["code"], "usage_error")
         self.assertIn("unrecognized arguments", envelope["error"]["detail"])
+
+    def test_json_logs_rejects_non_jsonl_format(self) -> None:
+        # The capture envelope parses stdout as JSON lines; an explicit
+        # non-jsonl --format would render a human table and silently
+        # yield an empty-but-ok records envelope.
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(preflight, "check", return_value=None),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = cli.main(["--json", "logs", "--format", "table"])
+        self.assertEqual(code, 2)
+        envelope = json.loads(stdout.getvalue())
+        self.assertEqual(envelope["error"]["code"], "usage_error")
+        self.assertIn("--format jsonl", envelope["error"]["detail"])
 
     def test_removed_duplicate_verbs_are_unknown(self) -> None:
         help_text = cli._usage()
@@ -2861,15 +2878,19 @@ class TestStateHome(_TempProject):
         self.assertFalse(legacy_logs.exists())
         self.assertEqual(state_migration.apply(self.root), 0)
 
-    def test_state_migration_merges_colliding_logs_legacy_first(self) -> None:
+    def test_state_migration_appends_colliding_legacy_log(self) -> None:
+        # Legacy content is appended (never a truncate-rewrite, which
+        # would race concurrent appenders at the new home); qlog and
+        # timeline order by timestamp, not file position. A legacy file
+        # cut mid-write gains a terminating newline so records never fuse.
         legacy_logs = self.root / "Agents" / "logs"
         legacy_logs.mkdir(parents=True)
-        (legacy_logs / "demo.log").write_text("old\n", encoding="utf-8")
+        (legacy_logs / "demo.log").write_text("old", encoding="utf-8")
         dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
         dest.parent.mkdir(parents=True)
         dest.write_text("new\n", encoding="utf-8")
         state_migration.apply(self.root)
-        self.assertEqual(dest.read_text(encoding="utf-8"), "old\nnew\n")
+        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
         self.assertFalse((legacy_logs / "demo.log").exists())
 
 
