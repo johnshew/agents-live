@@ -10,37 +10,41 @@ history is retained in the source repository.
   Every command now lists and completes `--json`, `-h`, `--help`, and `help`;
   top-level and help-target completion follows the full finite public grammar,
   enforced by behavioral Bash and generated Zsh conformance tests.
+- fix: reject incomplete first-line summaries before release preparation. (#63)
+  Release preview and publication require each changelog bullet's first line
+  to end as a standalone sentence.
 
 ## 2.1.0 - 2026-07-19
 
-- fix: `logs <name> --all` (and `logs timeline <name> --all`) apply the
-  positional name as an agent filter over the log union instead of
-  silently ignoring it. (#89)
-- fix: `--json logs` rejects an explicit non-jsonl `--format` with a
-  usage error instead of returning an empty-but-ok records envelope.
-- fix: `start --all` treats an unavailable ownership registry as
-  per-agent abstention again, never a mid-batch abort, so health sweeps
-  degrade instead of erroring.
-- fix: dashboard actions run children with stdin closed, and the
-  ownership-takeover prompt requires an interactive stdout, so a
-  captured action can never hang on an invisible question.
-- fix: spawned-agent stderr logs write to the user-level state home,
-  not the project tree, so the transitional state migration converges
-  and synced repos stay clean.
-- fix: the state migration appends colliding legacy logs
-  (newline-guarded) instead of rewriting the destination file under
-  live appenders.
-- fix: the health beacon is written atomically and reports `degraded`
-  with a warning when no repositories are registered, instead of
-  reporting a healthy zero-repo sweep.
-- fix: release gates pin `AGENTS_LIVE_REPO` to the checkout so they
-  cannot fall through to the registry-default repository. (#85)
+- fix: apply positional agent filters to combined log views. (#89)
+  `logs <name> --all` and `logs timeline <name> --all` no longer silently
+  ignore the positional name when reading the log union.
+- fix: reject non-jsonl explicit formats in JSON log mode.
+  `--json logs` returns a usage error instead of an empty-but-ok records
+  envelope when `--format` is not jsonl.
+- fix: keep `start --all` running when the ownership registry is unavailable.
+  Registry failure is per-agent abstention rather than a mid-batch abort, so
+  health sweeps degrade instead of erroring.
+- fix: prevent dashboard actions from hanging on hidden ownership prompts.
+  Dashboard children run with stdin closed, and ownership takeover requires an
+  interactive stdout.
+- fix: write spawned-agent stderr logs to the user-level state home.
+  Logs no longer enter the project tree, so transitional state migration
+  converges and synced repositories stay clean.
+- fix: append colliding legacy logs during state migration.
+  Newline-guarded appends preserve the destination file under live appenders.
+- fix: write the health beacon atomically and degrade empty registry sweeps.
+  A sweep with no registered repositories reports `degraded` with a warning
+  instead of reporting healthy.
+- fix: pin release gates to the checkout repository. (#85)
+  `AGENTS_LIVE_REPO` prevents gates from falling through to the registry-default
+  repository.
 - feat: make CLI help available around commands and generate the full public command surface. (#93)
   Completion help includes persistent Bash and Zsh installation commands,
   and upgrades report the installed agents-live version before running.
-- docs: repair stale skill-doc references (retired scripts tree,
-  removed `release` verb, dead cross-links) and add the missing
-  `repos add` step to the host bring-up workflow.
+- docs: repair stale skill documentation references and host setup steps.
+  Remove references to the retired scripts tree and `release` verb, fix dead
+  cross-links, and add the missing `repos add` step to the host workflow.
 
 ## 2.0.2 - 2026-07-19
 

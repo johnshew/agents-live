@@ -2386,7 +2386,7 @@ class TestReleaseTool(unittest.TestCase):
             'version = "1.2.3"\n',
             '__version__ = "1.2.3"\n',
             "1.2.3\n",
-            "# Changelog\n\n## Unreleased\n\nA fix.\n\n"
+            "# Changelog\n\n## Unreleased\n\n- fix: a fix.\n\n"
             "## 1.2.3 - 2026-07-18\n\n- fix: old release note.\n",
         )
         for path, content in zip(module.RELEASE_FILES, contents):
@@ -2438,6 +2438,40 @@ class TestReleaseTool(unittest.TestCase):
 
             with self.assertRaisesRegex(module.ReleaseError, "no release notes"):
                 module.preview("patch")
+
+    def test_preview_rejects_incomplete_first_line_summary(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n"
+                "- fix: apply the\n"
+                "  positional name as an agent filter.\n\n"
+                "## 1.2.3\n\n- fix: old release note.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                module.ReleaseError, "incomplete first-line summary"
+            ):
+                module.preview("patch")
+
+    def test_release_notes_reject_incomplete_first_line_summary(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n"
+                "## 1.2.3 - 2026-07-18\n\n"
+                "- fix: reject an incompatible format with a\n"
+                "  usage error.\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                module.ReleaseError, "incomplete first-line summary"
+            ):
+                module._release_notes("1.2.3")
 
     def test_minimum_bump_detects_breaking_change_markers(self) -> None:
         module = self._load_tool()

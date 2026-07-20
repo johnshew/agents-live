@@ -39,6 +39,7 @@ CURATED_CHANGELOG_RE = re.compile(
     r"(?m)^\[Full changelog\]\(https://github\.com/johnshew/agents-live/"
     r"blob/[^/]+/src/agents_live/skill/docs/changelog\.md\)$\n*"
 )
+SUMMARY_END_RE = re.compile(r"[.!?](?: \(#\d+(?:, #\d+)*\))?$")
 
 
 class ReleaseError(RuntimeError):
@@ -118,13 +119,21 @@ def _version_notes(version: str) -> str:
     return notes
 
 
-def _release_notes(version: str) -> str:
-    summaries = [
-        line for line in _version_notes(version).splitlines()
-        if line.startswith("- ")
-    ]
+def _changelog_summaries(notes: str, section: str) -> list[str]:
+    summaries = [line for line in notes.splitlines() if line.startswith("- ")]
     if not summaries:
-        raise ReleaseError(f"changelog section for {version} has no bullet entries")
+        raise ReleaseError(f"changelog section {section} has no bullet entries")
+    for summary in summaries:
+        if not SUMMARY_END_RE.search(summary):
+            raise ReleaseError(
+                f"changelog section {section} has an incomplete first-line summary: "
+                f"{summary!r}; end the standalone sentence with punctuation"
+            )
+    return summaries
+
+
+def _release_notes(version: str) -> str:
+    summaries = _changelog_summaries(_version_notes(version), version)
     return "## Curated Summary\n\n" + "\n".join(summaries)
 
 
@@ -164,7 +173,9 @@ def _minimum_bump(notes: str) -> str:
 
 
 def _check_bump(bump: str) -> str:
-    minimum = _minimum_bump(_unreleased_notes())
+    notes = _unreleased_notes()
+    _changelog_summaries(notes, "Unreleased")
+    minimum = _minimum_bump(notes)
     if BUMP_ORDER[bump] < BUMP_ORDER[minimum]:
         raise ReleaseError(
             f"changelog requires at least a {minimum} bump; "
