@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.1.0 - 2026-07-19
+
 - fix: `logs <name> --all` (and `logs timeline <name> --all`) apply the
   positional name as an agent filter over the log union instead of
   silently ignoring it. (#89)
