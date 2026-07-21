@@ -1812,9 +1812,71 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
+    def test_dashboard_structured_snapshot_deduplicates_correlated_errors(self) -> None:
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        code = f'''
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+from agents_live import headless
+
+nicegui = types.ModuleType("nicegui")
+nicegui.app = mock.MagicMock()
+nicegui.ui = mock.MagicMock()
+nicegui.run = mock.MagicMock()
+sys.modules["nicegui"] = nicegui
+
+with tempfile.TemporaryDirectory() as temp:
+    root = Path(temp)
+    logs = root / "logs"
+    logs.mkdir()
+    now = datetime.now(timezone.utc)
+    base = {{
+        "log_schema": 5, "agent_name": "alpha", "run_id": "run-1",
+        "phase": "agent", "status": "error", "level": "error",
+        "message": "failed",
+    }}
+    first = {{**base, "ts": now.isoformat(), "event_id": "event-1", "model": "old"}}
+    duplicate = {{**base, "ts": (now + timedelta(milliseconds=1)).isoformat(),
+                 "event_id": "event-2", "model": "new"}}
+    framework = {{
+        "ts": now.isoformat(), "log_schema": 5, "agent_name": "dashboard",
+        "event_id": "event-3", "phase": "refresh", "status": "error",
+        "level": "error", "message": "failed",
+    }}
+    (logs / "alpha.log").write_text(json.dumps(first) + "\\n", encoding="utf-8")
+    (logs / "agents-live.log").write_text(json.dumps(duplicate) + "\\n", encoding="utf-8")
+    (logs / "dashboard.log").write_text(json.dumps(framework) + "\\n", encoding="utf-8")
+
+    headless.repo_root = mock.Mock(return_value=root)
+    sys.argv = ["dashboard.py", "--all-repos"]
+    spec = importlib.util.spec_from_file_location(
+        "agents_live._dashboard_snapshot_test", {str(dashboard)!r})
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.LOGS_DIR = logs
+    errors, models = module._structured_log_snapshot({{"alpha"}})
+    assert errors == {{"alpha": 1, "framework": 1}}, errors
+    assert models == {{"alpha": "new"}}, models
+'''
+        result = subprocess.run(
+            ["uv", "run", "--with", "duckdb", "--with", "nicegui",
+             "--with-editable", ".", "python", "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rootless_all_repos_dashboard_has_no_relative_paths(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
         code = f"""
+import asyncio
 import importlib.util
 import sys
 import types
@@ -1842,6 +1904,71 @@ assert module.DASHBOARD_TRANSCRIPT is None
 from agents_live import paths
 assert module.HEALTH_OK_PATH == paths.health_beacon_path()
 assert module.HEALTH_OK_PATH.is_absolute()
+
+async def exercise_queue():
+    module.output_log = mock.MagicMock()
+    calls = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def execute(request):
+        calls.append(request.description)
+        if request.label == "First":
+            first_started.set()
+            await release_first.wait()
+            return 7
+        return 0
+
+    module._execute_action = execute
+    first = asyncio.create_task(module.do_action("First", "run.py", ["--name", "one"]))
+    await first_started.wait()
+    second = asyncio.create_task(module.do_action("Second", "run.py", ["--name", "two"]))
+    await asyncio.sleep(0)
+    duplicate = asyncio.create_task(module.do_action("Second", "run.py", ["--name", "two"]))
+    await asyncio.sleep(0)
+    assert len(module._ACTION_QUEUE) == 1
+    release_first.set()
+    assert await asyncio.gather(first, second, duplicate) == [7, 0, 0]
+    assert calls == ["First --name one", "Second --name two"]
+
+    finalized = []
+    refreshed = []
+
+    async def execute_with_exception(request):
+        calls.append(request.description)
+        if request.label == "Broken":
+            raise OSError("cannot spawn")
+        return 0
+
+    module._execute_action = execute_with_exception
+    module._log_action = lambda *args, **kwargs: finalized.append((args, kwargs))
+    module._refresh_views = lambda: refreshed.append(True)
+    broken = asyncio.create_task(module.do_action("Broken", "run.py", ["--name", "bad"]))
+    after = asyncio.create_task(module.do_action("After", "run.py", ["--name", "good"]))
+    assert await asyncio.gather(broken, after) == [-1, 0]
+    assert finalized[0][0][3] == -1
+    assert "cannot spawn" in finalized[0][0][4]
+    assert refreshed == [True]
+    assert calls[-2:] == ["Broken --name bad", "After --name good"]
+
+asyncio.run(exercise_queue())
+
+rows = [
+    {{"name": "alpha", "state": "active", "owner": "host-a", "agent": "copilot",
+      "unhealthy": False, "cost_day": "$1.25", "cost_week": "$3.50"}},
+    {{"name": "beta", "state": "stopped", "owner": "host-b", "agent": "handler",
+      "unhealthy": True, "cost_day": "-", "cost_week": "-"}},
+]
+assert module._filtered_agent_rows(rows, {{"name": "bet", "state": "All",
+    "owner": "All", "runtime": "All", "failing": True}}) == [rows[1]]
+assert module._cost_totals(rows) == ("$1.25", "$3.50")
+assert module._agent_model({{"name": "llm", "runtime": "copilot", "model": "configured"}},
+    {{"llm": "reported"}}) == "reported"
+assert module._agent_model({{"name": "llm", "runtime": "copilot", "model": "configured"}},
+    {{}}) == "configured"
+assert module._agent_model({{"name": "llm", "runtime": "copilot"}}, {{}}) == "default"
+assert module._agent_model({{"name": "handler", "runtime": "none"}},
+    {{"handler": "reported"}}) == "-"
 """
         with tempfile.TemporaryDirectory() as outside:
             result = subprocess.run(
@@ -1853,6 +1980,13 @@ assert module.HEALTH_OK_PATH.is_absolute()
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((Path(outside) / "Agents").exists())
+        source = dashboard.read_text(encoding="utf-8")
+        self.assertIn('ui.label("Log")', source)
+        self.assertIn('"label": "$/24h"', source)
+        self.assertIn('"label": "$/1w"', source)
+        self.assertIn('"label": "Model"', source)
+        self.assertIn("agent-table-scroll", source)
+        self.assertIn("minmax(15rem,.7fr)", source)
 
     def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
         with (
