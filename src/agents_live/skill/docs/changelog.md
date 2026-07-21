@@ -9,6 +9,10 @@ history is retained in the source repository.
 - fix: isolate framework smoketest watcher validation to the current run. (#106)
   Watcher checks reject stale or incomplete log output, ignore generated index
   noise, and reset persisted content hashes so consecutive runs still dispatch.
+- docs: clarify post-publish verification and artifact inspection.
+  Release checks distinguish PyPI JSON publication from Simple API propagation,
+  avoid interactive workflow watchers in automation, and identify the generic
+  `Agents/` fixtures intentionally included in the source distribution.
 
 ## 2.1.2 - 2026-07-20
 

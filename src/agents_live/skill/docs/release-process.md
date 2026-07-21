@@ -155,10 +155,12 @@ and creates the GitHub release. The release body contains each changelog
 entry's first-line summary, a link to the full changelog at the release tag,
 and GitHub's generated notes. That release triggers trusted publishing to PyPI.
 Wait for the workflow to succeed, verify the exact version with `uvx
---refresh --from "agents-live==<version>" agents-live --version`, then run
-`agents-live upgrade` and the installed-tool checks. The isolated exact-version
-check avoids mistaking cache propagation for a failed publish without pinning
-the user-level tool.
+--refresh --index-url https://pypi.org/simple --from
+"agents-live==<version>" agents-live --version`, then run `agents-live upgrade`
+and the installed-tool checks. First confirm that the versioned PyPI JSON
+endpoint returns HTTP 200. JSON can update before the Simple API used by
+resolvers; when JSON succeeds but `uvx` cannot find the version, wait for index
+propagation and retry instead of republishing or changing the tag.
 
 Use semantic versioning:
 
