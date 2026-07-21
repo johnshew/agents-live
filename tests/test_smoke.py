@@ -673,7 +673,7 @@ class TestProjectPlugins(_TempProject):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
 
-    def test_converge_succeeds_when_wheel_missing_but_plugin_installed(self) -> None:
+    def test_converge_returns_false_when_wheel_missing_but_plugin_installed(self) -> None:
         wheel = self.root / "Agents" / "plugins" / "missing.whl"
         (self.root / ".agents-live.toml").write_text(
             f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
@@ -690,7 +690,8 @@ class TestProjectPlugins(_TempProject):
                 return_value=distribution):
             self.assertFalse(plugins.converge([self.root]))
 
-    def test_converge_fails_when_missing_wheel_must_be_installed(self) -> None:
+    def test_converge_raises_error_when_plugin_not_installed_and_wheel_missing(
+            self) -> None:
         wheel = self.root / "Agents" / "plugins" / "missing.whl"
         (self.root / ".agents-live.toml").write_text(
             f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
@@ -703,6 +704,30 @@ class TestProjectPlugins(_TempProject):
             self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
         ):
             plugins.converge([self.root])
+
+    def test_union_prefers_declaration_with_available_wheel_metadata(self) -> None:
+        missing = self.root / "Agents" / "plugins" / "missing.whl"
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = {{ path = "{missing.relative_to(self.root).as_posix()}" }}\n',
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as other_tmp:
+            other = Path(other_tmp).resolve()
+            wheel = other / "Agents" / "plugins" / "example-plugin-3.2.1-py3-none-any.whl"
+            wheel.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin-3.2.1.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 3.2.1\n",
+                )
+            (other / ".agents-live.toml").write_text(
+                f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(other).as_posix()}" }}\n',
+                encoding="utf-8",
+            )
+            declaration = plugins.union([self.root, other], require_exists=False)
+        plugin = declaration["example-plugin"]
+        self.assertEqual(plugin.version, "3.2.1")
+        self.assertEqual(plugin.path, wheel)
 
 
 class TestAgentParsing(_TempProject):
