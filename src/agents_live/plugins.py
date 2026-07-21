@@ -25,6 +25,12 @@ class PluginError(RuntimeError):
 
 @dataclass(frozen=True)
 class Plugin:
+    """Resolved plugin declaration.
+
+    ``version`` is None when a declaration points at a wheel path that is
+    currently absent; read paths can still inspect installed state, while
+    install paths must require the artifact before convergence.
+    """
     name: str
     path: Path
     sha256: str | None
@@ -88,6 +94,9 @@ def declared(root: Path, *, require_exists: bool = False) -> dict[str, Plugin]:
         require_exists=require_exists)
     result = {}
     for configured_name, declaration in declarations.items():
+        # Read paths may run before wheel artifacts are present (for example in
+        # fresh clones). Keep the configured distribution name and leave version
+        # unknown so convergence can still short-circuit on installed state.
         wheel_name = configured_name
         version = None
         if declaration["path"].is_file():

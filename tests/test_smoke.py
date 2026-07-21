@@ -673,7 +673,7 @@ class TestProjectPlugins(_TempProject):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
 
-    def test_converge_returns_false_when_wheel_missing_but_plugin_installed(self) -> None:
+    def test_converge_skips_when_wheel_missing_but_plugin_installed(self) -> None:
         wheel = self.root / "Agents" / "plugins" / "missing.whl"
         (self.root / ".agents-live.toml").write_text(
             f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
@@ -3142,6 +3142,8 @@ class TestInstallSkill(_TempProject):
             self.assertEqual(installed.stdout.strip(), "1.0.0")
 
     def test_plugin_convergence_preserves_receipt_and_unions_declarations(self) -> None:
+        # converge() now verifies pending wheel paths exist before install,
+        # so these test declarations must point at real wheel files.
         first_wheel = self.root / "first.whl"
         second_wheel = self.root / "second.whl"
         first_wheel.write_bytes(b"first")
