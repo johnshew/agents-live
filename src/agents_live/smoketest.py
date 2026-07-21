@@ -400,6 +400,8 @@ def cleanup() -> tuple[list[str], list[str]]:
     for name in SMOKETEST_AGENT_NAMES:
         prompt = agents_dir() / f"{name}.md"
         prompt.unlink(missing_ok=True)
+        (paths.repo_state_dir(repo_root()) / f"{name}-watch-hashes.json").unlink(
+            missing_ok=True)
     trigger_dir = repo_root() / FIXTURES_REL / "_smoketest-watcher"
     trigger_file = trigger_dir / "trigger.txt"
     trigger_file.unlink(missing_ok=True)

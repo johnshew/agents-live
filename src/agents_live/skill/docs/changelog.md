@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: isolate framework smoketest watcher validation to the current run. (#106)
+  Watcher checks reject stale or incomplete log output, ignore generated index
+  noise, and reset persisted content hashes so consecutive runs still dispatch.
+
 ## 2.1.2 - 2026-07-20
 
 - fix: preserve UTC instants across qlog display and filtering. (#99, #100)
