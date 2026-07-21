@@ -594,9 +594,9 @@ def collect() -> list[dict]:
             note = f"{note}; " if note else ""
             note += f"crontab references missing script(s): {joined}"
         add("crontab entries match agent files", not orphans and not stale, False,
-            "run `migrate` for stale script paths; stop removed agent(s) "
-            "for orphans; edit with `crontab -e` for entries from a moved "
-            "or deleted project root",
+            "run `agents-live doctor --repair` to converge stale script paths "
+            "and orphaned triggers; edit with `crontab -e` for entries from "
+            "a moved or deleted project root",
             note=note or "no orphaned or stale entries")
 
     # Watcher self-heal coverage (commands.md check 13): a running watcher
@@ -627,7 +627,7 @@ def collect() -> list[dict]:
     if dead is not None:
         add("intended watchers are running", not dead, False,
             "run `start <name>` to relaunch, or run "
-            "`agents-live health-check` once",
+            "`agents-live doctor --repair`",
             note=(f"dead watcher(s) with @reboot intent: {', '.join(dead)}"
                   if dead else "all intended watchers have live processes"))
 
@@ -650,11 +650,10 @@ def collect() -> list[dict]:
     except Exception:
         installed = None
     if installed is not None:
-        add("health-check loop installed", installed, False,
-            "run `agents-live health-check` once (it installs its own "
-            "@reboot + hourly crontab entries)",
+        add("automatic maintenance installed", installed, False,
+            "run `agents-live doctor --repair`",
             note=("@reboot + hourly entries present" if installed
-                  else "no health-check crontab entries on this host"))
+                  else "no automatic maintenance entries on this host"))
 
     # Liveness of the check-and-repair loop itself. The health check (boot +
     # hourly) converges the crontab and restarts dead watchers; when its own
@@ -667,9 +666,9 @@ def collect() -> list[dict]:
         beacon_note = f"written {age_min:.0f} min ago"
     else:
         beacon_ok = False
-        beacon_note = "never written (health check has not run on this host)"
-    add("health beacon fresh (check-and-repair loop alive)", beacon_ok, False,
-        "run `agents-live health-check` and re-check",
+        beacon_note = "never written (maintenance has not run on this host)"
+    add("health beacon fresh (automatic maintenance alive)", beacon_ok, False,
+        "run `agents-live doctor --repair` and re-check",
         note=beacon_note)
 
     # Native-agent policy lints + platform tripwire (convergence C2).
@@ -706,8 +705,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all-repos", action="store_true",
         help="Run host checks once and project checks for every registered repo")
+    parser.add_argument(
+        "--repair", action="store_true",
+        help="Run automatic maintenance immediately before diagnosis")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Show the repair plan without changing anything")
     args = parser.parse_args(argv)
+    if args.dry_run and not args.repair:
+        parser.error("--dry-run requires --repair")
+    if args.all_repos and args.repair:
+        parser.error("--all-repos and --repair are mutually exclusive")
     json_mode = preflight.json_mode()
+
+    if args.repair:
+        from . import health_check  # noqa: PLC0415
+        repair_status = health_check.repair(
+            dry_run=args.dry_run, quiet=json_mode)
+        if args.dry_run or repair_status != 0:
+            return repair_status
 
     if args.all_repos:
         payload = repos.collect_doctor()
@@ -721,11 +737,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [{state}] {item['name']} ({item['path']}){detail}")
         return 0 if payload["ok"] else 1
 
-    if not os.environ.get(repos.SKIP_UPDATE_CHECK_ENV):
-        try:
-            update_check.refresh()
-        except OSError:
-            pass
     project_checks = _project_checks_enabled()
     checks = collect()
     required_failures = [c for c in checks if c["required"] and not c["ok"]]

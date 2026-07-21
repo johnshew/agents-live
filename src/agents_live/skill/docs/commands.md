@@ -25,7 +25,7 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | health-check | heartbeat | uninstall | repos | completions | dashboard
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | heartbeat | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
 stop         ::= "stop" ( NAME | "--name" NAME )
@@ -34,14 +34,12 @@ logs         ::= "logs" ( logs_query | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
-doctor       ::= "doctor" [ "--all-repos" ]
-init         ::= "init"
+doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ]
+init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
-migrate      ::= "migrate" [ ( "--dry-run" | "-n" ) ] [ "--adopt" VALUE ]
-health-check ::= "health-check" [ "--quiet" ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
-repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+repos        ::= "repos" ( "list" | "default" REPO | "remove" REPO )
 completions  ::= "completions" ( "bash" | "zsh" )
 dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
 ```
@@ -50,25 +48,22 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
-| run | in-process | auto-marker |  | yes |  | yes | --name, --changed-files, --quiet | Execute an agent once. |
-| start | in-process | auto-marker | crontab, inotify | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
+| run | in-process | required |  | yes |  | yes | --name, --changed-files, --quiet | Execute an agent once. |
+| start | in-process | required | crontab, inotify | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
 | stop | in-process | required | crontab | yes |  | yes | --name | Deactivate triggers and keep configuration. |
 | status | in-process | required |  | yes | yes |  | --all-repos | List agents and runtime state. |
 | logs | subprocess | required |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | required |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | crontab, inotify | yes |  |  | --runtime, --model | Run end-to-end validation. |
-| doctor | in-process | markerless |  | yes | yes |  | --all-repos | Check environment and installation readiness. |
-| init | in-process | none |  | yes |  |  |  | Initialize the project layout. |
+| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run | Check environment and installation readiness. |
+| init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
-| migrate | in-process | required | crontab | yes |  |  | --dry-run, -n, --adopt | Converge persisted runtime invocations. |
-| health-check | in-process | none | crontab | yes |  |  | --quiet | Run the host check-and-repair loop. |
 | heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
 | heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
 | heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |
 | uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |
-| repos add | in-process | none |  |  |  |  |  | Register a repository. |
 | repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
 | completions | in-process | none |  |  |  |  |  | Generate shell completion scripts. |
@@ -111,7 +106,7 @@ It also completes command targets after `agents-live help`.
 
 - [install -- Installation Instructions](#install----installation-instructions)
 - [doctor -- Check Environment Readiness](#doctor----check-environment-readiness)
-- [health-check -- Host Check-and-Repair Loop](#health-check----host-check-and-repair-loop)
+- [Automatic maintenance](#automatic-maintenance)
 - [smoketest -- End-to-End Validation](#smoketest----end-to-end-validation)
 - [create -- Create an Agent](#create----create-an-agent)
 - [release -- Audit, Assemble, and Publish](#release----audit-assemble-and-publish)
@@ -211,32 +206,23 @@ that runs every fix command unconditionally.
 Full bring-up sequence for a new host. Every step is idempotent -- safe to
 re-run.
 
-1. **Check readiness.** `agents-live doctor` -- reports what's missing,
+1. **Initialize host support.** `agents-live init` creates global
+   configuration and state and installs automatic maintenance.
+2. **Check readiness.** `agents-live doctor` reports what's missing,
    scoped to the agents this host owns.
-2. **Install missing tools.** Use the commands above. Hand sudo-gated
-   `apt install` lines to the user; skip host-inapplicable tools (e.g.
-   `agency` on an agency-less host).
-3. **Re-check readiness.** Confirm all *required* checks pass. Optional
-   agent-CLI WARNs for agents this host doesn't own are expected.
-4. **Activate owned agents.** `agents-live start --all` -- installs the
+3. **Install missing tools.** Use the commands above. Hand sudo-gated
+   `apt install` lines to the user; skip host-inapplicable tools.
+4. **Activate owned agents.** `agents-live start --all` installs the
    cron lines and starts the file-watchers for agents this host owns. Safe on
    every machine: it activates only what this host owns.
-5. **Register the repository.** `agents-live repos add <path>` -- records
-   the repo in the user-level registry. The hourly loop runs from cron
-   (not from the repo directory), so only registered repositories are
-   swept; an unregistered host sweeps nothing and its beacon reports
-   `degraded` with "no registered repositories".
-6. **Opt into the check-and-repair loop.** `agents-live health-check` --
-   runs the built-in host loop once, installs its own `@reboot` + hourly
-   crontab entries, and writes the host beacon
-   `~/.local/state/agents-live/health.ok`. Until this runs the beacon is
-   missing and the dashboard reads "unhealthy".
-7. **(WSL only) Register one distro-level Windows heartbeat.** Run
+5. **Initialize additional repositories.** Run
+   `agents-live init --repo <path>` for each additional workspace.
+6. **(WSL only) Register one distro-level Windows heartbeat.** Run
    `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"` so cron fires
    when the machine is idle -- see
    [windows-heartbeat.md](windows-heartbeat.md). Without it, cron only runs
    while a WSL session is open.
-8. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
+7. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
    warning `events`. On agency hosts the system `smoketest` also validates
    the agent path end-to-end; it is recorded as `skipped` (not `fail`) on
    agency-less hosts.
@@ -267,19 +253,18 @@ exactly the state no in-band check can report. A separate check reports
 whether the health-check loop's own crontab entries are installed on
 this host. `doctor`
 never mutates host state; `init` closes by running it so a fresh
-install ends verified green. Repairs are one step away: `migrate`
-converges stale crontab entries, then running
-`agents-live health-check` once re-verifies and refreshes the beacon.
+install ends verified green. `agents-live doctor --repair` runs immediate
+maintenance before diagnosis. Add `--dry-run` to inspect the repair plan.
 
 Before `init`, a markerless `doctor` runs host readiness checks only (including
 cron, inotifywait, and agent CLIs) and notes that project checks are skipped.
 Run `agents-live init` to create the project config and enable the full set.
 
-`doctor` always performs a fresh PyPI update check and updates the shared cache.
-For interactive terminal use, it also displays the result. Other commands check
-when the cached result is missing or one hour old. Checks only write under
-`$XDG_CACHE_HOME/agents-live/`; they do not change the project or install an
-update.
+For interactive terminal use, `doctor` displays the cached PyPI update result
+without refreshing or writing it. Other interactive commands refresh the cache
+in the background when the result is missing or one hour old. Update checks
+write only under `$XDG_CACHE_HOME/agents-live/`; they do not change the project
+or install an update.
 
 When `doctor` reports that the project skill payload does not match the
 installed package, run `agents-live upgrade --skills-only`. Skill refresh
@@ -291,8 +276,8 @@ and setup.
 Bare `agents-live upgrade` needs no project context. It upgrades the uv-managed
 runtime in place so receipt-recorded `--with` requirements survive, unions
 plugin declarations from the current and every available registered project,
-then invokes the newly installed CLI to migrate legacy in-tree runtime state
-and refresh each project's skill payload.
+then invokes the newly installed CLI to converge persisted triggers and refresh
+each project's skill payload.
 `--repo PATH|ALIAS` constrains payload refresh to one project, while plugin
 convergence remains host-global. `--runtime-only` and `--skills-only` run one
 phase. Unavailable repositories produce warnings and a nonzero final result
@@ -497,7 +482,7 @@ ignore an `agency` WARN.
 
 ---
 
-## `health-check` -- Host Check-and-Repair Loop
+## Automatic maintenance
 
 The built-in boot/hourly check-and-repair loop. It replaced the earlier
 consumer-project `agents-live-health-check` agent: the loop is host-scoped
@@ -505,24 +490,18 @@ consumer-project `agents-live-health-check` agent: the loop is host-scoped
 repository), so it ships with the package and keeps its state in the
 user-level XDG state home, never inside any project tree.
 
-```bash
-agents-live health-check [--quiet]
-```
-
 Each pass:
 
 1. **Converges its own crontab entries.** The loop self-installs an
    `@reboot` and an hourly entry of the form
-   `@reboot PATH=... <shim> health-check --quiet 2>&1` (no `cd`, no
-   `--repo`: the loop resolves registered repositories itself). Hosts opt
-   in by running `agents-live health-check` once; `upgrade` converges the
-   entries when present but never installs them, and `uninstall` removes
-   them.
+   `@reboot PATH=... <shim> internal maintain --quiet 2>&1` (no `cd`, no
+   `--repo`: the loop resolves registered workspaces itself). `init` installs
+   these entries, `upgrade` converges them, and `uninstall` removes them.
 2. **Converges declared plugin wheels** into the host-global uv tool
    environment.
 3. **Sweeps every registered repository**, each in its own subprocess
-   (`agents-live --repo <root> health-check --sweep`): converges persisted
-   crontab entries via `migrate`, prunes orphans, prunes fleet-wide
+   through an internal subprocess: converges persisted crontab entries,
+   prunes orphans, prunes fleet-wide
    registry orphans, enforces multi-host ownership, and restarts dead
    watchers.
 4. **Gates the framework smoketest on a content fingerprint** and runs it
@@ -713,14 +692,10 @@ agents-live status --all-repos       # repo-qualified, read-only aggregate
 agents-live doctor --all-repos       # host once + each registered project
 agents-live dashboard --all-repos    # read-only repository selector
 
-# Moved repository recovery
-agents-live migrate --adopt /old/project/root --dry-run
-agents-live migrate --adopt /old/project/root
-
 # User repository registry
-agents-live repos add ~/repos/<target-project>        # registered under its directory name
+agents-live init --repo ~/repos/<target-project>
 agents-live repos list
-agents-live repos default ~/repos/<target-project>    # registers the path if needed
+agents-live repos default ~/repos/<target-project>
 agents-live --repo <target-project> status
 agents-live repos remove ~/repos/<target-project>
 
@@ -730,37 +705,26 @@ agents-live smoketest --runtime copilot
 agents-live smoketest --runtime "agency copilot"
 ```
 
-`migrate --adopt` accepts only an old project root that no longer exists. It
-rewrites token-exact schedule and `@reboot` watcher entries for agents defined
-in the current project, using the same crontab lock and canonical builders as
-normal activation. Unmatched entries and entries for every other project are
-reported and left unchanged.
-
-Transitional (to be removed after fleet convergence): `migrate` and ordinary
-project refresh during `upgrade` perform a one-time move of legacy in-tree
-state into the user-level XDG state home. `Agents/logs/*` and watch-hash files
-move, and stale `health.ok` / smoketest lock files are deleted.
-`Agents/data/agent-owners.json` is untouched (git-synced shared state).
-
 ### Repository selection
 
 The user registry is
 `$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
 the platform-neutral fallback is `~/.config/agents-live/config.toml`.
-`repos add` requires an existing directory and stores its normalized absolute
-path under the directory's name. `repos default` accepts either a registered
-name or an existing path, registering that path first when needed. `repos
-remove` accepts either the registered path or name. Duplicate registrations,
+`init --repo` stores an initialized repository's normalized absolute path under
+the directory's name. `repos default` accepts either a registered name or an
+existing path, registering that path first when needed. `repos remove` accepts
+either the registered path or name. Duplicate registrations,
 malformed configuration, unavailable paths, and removing the current default
 fail with an actionable error.
 
-Targets resolve in this order:
+Explicit agent-file paths bypass workspace lookup. Name-based targets resolve
+in this order:
 
 1. explicit `--repo` path or registered name;
 2. `AGENTS_LIVE_REPO` process/session override;
 3. nearest `.agents-live.toml` or `[tool.agents-live]` marker;
-4. markerless-git adoption for interactive `run` and `start`;
-5. configured default repository.
+4. configured default repository;
+5. initialized global workspace.
 
 A default never redirects a command away from a local marker. Mutating commands
 print the selected path when they use the default. Cron, watcher, and spawned
@@ -772,7 +736,7 @@ repository without hiding healthy peers. Aggregate doctor runs host checks once
 and project checks once per valid repository; its exit status is nonzero when a
 required host/project check or repository validation fails. The aggregate
 dashboard can filter registered repositories but exposes no actions. Select one
-repository explicitly to run, start, stop, migrate, claim, or repair.
+repository explicitly to run, start, stop, claim, or repair.
 
 `agent_directories` remains a within-repository discovery setting. Entries must
 be relative and may not escape through `..` or symlinks; register another
@@ -801,9 +765,8 @@ and is verified before installation. For pyproject configuration, use
 tool environment is host-global. Existing receipt-recorded co-installed
 requirements and the primary agents-live install source are preserved, so
 convergence does not turn an editable or pinned install into a PyPI install.
-`repos add` registers before inspecting plugins and never changes the
-environment. Missing or invalid artifacts produce a pending notice or warning
-for `init`, `start`, or `upgrade` without discarding the registration.
+Missing or invalid artifacts produce a pending notice or warning for `init`,
+`start`, or `upgrade` without discarding the registration.
 `doctor` is read-only and makes a missing distribution, broken agents-live
 entry point, integrity mismatch, or declared registry mode without a resolving
 ownership backend a required failure. Its repair command is
@@ -891,8 +854,8 @@ explicit `--repo` into each cron line, so the entry is self-contained:
 nothing at fire time depends on the crontab `PATH=` prefix or the
 working directory resolving the right project.
 
-Source-checkout deployments (pre-packaging) instead persist the script
-form, retired by `migrate` at cutover:
+Source-checkout deployments (pre-packaging) instead persisted the script form.
+Automatic maintenance retires these entries during convergence:
 
 ```bash
 0 9 * * * cd /repo && /home/you/.local/bin/uv run --script .claude/skills/agents-live/scripts/run.py --name my-agent --quiet 2>&1

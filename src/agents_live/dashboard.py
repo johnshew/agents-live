@@ -581,7 +581,7 @@ async def health_check() -> None:
        of as a cryptic mid-activation error).
     2. `activate.py --all` - ensure every agent owned by this host (or `*`)
        with a trigger is actually registered and running.
-    3. The built-in `agents-live health-check` loop - confirm each
+    3. Built-in automatic maintenance - confirm each
        watcher and cron job is alive (self-healing any that died),
        refresh the host `health.ok` beacon, and run the framework
        smoketest.
@@ -711,7 +711,7 @@ def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
 def system_health() -> dict:
     """Real infrastructure health, read from the host health beacon.
 
-    The built-in loop (`agents-live health-check`) writes the host
+    Built-in automatic maintenance writes the host
     `health.ok` beacon (under the user-level state home) only after
     confirming every intended watcher is alive (self-healing any that
     died), so a *fresh* beacon means the infrastructure is genuinely up.
@@ -727,9 +727,8 @@ def system_health() -> dict:
     health_ok_path = HEALTH_OK_PATH
     if not health_ok_path.is_file():
         return {"level": "down", "text": "unhealthy: no beacon",
-                "tip": "the host health.ok beacon is missing - "
-                       "`agents-live health-check` has never written a "
-                       "healthy beacon. Run the health check."}
+                  "tip": "the host health.ok beacon is missing. Run "
+                      "`agents-live doctor --repair`."}
     mtime = datetime.fromtimestamp(health_ok_path.stat().st_mtime, timezone.utc)
     age_min = (now - mtime).total_seconds() / 60
     ago = _ago(mtime.isoformat(), now)

@@ -8,18 +8,17 @@ Resolution order:
 3. Walk up from CWD to the nearest directory containing a marker:
    ``.agents-live.toml``, or ``pyproject.toml`` with a
    ``[tool.agents-live]`` table.
-4. The default repository in the user-level XDG registry.
+4. The optional user-configured default workspace.
+5. The initialized host-global workspace.
 
-The optional user-configured default is the only fallback: a script-location
-anchor would resolve inside the installed package instead of the user's
-project. With no explicit root, env var, marker, or default, resolution fails
-loudly. All persisted
+No script-location fallback exists: it would resolve inside the installed
+package instead of the user's project. With no explicit root, environment
+variable, marker, configured default, or initialized global workspace,
+resolution fails loudly. All persisted
 invocations (cron lines, watcher respawns, dispatches) pin CWD to the
 repo, so the marker walk always succeeds for scheduled work. One
-first-use exception lives at the CLI layer, not here: interactive
-``run``/``start`` inside a markerless git repository auto-create the
-minimal local-mode marker at the git root (their command spec policy), after
-which resolution succeeds by the normal walk.
+first-use exception lives at the CLI layer, not here: an explicit agent file
+path does not require workspace resolution.
 
 The markers ARE the config home (§3.2 decision, 2026-07-12): project
 config lives at the repo root in ``.agents-live.toml``
@@ -119,10 +118,16 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
         _cached_default_source = "default"
         return _cached_default_root
 
+    global_workspace = global_root()
+    if config_source(global_workspace) is not None:
+        _cached_default_root = global_workspace
+        _cached_default_source = "global"
+        return _cached_default_root
+
     raise ValueError(
         f"no project root found: no {ENV_VAR} set, no --repo given, and no "
         f"marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents, "
-        "and no default repo configured"
+        "and the global workspace is not initialized; run `agents-live init`"
     )
 
 
@@ -167,6 +172,18 @@ def state_home() -> Path:
     return base / "agents-live"
 
 
+def data_home() -> Path:
+    """User-level durable data root for host-global agent content."""
+    root = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(root).expanduser() if root else Path.home() / ".local" / "share"
+    return base / "agents-live"
+
+
+def global_root() -> Path:
+    """Host-global workspace used when no initialized repository is selected."""
+    return data_home() / "workspace"
+
+
 def host_logs_dir() -> Path:
     """Host-level log directory (health-check loop and other host-scoped
     operations that run with no project selected)."""
@@ -174,7 +191,7 @@ def host_logs_dir() -> Path:
 
 
 def health_beacon_path() -> Path:
-    """The host health beacon written by ``agents-live health-check``."""
+    """The host health beacon written by automatic maintenance."""
     return state_home() / "health.ok"
 
 

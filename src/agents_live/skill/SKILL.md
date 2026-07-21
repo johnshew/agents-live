@@ -99,7 +99,7 @@ not the user-facing contract.
 | `stop <name>` | `agents-live stop <name>` |
 | `status [name] [--json]` | `agents-live status [name] [--json]` |
 | `status --all-repos` | `agents-live status --all-repos` *(read-only, repo-qualified)* |
-| `repos` | `agents-live repos list|add|default|remove` |
+| `repos` | `agents-live repos list|default|remove` |
 | `dashboard` | `agents-live dashboard --dev` |
 | `dashboard --all-repos` | `agents-live dashboard --all-repos` *(read-only)* |
 | `logs [name]` | `agents-live logs [name] [--errors] [--all] [--limit 50]` |
@@ -108,7 +108,7 @@ not the user-facing contract.
 | `smoketest` | `agents-live smoketest` |
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
-| `health-check` | `agents-live health-check` (host check-and-repair loop; self-installs its `@reboot` + hourly crontab entries) |
+| `repair` | `agents-live doctor --repair [--dry-run]` |
 | `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |

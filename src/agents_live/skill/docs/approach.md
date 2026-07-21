@@ -1,7 +1,7 @@
 ---
 title: Agents Live Architecture
 description: Architecture and runtime contracts for agents-live triggered agents
-ms.date: 2026-07-19
+ms.date: 2026-07-21
 ms.topic: concept
 ---
 
@@ -262,8 +262,8 @@ file a complete decommission:
   tears down (cron + watcher + desired-state entries) any name with no backing
   standard agent file. It is also run at the start of `activate.py --all`, so
   a reconcile both activates defined agents and removes deleted ones.
-- The built-in health-check loop (`agents-live health-check`, hourly and on
-  boot) calls `--prune-orphans` in its per-repo sweep before
+- Built-in automatic maintenance, hourly and on boot, calls
+  `--prune-orphans` in its per-repo sweep before
   reconciling. Removing an agent with `git rm` therefore decommissions it:
   every host self-cleans on its next health check, with no manual
   per-host stop. Cron entries (which survive reboots) and watcher processes
@@ -365,8 +365,7 @@ The uv tool environment is host-global. `init` and non-dry-run `start`
 converge the selected project; `upgrade` unions declarations from all
 registered projects and preserves requirements already recorded in uv's tool
 receipt. `doctor` only lints installed distributions and resolves their entry
-points. `repos add` is bookkeeping and reports pending plugins without
-installing them.
+points. `init --repo` enrolls a repository and reports pending plugins.
 
 No separate consent prompt is required. Activating a repository already grants
 its committed handlers and agent prompts execution authority on that host, so

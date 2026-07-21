@@ -75,8 +75,9 @@ commands, the refresh runs in the background and is skipped for
 scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
 cache failures never affect the command. This request sends only ordinary
 package-index request metadata; it does not include project or agent data.
-`agents-live doctor` is the exception: it always performs a fresh check and
-updates the cache. Checks never install updates in the background. Run
+`agents-live doctor` displays the cached result without refreshing or writing
+it, preserving its read-only contract. Checks never install updates in the
+background. Run
 `agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
 release without dropping co-installed requirements, converge project-declared
 plugins, and then refresh managed skill payloads using the newly installed CLI.
@@ -91,16 +92,18 @@ first-time project setup command.
 ## Quick start
 
 ```bash
-cd your-repo
-agents-live doctor    # verify cron, inotifywait, and agent CLIs
-agents-live init      # layout + config marker + skill payload
-# copy a starter from .claude/skills/agents-live/templates/ into .claude/agents/
-agents-live run my-agent        # test once, in the foreground
-agents-live start my-agent      # activate cron/watcher triggers
+uv tool install agents-live
+agents-live init
+agents-live run ./my-agent.md
+agents-live start ./my-agent.md
 agents-live status
 agents-live logs
-agents-live stop my-agent       # deactivate and keep its configuration
+agents-live stop ./my-agent.md
 ```
+
+An explicit agent path resolves from the current directory and requires no
+repository registration. Initialize an additional repository later with
+`agents-live init --repo ~/repos/example`.
 
 Projects that need plugin-provided adapters or registry ownership declare the
 committed wheel in `.agents-live.toml`:
@@ -112,27 +115,29 @@ example-plugin = { path = "Agents/plugins/example-plugin-1.0.0-py3-none-any.whl"
 
 The path is repository-relative and the optional SHA-256 pins its contents.
 `init`, `start`, and `upgrade` converge declarations into the host-global uv
-tool environment. `doctor` reports missing or broken entry points, while
-`repos add` only reports what a later activation will install.
+tool environment. `doctor` reports missing or broken entry points.
 
-For work across projects, register normalized absolute repository paths in
+For work across projects, initialize normalized absolute repository paths in
 the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
 `~/.config/agents-live/config.toml`):
 
 ```bash
-agents-live repos add ~/repos/<target-project>   # registered under its directory name
-agents-live repos default ~/repos/<target-project> # registers the path if needed
+agents-live init --repo ~/repos/<target-project>
 agents-live --repo <target-project> status       # directory name also works
 agents-live status --all-repos
 agents-live doctor --all-repos
 agents-live dashboard --all-repos   # read-only repository selector
 ```
 
-Selection precedence is explicit `--repo` path or registered name,
-`AGENTS_LIVE_REPO`, the nearest local marker, markerless-git adoption for
-`run`/`start`, then the configured default. A default never overrides the
-current project. Aggregate commands are read-only; lifecycle mutations always
-target one selected repository, and persisted commands pin its absolute path.
+Repository initialization also selects that repository as the configured
+default for later name-based commands outside a repository.
+
+An explicit agent path bypasses workspace selection. Name-based selection
+precedence is explicit `--repo` path or registered name, `AGENTS_LIVE_REPO`,
+the nearest local marker, then the configured default and global workspace. A
+default never overrides the current project. Aggregate commands are read-only;
+lifecycle mutations target one selected workspace, and persisted commands pin
+its absolute path.
 
 ## Requirements
 

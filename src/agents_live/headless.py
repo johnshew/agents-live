@@ -1135,6 +1135,16 @@ def load_agent_config(name: str) -> AgentConfig:
     Raises :class:`AgentInvalidError` if the name is found in more than one
     location (ambiguous) or in none.
     """
+    candidate_path = Path(name).expanduser()
+    if candidate_path.is_absolute() or any(
+            separator in name for separator in (os.sep, os.altsep) if separator):
+        prompt = candidate_path.resolve()
+        if not prompt.is_file():
+            raise AgentInvalidError(f"agent file not found: {prompt}")
+        if prompt.suffix.lower() != ".md":
+            raise AgentInvalidError(f"agent file must be Markdown: {prompt}")
+        return _parse_frontmatter(prompt)
+
     matches: list[Path] = []
     for d in _all_agent_dirs():
         candidate = d / f"{name}.md"
@@ -1165,6 +1175,10 @@ def agent_file_exists(name: str) -> bool:
     Discovery's lenient trigger probe deliberately skips broken native
     files, so absence from :func:`list_agents` is NOT proof the file is
     gone."""
+    candidate_path = Path(name).expanduser()
+    if candidate_path.is_absolute() or any(
+            separator in name for separator in (os.sep, os.altsep) if separator):
+        return candidate_path.resolve().is_file()
     for d in _all_agent_dirs():
         if (d / f"{name}.md").is_file():
             return True

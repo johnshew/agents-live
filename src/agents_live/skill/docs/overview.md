@@ -1,7 +1,7 @@
 ---
 title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
-ms.date: 2026-07-19
+ms.date: 2026-07-21
 ms.topic: overview
 ---
 
@@ -80,16 +80,47 @@ your machine:
 | Externally reachable inbound ports | none |
 | Databases | none - plain-text JSONL logs, aged into monthly Parquet archives |
 
-Trying it takes about a minute:
+### MVP experience
+
+Install the tool, initialize host support once, and run an agent file from the
+current directory:
 
 ```bash
-uv tool install agents-live        # install the Python package
-source <(agents-live completions bash) # optional shell completion
-agents-live doctor                 # verify cron, inotifywait, and agent CLIs
-agents-live run file-notes         # test the agent once, in the foreground
-agents-live start file-notes       # activate it unattended
-agents-live stop file-notes        # clean up - remove its triggers
+uv tool install agents-live
+agents-live init
+agents-live run ./my-agent.md
 ```
+
+The explicit file path is authoritative. It resolves from the current
+directory and does not require an agent registry or an initialized repository.
+The current directory is the run's working directory. Activate the same file's
+cron or file-watch triggers after the foreground run succeeds:
+
+```bash
+agents-live start ./my-agent.md
+```
+
+`start` persists the canonical agent path and working directory in host state,
+so automatic maintenance can restore its triggers without rediscovering the
+file through a repository. Use `stop ./my-agent.md` to remove those triggers
+without deleting the agent definition.
+
+Initialize a repository only when you want its configuration, native agent
+directories, handlers, and managed skill payload to form an additional
+workspace:
+
+```bash
+agents-live init --repo ~/repos/<target-project>
+```
+
+Repository initialization bootstraps global support first when necessary and
+adds the repository to the workspace registry as the configured default for
+later name-based commands outside a repository. Explicit paths and `--repo`
+still take precedence.
+
+Explicit agent paths bypass workspace selection. Name-based commands resolve
+an explicit `--repo` first, then an initialized repository containing the
+current directory, then the configured default workspace.
 
 On interactive terminal invocations, agents-live checks PyPI for a newer
 stable release when its shared cached result is missing or one hour old. The
@@ -99,16 +130,17 @@ commands, the refresh runs in the background and is skipped for
 scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
 cache failures never affect the command. This request sends only ordinary
 package-index request metadata; it does not include project or agent data.
-`agents-live doctor` is the exception: it always performs a fresh check and
-updates the cache. Checks never install updates in the background. Run
+`agents-live doctor` displays the cached result without refreshing or writing
+it, preserving its read-only contract. Checks never install updates in the
+background. Run
 `agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
 release without dropping co-installed requirements, converge project-declared
 plugins, and then refresh managed skill payloads using the newly installed CLI.
 
-Repositories used from outside their working tree can be registered by path
+Additional workspaces are registered by path
 under `$XDG_CONFIG_HOME/agents-live/config.toml` (normally
 `~/.config/agents-live/config.toml`). Explicit selection and local project
-markers take precedence over the optional default. `status --all-repos`,
+markers take precedence over the default. `status --all-repos`,
 `doctor --all-repos`, and `dashboard --all-repos` provide repo-qualified,
 read-only views; lifecycle actions remain scoped to one selected repository.
 
@@ -126,13 +158,11 @@ repository-relative, and an optional SHA-256 pins its contents. `init`, `start`,
 and `upgrade` converge declarations into the host-global uv tool environment;
 `doctor` verifies each distribution and its agents-live entry points.
 
-No setup step: the first `run` or `start` inside a git repository records
-the project root by writing a minimal `.agents-live.toml` marker (local
-mode, all defaults). `agents-live init` is optional - run it to install
-the conversational `/agents-live` skill (itself optional support for
-the CLI), seed the agent directories, or declare more complex
-(multi-host) configuration. `stop` pauses an agent without
-removing it, so the full lifecycle is
+`agents-live init` performs the one-time host bootstrap. It installs automatic
+maintenance and initializes global configuration and state. It never creates a
+partial repository marker as a side effect of `run` or `start`. Repository
+configuration is explicit through `init --repo PATH`. `stop` pauses an agent
+without removing it, so the full lifecycle is
 `create -> run -> start -> stop`. `stop` removes triggers while preserving
 the agent definition. An optional
 local dashboard adds run/pause/activate controls, ownership visibility, and
@@ -193,11 +223,14 @@ stable and continuously improving.
    repos sync between machines, so machine-local logs in the tree were an
    export hazard, and user-level state lets the tool log and repair before
    any project is resolved.
-6. **Fail gracefully, self-heal, and self-optimize.** A built-in
-   check-and-repair loop (`agents-live health-check`, self-installed on
-   `@reboot` + hourly crontab entries) sweeps every registered repository:
+6. **Fail gracefully, self-heal, and self-optimize.** A built-in automatic
+   maintenance loop, installed by `init` on `@reboot` and hourly crontab
+   entries, sweeps active agents and registered workspaces:
    it restarts dead watchers, prunes orphans, converges persisted crontab
    entries, enforces multi-host ownership, and stamps a host health beacon.
+   Maintenance and migration are internal operations, not public commands.
+   Use `doctor --repair` for immediate troubleshooting or
+   `doctor --repair --dry-run` to inspect the repair plan.
    A fire-rate circuit breaker stops accidental runaway watcher cascades.
    Automated outer loops continually monitor overall system behavior (using the
    indelible logs): an hourly diagnosis agent turns log errors into
@@ -290,7 +323,7 @@ Two artifacts, one source of truth:
 1. **One `agents-live` package**, developed at
    `github.com/johnshew/agents-live` and installed with `uv tool`:
    the CLI (`run`, `start`, `status`, `logs`, `smoketest`, `init`,
-   `doctor`, `migrate`, ...) plus an importable handler SDK for live agents (event
+   `doctor`, `upgrade`, ...) plus an importable handler SDK for live agents (event
    logging, pipeline put/get client, config access, guarded file writer)
    in the same package. `init` installs the vendored skill and seeds the
    agent directories; `doctor` (read-only) verifies the install and

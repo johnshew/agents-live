@@ -1,7 +1,7 @@
 ---
 title: Agents Live Windows Heartbeat
 description: Keep WSL available for scheduled Agents Live agents with Windows Task Scheduler
-ms.date: 2026-07-18
+ms.date: 2026-07-21
 ms.topic: how-to
 ---
 
@@ -74,8 +74,8 @@ agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
 ```
 
 A bare `uv tool install` does not carry project-declared plugin wheels;
-if any project declares them, follow with `agents-live upgrade` (the
-hourly `agents-live health-check` pass also converges them).
+if any project declares them, follow with `agents-live upgrade` (hourly
+automatic maintenance also converges them).
 
 Registration is idempotent. It replaces a stale canonical action, starts the
 new task, and waits for a fresh global beacon. Only after that verification

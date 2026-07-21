@@ -65,8 +65,18 @@ def _hash_file_content(filepath: Path) -> str | None:
         return None
 
 
+def _artifact_key(selector: str) -> str:
+    """Return a filesystem-safe stable key without changing agent identity."""
+    if Path(selector).is_absolute():
+        stem = Path(selector).stem
+        digest = hashlib.sha256(selector.encode()).hexdigest()[:12]
+        return f"{stem}-{digest}"
+    return selector
+
+
 def _watch_hash_path(name: str) -> Path:
-    return paths.repo_state_dir(repo_root()) / f"{name}-watch-hashes.json"
+    return paths.repo_state_dir(repo_root()) / \
+        f"{_artifact_key(name)}-watch-hashes.json"
 
 
 def _load_watch_hashes(name: str) -> dict:
@@ -193,8 +203,9 @@ def _dispatch_run_once(name: str, changed_files: list[str]) -> None:
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     runs_dir = logs_root() / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
-    out_path = runs_dir / f"{name}-{ts}.watcher.out.txt"
-    err_path = runs_dir / f"{name}-{ts}.watcher.err.txt"
+    artifact_key = _artifact_key(name)
+    out_path = runs_dir / f"{artifact_key}-{ts}.watcher.out.txt"
+    err_path = runs_dir / f"{artifact_key}-{ts}.watcher.err.txt"
     dispatch_started = time.monotonic()
     with open(out_path, "w") as out_f, open(err_path, "w") as err_f:
         proc = subprocess.Popen(
@@ -693,7 +704,7 @@ def activate_watcher(name: str) -> int:
         if process.stderr:
             stderr_text = process.stderr.read().strip()
             process.stderr.close()
-        agent_log = logs_root() / f"{name}.log"
+        agent_log = config.agent_log
         if stderr_text:
             log_event(agent_log, level="error", phase="watcher",
                       status="crash", message=stderr_text[:2000])
@@ -960,7 +971,7 @@ def activate_one(
         if dry_run:
             print(f"[dry-run] would activate cron for '{config.name}': {', '.join(config.schedule)}")
         else:
-            cron_line = install_cron_agent(config.name)
+            cron_line = install_cron_agent(name)
             log_event(system_log(), level="info", agent_name=config.name, phase="activate", type="cron",
                       schedule=config.schedule)
             print(f"Activated cron for '{config.name}': {cron_line}")
@@ -971,8 +982,8 @@ def activate_one(
             print(f"[dry-run] would activate watcher for '{config.name}': "
                   f"watching {config.watch_path}")
         else:
-            pid = activate_watcher(config.name)
-            install_watcher_reboot_line(config.name)
+            pid = activate_watcher(name)
+            install_watcher_reboot_line(name)
             log_event(system_log(), level="info", agent_name=config.name, phase="activate", type="watcher",
                       watchPath=config.watch_path, pid=pid)
             print(f"Activated watcher for '{config.name}': watching {config.watch_path}, pid {pid}")
@@ -1033,7 +1044,7 @@ def main() -> int:
             return 0
 
         if getattr(args, "internal_command", None) == "watch-loop":
-            agent_log = logs_root() / f"{args.name}.log"
+            agent_log = load_agent_config(args.name).agent_log
             try:
                 return watch_loop(args.name)
             except Exception:
