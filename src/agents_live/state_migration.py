@@ -11,20 +11,94 @@ into the user-level XDG state home (2026-07-19 layout change):
 ``agent-owners.json`` is deliberately untouched: it is git-synced shared
 state and stays in the tree.
 
-Runs from ``migrate.main`` on every pass (idempotent, no-op once the
-legacy locations are empty), so every host converges automatically via
-the hourly built-in health-check loop. The whole transition lives in
-this module plus one call site in ``migrate.py``: to retire it, delete
-this file and that call.
+Runs from ``migrate.main`` and each upgrade target refresh (idempotent,
+no-op once the legacy locations are empty), so hosts converge through
+ordinary upgrades or the hourly built-in health-check loop. To retire
+the transition, delete this module and both call sites.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import shutil
 from pathlib import Path
 
 from . import paths
 
 _EPHEMERAL = ("health.ok", "smoketest-framework.lock")
+
+
+def _append_legacy_log(src: Path, dest: Path) -> None:
+    """Append once across retries, including failure after the append."""
+    raw_legacy = src.read_bytes()
+    while True:
+        current = src.read_bytes()
+        if current == raw_legacy:
+            break
+        raw_legacy = current
+    journal = dest.with_name(f".{dest.name}.legacy-migration.json")
+    start = dest.stat().st_size
+    if journal.is_file():
+        try:
+            receipt = json.loads(journal.read_text(encoding="utf-8"))
+            original_size = int(receipt["source_size"])
+            original_digest = str(receipt["source_sha256"])
+            if hashlib.sha256(raw_legacy[:original_size]).hexdigest() != original_digest:
+                raise OSError(f"legacy log changed before migration retry: {src}")
+            start = int(receipt["destination_size"])
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            raise
+    else:
+        original_size = len(raw_legacy)
+        original_digest = hashlib.sha256(raw_legacy).hexdigest()
+        receipt = {
+            "source_size": original_size,
+            "source_sha256": original_digest,
+            "destination_size": start,
+            "batches": [],
+        }
+        paths.atomic_write_text(journal, json.dumps(receipt) + "\n")
+
+    def append_missing(payload: bytes) -> None:
+        if not payload:
+            return
+        if not payload.endswith(b"\n"):
+            payload += b"\n"
+        digest = hashlib.sha256(payload).hexdigest()
+        for batch in receipt.get("batches", []):
+            if batch.get("sha256") != digest or batch.get("size") != len(payload):
+                continue
+            with dest.open("rb") as existing:
+                existing.seek(int(batch["offset"]))
+                if existing.read(len(payload)) == payload:
+                    return
+        with dest.open("ab") as merged:
+            merged.write(payload)
+            merged.flush()
+            os.fsync(merged.fileno())
+            offset = merged.tell() - len(payload)
+        receipt.setdefault("batches", []).append({
+            "offset": offset,
+            "size": len(payload),
+            "sha256": digest,
+        })
+        paths.atomic_write_text(journal, json.dumps(receipt) + "\n")
+
+    append_missing(raw_legacy[:original_size])
+    consumed = original_size
+    while True:
+        current = src.read_bytes()
+        if hashlib.sha256(current[:original_size]).hexdigest() != original_digest:
+            raise OSError(f"legacy log changed during migration: {src}")
+        if len(current) > original_size and raw_legacy[:original_size] and not raw_legacy[:original_size].endswith(b"\n"):
+            raise OSError(f"unterminated legacy log grew during migration: {src}")
+        append_missing(current[consumed:])
+        consumed = len(current)
+        if src.read_bytes() == current:
+            break
+    src.unlink()
+    journal.unlink(missing_ok=True)
 
 
 def plan(root: Path) -> dict[str, list]:
@@ -69,12 +143,7 @@ def apply(root: Path, *, dry_run: bool = False) -> int:
                 # timestamp, not file position. Guard the join so a
                 # legacy file cut mid-write cannot fuse two JSONL records
                 # into one unparseable line.
-                legacy = src.read_bytes()
-                if legacy and not legacy.endswith(b"\n"):
-                    legacy += b"\n"
-                with dest.open("ab") as merged:
-                    merged.write(legacy)
-                src.unlink()
+                _append_legacy_log(src, dest)
             else:
                 src.unlink()  # regenerated at the new home already; drop
         else:

@@ -6,6 +6,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: migrate legacy runtime state during ordinary upgrades. (#90)
+  Each refreshed project moves in-tree logs and watch hashes into the XDG state
+  home with retry-safe collision handling before its skill payload is updated.
+- fix: tolerate unavailable plugin wheels until installation is required. (#91)
+  Healthy installed plugins no longer block activation after an artifact is
+  removed, and repository registration survives plugin diagnostics while
+  preserving metadata, identity, and checksum checks at installation time.
 - feat: improve dashboard coordination, diagnostics, and agent reporting. (#104)
   Dashboard actions run through a visible FIFO queue; structured error summaries,
   model details, filters, cost totals, and bounded table and log scrolling keep

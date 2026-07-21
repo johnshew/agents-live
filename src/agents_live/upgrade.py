@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, init, paths, plugins, preflight, repos
+from . import __version__, init, paths, plugins, preflight, repos, state_migration
 from .spawn import find_uv
 
 
@@ -154,6 +154,7 @@ def main() -> int:
     for label, root in targets:
         print(f"Refreshing {label}: {root}")
         try:
+            state_migration.apply(root)
             _refresh_payload(root)
         except (OSError, ValueError) as exc:
             preflight.emit_failure(
