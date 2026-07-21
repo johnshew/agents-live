@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.2.0 - 2026-07-21
+
 - fix: migrate legacy runtime state during ordinary upgrades. (#90)
   Each refreshed project moves in-tree logs and watch hashes into the XDG state
   home with retry-safe collision handling before its skill payload is updated.
