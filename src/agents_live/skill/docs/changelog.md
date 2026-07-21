@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: render nested command help from the selected subcommand. (#112)
+  `logs timeline --help` now lists only timeline arguments, documents its
+  ISO-8601 time filter, and rejects unrelated parent log-query options.
+
 ## 2.2.0 - 2026-07-21
 
 - fix: migrate legacy runtime state during ordinary upgrades. (#90)
