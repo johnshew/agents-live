@@ -106,9 +106,12 @@ def union(roots: list[Path], *, require_exists: bool = False) -> dict[str, Plugi
         for key, plugin in declared(root, require_exists=require_exists).items():
             previous = result.get(key)
             if previous is not None:
-                if previous.version is None or plugin.version is None:
-                    if previous.version is None and plugin.version is not None:
-                        result[key] = plugin
+                if previous.version is None and plugin.version is None:
+                    continue
+                if previous.version is None and plugin.version is not None:
+                    result[key] = plugin
+                    continue
+                if previous.version is not None and plugin.version is None:
                     continue
                 try:
                     same_artifact = (
