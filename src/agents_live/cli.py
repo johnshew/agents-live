@@ -83,6 +83,19 @@ def _usage() -> str:
     return render_usage(__version__, DOCS_URL)
 
 
+def _help_target(command: Cmd, invoked_as: str,
+                 argv: list[str]) -> tuple[Cmd, str]:
+    """Resolve a declared child command for spec-generated help."""
+    if argv:
+        child = next(
+            (item for item in command.subcommands if item.name == argv[0]),
+            None,
+        )
+        if child is not None:
+            return child, f"{invoked_as} {child.name}"
+    return command, invoked_as
+
+
 def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
     if name_sugar and rest and not rest[0].startswith("-"):
         return ["--name", rest[0], *rest[1:]]
@@ -286,8 +299,9 @@ def main(argv: list[str] | None = None) -> int:
                 "unknown_command", args[1],
                 f"unknown command '{args[1]}'", json_mode=json_mode)
             return 2
-        print(command_help(command, args[1]), end="")
-        return _finish(0, command, args[2:], json_mode=json_mode)
+        target, invoked_as = _help_target(command, args[1], args[2:])
+        print(command_help(target, invoked_as), end="")
+        return _finish(0, target, args[2:], json_mode=json_mode)
 
     cmd, rest = args[0], args[1:]
     command = COMMAND_BY_NAME.get(cmd)
@@ -305,8 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     # the command's own output passes through uncaptured.
     capture = json_mode and command.json
     if any(arg in ("-h", "--help", "help") for arg in rest):
-        print(command_help(command, cmd), end="")
-        return _finish(0, command, rest, json_mode=json_mode)
+        target, invoked_as = _help_target(command, cmd, rest)
+        print(command_help(target, invoked_as), end="")
+        return _finish(0, target, rest, json_mode=json_mode)
     unknown = unknown_flag(command, rest)
     if unknown is not None:
         _emit_failure(

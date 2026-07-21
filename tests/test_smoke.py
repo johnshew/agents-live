@@ -40,8 +40,8 @@ try:  # installed package layout
         update_check, upgrade,
     )
     from agents_live.cli_spec import (
-        COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS, render_docs_block,
-        visible_args,
+        Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
+        render_docs_block, validation_error, visible_args,
     )
 except ImportError:  # flat checkout layout
     import sys
@@ -68,8 +68,8 @@ except ImportError:  # flat checkout layout
     import upgrade
     import uninstall
     from cli_spec import (
-        COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS, render_docs_block,
-        visible_args,
+        Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
+        render_docs_block, validation_error, visible_args,
     )
 
 
@@ -1389,6 +1389,49 @@ class TestCliContract(_TempProject):
                 self.assertIn(command.summary, stdout.getvalue())
                 self.assertIn("--json", stdout.getvalue())
                 self.assertIn("-h, --help, help", stdout.getvalue())
+
+    def test_timeline_help_uses_subcommand_spec(self) -> None:
+        for argv in (
+                ["logs", "timeline", "--help"],
+                ["help", "logs", "timeline"]):
+            with (
+                self.subTest(argv=argv),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertEqual(cli.main(argv), 0)
+                help_text = stdout.getvalue()
+                self.assertIn("usage: agents-live logs timeline", help_text)
+                self.assertIn("--last", help_text)
+                self.assertIn("Start time (ISO-8601 UTC).", help_text)
+                self.assertNotIn("--agent", help_text)
+                self.assertNotIn("--until", help_text)
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(
+                cli.main(["logs", "timeline", "--agent", "fixture"]), 2)
+        self.assertIn("unrecognized argument: --agent", stderr.getvalue())
+
+    def test_child_validation_uses_child_constraints(self) -> None:
+        child = Cmd(
+            "child", "Child.", "child", "in-process",
+            args=(Arg(("--left",), "Use left."),
+                Arg(("--right",), "Use right.")),
+            mutually_exclusive=(("--left", "--right"),),
+            requires_one_of=("--left", "--right"),
+        )
+        parent = Cmd(
+            "parent", "Parent.", "parent", "in-process",
+            subcommands=(child,), subcommand_required=True,
+        )
+        self.assertEqual(
+            validation_error(parent, ["child"]),
+            "child requires --left, or --right",
+        )
+        self.assertEqual(
+            validation_error(parent, ["child", "--left", "--right"]),
+            "--left and --right are mutually exclusive",
+        )
+        self.assertIsNone(validation_error(parent, ["child", "--left"]))
 
     def test_all_help_covers_every_public_command(self) -> None:
         with mock.patch(
