@@ -77,6 +77,12 @@ def _sha256(path: Path) -> str:
 
 
 def declared(root: Path, *, require_exists: bool = False) -> dict[str, Plugin]:
+    """Resolve declared plugins from *root*.
+
+    Use ``require_exists=False`` for read/inspection paths that can short-circuit
+    on already-installed distributions; use ``True`` for install paths that must
+    consume wheel artifacts.
+    """
     declarations = paths.validated_plugins(
         root, paths.load_config(root).get("plugins", {}),
         require_exists=require_exists)
@@ -106,6 +112,10 @@ def union(roots: list[Path], *, require_exists: bool = False) -> dict[str, Plugi
         for key, plugin in declared(root, require_exists=require_exists).items():
             previous = result.get(key)
             if previous is not None:
+                # Missing-wheel declarations cannot provide version/artifact
+                # identity. Keep the declaration that has metadata when only one
+                # side has it; otherwise keep the first declaration and defer any
+                # artifact validation until an install is actually needed.
                 if previous.version is None and plugin.version is None:
                     continue
                 if previous.version is None and plugin.version is not None:

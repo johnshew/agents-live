@@ -356,6 +356,10 @@ class TestRepositoryRegistry(_TempProject):
         registry = repos.load()
         self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
         self.assertIn(
+            "warning: plugin declarations could not be checked after registration",
+            stderr.getvalue(),
+        )
+        self.assertIn(
             "declared plugins will be installed on init/start/upgrade",
             stderr.getvalue(),
         )
@@ -669,7 +673,7 @@ class TestProjectPlugins(_TempProject):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
 
-    def test_converge_treats_missing_wheel_as_converged_when_installed(self) -> None:
+    def test_converge_succeeds_when_wheel_missing_but_plugin_installed(self) -> None:
         wheel = self.root / "Agents" / "plugins" / "missing.whl"
         (self.root / ".agents-live.toml").write_text(
             f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
