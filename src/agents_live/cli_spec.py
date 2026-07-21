@@ -128,7 +128,8 @@ COMMANDS = (
                     Arg(("filter",), "Agent or content filter.",
                         kind="positional"),
                     Arg(("--all",), "Show all agents."),
-                    Arg(("--since",), "Start time.", kind="value"),
+                    Arg(("--since",), "Start time (ISO-8601 UTC).",
+                        kind="value"),
                     Arg(("--last",), "Last N events.", kind="value", default=50),
                     Arg(("--logs",), "Specific log files.", kind="value"),
                 ),
@@ -547,7 +548,7 @@ def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
         if child is not None:
             current = child
             argv = argv[1:]
-    arguments = (*command.args, *(current.args if current is not command else ()))
+    arguments = current.args
     known = {flag for argument in arguments for flag in argument.flags
              if flag.startswith("-")}
     known.add("--all-repos")
@@ -585,22 +586,6 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
     ``requires_one_of``, ``subcommand_required``, ``required`` args);
     nothing here keys on a command's name.
     """
-    for group in command.mutually_exclusive:
-        present = [flag for flag in group if _flag_present(argv, flag)]
-        if len(present) > 1:
-            return " and ".join(present) + " are mutually exclusive"
-    if command.requires_one_of:
-        sugared = (command.name_sugar and argv
-                   and not argv[0].startswith("-"))
-        if not sugared and not any(
-                _flag_present(argv, flag)
-                for flag in command.requires_one_of):
-            options = [
-                "NAME, --name NAME" if flag == "--name" and command.name_sugar
-                else flag
-                for flag in command.requires_one_of
-            ]
-            return f"{command.name} requires " + ", or ".join(options)
     current = command
     if command.subcommands:
         child = next(
@@ -614,6 +599,22 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
         elif command.subcommand_required:
             return f"{command.name} requires one of: " + ", ".join(
                 item.name for item in command.subcommands if not item.hidden)
+    for group in current.mutually_exclusive:
+        present = [flag for flag in group if _flag_present(argv, flag)]
+        if len(present) > 1:
+            return " and ".join(present) + " are mutually exclusive"
+    if current.requires_one_of:
+        sugared = (current.name_sugar and argv
+                   and not argv[0].startswith("-"))
+        if not sugared and not any(
+                _flag_present(argv, flag)
+                for flag in current.requires_one_of):
+            options = [
+                "NAME, --name NAME" if flag == "--name" and current.name_sugar
+                else flag
+                for flag in current.requires_one_of
+            ]
+            return f"{current.name} requires " + ", or ".join(options)
     for argument in current.args:
         if argument.hidden:
             continue
@@ -635,6 +636,6 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
                     return f"{flag} requires a value"
             if argument.required and not any(
                     _flag_present(argv, flag) for flag in argument.flags):
-                if not command.name_sugar or not argv or argv[0].startswith("-"):
+                if not current.name_sugar or not argv or argv[0].startswith("-"):
                     return f"{argument.flags[0]} is required"
     return None
