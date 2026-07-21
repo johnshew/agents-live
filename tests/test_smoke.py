@@ -122,6 +122,36 @@ FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
 class TestSmoketestDispatch(_TempProject):
+    def test_cleanup_removes_smoketest_watch_hashes(self) -> None:
+        smoketest = importlib.import_module(
+            f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
+        state_dir = paths.repo_state_dir(self.root)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        for name in smoketest.SMOKETEST_AGENT_NAMES:
+            (state_dir / f"{name}-watch-hashes.json").write_text(
+                "{}", encoding="utf-8")
+        unrelated = state_dir / "production-watch-hashes.json"
+        unrelated.write_text("{}", encoding="utf-8")
+
+        stopped = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with (
+            mock.patch.object(smoketest, "_smoketest_process_tree",
+                              return_value={}),
+            mock.patch.object(smoketest, "_stop_process_tree", return_value=[]),
+            mock.patch.object(smoketest.subprocess, "run", return_value=stopped),
+            mock.patch.object(smoketest, "_smoketest_run_pids", return_value=[]),
+            mock.patch.object(smoketest, "cron_is_active", return_value=False),
+            mock.patch.object(smoketest, "find_watcher_pid", return_value=None),
+        ):
+            residue, diagnostics = smoketest.cleanup()
+
+        self.assertEqual(residue, [])
+        self.assertEqual(diagnostics, [])
+        for name in smoketest.SMOKETEST_AGENT_NAMES:
+            self.assertFalse(
+                (state_dir / f"{name}-watch-hashes.json").exists())
+        self.assertTrue(unrelated.is_file())
+
     def test_changed_files_round_trip_uses_run_contract(self) -> None:
         smoketest = importlib.import_module(
             f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
