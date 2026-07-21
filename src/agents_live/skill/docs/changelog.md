@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 2.1.3 - 2026-07-20
+
 - fix: isolate framework smoketest watcher validation to the current run. (#106)
   Watcher checks reject stale or incomplete log output, ignore generated index
   noise, and reset persisted content hashes so consecutive runs still dispatch.
