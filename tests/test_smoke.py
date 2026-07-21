@@ -344,6 +344,22 @@ class TestRepositoryRegistry(_TempProject):
         self.assertIn(
             "will be installed on init/start/upgrade", stdout.getvalue())
 
+    def test_add_registers_repo_when_plugin_check_fails(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                plugins, "checks",
+                side_effect=plugins.PluginError("wheel is unreadable")),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        registry = repos.load()
+        self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
+        self.assertIn(
+            "declared plugins will be installed on init/start/upgrade",
+            stderr.getvalue(),
+        )
+
     def test_help_action_prints_usage(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -652,6 +668,37 @@ class TestProjectPlugins(_TempProject):
         ):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
+
+    def test_converge_treats_missing_wheel_as_converged_when_installed(self) -> None:
+        wheel = self.root / "Agents" / "plugins" / "missing.whl"
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
+            encoding="utf-8",
+        )
+        entry_point = mock.Mock(
+            group="agents_live.agents",
+            name="example",
+            load=mock.Mock(return_value=object()),
+        )
+        distribution = mock.Mock(version="1.2.3", entry_points=[entry_point])
+        with mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                return_value=distribution):
+            self.assertFalse(plugins.converge([self.root]))
+
+    def test_converge_fails_when_missing_wheel_must_be_installed(self) -> None:
+        wheel = self.root / "Agents" / "plugins" / "missing.whl"
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = {{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                side_effect=plugins.importlib.metadata.PackageNotFoundError),
+            self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
+        ):
+            plugins.converge([self.root])
 
 
 class TestAgentParsing(_TempProject):
@@ -3066,10 +3113,14 @@ class TestInstallSkill(_TempProject):
             self.assertEqual(installed.stdout.strip(), "1.0.0")
 
     def test_plugin_convergence_preserves_receipt_and_unions_declarations(self) -> None:
+        first_wheel = self.root / "first.whl"
+        second_wheel = self.root / "second.whl"
+        first_wheel.write_bytes(b"first")
+        second_wheel.write_bytes(b"second")
         first = plugins.Plugin(
-            "first-plugin", Path("/repo/first.whl"), None, "1.0")
+            "first-plugin", first_wheel, None, "1.0")
         second = plugins.Plugin(
-            "second-plugin", Path("/repo/second.whl"), None, "2.0")
+            "second-plugin", second_wheel, None, "2.0")
         completed = subprocess.CompletedProcess(args=[], returncode=0)
         with (
             mock.patch.object(
@@ -3095,8 +3146,8 @@ class TestInstallSkill(_TempProject):
                 "/usr/bin/uv", "tool", "install", "--force",
                 "agents-live==0.3.1",
                 "--with", "/repo/co-installed.whl",
-                "--with", "/repo/first.whl",
-                "--with", "/repo/second.whl",
+                "--with", str(first_wheel),
+                "--with", str(second_wheel),
             ],
             check=False,
         )

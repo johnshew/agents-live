@@ -345,14 +345,22 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "add":
             from . import plugins  # noqa: PLC0415
             root = Path(args.path).expanduser().resolve()
-            pending = [
-                name for name, ok, _ in plugins.checks(root) if not ok
-            ]
             _add(args.path)
-            if pending:
+            try:
+                pending = [
+                    name for name, ok, _ in plugins.checks(root) if not ok
+                ]
+                if pending:
+                    print(
+                        f"Declared plugin(s) not installed: {', '.join(pending)}; "
+                        "will be installed on init/start/upgrade")
+            except (OSError, ValueError, plugins.PluginError) as exc:
                 print(
-                    f"Declared plugin(s) not installed: {', '.join(pending)}; "
-                    "will be installed on init/start/upgrade")
+                    "warning: plugin declarations could not be checked after "
+                    f"registration: {exc}; "
+                    "declared plugins will be installed on init/start/upgrade",
+                    file=sys.stderr,
+                )
         elif args.action == "default":
             _set_default(args.repo)
         elif args.action == "remove":

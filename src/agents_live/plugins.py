@@ -28,7 +28,7 @@ class Plugin:
     name: str
     path: Path
     sha256: str | None
-    version: str
+    version: str | None
 
 
 @dataclass(frozen=True)
@@ -76,16 +76,20 @@ def _sha256(path: Path) -> str:
     return digest
 
 
-def declared(root: Path) -> dict[str, Plugin]:
+def declared(root: Path, *, require_exists: bool = False) -> dict[str, Plugin]:
     declarations = paths.validated_plugins(
-        root, paths.load_config(root).get("plugins", {}))
+        root, paths.load_config(root).get("plugins", {}),
+        require_exists=require_exists)
     result = {}
     for configured_name, declaration in declarations.items():
-        wheel_name, version = _wheel_identity(declaration["path"])
-        if _canonical(configured_name) != _canonical(wheel_name):
-            raise PluginError(
-                f"plugin {configured_name!r} wheel declares distribution "
-                f"{wheel_name!r}: {declaration['path']}")
+        wheel_name = configured_name
+        version = None
+        if declaration["path"].is_file():
+            wheel_name, version = _wheel_identity(declaration["path"])
+            if _canonical(configured_name) != _canonical(wheel_name):
+                raise PluginError(
+                    f"plugin {configured_name!r} wheel declares distribution "
+                    f"{wheel_name!r}: {declaration['path']}")
         key = _canonical(configured_name)
         result[key] = Plugin(
             name=wheel_name,
@@ -96,12 +100,16 @@ def declared(root: Path) -> dict[str, Plugin]:
     return result
 
 
-def union(roots: list[Path]) -> dict[str, Plugin]:
+def union(roots: list[Path], *, require_exists: bool = False) -> dict[str, Plugin]:
     result = {}
     for root in roots:
-        for key, plugin in declared(root).items():
+        for key, plugin in declared(root, require_exists=require_exists).items():
             previous = result.get(key)
             if previous is not None:
+                if previous.version is None or plugin.version is None:
+                    if previous.version is None and plugin.version is not None:
+                        result[key] = plugin
+                    continue
                 try:
                     same_artifact = (
                         previous.version == plugin.version
@@ -144,7 +152,7 @@ def _installed_state(plugin: Plugin) -> tuple[bool, str]:
         distribution = importlib.metadata.distribution(plugin.name)
     except importlib.metadata.PackageNotFoundError:
         return False, f"distribution {plugin.name} is not installed"
-    if distribution.version != plugin.version:
+    if plugin.version is not None and distribution.version != plugin.version:
         return False, (
             f"installed version {distribution.version}, declared wheel "
             f"version {plugin.version}")
@@ -236,7 +244,7 @@ def converge(roots: list[Path]) -> bool:
 
     Return True when plugins were installed and False when already converged.
     """
-    declarations = union(roots)
+    declarations = union(roots, require_exists=False)
     # Pending detection deliberately skips artifact hashing: when every
     # plugin is installed at its declared version there is nothing to
     # install, so the wheels are not consumed and re-verifying them on
@@ -247,6 +255,10 @@ def converge(roots: list[Path]) -> bool:
     }
     if not pending:
         return False
+    for plugin in pending.values():
+        if not plugin.path.is_file():
+            raise PluginError(
+                f"plugin {plugin.name!r} wheel does not exist: {plugin.path}")
     # An install will consume the artifacts: an integrity mismatch must
     # fail before uv sees any of them rather than being treated like an
     # installable stale plugin.
