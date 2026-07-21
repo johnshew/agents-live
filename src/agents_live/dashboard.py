@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["nicegui>=2.0", "PyYAML", "pywebview"]
+# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview"]
 # ///
 """Interactive agents-live control panel (single host).
 
@@ -38,11 +38,15 @@ stays current while you iterate.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import subprocess
 import sys
+import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -54,6 +58,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if (SCRIPTS_DIR / "__init__.py").is_file():
     if str(SCRIPTS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
+    from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
     from agents_live import cli_spec, headless, ownership, paths, repos  # noqa: E402
 else:
     if str(SCRIPTS_DIR) not in sys.path:
@@ -63,6 +68,10 @@ else:
     import ownership  # noqa: E402
     import paths  # noqa: E402
     import repos  # noqa: E402
+    try:
+        AGENTS_LIVE_VERSION = version("agents-live")
+    except PackageNotFoundError:
+        AGENTS_LIVE_VERSION = "unknown"
 from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
 
@@ -82,7 +91,12 @@ HEALTH_STALE_MINUTES = 70
 # bound so the spinner can never hang forever.
 WORKER_TIMEOUT = 480
 
-STATE: dict = {"last_refresh": datetime.now(timezone.utc)}
+STATE: dict = {
+    "last_refresh": datetime.now(timezone.utc),
+    "models": {},
+    "filters": {"name": "", "state": "All", "owner": "All",
+                "runtime": "All", "failing": False},
+}
 
 
 def _require_repo_path(path: Path | None) -> Path:
@@ -193,6 +207,90 @@ def agent_cost(name: str) -> tuple[str, str]:
     if not found:
         return ("-", "-")
     return (f"${day_total:.2f}", f"${week_total:.2f}")
+
+
+def _running_version() -> str:
+    return AGENTS_LIVE_VERSION
+
+
+def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dict[str, str]]:
+    """Return trailing-hour errors and latest reported models via qlog."""
+    if (SCRIPTS_DIR / "__init__.py").is_file():
+        if str(SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR))
+        from agents_live import qlog as structured_qlog
+    else:
+        import qlog as structured_qlog
+
+    logs_dir = _require_repo_path(LOGS_DIR)
+    if not any(logs_dir.glob("*.log")):
+        return {}, {}
+    connection = structured_qlog.duckdb.connect(":memory:")
+    try:
+        structured_qlog.build_view(connection, [str(logs_dir / "*.log")])
+        columns = {
+            row[0] for row in connection.sql("DESCRIBE log").fetchall()
+        }
+        if "run_id" in columns and "event_id" in columns:
+            event_identity = "CASE WHEN run_id IS NULL THEN event_id ELSE run_id END"
+        elif "event_id" in columns:
+            event_identity = "event_id"
+        else:
+            event_identity = "concat(_src, CAST(ts AS VARCHAR))"
+        error_rows = connection.sql(
+            "SELECT agent_name, count(*) FROM ("
+            "SELECT agent_name, phase, status, level, message "
+            "FROM log WHERE ts >= now() - INTERVAL 1 HOUR "
+            "AND (level = 'error' OR status = 'error') "
+            "QUALIFY row_number() OVER (PARTITION BY "
+            f"{event_identity}, "
+            "agent_name, phase, status, level, message ORDER BY ts) = 1"
+            ") errors "
+            "GROUP BY agent_name ORDER BY agent_name NULLS LAST"
+        ).fetchall()
+        model_rows = []
+        if "model" in columns:
+            model_rows = connection.sql(
+                "SELECT agent_name, model FROM log "
+                "WHERE agent_name IS NOT NULL AND model IS NOT NULL "
+                "QUALIFY row_number() OVER ("
+                "PARTITION BY agent_name ORDER BY ts DESC) = 1"
+            ).fetchall()
+    except (OSError, structured_qlog.duckdb.Error):
+        return {}, {}
+    finally:
+        connection.close()
+
+    errors: dict[str, int] = {}
+    framework_errors = 0
+    for raw_name, count in error_rows:
+        name = str(raw_name or "")
+        if name in agent_names:
+            errors[name] = int(count)
+        else:
+            framework_errors += int(count)
+    if framework_errors:
+        errors["framework"] = framework_errors
+    models = {
+        str(name): str(model)
+        for name, model in model_rows
+        if name and model
+    }
+    return errors, models
+
+
+def _refresh_summary() -> str:
+    names = {agent["name"] for agent in collect_agents()}
+    errors, models = _structured_log_snapshot(names)
+    STATE["models"] = models
+    error_text = ", ".join(
+        f"{name} {count}" for name, count in errors.items()) or "none"
+    local_now = datetime.now().astimezone()
+    timestamp = local_now.strftime("%b %d, %Y %I:%M:%S %p %Z").replace(" 0", " ")
+    return (
+        f"Agents Live {_running_version()} | errors in last hour: "
+        f"{error_text} | {timestamp}"
+    )
 
 
 def _entry_cost_usd(entry: dict) -> float | None:
@@ -356,33 +454,120 @@ def _safe_ui(func, *args, **kwargs):
         return None
 
 
-async def do_action(label: str, script: str, args: list[str],
-                    *, agent_name: str | None = None,
-                    timeout: float | None = None) -> int:
-    target = agent_name or " ".join(args)
+class _ActionRequest:
+    def __init__(self, label: str, script: str, args: list[str],
+                 agent_name: str | None, timeout: float | None,
+                 future: asyncio.Future[int]) -> None:
+        self.label = label
+        self.script = script
+        self.args = args
+        self.agent_name = agent_name
+        self.timeout = timeout
+        self.future = future
+        self.key = (self.script, tuple(self.args))
+
+    @property
+    def description(self) -> str:
+        return f"{self.label} {self.agent_name or ' '.join(self.args)}".strip()
+
+
+_ACTION_QUEUE: deque[_ActionRequest] = deque()
+_PENDING_ACTIONS: dict[tuple[str, tuple[str, ...]], _ActionRequest] = {}
+_ACTION_WORKER: asyncio.Task[None] | None = None
+_ACTION_RUNNING = False
+
+
+def _push_log(message: str) -> None:
+    timestamp = datetime.now().astimezone().strftime("%H:%M:%S %Z")
+    _safe_ui(output_log.push, f"[{timestamp}] {message}")
+
+
+async def _execute_action(request: _ActionRequest) -> int:
+    target = request.agent_name or " ".join(request.args)
     # Creating the notification can itself raise if the client already
     # disconnected, so guard it like every other UI touch below.
-    note = _safe_ui(ui.notification, f"{label}: {target} ...",
+    note = _safe_ui(ui.notification, f"{request.label}: {target} ...",
                     spinner=True, timeout=None)
+    started = time.monotonic()
+    _push_log(f"started: {request.description}")
     try:
-        code, out = await ng_run.io_bound(_run_script, script, args, timeout=timeout)
+        code, out = await ng_run.io_bound(
+            _run_script, request.script, request.args, timeout=request.timeout)
     finally:
         if note is not None:
             _safe_ui(note.dismiss)
     ok = code == 0
     # Persist the outcome first so a disconnected client never loses the record.
-    _log_action(label, script, args, code, out, agent_name=agent_name)
+    _log_action(
+        request.label, request.script, request.args, code, out,
+        agent_name=request.agent_name)
     _safe_ui(
         ui.notify,
-        f"{label} {target}: {'ok' if ok else f'failed (exit {code})'}",
+        f"{request.label} {target}: {'ok' if ok else f'failed (exit {code})'}",
         type="positive" if ok else "negative",
     )
-    timestamp = datetime.now().astimezone().strftime("%H:%M:%S %Z")
-    _safe_ui(output_log.push, f"[{timestamp}] {label} {target} (exit {code})")
+    elapsed = time.monotonic() - started
+    outcome = "completed" if ok else "failed"
+    _push_log(
+        f"{outcome}: {request.description} (exit {code}, {elapsed:.1f}s)")
     for line in out.splitlines():
         _safe_ui(output_log.push, f"    {line}")
     _safe_ui(_refresh_views)
     return code
+
+
+async def _process_action_queue() -> None:
+    global _ACTION_RUNNING, _ACTION_WORKER
+    try:
+        while _ACTION_QUEUE:
+            request = _ACTION_QUEUE.popleft()
+            _PENDING_ACTIONS.pop(request.key, None)
+            _ACTION_RUNNING = True
+            started = time.monotonic()
+            try:
+                code = await _execute_action(request)
+            except Exception as exc:
+                code = -1
+                elapsed = time.monotonic() - started
+                output = f"unexpected dashboard action error: {exc}"
+                _log_action(
+                    request.label, request.script, request.args, code, output,
+                    agent_name=request.agent_name)
+                _push_log(
+                    f"failed: {request.description} "
+                    f"(exit {code}, {elapsed:.1f}s): {exc}")
+                _safe_ui(_refresh_views)
+                if not request.future.done():
+                    request.future.set_result(code)
+            else:
+                if not request.future.done():
+                    request.future.set_result(code)
+            finally:
+                _ACTION_RUNNING = False
+    finally:
+        _ACTION_WORKER = None
+
+
+async def do_action(label: str, script: str, args: list[str],
+                    *, agent_name: str | None = None,
+                    timeout: float | None = None) -> int:
+    global _ACTION_WORKER
+    key = (script, tuple(args))
+    pending = _PENDING_ACTIONS.get(key)
+    if pending is not None:
+        _push_log(f"already queued: {pending.description}")
+        return await asyncio.shield(pending.future)
+
+    loop = asyncio.get_running_loop()
+    request = _ActionRequest(
+        label, script, list(args), agent_name, timeout, loop.create_future())
+    if _ACTION_RUNNING or _ACTION_QUEUE:
+        _push_log(f"queued: {request.description}")
+    _ACTION_QUEUE.append(request)
+    _PENDING_ACTIONS[request.key] = request
+    if _ACTION_WORKER is None:
+        _ACTION_WORKER = asyncio.create_task(_process_action_queue())
+    return await asyncio.shield(request.future)
 
 
 async def health_check() -> None:
@@ -456,6 +641,7 @@ def agent_rows() -> list[dict]:
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
         cost_day, cost_week = (agent_cost(name) if runtime != "none" else ("-", "-"))
+        model = _agent_model(agent, STATE["models"])
         can_pause = state.startswith("active") or state == "partial"
         can_activate = local and not state.startswith("active")
         rows.append({
@@ -464,6 +650,7 @@ def agent_rows() -> list[dict]:
             "trigger": trigger_summary(agent),
             "state": state,
             "owner": owner,
+            "model": model,
             "last_ok": ok_ago,
             "last_err": err_ago,
             "cost_day": cost_day,
@@ -485,6 +672,40 @@ def agent_rows() -> list[dict]:
                           f"Claim onto {host} (transfer ownership + register trigger)"),
         })
     return rows
+
+
+def _filtered_agent_rows(rows: list[dict], filters: dict) -> list[dict]:
+    name_filter = str(filters.get("name", "")).casefold().strip()
+    return [
+        row for row in rows
+        if (not name_filter or name_filter in row["name"].casefold())
+        and (filters.get("state", "All") == "All"
+             or row["state"] == filters["state"])
+        and (filters.get("owner", "All") == "All"
+             or row["owner"] == filters["owner"])
+        and (filters.get("runtime", "All") == "All"
+             or row["agent"] == filters["runtime"])
+        and (not filters.get("failing") or row["unhealthy"])
+    ]
+
+
+def _cost_totals(rows: list[dict]) -> tuple[str, str]:
+    def total(field: str) -> str:
+        values = [
+            float(row[field].removeprefix("$"))
+            for row in rows
+            if row[field] != "-"
+        ]
+        return f"${sum(values):.2f}"
+
+    return total("cost_day"), total("cost_week")
+
+
+def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
+    runtime = agent.get("runtime") or "agency copilot"
+    if runtime == "none":
+        return "-"
+    return reported_models.get(agent["name"]) or agent.get("model") or "default"
 
 
 def system_health() -> dict:
@@ -572,15 +793,16 @@ _AGENT_COLUMNS = [
     {"name": "actions", "label": "Actions", "field": "actions", "align": "left"},
     {"name": "owner", "label": "Owner", "field": "owner", "align": "left", "sortable": True},
     {"name": "agent", "label": "Runtime", "field": "agent", "align": "left", "sortable": True},
+    {"name": "model", "label": "Model", "field": "model", "align": "left", "sortable": True},
     {"name": "trigger", "label": "Trigger", "field": "trigger", "align": "left",
      "style": "width: 100%; max-width: 0", "headerStyle": "width: 100%"},
     {"name": "last_ok", "label": "Last OK", "field": "last_ok", "align": "right",
      "style": "width: 64px", "headerStyle": "width: 64px"},
     {"name": "last_err", "label": "Last Err", "field": "last_err", "align": "right",
      "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_day", "label": "$ 24h", "field": "cost_day", "align": "right",
+    {"name": "cost_day", "label": "$/24h", "field": "cost_day", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_week", "label": "$ 7d", "field": "cost_week", "align": "right",
+    {"name": "cost_week", "label": "$/1w", "field": "cost_week", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
 ]
 
@@ -588,10 +810,49 @@ _AGENT_COLUMNS = [
 @ui.refreshable
 def agent_grid() -> None:
     STATE["last_refresh"] = datetime.now(timezone.utc)
-    table = ui.table(
-        columns=_AGENT_COLUMNS, rows=agent_rows(), row_key="name",
-        pagination={"rowsPerPage": 0},
-    ).classes("w-full").props("flat dense hide-bottom separator=none")
+    rows = agent_rows()
+    filters = STATE["filters"]
+    filtered_rows = _filtered_agent_rows(rows, filters)
+
+    def apply_filters() -> None:
+        table.rows = _filtered_agent_rows(rows, filters)
+        table.update()
+        day, week = _cost_totals(table.rows)
+        totals.text = f"Totals: {day} / 24h   {week} / 1w"
+
+    def set_filter(key: str, value) -> None:
+        filters[key] = value
+        apply_filters()
+
+    with ui.row().classes("w-full items-center gap-2 agent-filters"):
+        ui.input(
+            "Search agent", value=filters["name"],
+            on_change=lambda event: set_filter("name", event.value),
+        ).props("dense outlined clearable").classes("min-w-48")
+        ui.select(
+            ["All", *sorted({row["state"] for row in rows})],
+            value=filters["state"], label="State",
+            on_change=lambda event: set_filter("state", event.value),
+        ).props("dense outlined options-dense")
+        ui.select(
+            ["All", *sorted({row["owner"] for row in rows})],
+            value=filters["owner"], label="Owner",
+            on_change=lambda event: set_filter("owner", event.value),
+        ).props("dense outlined options-dense")
+        ui.select(
+            ["All", *sorted({row["agent"] for row in rows})],
+            value=filters["runtime"], label="Runtime",
+            on_change=lambda event: set_filter("runtime", event.value),
+        ).props("dense outlined options-dense")
+        ui.checkbox(
+            "Failing", value=filters["failing"],
+            on_change=lambda event: set_filter("failing", event.value),
+        ).props("dense")
+    with ui.scroll_area().classes("w-full grow min-h-0 agent-table-scroll"):
+        table = ui.table(
+            columns=_AGENT_COLUMNS, rows=filtered_rows, row_key="name",
+            pagination={"rowsPerPage": 0},
+        ).classes("w-full").props("flat dense hide-bottom separator=none")
     table.add_slot("body-cell-name", '''
         <q-td :props="props">
           <div style="white-space:nowrap"
@@ -605,11 +866,16 @@ def agent_grid() -> None:
                :class="props.row.local ? '' : 'text-grey-6'">{{ props.row.owner }}</div>
         </q-td>
     ''')
-    table.add_slot("body-cell-agent", '''
-        <q-td :props="props">
-          <div style="white-space:nowrap">{{ props.row.agent }}</div>
-        </q-td>
-    ''')
+    table.add_slot(
+        "body-cell-agent",
+        '<q-td :props="props"><div style="white-space:nowrap">'
+        '{{ props.row.agent }}</div></q-td>',
+    )
+    table.add_slot(
+        "body-cell-model",
+        '<q-td :props="props"><div style="white-space:nowrap">'
+        '{{ props.row.model }}</div></q-td>',
+    )
     table.add_slot("body-cell-trigger", '''
         <q-td :props="props">
           <div class="ellipsis" :title="props.row.trigger">{{ props.row.trigger }}</div>
@@ -652,6 +918,10 @@ def agent_grid() -> None:
     table.on("activate", _activate_row)
     table.on("pause", _pause_row)
     table.on("claim", _claim_row)
+    day_total, week_total = _cost_totals(filtered_rows)
+    totals = ui.label(
+        f"Totals: {day_total} / 24h   {week_total} / 1w"
+    ).classes("w-full text-right text-xs text-gray-500 pr-4")
 
 
 @ui.refreshable
@@ -682,12 +952,15 @@ def header_actions() -> None:
 
 
 def _refresh_views() -> None:
+    summary = _refresh_summary()
     agent_grid.refresh()
     header_actions.refresh()
+    _safe_ui(output_log.push, summary)
 
 
 def build_page() -> None:
     ui.dark_mode().auto()
+    startup_summary = _refresh_summary()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
         ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
@@ -696,9 +969,12 @@ def build_page() -> None:
         ".hdr-btn .q-btn__content{min-height:0;white-space:nowrap}"
         ".hdr-btn .q-icon{font-size:0.95em}"
         ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
-        # Stretch the page column to the viewport so the action log can
-        # flex-grow into any leftover space on tall screens.
-        ".nicegui-content{min-height:100vh}"
+        ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) auto "
+        "minmax(15rem,.7fr);min-height:0}"
+        ".agent-panel{overflow:hidden;display:flex;flex-direction:column}"
+        ".agent-table-scroll{min-height:0}"
+        ".agent-filters .q-field{min-width:8rem}"
     )
     host = ownership.current_host()
 
@@ -718,16 +994,18 @@ def build_page() -> None:
     tick_age()
     ui.timer(1.0, tick_age)
 
-    with ui.card().classes("w-full"):
-        agent_grid()
+    with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
+        with ui.card().classes("agent-panel w-full min-h-0"):
+            agent_grid()
 
-    ui.label("Action log").classes("text-sm text-gray-500 mt-2")
-    global output_log
-    output_log = ui.log(max_lines=300).classes(
-        "w-full grow font-mono text-xs"
-    ).style("min-height:18rem")
+        ui.label("Log").classes("text-sm text-gray-500 mt-2")
+        global output_log
+        output_log = ui.log(max_lines=300).classes(
+            "w-full h-full font-mono text-xs"
+        )
+        output_log.push(startup_summary)
 
-    ui.timer(600.0, _refresh_views)
+    ui.timer(600.0, _refresh_views, immediate=False)
 
 
 def _all_repos_rows() -> list[dict]:

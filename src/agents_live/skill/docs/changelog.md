@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: improve dashboard coordination, diagnostics, and agent reporting. (#104)
+  Dashboard actions run through a visible FIFO queue; structured error summaries,
+  model details, filters, cost totals, and bounded table and log scrolling keep
+  operational status usable as the agent list grows.
+
 ## 2.1.3 - 2026-07-20
 
 - fix: isolate framework smoketest watcher validation to the current run. (#106)
