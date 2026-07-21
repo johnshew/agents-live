@@ -344,6 +344,34 @@ class TestRepositoryRegistry(_TempProject):
         self.assertIn(
             "will be installed on init/start/upgrade", stdout.getvalue())
 
+    def test_add_registers_repo_when_declared_wheel_is_missing(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/missing.whl" }\n',
+            encoding="utf-8",
+        )
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        self.assertEqual(
+            repos.load()["repos"], {self.root.name: str(self.root)})
+        self.assertIn(
+            "will be installed on init/start/upgrade", stdout.getvalue())
+
+    def test_add_registers_repo_when_declared_wheel_is_invalid(self) -> None:
+        wheel = self.root / "dist" / "invalid.whl"
+        wheel.parent.mkdir()
+        wheel.write_bytes(b"not a wheel")
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/invalid.whl" }\n',
+            encoding="utf-8",
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        self.assertEqual(
+            repos.load()["repos"], {self.root.name: str(self.root)})
+        self.assertIn(
+            "plugin declarations could not be checked after registration",
+            stderr.getvalue())
+
     def test_help_action_prints_usage(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -652,6 +680,163 @@ class TestProjectPlugins(_TempProject):
         ):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
+
+    def test_converge_skips_missing_wheel_for_installed_plugin(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/missing.whl", '
+            f'sha256 = "{"a" * 64}" }}\n',
+            encoding="utf-8",
+        )
+        entry_point = mock.Mock(
+            group="agents_live.agents", name="example",
+            load=mock.Mock(return_value=object()),
+        )
+        distribution = mock.Mock(version="1.2.3", entry_points=[entry_point])
+        with mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                return_value=distribution):
+            self.assertFalse(plugins.converge([self.root]))
+
+    def test_converge_requires_missing_wheel_for_pending_plugin(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/missing.whl" }\n',
+            encoding="utf-8",
+        )
+        with (
+            mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                side_effect=plugins.importlib.metadata.PackageNotFoundError),
+            self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
+        ):
+            plugins.converge([self.root])
+
+    def test_converge_skips_invalid_wheel_for_installed_plugin(self) -> None:
+        wheel = self.root / "dist" / "invalid.whl"
+        wheel.parent.mkdir()
+        wheel.write_bytes(b"not a wheel")
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/invalid.whl" }\n',
+            encoding="utf-8",
+        )
+        entry_point = mock.Mock(
+            group="agents_live.agents", name="example",
+            load=mock.Mock(return_value=object()),
+        )
+        distribution = mock.Mock(version="1.2.3", entry_points=[entry_point])
+        with mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                return_value=distribution):
+            self.assertFalse(plugins.converge([self.root]))
+        with self.assertRaisesRegex(plugins.PluginError, "wheel is unreadable"):
+            plugins.checks(self.root)
+
+    def test_converge_skips_name_mismatch_for_installed_plugin(self) -> None:
+        wheel = self._wheel(name="other-plugin")
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = '
+            f'{{ path = "{wheel.relative_to(self.root).as_posix()}" }}\n',
+            encoding="utf-8",
+        )
+        entry_point = mock.Mock(
+            group="agents_live.agents", name="example",
+            load=mock.Mock(return_value=object()),
+        )
+        distribution = mock.Mock(version="1.2.3", entry_points=[entry_point])
+        with mock.patch.object(
+                plugins.importlib.metadata, "distribution",
+                return_value=distribution):
+            self.assertFalse(plugins.converge([self.root]))
+
+    def test_union_prefers_available_wheel_metadata(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/missing.whl" }\n',
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as other_tmp:
+            other = Path(other_tmp).resolve()
+            wheel = (
+                other / "dist" / "example_plugin-3.2.1-py3-none-any.whl")
+            wheel.parent.mkdir()
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin-3.2.1.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\n"
+                    "Version: 3.2.1\n",
+                )
+            (other / ".agents-live.toml").write_text(
+                '[plugins]\nexample-plugin = '
+                '{ path = "dist/example_plugin-3.2.1-py3-none-any.whl" }\n',
+                encoding="utf-8",
+            )
+            plugin = plugins.union([self.root, other])["example-plugin"]
+            self.assertEqual(plugin.version, "3.2.1")
+            self.assertEqual(plugin.path, wheel)
+
+    def test_union_rejects_conflicting_checksum_without_wheel(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins]\nexample-plugin = { path = "dist/missing.whl", '
+            f'sha256 = "{"a" * 64}" }}\n',
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as other_tmp:
+            other = Path(other_tmp).resolve()
+            wheel = other / "dist" / "example_plugin-1.0-py3-none-any.whl"
+            wheel.parent.mkdir()
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\n"
+                    "Version: 1.0\n",
+                )
+            (other / ".agents-live.toml").write_text(
+                '[plugins]\nexample-plugin = '
+                '{ path = "dist/example_plugin-1.0-py3-none-any.whl", '
+                f'sha256 = "{"b" * 64}" }}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                    plugins.PluginError, "conflicting sha256"):
+                plugins.union([self.root, other])
+
+    def test_union_preserves_checksum_from_identical_declaration(self) -> None:
+        first = self._wheel()
+        digest = hashlib.sha256(first.read_bytes()).hexdigest()
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\nexample-plugin = '
+            f'{{ path = "{first.relative_to(self.root).as_posix()}" }}\n',
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as other_tmp:
+            other = Path(other_tmp).resolve()
+            second = other / "dist" / first.name
+            second.parent.mkdir()
+            second.write_bytes(first.read_bytes())
+            (other / ".agents-live.toml").write_text(
+                f'[plugins]\nexample-plugin = '
+                f'{{ path = "{second.relative_to(other).as_posix()}", '
+                f'sha256 = "{digest}" }}\n',
+                encoding="utf-8",
+            )
+            plugin = plugins.union([self.root, other])["example-plugin"]
+        self.assertEqual(plugin.sha256, digest)
+
+    def test_pending_install_validates_installed_plugin_wheel(self) -> None:
+        invalid = plugins.Plugin(
+            "installed-plugin", self.root / "missing.whl", None, None)
+        pending_wheel = self.root / "pending.whl"
+        pending_wheel.write_bytes(b"pending")
+        pending = plugins.Plugin(
+            "pending-plugin", pending_wheel, None, "1.0")
+        with (
+            mock.patch.object(
+                plugins, "union",
+                return_value={"installed-plugin": invalid, "pending-plugin": pending}),
+            mock.patch.object(
+                plugins, "_installed_state",
+                side_effect=[(True, "installed"), (False, "missing")]),
+            self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
+        ):
+            plugins.converge([self.root])
 
 
 class TestAgentParsing(_TempProject):
@@ -3139,6 +3324,19 @@ class TestInstallSkill(_TempProject):
         output.assert_any_call(
             f"{self.root}: skill payload already matches the installed package")
 
+    def test_upgrade_migrates_legacy_state_before_payload_refresh(self) -> None:
+        legacy_log = self.root / "Agents" / "logs" / "demo.log"
+        legacy_log.parent.mkdir(parents=True)
+        legacy_log.write_text("{}\n", encoding="utf-8")
+        with (
+            mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        migrated_log = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        self.assertEqual(migrated_log.read_text(encoding="utf-8"), "{}\n")
+        self.assertFalse(legacy_log.exists())
+
     def test_runtime_upgrade_preserves_receipt_and_converges_plugins(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0)
         with (
@@ -3200,17 +3398,21 @@ class TestInstallSkill(_TempProject):
             self.assertEqual(installed.stdout.strip(), "1.0.0")
 
     def test_plugin_convergence_preserves_receipt_and_unions_declarations(self) -> None:
+        first_wheel = self.root / "first.whl"
+        second_wheel = self.root / "second.whl"
+        first_wheel.write_bytes(b"first")
+        second_wheel.write_bytes(b"second")
         first = plugins.Plugin(
-            "first-plugin", Path("/repo/first.whl"), None, "1.0")
+            "first-plugin", first_wheel, None, "1.0")
         second = plugins.Plugin(
-            "second-plugin", Path("/repo/second.whl"), None, "2.0")
+            "second-plugin", second_wheel, None, "2.0")
         completed = subprocess.CompletedProcess(args=[], returncode=0)
         with (
             mock.patch.object(
                 plugins, "union",
                 return_value={"first-plugin": first, "second-plugin": second}),
             mock.patch.object(
-                plugins, "inspect",
+                plugins, "_installed_state",
                 side_effect=[(False, "missing"), (True, "installed")]),
             mock.patch.object(plugins, "_integrity_error", return_value=None),
             mock.patch.object(
@@ -3229,8 +3431,8 @@ class TestInstallSkill(_TempProject):
                 "/usr/bin/uv", "tool", "install", "--force",
                 "agents-live==0.3.1",
                 "--with", "/repo/co-installed.whl",
-                "--with", "/repo/first.whl",
-                "--with", "/repo/second.whl",
+                "--with", str(first_wheel),
+                "--with", str(second_wheel),
             ],
             check=False,
         )
@@ -3414,6 +3616,168 @@ class TestStateHome(_TempProject):
         state_migration.apply(self.root)
         self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
         self.assertFalse((legacy_logs / "demo.log").exists())
+
+    def test_state_migration_retry_does_not_reappend_legacy_log(self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        src = legacy_logs / "demo.log"
+        src.write_text("old\n", encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("new\n", encoding="utf-8")
+        original_unlink = Path.unlink
+        failed = False
+
+        def fail_source_unlink(path: Path, *args, **kwargs):
+            nonlocal failed
+            if path == src and not failed:
+                failed = True
+                raise OSError("injected unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "unlink", fail_source_unlink),
+            self.assertRaisesRegex(OSError, "injected unlink failure"),
+        ):
+            state_migration.apply(self.root)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
+        self.assertTrue(src.exists())
+
+        state_migration.apply(self.root)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
+        self.assertFalse(src.exists())
+
+    def test_state_migration_retry_appends_only_grown_suffix(self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        src = legacy_logs / "demo.log"
+        src.write_text("old\n", encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("new\n", encoding="utf-8")
+        original_unlink = Path.unlink
+        failed = False
+
+        def fail_source_unlink(path: Path, *args, **kwargs):
+            nonlocal failed
+            if path == src and not failed:
+                failed = True
+                raise OSError("injected unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "unlink", fail_source_unlink),
+            self.assertRaisesRegex(OSError, "injected unlink failure"),
+        ):
+            state_migration.apply(self.root)
+        with src.open("a", encoding="utf-8") as legacy:
+            legacy.write("late\n")
+
+        state_migration.apply(self.root)
+        self.assertEqual(
+            dest.read_text(encoding="utf-8"), "new\nold\nlate\n")
+        self.assertFalse(src.exists())
+
+    def test_state_migration_rejects_growth_after_unterminated_record(
+            self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        src = legacy_logs / "demo.log"
+        src.write_text('{"partial":', encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("new\n", encoding="utf-8")
+        original_unlink = Path.unlink
+        failed = False
+
+        def fail_source_unlink(path: Path, *args, **kwargs):
+            nonlocal failed
+            if path == src and not failed:
+                failed = True
+                raise OSError("injected unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "unlink", fail_source_unlink),
+            self.assertRaisesRegex(OSError, "injected unlink failure"),
+        ):
+            state_migration.apply(self.root)
+        with src.open("a", encoding="utf-8") as legacy:
+            legacy.write("true}\n")
+
+        with self.assertRaisesRegex(OSError, "unterminated legacy log grew"):
+            state_migration.apply(self.root)
+        self.assertTrue(src.exists())
+
+    def test_state_migration_drains_source_growth_before_unlink(self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        src = legacy_logs / "demo.log"
+        src.write_text("old\n", encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("new\n", encoding="utf-8")
+        original_read_bytes = Path.read_bytes
+        reads = 0
+
+        def grow_after_snapshot(path: Path):
+            nonlocal reads
+            content = original_read_bytes(path)
+            if path == src:
+                reads += 1
+                if reads == 2:
+                    with src.open("a", encoding="utf-8") as legacy:
+                        legacy.write("late\n")
+            return content
+
+        with mock.patch.object(Path, "read_bytes", grow_after_snapshot):
+            state_migration.apply(self.root)
+        self.assertEqual(
+            dest.read_text(encoding="utf-8"), "new\nold\nlate\n")
+        self.assertFalse(src.exists())
+
+    def test_state_migration_retry_ignores_concurrent_destination_append(
+            self) -> None:
+        legacy_logs = self.root / "Agents" / "logs"
+        legacy_logs.mkdir(parents=True)
+        src = legacy_logs / "demo.log"
+        src.write_text('{"ts":"old"}\n', encoding="utf-8")
+        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
+        dest.parent.mkdir(parents=True)
+        dest.write_text('{"ts":"new"}\n', encoding="utf-8")
+        original_open = Path.open
+        original_unlink = Path.unlink
+        inserted = False
+        failed = False
+
+        def append_before_merge(path: Path, mode="r", *args, **kwargs):
+            nonlocal inserted
+            if path == dest and mode == "ab" and not inserted:
+                inserted = True
+                with original_open(dest, "a", encoding="utf-8") as log:
+                    log.write('{"ts":"old"}\n')
+            return original_open(path, mode, *args, **kwargs)
+
+        def fail_source_unlink(path: Path, *args, **kwargs):
+            nonlocal failed
+            if path == src and not failed:
+                failed = True
+                raise OSError("injected unlink failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "open", append_before_merge),
+            mock.patch.object(Path, "unlink", fail_source_unlink),
+            self.assertRaisesRegex(OSError, "injected unlink failure"),
+        ):
+            state_migration.apply(self.root)
+
+        state_migration.apply(self.root)
+        self.assertEqual(dest.read_text(encoding="utf-8"),
+                         '{"ts":"new"}\n'
+                         '{"ts":"old"}\n'
+                         '{"ts":"old"}\n')
+        self.assertFalse(src.exists())
 
 
 _HEALTH_SHIM = Path("/opt/agents-live/bin/agents-live")

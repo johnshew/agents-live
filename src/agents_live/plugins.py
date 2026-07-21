@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tomllib
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
@@ -25,10 +25,12 @@ class PluginError(RuntimeError):
 
 @dataclass(frozen=True)
 class Plugin:
+    """Resolved declaration; version is unknown while its wheel is absent."""
     name: str
     path: Path
     sha256: str | None
-    version: str
+    version: str | None
+    metadata_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,32 +78,71 @@ def _sha256(path: Path) -> str:
     return digest
 
 
-def declared(root: Path) -> dict[str, Plugin]:
+def declared(root: Path, *, require_exists: bool = False) -> dict[str, Plugin]:
+    """Resolve declarations, retaining configured names for absent wheels."""
     declarations = paths.validated_plugins(
-        root, paths.load_config(root).get("plugins", {}))
+        root, paths.load_config(root).get("plugins", {}),
+        require_exists=require_exists)
     result = {}
     for configured_name, declaration in declarations.items():
-        wheel_name, version = _wheel_identity(declaration["path"])
-        if _canonical(configured_name) != _canonical(wheel_name):
-            raise PluginError(
-                f"plugin {configured_name!r} wheel declares distribution "
-                f"{wheel_name!r}: {declaration['path']}")
+        wheel_name = configured_name
+        version = None
+        metadata_error = None
+        if declaration["path"].is_file():
+            try:
+                wheel_name, version = _wheel_identity(declaration["path"])
+                if _canonical(configured_name) != _canonical(wheel_name):
+                    raise PluginError(
+                        f"plugin {configured_name!r} wheel declares distribution "
+                        f"{wheel_name!r}: {declaration['path']}")
+            except PluginError as exc:
+                if require_exists:
+                    raise
+                wheel_name = configured_name
+                version = None
+                metadata_error = str(exc)
         key = _canonical(configured_name)
         result[key] = Plugin(
             name=wheel_name,
             path=declaration["path"],
             sha256=declaration["sha256"],
             version=version,
+            metadata_error=metadata_error,
         )
     return result
 
 
-def union(roots: list[Path]) -> dict[str, Plugin]:
+def union(roots: list[Path], *, require_exists: bool = False) -> dict[str, Plugin]:
+    """Combine declarations, preferring available wheel metadata."""
     result = {}
     for root in roots:
-        for key, plugin in declared(root).items():
+        for key, plugin in declared(
+                root, require_exists=require_exists).items():
             previous = result.get(key)
             if previous is not None:
+                if (
+                    previous.sha256 is not None
+                    and plugin.sha256 is not None
+                    and previous.sha256.lower() != plugin.sha256.lower()
+                ):
+                    raise PluginError(
+                        f"conflicting sha256 declarations for plugin "
+                        f"{plugin.name!r}: {previous.path} and {plugin.path}")
+                merged_sha256 = previous.sha256 or plugin.sha256
+                if previous.version is None and plugin.version is None:
+                    selected = (
+                        plugin
+                        if not previous.path.is_file() and plugin.path.is_file()
+                        else previous
+                    )
+                    result[key] = replace(selected, sha256=merged_sha256)
+                    continue
+                if previous.version is None:
+                    result[key] = replace(plugin, sha256=merged_sha256)
+                    continue
+                if plugin.version is None:
+                    result[key] = replace(previous, sha256=merged_sha256)
+                    continue
                 try:
                     same_artifact = (
                         previous.version == plugin.version
@@ -114,6 +155,7 @@ def union(roots: list[Path]) -> dict[str, Plugin]:
                     raise PluginError(
                         f"conflicting declarations for plugin {plugin.name!r}: "
                         f"{previous.path} and {plugin.path}")
+                result[key] = replace(previous, sha256=merged_sha256)
                 continue
             result[key] = plugin
     return result
@@ -132,9 +174,10 @@ def _integrity_error(plugin: Plugin) -> str | None:
 
 
 def inspect(plugin: Plugin) -> tuple[bool, str]:
-    integrity_error = _integrity_error(plugin)
-    if integrity_error:
-        return False, integrity_error
+    if plugin.path.is_file():
+        integrity_error = _integrity_error(plugin)
+        if integrity_error:
+            return False, integrity_error
     return _installed_state(plugin)
 
 
@@ -144,7 +187,7 @@ def _installed_state(plugin: Plugin) -> tuple[bool, str]:
         distribution = importlib.metadata.distribution(plugin.name)
     except importlib.metadata.PackageNotFoundError:
         return False, f"distribution {plugin.name} is not installed"
-    if distribution.version != plugin.version:
+    if plugin.version is not None and distribution.version != plugin.version:
         return False, (
             f"installed version {distribution.version}, declared wheel "
             f"version {plugin.version}")
@@ -160,14 +203,22 @@ def _installed_state(plugin: Plugin) -> tuple[bool, str]:
             return False, (
                 f"entry point {entry_point.group}:{entry_point.name} failed: {exc}")
     return True, (
-        f"version {plugin.version}; entry points "
+        f"version {distribution.version}; entry points "
         + ", ".join(f"{ep.group}:{ep.name}" for ep in entry_points))
 
 
-def checks(root: Path) -> list[tuple[str, bool, str]]:
+def checks(root: Path, *, require_exists: bool = True) -> list[tuple[str, bool, str]]:
+    declarations = declared(root, require_exists=require_exists)
+    invalid = next(
+        (plugin.metadata_error for plugin in declarations.values()
+         if plugin.metadata_error),
+        None,
+    )
+    if invalid:
+        raise PluginError(invalid)
     return [
         (plugin.name, *inspect(plugin))
-        for plugin in declared(root).values()
+        for plugin in declarations.values()
     ]
 
 
@@ -236,7 +287,7 @@ def converge(roots: list[Path]) -> bool:
 
     Return True when plugins were installed and False when already converged.
     """
-    declarations = union(roots)
+    declarations = union(roots, require_exists=False)
     # Pending detection deliberately skips artifact hashing: when every
     # plugin is installed at its declared version there is nothing to
     # install, so the wheels are not consumed and re-verifying them on
@@ -247,6 +298,12 @@ def converge(roots: list[Path]) -> bool:
     }
     if not pending:
         return False
+    for plugin in declarations.values():
+        if plugin.metadata_error:
+            raise PluginError(plugin.metadata_error)
+        if not plugin.path.is_file():
+            raise PluginError(
+                f"plugin {plugin.name!r} wheel does not exist: {plugin.path}")
     # An install will consume the artifacts: an integrity mismatch must
     # fail before uv sees any of them rather than being treated like an
     # installable stale plugin.

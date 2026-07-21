@@ -1,7 +1,7 @@
 ---
 title: Agents Live Command Reference
 description: Installation, lifecycle, validation, and logging commands for agents-live
-ms.date: 2026-07-20
+ms.date: 2026-07-21
 ms.topic: reference
 ---
 
@@ -291,7 +291,8 @@ and setup.
 Bare `agents-live upgrade` needs no project context. It upgrades the uv-managed
 runtime in place so receipt-recorded `--with` requirements survive, unions
 plugin declarations from the current and every available registered project,
-then invokes the newly installed CLI to refresh their skill payloads.
+then invokes the newly installed CLI to migrate legacy in-tree runtime state
+and refresh each project's skill payload.
 `--repo PATH|ALIAS` constrains payload refresh to one project, while plugin
 convergence remains host-global. `--runtime-only` and `--skills-only` run one
 phase. Unavailable repositories produce warnings and a nonzero final result
@@ -735,10 +736,10 @@ in the current project, using the same crontab lock and canonical builders as
 normal activation. Unmatched entries and entries for every other project are
 reported and left unchanged.
 
-Transitional (to be removed after fleet convergence): `migrate` also
-performs a one-time move of legacy in-tree state into the user-level XDG
-state home - `Agents/logs/*` and watch-hash files move, and stale
-`health.ok` / smoketest lock files are deleted.
+Transitional (to be removed after fleet convergence): `migrate` and ordinary
+project refresh during `upgrade` perform a one-time move of legacy in-tree
+state into the user-level XDG state home. `Agents/logs/*` and watch-hash files
+move, and stale `health.ok` / smoketest lock files are deleted.
 `Agents/data/agent-owners.json` is untouched (git-synced shared state).
 
 ### Repository selection
@@ -787,19 +788,22 @@ Plugin wheels are project configuration, not an installation runbook:
 example-plugin = { path = "Agents/plugins/example-plugin-1.0.0-py3-none-any.whl", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 ```
 
-Each key is the wheel's distribution name. `path` must name an existing
+Each key is the wheel's distribution name. `path` must name a
 repository-relative `.whl` that does not escape the project, including through
-a symlink. `sha256` is optional; when present it must be 64 hexadecimal
-characters and is verified before installation. For pyproject configuration,
-use `[tool.agents-live.plugins]`.
+a symlink. The artifact may be absent when that distribution is already
+installed and its entry points resolve; a pending installation requires the
+wheel. `sha256` is optional; when present it must be 64 hexadecimal characters
+and is verified before installation. For pyproject configuration, use
+`[tool.agents-live.plugins]`.
 
 `init` and a non-dry-run `start` converge the selected project's declarations.
 `upgrade` unions declarations across registered repositories because the uv
 tool environment is host-global. Existing receipt-recorded co-installed
 requirements and the primary agents-live install source are preserved, so
 convergence does not turn an editable or pinned install into a PyPI install.
-`repos add` never changes the environment; it
-reports missing declarations as pending for `init`, `start`, or `upgrade`.
+`repos add` registers before inspecting plugins and never changes the
+environment. Missing or invalid artifacts produce a pending notice or warning
+for `init`, `start`, or `upgrade` without discarding the registration.
 `doctor` is read-only and makes a missing distribution, broken agents-live
 entry point, integrity mismatch, or declared registry mode without a resolving
 ownership backend a required failure. Its repair command is
