@@ -71,7 +71,9 @@ This is tool policy, not a sandbox. Agents still inherit the permissions of
 your local account and agent CLI.
 
 The example uses `write` so it can fix documents directly. For tighter
-control, use `plan` with a validated handler or `pipeline` with
+control, use [`plan`](src/agents_live/skill/docs/approach.md#execution-modes)
+with a validated handler or
+[`pipeline`](src/agents_live/skill/docs/approach.md#execution-modes) with
 schema-checked pre-processors and post-processors.
 
 ## Prerequisites
