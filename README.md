@@ -1,25 +1,24 @@
 # agents-live
 
-**Take your agents live.** Add cron and file-watch automation to existing or
-new Claude Code and GitHub Copilot agents.
+**Take your agents live.** Turn Claude Code and GitHub Copilot agents into
+scheduled and file-triggered local automations, without moving them to another
+agent platform.
 
-An agent stays one Markdown file. A few frontmatter fields say when it runs
-and how it may act. No application server, database, or agent registry is
-required.
+Your agent stays one Markdown file. Agents Live adds triggers, execution
+controls, logs, and automatic repair using standard host tools.
 
-### `note-filing-agent.md`
+### `markdown-polisher.md`
 
-```yaml
+```markdown
 ---
-runtime: claude            # unattended execution adapter
-mode: plan                 # read-only; a handler script does the writing
-watchPath: notes/inbox/    # or schedule: "0 8 * * *", or both
-post-processor: file-notes.sh
+description: Polish Markdown documents when they change.
+runtime: claude
+mode: write
+watchPath: docs/
 ---
-Read ~/AGENTS.md for vault context and filing conventions. Then, for each
-new file in notes/inbox/: add frontmatter and tags, fix the title, decide
-where it belongs in the vault, and emit JSON:
-{ "moves": [{ "from": "...", "to": "...", "content": "..." }] }
+Correct spelling, grammar, and Markdown formatting errors in the selected files.
+Preserve their meaning, links, code, and frontmatter. When a `Files changed:`
+list is present, process only those files.
 ```
 
 ## Quick start
@@ -30,33 +29,22 @@ details.
 ```bash
 uv tool install agents-live
 agents-live init
-agents-live run ./note-filing-agent.md
+agents-live start ./markdown-polisher.md
 ```
 
-Run the agent directly by path. Once the foreground run looks right, activate
-its cron or file-watch triggers:
+The watcher sleeps until a file changes, then runs the agent immediately with
+the changed paths. Add or edit a Markdown file under `docs/`, then open the
+file to see the fixes.
 
-```bash
-agents-live start ./note-filing-agent.md
-```
-
-Inspect and stop it with the same path:
+Manage the running agent with `status` and `stop`:
 
 ```bash
 agents-live status
-agents-live logs
-agents-live stop ./note-filing-agent.md
+agents-live stop ./markdown-polisher.md
 ```
 
-Drop a note into `notes/inbox/` and the watcher runs the agent. The agent
-decides what should happen; the deterministic post-processor you own changes
-the files.
-
-Use `schedule` instead of `watchPath` for cron, or declare both:
-
-```yaml
-schedule: "0 8 * * *"
-```
+There is no polling interval or clock tick. The agent runs only when the
+operating system reports a change in the watched directory.
 
 ## Lightweight
 
@@ -70,8 +58,6 @@ local watcher. There are no externally reachable ports or databases. Custom
 handlers and plugins may bring their own dependencies; Agents Live core does
 not require them.
 
-Run `agents-live doctor` to see which core host tools are missing.
-
 ## Safe by default
 
 Execution modes make write access explicit:
@@ -83,6 +69,10 @@ Execution modes make write access explicit:
 
 This is tool policy, not a sandbox. Agents still inherit the permissions of
 your local account and agent CLI.
+
+The example uses `write` so it can fix documents directly. For tighter
+control, use `plan` with a validated handler or `pipeline` with
+schema-checked pre-processors and post-processors.
 
 ## Prerequisites
 
@@ -97,8 +87,11 @@ initialization, automatic maintenance, and scheduled agents; `inotifywait` is
 only required when agents watch files or directories for changes.
 
 Linux is the primary platform, with Ubuntu on WSL as the reference setup.
-Windows support is partial and macOS is untested. `agents-live doctor` reports
-what the current host needs.
+Windows support is partial and macOS is untested.
+
+Run `agents-live doctor` to diagnose missing requirements and inspect
+configuration. Use `agents-live doctor --repair` to repair supported
+configuration issues.
 
 ## Go further
 
