@@ -2127,6 +2127,29 @@ class TestCliContract(_TempProject):
         self.assertNotIn("Agents/ directory", output)
         self.assertNotIn("[PASS] project config", output)
 
+    def test_doctor_prints_install_commands_for_missing_prerequisites(self) -> None:
+        with (
+            mock.patch.object(doctor, "REPO", None),
+            mock.patch.object(doctor, "_has", return_value=False),
+            mock.patch.object(doctor, "_python_312_resolvable", return_value=False),
+            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(doctor.main([]), 1)
+
+        output = stdout.getvalue()
+        for command in (
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "uv python install 3.12",
+            "npm i -g @anthropic-ai/claude-code",
+            "npm i -g @github/copilot",
+            "sudo apt install cron",
+            "sudo apt install inotify-tools",
+        ):
+            self.assertIn(f"fix: {command}", output)
+
     def test_doctor_rejects_invalid_environment_root(self) -> None:
         os.environ[paths.ENV_VAR] = str(self.root / "missing")
         paths.clear_cache()
