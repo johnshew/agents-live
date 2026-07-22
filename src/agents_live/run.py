@@ -146,8 +146,9 @@ def main() -> int:
     # Per-run event streams: the agent's own log and the correlated system
     # log, each with agent_name= bound once. Rebound to config values once the
     # config loads; these early bindings cover load failures.
-    tlog = EventLog(logs_root() / f"{args.name}.log", agent_name=args.name)
-    slog = EventLog(system_log(), agent_name=args.name)
+    initial_name = Path(args.name).stem
+    tlog = EventLog(logs_root() / f"{initial_name}.log", agent_name=initial_name)
+    slog = EventLog(system_log(), agent_name=initial_name)
     # Initialized before the try: the except block logs **phase_durations,
     # and a failure before the pipeline starts (e.g. agent not found) must
     # still produce a clean error event, not an UnboundLocalError.

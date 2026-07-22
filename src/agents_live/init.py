@@ -23,9 +23,9 @@ Counterpart: ``ownership.py`` is the read side of this seam - runtime
 mode resolution and registry enforcement. It never writes the project
 config; all config writes live here.
 
-Unlike every other subcommand, init defines the project root rather than
-requiring one: the target is --repo/AGENTS_LIVE_REPO if given, else
-the current directory.
+Unlike every other subcommand, init defines its target. Bare init initializes
+the host-global workspace; ``init --repo`` initializes the global workspace
+first and then enrolls the selected repository.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from . import paths, plugins, preflight
+from . import health_check, paths, plugins, preflight, repos
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -240,11 +240,19 @@ def main() -> int:
         description="Initialize the agents-live project layout")
     parser.parse_args()
 
-    env_root = os.environ.get(paths.ENV_VAR, "").strip()
-    root = Path(env_root).resolve() if env_root else Path.cwd().resolve()
+    selected_repo = os.environ.get("AGENTS_LIVE_INIT_REPO", "").strip()
+    global_root = paths.global_root()
 
     try:
-        created = initialize(root)
+        global_root.mkdir(parents=True, exist_ok=True)
+        global_created = initialize(global_root)
+        if selected_repo:
+            root = Path(selected_repo).resolve()
+            created = initialize(root)
+            repos.ensure_default(root)
+        else:
+            root = global_root
+            created = global_created
     except ValueError as exc:
         print(f"error [agent_invalid] init: existing project config is "
               f"malformed; repair it first: {exc}", file=sys.stderr)
@@ -254,12 +262,17 @@ def main() -> int:
     else:
         print(f"{paths.config_source(root)} already up to date")
     try:
-        if plugins.converge([root]):
+        plugin_roots = [global_root]
+        plugin_roots.extend(
+            Path(value) for _, value, error in repos.entries() if error is None)
+        if plugins.converge(list(dict.fromkeys(plugin_roots))):
             print("Converged declared plugins in the agents-live tool environment")
     except (OSError, ValueError, plugins.PluginError) as exc:
         preflight.emit_failure("init", f"plugin convergence failed: {exc}")
         return 1
-    skill_status = install_skill(root)
+    global_skill_status = install_skill(global_root)
+    skill_status = (
+        install_skill(root) if root != global_root else global_skill_status)
     if skill_status == "installed":
         print("Installed skill payload: .claude/skills/agents-live/ "
               "(SKILL.md, docs, templates)")
@@ -267,20 +280,25 @@ def main() -> int:
         print("Refreshed skill payload to match the installed package: "
               ".claude/skills/agents-live/")
 
+    try:
+        health_check.ensure_health_cron_lines()
+    except (OSError, ValueError, health_check.AgentsLiveError) as exc:
+        preflight.emit_failure("init", f"automatic maintenance setup failed: {exc}")
+        return 1
+
     print(
         "\nNext steps:\n"
         "  - copy a starter from .claude/skills/agents-live/templates/\n"
         "    into .claude/agents/<agent-name>.md and edit its frontmatter\n"
         "  - `agents-live run <agent-name>` to test it once\n"
         "  - `agents-live start <agent-name>` to activate its triggers\n"
-        "  - `agents-live health-check` to start the hourly check-and-repair\n"
-        "    loop (installs its own @reboot + hourly crontab entries)\n"
         "  docs: https://github.com/johnshew/agents-live\n")
 
     # Close with a read-only doctor run (§3.4 step 6) so a fresh install
     # ends in a verified green state, not a hopeful one. Reload: doctor
     # resolves its repo root at import time, and init may target a root
     # the process hadn't resolved before.
+    os.environ[paths.ENV_VAR] = str(root)
     paths.clear_cache()
     import importlib
     from . import doctor

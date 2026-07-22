@@ -3,8 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["PyYAML"]
 # ///
-"""agents-live migrate - converge persisted trigger entries to the
-canonical invocation form (Phase 5 core; §5.2 F3).
+"""Internal convergence of persisted trigger entries to canonical form.
 
 Scope: crontab schedule lines (``--name <agent>``) and @reboot watcher
 respawn lines (``ensure-watcher <agent>`` or its legacy flag form) that
@@ -235,12 +234,6 @@ def main() -> int:
                 "rewrites": rewrites, "plan": plan,
             }))
         return 0
-
-    # TRANSITIONAL (2026-07-19): move legacy in-tree runtime state to the
-    # user-level state home. Delete this call and state_migration.py once
-    # the fleet has converged on the v2 layout.
-    from . import state_migration
-    state_migration.apply(headless.repo_root(), dry_run=args.dry_run)
 
     lines = headless.current_crontab_lines()
     if lines is None:

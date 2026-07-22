@@ -125,7 +125,7 @@ def _validated_path(value: str | Path, alias: str) -> Path:
 def _registry_lock() -> Iterator[None]:
     """Serialize load-modify-write registry mutations across processes.
 
-    Without it, two concurrent ``repos add`` calls each rewrite the file
+    Without it, two concurrent repository registrations each rewrite the file
     from their own snapshot and the last rename silently drops the other
     repo."""
     lock_path = config_path().parent / ".config.lock"
@@ -176,6 +176,37 @@ def _add(value: str) -> None:
         registry = load()
         _register_path(registry, value)
         _write(registry)
+
+
+def ensure_registered(value: str | Path) -> bool:
+    """Register *value* once; return True when the registry changed."""
+    path = str(Path(value).expanduser().resolve())
+    with _registry_lock():
+        registry = load()
+        if path in registry["repos"].values():
+            return False
+        _register_path(registry, path)
+        _write(registry)
+        return True
+
+
+def ensure_default(value: str | Path) -> bool:
+    """Register *value* and select it as default in one locked update."""
+    path = str(Path(value).expanduser().resolve())
+    with _registry_lock():
+        registry = load()
+        name = next(
+            (name for name, registered in registry["repos"].items()
+             if registered == path),
+            None,
+        )
+        if name is None:
+            name = _register_path(registry, path)
+        if registry["default_repo"] == name:
+            return False
+        registry["default_repo"] = name
+        _write(registry)
+        return True
 
 
 def _resolve_ref(registry: dict, ref: str) -> str:

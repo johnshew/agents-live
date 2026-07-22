@@ -1,4 +1,4 @@
-"""agents-live health-check - the built-in host check-and-repair loop.
+"""Internal built-in host check-and-repair loop.
 
 Promoted from a consumer-project agent (2026-07-19): the loop is
 host-scoped - it repairs the host-global crontab, converges the
@@ -8,8 +8,8 @@ so it ships with the package and keeps its state at the user level
 
 Two modes share this module:
 
-- **Host mode** (``agents-live health-check``, the crontab entries'
-  form): ensures its own ``@reboot`` + hourly crontab lines, converges
+- **Host mode** (``agents-live internal maintain``, the crontab entries'
+    form): ensures its own ``@reboot`` + hourly crontab lines, converges
   declared plugin wheels into the tool environment, runs a per-repo
   sweep for every registered repository (each in its own subprocess -
   project-root resolution is process-global, so one process never
@@ -17,9 +17,9 @@ Two modes share this module:
   fingerprint, checks the Windows heartbeat on WSL, and writes the host
   ``health.ok`` beacon. Events are logged to
   ``<state home>/logs/health-check.log``.
-- **Sweep mode** (``agents-live --repo <root> health-check --sweep``,
+- **Sweep mode** (``agents-live --repo <root> internal maintain --sweep``,
   internal): converges the repo's persisted crontab entries
-  (``migrate``), prunes orphans, prunes fleet-wide registry orphans,
+    through internal migration, prunes orphans and fleet-wide registry orphans,
   enforces multi-host ownership, and restarts dead watchers. Prints one
   JSON summary to stdout for the host loop to aggregate.
 
@@ -92,31 +92,34 @@ def build_health_cron_lines() -> list[str]:
     """
     shim = shlex.quote(str(cli_shim_path()))
     prefix = f"PATH={shlex.quote(clean_path())}"
-    return [f"{sched} {prefix} {shim} health-check --quiet 2>&1"
+    return [f"{sched} {prefix} {shim} internal maintain --quiet 2>&1"
             for sched in HEALTH_SCHEDULES]
 
 
 def health_cron_line_matches(line: str) -> bool:
     """True when *line* invokes this built-in loop (any install of it).
 
-    Keys on a standalone ``health-check`` token from an ``agents-live``
-    executable. The retired per-project agent's lines carried
-    ``--name agents-live-health-check`` instead and never match.
+    Matches both the internal maintenance command and legacy health-check
+    entries so convergence removes the retired public invocation.
     """
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
-    return "health-check" in tokens and any(
+    is_maintenance = (
+        "health-check" in tokens
+        or any(tokens[index:index + 2] == ["internal", "maintain"]
+               for index in range(len(tokens) - 1))
+    )
+    return is_maintenance and any(
         Path(token).name == "agents-live" for token in tokens)
 
 
 def ensure_health_cron_lines(*, install: bool = True) -> bool:
     """Install/converge the loop's crontab entries. True when changed.
 
-    ``install=False`` converges existing entries (e.g. after an upgrade
-    re-homed the pinned shim path) but never adds them to a host that
-    has not opted into the loop by running ``agents-live health-check``.
+    ``install=False`` converges existing entries after an upgrade re-homes
+    the pinned shim path, but never adds them to an uninitialized host.
     """
     desired = build_health_cron_lines()
     with crontab_lock():
@@ -167,7 +170,7 @@ def _converge_crontab(events: list[dict[str, str]]) -> bool:
     buffer = io.StringIO()
     try:
         saved_argv = sys.argv
-        sys.argv = ["agents-live migrate"]
+        sys.argv = ["agents-live internal migrate"]
         try:
             with contextlib.redirect_stdout(buffer):
                 code = migrate.main()
@@ -220,6 +223,17 @@ def _agent_states() -> dict[str, dict]:
         except AgentsLiveError:
             continue
     return states
+
+
+def _add_persisted_agent_states(states: dict[str, dict]) -> None:
+    """Load path-backed definitions named by persisted watcher intent."""
+    for selector in list_reboot_watcher_agent_names():
+        if selector in states:
+            continue
+        try:
+            states[selector] = agent_details(load_agent_config(selector))
+        except AgentsLiveError:
+            continue
 
 
 def _lifecycle(subcommand: str, name: str) -> bool:
@@ -394,6 +408,7 @@ def sweep() -> dict:
     registry_prune = _prune_registry_orphans(root, events)
 
     states = _agent_states()
+    _add_persisted_agent_states(states)
     ownership_deactivated, ownership_degraded = _enforce_ownership(
         states, events)
     ownership_degraded = ownership_degraded or bool(
@@ -461,6 +476,78 @@ def sweep() -> dict:
         "registry_prune_abstained": registry_prune["abstained"],
         "events": events,
     }
+
+
+def plan_sweep() -> list[dict]:
+    """Describe workspace mutations a sweep would perform without applying them."""
+    from . import activate  # noqa: PLC0415
+
+    actions: list[dict] = []
+    states = _agent_states()
+    _add_persisted_agent_states(states)
+    running = set(activate.list_active_agent_names())
+    defined = set(list_agents())
+    for name in sorted(running - defined):
+        if not agent_file_exists(name):
+            actions.append({"action": "prune-orphaned-trigger", "agent": name})
+
+    owners: dict[str, str] = {}
+    try:
+        owners = ownership.load_owners(rate_limit_secs=10**9)
+    except ownership.OwnershipUnavailableError:
+        pass
+    host = ownership.current_host()
+    ownership_deactivated: set[str] = set()
+    for name, agent in sorted(states.items()):
+        owner = owners.get(name)
+        trigger_states = agent.get("triggerStates", {})
+        active_here = (
+            "active" in str(agent.get("state", "")).lower()
+            or any("active" in str(value).lower()
+                   for value in trigger_states.values())
+        )
+        if owner and owner != "*" and owner.lower() != host and active_here:
+            ownership_deactivated.add(name)
+            actions.append({
+                "action": "deactivate-for-ownership",
+                "agent": name,
+                "owner": owner,
+            })
+
+    for name in list_reboot_watcher_agent_names():
+        if name in ownership_deactivated:
+            continue
+        agent = states.get(name)
+        if agent is None:
+            if not any(action.get("agent") == name for action in actions):
+                actions.append({
+                    "action": "prune-orphaned-trigger", "agent": name})
+            continue
+        watcher_state = str(agent.get("triggerStates", {}).get(
+            "watcher", agent.get("state", "")))
+        if "active" not in watcher_state.lower():
+            actions.append({"action": "restart-watcher", "agent": name})
+
+    head = _git_head(repo_root())
+    try:
+        remote = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/heads/main"], cwd=repo_root(),
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        remote = None
+    remote_sha = (
+        remote.stdout.split()[0]
+        if remote is not None and remote.returncode == 0 and remote.stdout.split()
+        else None
+    )
+    if head and remote_sha == head:
+        for name in sorted(owners):
+            if not name.startswith("_") and not _agent_definition_exists(
+                    name, repo_root()):
+                actions.append({
+                    "action": "prune-ownership-record", "agent": name})
+    return actions
 
 
 # --- Smoketest gating (host mode) -------------------------------------------
@@ -652,16 +739,42 @@ def maybe_run_smoketest(root: Path, prev: dict,
 # --- Host loop ---------------------------------------------------------------
 
 def _registered_roots() -> list[tuple[str, Path]]:
-    """(alias, root) for every registered repository, falling back to the
-    locally resolved project when nothing is registered yet."""
-    rows = [(alias, Path(path)) for alias, path, error in repos.entries()
-            if error is None]
-    if rows:
-        return rows
+    """Every initialized workspace maintained by the host loop."""
+    rows: list[tuple[str, Path]] = []
+    global_root = paths.global_root()
+    if paths.config_source(global_root) is not None:
+        rows.append(("global", global_root))
+    rows.extend(
+        (alias, Path(path)) for alias, path, error in repos.entries()
+        if error is None and Path(path) != global_root
+    )
     local = paths.local_root()
-    if local is not None:
-        return [(local.name, local)]
-    return []
+    if local is not None and all(root != local for _, root in rows):
+        rows.append((local.name, local))
+    for root in persisted_roots():
+        if all(existing != root for _, existing in rows):
+            rows.append((root.name, root))
+    return rows
+
+
+def persisted_roots() -> list[Path]:
+    """Existing roots pinned by active Agents Live trigger invocations."""
+    roots: list[Path] = []
+    for line in current_crontab_lines() or []:
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        if not any(Path(token).name == "agents-live" for token in tokens):
+            continue
+        for first, second in zip(tokens, tokens[1:]):
+            if first != "--repo":
+                continue
+            root = Path(second).expanduser().resolve()
+            if root.is_dir() and root not in roots:
+                roots.append(root)
+            break
+    return roots
 
 
 def _check_windows_heartbeat(events: list[dict[str, str]]) -> None:
@@ -716,8 +829,8 @@ def run_host_loop(quiet: bool) -> int:
         # Cron runs from $HOME, so an unregistered host resolves no
         # repository at all: the loop would sweep nothing yet still
         # report healthy. Surface the misconfiguration instead.
-        msg = ("no registered repositories; run `agents-live repos add "
-               "<path>` so the health-check loop has something to sweep")
+        msg = ("no initialized workspace; run `agents-live init` before "
+               "automatic maintenance")
         _err(f"WARNING: {msg}")
         events.append({"level": "warning", "phase": "sweep", "message": msg})
 
@@ -740,7 +853,7 @@ def run_host_loop(quiet: bool) -> int:
     for alias, root in targets:
         try:
             result = subprocess.run(
-                _self_argv("health-check", "--sweep", root=root),
+                _self_argv("internal", "maintain", "--sweep", root=root),
                 capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:
@@ -837,17 +950,144 @@ def run_host_loop(quiet: bool) -> int:
     return 1 if (failed or sweep_errors) else 0
 
 
+def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
+    """Run immediate automatic maintenance or report its mutation plan."""
+    if not dry_run:
+        return run_host_loop(quiet=quiet)
+    targets = _registered_roots()
+    actions: list[dict] = []
+    lines = current_crontab_lines()
+    if lines is None:
+        preflight.emit_failure("doctor", "crontab is not accessible")
+        return 1
+    desired = build_health_cron_lines()
+    current = [line for line in lines if health_cron_line_matches(line)]
+    if current != desired:
+        actions.append({
+            "action": "replace-maintenance-schedule",
+            "remove": current,
+            "add": desired,
+        })
+    try:
+        declarations = plugins.union([root for _, root in targets])
+        pending = sorted(
+            plugin.name for plugin in declarations.values()
+            if not plugins._installed_state(plugin)[0]
+        )
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        preflight.emit_failure("doctor", f"could not plan plugin repair: {exc}")
+        return 1
+    if pending:
+        actions.append({"action": "converge-plugins", "plugins": pending})
+    for _, root in targets:
+        completed = subprocess.run(
+            _self_argv(
+                "--json", "internal", "migrate", "--dry-run", root=root),
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode != 0:
+            preflight.emit_failure(
+                "doctor", completed.stderr.strip()
+                or f"could not plan trigger migration for {root}")
+            return 1
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            preflight.emit_failure(
+                "doctor", f"invalid trigger migration plan for {root}")
+            return 1
+        plan = payload.get("plan", {})
+        for kind in ("schedule", "watcher"):
+            for selector, change in plan.get(kind, {}).items():
+                actions.append({
+                    "action": f"rewrite-{kind}",
+                    "workspace": str(root),
+                    "agent": selector,
+                    "remove": change[0],
+                    "add": change[1],
+                })
+        for selector in plan.get("missing", []):
+            actions.append({
+                "action": "prune-orphaned-trigger",
+                "workspace": str(root),
+                "agent": selector,
+            })
+        completed = subprocess.run(
+            _self_argv(
+                "internal", "maintain", "--sweep", "--dry-run", root=root),
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode != 0:
+            preflight.emit_failure(
+                "doctor", completed.stderr.strip()
+                or f"could not plan workspace repairs for {root}")
+            return 1
+        try:
+            workspace_actions = json.loads(completed.stdout)["actions"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            preflight.emit_failure(
+                "doctor", f"invalid workspace repair plan for {root}")
+            return 1
+        for action in workspace_actions:
+            actions.append({**action, "workspace": str(root)})
+
+    if targets:
+        default = repos.default_root() or targets[0][1]
+        runtime = _resolve_smoketest_runtime()
+        previous = _load_previous_beacon().get("smoketest", {})
+        head = _git_head(default)
+        if runtime is not None and head is not None:
+            fingerprint = smoketest_source_fingerprint(default)
+            if not (
+                isinstance(previous, dict)
+                and previous.get("sha")
+                and previous.get("status") == "pass"
+                and previous.get("source_fingerprint") == fingerprint
+            ):
+                actions.append({
+                    "action": "run-smoketest",
+                    "workspace": str(default),
+                    "runtime": runtime,
+                })
+    unique_actions = []
+    seen_actions: set[tuple[object, object, object]] = set()
+    for action in actions:
+        key = (
+            action.get("action"),
+            action.get("workspace"),
+            action.get("agent"),
+        )
+        if key in seen_actions:
+            continue
+        seen_actions.add(key)
+        unique_actions.append(action)
+    print(json.dumps({
+        "status": "planned",
+        "targets": [str(root) for _, root in targets],
+        "actions": unique_actions,
+    }, indent=2))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="agents-live health-check",
+        prog="agents-live internal maintain",
         description="Run the built-in host check-and-repair loop.")
     parser.add_argument("--quiet", action="store_true",
                         help="suppress progress output")
     parser.add_argument("--sweep", action="store_true",
                         help=argparse.SUPPRESS)  # internal per-repo mode
+    parser.add_argument("--dry-run", action="store_true",
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.dry_run and not args.sweep:
+        parser.error("--dry-run requires --sweep")
+
     if args.sweep:
+        if args.dry_run:
+            print(json.dumps({"status": "planned", "actions": plan_sweep()}))
+            return 0
         # The sweep's stdout contract is exactly one JSON document (the
         # host loop parses it). In-process work can print - notably
         # activate.prune_orphans reporting each pruned entry - so capture

@@ -36,7 +36,7 @@ try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, health_check,
         heartbeat, init, migrate, ownership, paths, plugins, preflight,
-        doctor, repos, spawn, state_migration, status, uninstall,
+        doctor, repos, run, spawn, status, uninstall,
         update_check, upgrade,
     )
     from agents_live.cli_spec import (
@@ -55,13 +55,13 @@ except ImportError:  # flat checkout layout
     import heartbeat
     import init
     import migrate
-    import state_migration
     import ownership
     import paths
     import plugins
     import preflight
     import doctor
     import repos
+    import run
     import spawn
     import status
     import update_check
@@ -87,6 +87,10 @@ class _TempProject(unittest.TestCase):
         # so tests never touch the developer's real state home.
         self._saved_state_home = os.environ.get("XDG_STATE_HOME")
         os.environ["XDG_STATE_HOME"] = str(self.root / "xdg-state")
+        self._saved_data_home = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = str(self.root / "xdg-data")
+        self._saved_config_home = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.root / "xdg-config")
         paths.clear_cache()
 
     def tearDown(self) -> None:
@@ -98,6 +102,15 @@ class _TempProject(unittest.TestCase):
             os.environ.pop("XDG_STATE_HOME", None)
         else:
             os.environ["XDG_STATE_HOME"] = self._saved_state_home
+        if self._saved_data_home is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = self._saved_data_home
+        if self._saved_config_home is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._saved_config_home
+        os.environ.pop(cli.INIT_REPO_ENV_VAR, None)
         paths.clear_cache()
         self._tmp.cleanup()
 
@@ -409,9 +422,12 @@ class TestRepositoryRegistry(_TempProject):
             finally:
                 os.chdir(saved)
 
-    def test_default_is_last_resort(self) -> None:
+    def test_configured_default_precedes_global_fallback(self) -> None:
         repos._add(str(self.root))
         repos._set_default(str(self.root))
+        global_root = paths.global_root()
+        global_root.mkdir(parents=True)
+        (global_root / ".agents-live.toml").write_text("", encoding="utf-8")
         os.environ.pop(paths.ENV_VAR, None)
         with tempfile.TemporaryDirectory() as outside:
             saved = Path.cwd()
@@ -647,16 +663,20 @@ class TestProjectPlugins(_TempProject):
         self.assertFalse(checks["registry ownership backend resolves"]["ok"])
 
     def test_init_and_start_converge_but_start_dry_run_does_not(self) -> None:
+        os.environ[cli.INIT_REPO_ENV_VAR] = str(self.root)
         with (
             mock.patch.object(plugins, "converge", return_value=False) as converge,
             mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=True),
             mock.patch("importlib.reload", return_value=mock.Mock(
                 main=mock.Mock(return_value=0))),
             mock.patch("sys.argv", ["agents-live init"]),
             mock.patch("sys.stdout", new_callable=io.StringIO) as init_stdout,
         ):
             self.assertEqual(init.main(), 0)
-        converge.assert_called_once_with([self.root])
+        converge.assert_called_once_with([paths.global_root(), self.root])
+        self.assertEqual(repos.default_root(), self.root)
         self.assertIn(
             "into .claude/agents/<agent-name>.md", init_stdout.getvalue())
         self.assertNotIn(
@@ -680,6 +700,24 @@ class TestProjectPlugins(_TempProject):
         ):
             self.assertEqual(activate.main(), 0)
         converge.assert_not_called()
+
+    def test_init_reports_inaccessible_crontab_without_traceback(self) -> None:
+        os.environ[cli.INIT_REPO_ENV_VAR] = str(self.root)
+        with (
+            mock.patch.object(plugins, "converge", return_value=False),
+            mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines",
+                side_effect=health_check.AgentsLiveError(
+                    "crontab is not accessible")),
+            mock.patch("sys.argv", ["agents-live init"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(init.main(), 1)
+        self.assertIn(
+            "automatic maintenance setup failed: crontab is not accessible",
+            stderr.getvalue(),
+        )
 
     def test_converge_skips_missing_wheel_for_installed_plugin(self) -> None:
         (self.root / ".agents-live.toml").write_text(
@@ -908,6 +946,47 @@ class TestAgentParsing(_TempProject):
 
 
 class TestInvocationForms(_TempProject):
+    def test_explicit_agent_path_loads_without_agent_directory_lookup(self) -> None:
+        prompt = self.root / "my-agent.md"
+        prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
+        config = headless.load_agent_config(str(prompt))
+        self.assertEqual(config.name, "my-agent")
+        self.assertEqual(config.prompt_path, prompt)
+
+    def test_cli_canonicalizes_explicit_agent_path_and_pins_cwd(self) -> None:
+        prompt = self.root / "my-agent.md"
+        prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
+        os.environ.pop(paths.ENV_VAR, None)
+        dispatched: list[str] = []
+
+        def capture_argv() -> int:
+            dispatched.extend(sys.argv)
+            return 0
+
+        saved_cwd = Path.cwd()
+        try:
+            os.chdir(self.root)
+            with (
+                mock.patch.object(preflight, "check", return_value=None),
+                mock.patch.object(
+                    run, "main", side_effect=capture_argv) as run_main,
+            ):
+                self.assertEqual(cli.main(["run", "./my-agent.md"]), 0)
+        finally:
+            os.chdir(saved_cwd)
+        run_main.assert_called_once_with()
+        self.assertEqual(dispatched[0], "agents-live run")
+        self.assertEqual(dispatched[1:], ["--name", str(prompt)])
+        self.assertEqual(os.environ[paths.ENV_VAR], str(self.root))
+
+    def test_path_backed_cron_preserves_canonical_agent_file(self) -> None:
+        prompt = self.root / "my-agent.md"
+        prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
+        with mock.patch.object(activate, "_validate_handler_paths"):
+            lines = activate.build_cron_lines(str(prompt))
+        self.assertIn(str(prompt), lines[0])
+        self.assertTrue(headless.cron_line_matches(lines[0], str(prompt)))
+
     def test_run_invocation_carries_name_token(self) -> None:
         line = f"{TEST_CRON_SCHEDULE} cd {self.root} && " + " ".join(
             headless.run_invocation("t"))
@@ -1509,7 +1588,7 @@ class TestCliContract(_TempProject):
         self.assertIsNone(cli.validation_error(start, ["--name=fixture"]))
         self.assertEqual(
             cli.validation_error(repos_cmd, []),
-            "repos requires one of: list, add, default, remove")
+            "repos requires one of: list, default, remove")
         for argv in (["watch-loop", "x"], ["ensure-watcher", "x"],
                      ["list-reboot-watchers"]):
             self.assertIsNone(cli.validation_error(internal, argv))
@@ -1897,26 +1976,25 @@ class TestCliContract(_TempProject):
                 )
                 self.assertIn("~/.zfunc/_agents-live", stdout.getvalue())
 
-    def test_repos_list_and_migrate_expose_structured_results(self) -> None:
+    def test_repos_list_exposes_structured_results(self) -> None:
         config_home = self.root / "contract-config"
         with mock.patch.dict(
                 os.environ, {"XDG_CONFIG_HOME": str(config_home)}):
-            for argv, expected_key in (
-                (["repos", "list", "--json"], "repositories"),
-                (["migrate", "--dry-run", "--json"], "plan"),
-            ):
-                stdout = io.StringIO()
-                with (
-                    self.subTest(argv=argv),
-                    mock.patch.object(preflight, "check", return_value=None),
-                    mock.patch.object(
-                        headless, "current_crontab_lines", return_value=[]),
-                    contextlib.redirect_stdout(stdout),
-                ):
-                    self.assertEqual(cli.main(argv), 0)
-                payload = json.loads(stdout.getvalue())
-                self.assertTrue(payload["ok"])
-                self.assertIn(expected_key, payload)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.main(["repos", "list", "--json"]), 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertIn("repositories", payload)
+
+    def test_maintenance_commands_are_not_public(self) -> None:
+        for command in ("health-check", "migrate"):
+            with self.subTest(command=command):
+                self.assertNotIn(command, cli.COMMAND_BY_NAME)
+                with mock.patch(
+                        "sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(cli.main([command]), 2)
+                self.assertIn("unknown command", stderr.getvalue())
 
     def test_version_works_outside_repository(self) -> None:
         saved = Path.cwd()
@@ -1950,6 +2028,24 @@ class TestCliContract(_TempProject):
             self.assertEqual(cli.main(["--json", "--version"]), 0)
         self.assertIn(f"agents-live {cli.__version__}", stdout.getvalue())
 
+    def test_init_repo_survives_global_flag_ordering(self) -> None:
+        forms = (
+            ["init", "--repo", str(self.root)],
+            ["--json", "init", "--repo", str(self.root)],
+            ["--json", "--repo", str(self.root), "init"],
+            ["--repo", str(self.root), "--json", "init"],
+        )
+        for argv in forms:
+            with (
+                self.subTest(argv=argv),
+                mock.patch.object(init, "main", return_value=0),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                os.environ.pop(cli.INIT_REPO_ENV_VAR, None)
+                self.assertEqual(cli.main(argv), 0)
+                self.assertEqual(
+                    os.environ.get(cli.INIT_REPO_ENV_VAR), str(self.root))
+
     def test_heartbeat_works_outside_repository(self) -> None:
         os.environ.pop(paths.ENV_VAR, None)
         paths.clear_cache()
@@ -1980,10 +2076,14 @@ class TestCliContract(_TempProject):
         stdout = io.StringIO()
         with (
             mock.patch.object(init, "install_skill", return_value=None) as install,
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=False),
+            mock.patch.object(upgrade, "_migrate_triggers") as migrate,
             mock.patch("sys.stdout", stdout),
         ):
             self.assertEqual(cli.main(["upgrade", "--skills-only"]), 0)
         install.assert_called_once_with(self.root)
+        migrate.assert_called_once_with(self.root)
         self.assertIn(
             "skill payload already matches the installed package",
             stdout.getvalue(),
@@ -1995,11 +2095,14 @@ class TestCliContract(_TempProject):
         with (
             mock.patch.object(upgrade, "_upgrade_runtime", return_value=0) as runtime,
             mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(
+                upgrade, "_refresh_with_installed_cli", return_value=0) as refresh,
             mock.patch.object(paths, "resolve_root") as resolve_root,
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
             self.assertEqual(cli.main(["upgrade"]), 0)
         runtime.assert_called_once_with([])
+        refresh.assert_called_once_with()
         resolve_root.assert_not_called()
 
     def test_doctor_without_project_root_runs_host_checks(self) -> None:
@@ -2023,6 +2126,29 @@ class TestCliContract(_TempProject):
         self.assertIn("[PASS] copilot CLI", output)
         self.assertNotIn("Agents/ directory", output)
         self.assertNotIn("[PASS] project config", output)
+
+    def test_doctor_prints_install_commands_for_missing_prerequisites(self) -> None:
+        with (
+            mock.patch.object(doctor, "REPO", None),
+            mock.patch.object(doctor, "_has", return_value=False),
+            mock.patch.object(doctor, "_python_312_resolvable", return_value=False),
+            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(doctor, "_hostname", return_value="test-host"),
+            mock.patch.object(update_check, "interactive", return_value=False),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(doctor.main([]), 1)
+
+        output = stdout.getvalue()
+        for command in (
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "uv python install 3.12",
+            "npm i -g @anthropic-ai/claude-code",
+            "npm i -g @github/copilot",
+            "sudo apt install cron",
+            "sudo apt install inotify-tools",
+        ):
+            self.assertIn(f"fix: {command}", output)
 
     def test_doctor_rejects_invalid_environment_root(self) -> None:
         os.environ[paths.ENV_VAR] = str(self.root / "missing")
@@ -2216,12 +2342,17 @@ assert module._agent_model({{"name": "handler", "runtime": "none"}},
         self.assertIn("agent-table-scroll", source)
         self.assertIn("minmax(15rem,.7fr)", source)
 
-    def test_doctor_forces_refresh_and_ignores_io_failure(self) -> None:
+    def test_doctor_reads_update_status_without_refreshing_cache(self) -> None:
+        cache = self.root / "cache" / "agents-live" / "update-check.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text('{"checked_at": 100, "latest_version": null}\n',
+                         encoding="utf-8")
+        before = cache.read_bytes()
         with (
+            mock.patch.object(update_check, "cache_path", return_value=cache),
             mock.patch.object(doctor, "collect", return_value=[]),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
-            mock.patch.object(
-                update_check, "refresh", side_effect=OSError) as refresh,
+            mock.patch.object(update_check, "refresh") as refresh,
             mock.patch.object(
                 update_check, "status_text", return_value="Update check: current") as status,
             mock.patch.object(update_check, "interactive", return_value=True),
@@ -2229,8 +2360,9 @@ assert module._agent_model({{"name": "handler", "runtime": "none"}},
             mock.patch("sys.stderr", io.StringIO()),
         ):
             self.assertEqual(doctor.main([]), 0)
-        refresh.assert_called_once()
+        refresh.assert_not_called()
         status.assert_called_once()
+        self.assertEqual(cache.read_bytes(), before)
 
     def test_doctor_children_suppress_redundant_update_refresh(self) -> None:
         completed = subprocess.CompletedProcess(
@@ -2258,7 +2390,7 @@ assert module._agent_model({{"name": "handler", "runtime": "none"}},
             mock.patch("sys.stderr", io.StringIO()),
         ):
             self.assertEqual(doctor.main([]), 0)
-        refresh.assert_called_once()
+        refresh.assert_not_called()
         status.assert_not_called()
 
     def test_doctor_json_flag_positions_are_equivalent(self) -> None:
@@ -3348,37 +3480,38 @@ class TestInstallSkill(_TempProject):
 
     def test_upgrade_reports_refresh_then_current(self) -> None:
         with (
+            mock.patch.object(
+                upgrade, "_targets",
+                return_value=([("current project", self.root)], [])),
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=False),
+            mock.patch.object(upgrade, "_migrate_triggers") as migrate,
             mock.patch.object(init, "install_skill", return_value="refreshed"),
             mock.patch("builtins.print") as output,
             mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
         ):
             self.assertEqual(upgrade.main(), 0)
+        migrate.assert_called_once_with(self.root)
         output.assert_any_call(
             f"{self.root}: upgraded skill payload to match the installed package")
         output.assert_any_call(
             f"Installed agents-live version: {upgrade.__version__}")
 
         with (
+            mock.patch.object(
+                upgrade, "_targets",
+                return_value=([("current project", self.root)], [])),
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=False),
+            mock.patch.object(upgrade, "_migrate_triggers") as migrate,
             mock.patch.object(init, "install_skill", return_value=None),
             mock.patch("builtins.print") as output,
             mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
         ):
             self.assertEqual(upgrade.main(), 0)
+        migrate.assert_called_once_with(self.root)
         output.assert_any_call(
             f"{self.root}: skill payload already matches the installed package")
-
-    def test_upgrade_migrates_legacy_state_before_payload_refresh(self) -> None:
-        legacy_log = self.root / "Agents" / "logs" / "demo.log"
-        legacy_log.parent.mkdir(parents=True)
-        legacy_log.write_text("{}\n", encoding="utf-8")
-        with (
-            mock.patch.object(init, "install_skill", return_value=None),
-            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
-        ):
-            self.assertEqual(upgrade.main(), 0)
-        migrated_log = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        self.assertEqual(migrated_log.read_text(encoding="utf-8"), "{}\n")
-        self.assertFalse(legacy_log.exists())
 
     def test_runtime_upgrade_preserves_receipt_and_converges_plugins(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0)
@@ -3494,6 +3627,8 @@ class TestInstallSkill(_TempProject):
                         ("gone", "/repos/gone", "path is unavailable"),
                     ],
                 ),
+                mock.patch.object(
+                    health_check, "persisted_roots", return_value=[]),
             ):
                 targets, errors = upgrade._targets()
         finally:
@@ -3541,6 +3676,9 @@ class TestInstallSkill(_TempProject):
                 "_refresh_payload",
                 side_effect=[PermissionError("denied"), None],
             ) as refresh,
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=False),
+            mock.patch.object(upgrade, "_migrate_triggers"),
             mock.patch("sys.stdout", new_callable=io.StringIO),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
@@ -3551,6 +3689,25 @@ class TestInstallSkill(_TempProject):
             [mock.call(broken), mock.call(healthy)],
         )
         self.assertIn("broken (/repos/broken): denied", stderr.getvalue())
+
+    def test_skills_only_fails_before_refresh_when_trigger_migration_fails(
+            self) -> None:
+        with (
+            mock.patch.object(
+                upgrade, "_targets",
+                return_value=([("project", self.root)], [])),
+            mock.patch.object(
+                upgrade, "_migrate_triggers",
+                side_effect=OSError("trigger migration failed")),
+            mock.patch.object(
+                health_check, "ensure_health_cron_lines", return_value=False),
+            mock.patch.object(upgrade, "_refresh_payload") as refresh,
+            mock.patch("sys.argv", ["agents-live upgrade", "--skills-only"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(upgrade.main(), 1)
+        refresh.assert_not_called()
+        self.assertIn("trigger migration failed", stderr.getvalue())
 
 
 class TestSpawnInvocation(_TempProject):
@@ -3599,6 +3756,30 @@ class TestStateHome(_TempProject):
         self.assertTrue(Path(start["stdout"]).is_absolute())
         self.assertIn(str(paths.repo_state_dir(self.root)), start["stdout"])
 
+    def test_path_backed_watcher_artifacts_stay_in_state_home(self) -> None:
+        prompt = self.root / "my-agent.md"
+        prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
+        hash_path = activate._watch_hash_path(str(prompt))
+        self.assertEqual(hash_path.parent, paths.repo_state_dir(self.root))
+        self.assertNotIn(str(prompt.parent), hash_path.name)
+
+        completed = mock.Mock(pid=4242)
+        completed.wait.return_value = 0
+        events: list[dict] = []
+        with (
+            mock.patch.object(activate.subprocess, "Popen",
+                              return_value=completed),
+            mock.patch.object(activate, "log_event",
+                              lambda _log, **fields: events.append(fields)),
+            mock.patch.object(activate, "run_invocation",
+                              return_value=["true"]),
+        ):
+            activate._dispatch_run_once(str(prompt), ["some/file.md"])
+        start = next(event for event in events if event.get("status") == "start")
+        self.assertTrue(Path(start["stdout"]).is_relative_to(
+            paths.repo_state_dir(self.root)))
+        self.assertFalse((prompt.parent / "runs").exists())
+
     def test_state_home_honors_xdg_env(self) -> None:
         self.assertEqual(
             paths.state_home(), self.root / "xdg-state" / "agents-live")
@@ -3618,211 +3799,6 @@ class TestStateHome(_TempProject):
         self.assertEqual(root, paths.repo_state_dir(self.root) / "logs")
         self.assertNotIn(str(self.root / "Agents"), str(root))
 
-    def test_state_migration_moves_legacy_state(self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        (legacy_logs / "archive").mkdir(parents=True)
-        (legacy_logs / "demo.log").write_text("{}\n", encoding="utf-8")
-        (legacy_logs / "archive" / "old.parquet").write_bytes(b"pq")
-        data = self.root / "Agents" / "data"
-        (data / "health.ok").write_text("{}\n", encoding="utf-8")
-        (data / "smoketest-framework.lock").write_text("", encoding="utf-8")
-        (data / "demo-watch-hashes.json").write_text("{}", encoding="utf-8")
-        (data / "agent-owners.json").write_text("{}", encoding="utf-8")
-
-        from_module = state_migration.apply(self.root)
-        self.assertGreater(from_module, 0)
-
-        state_dir = paths.repo_state_dir(self.root)
-        self.assertTrue((state_dir / "logs" / "demo.log").is_file())
-        self.assertTrue(
-            (state_dir / "logs" / "archive" / "old.parquet").is_file())
-        self.assertTrue((state_dir / "demo-watch-hashes.json").is_file())
-        self.assertFalse((data / "health.ok").exists())
-        self.assertFalse((data / "smoketest-framework.lock").exists())
-        # Shared git-synced state stays in the tree.
-        self.assertTrue((data / "agent-owners.json").is_file())
-        # Emptied legacy directory is tidied away; second pass is a no-op.
-        self.assertFalse(legacy_logs.exists())
-        self.assertEqual(state_migration.apply(self.root), 0)
-
-    def test_state_migration_appends_colliding_legacy_log(self) -> None:
-        # Legacy content is appended (never a truncate-rewrite, which
-        # would race concurrent appenders at the new home); qlog and
-        # timeline order by timestamp, not file position. A legacy file
-        # cut mid-write gains a terminating newline so records never fuse.
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        (legacy_logs / "demo.log").write_text("old", encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("new\n", encoding="utf-8")
-        state_migration.apply(self.root)
-        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
-        self.assertFalse((legacy_logs / "demo.log").exists())
-
-    def test_state_migration_retry_does_not_reappend_legacy_log(self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        src = legacy_logs / "demo.log"
-        src.write_text("old\n", encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("new\n", encoding="utf-8")
-        original_unlink = Path.unlink
-        failed = False
-
-        def fail_source_unlink(path: Path, *args, **kwargs):
-            nonlocal failed
-            if path == src and not failed:
-                failed = True
-                raise OSError("injected unlink failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "unlink", fail_source_unlink),
-            self.assertRaisesRegex(OSError, "injected unlink failure"),
-        ):
-            state_migration.apply(self.root)
-        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
-        self.assertTrue(src.exists())
-
-        state_migration.apply(self.root)
-        self.assertEqual(dest.read_text(encoding="utf-8"), "new\nold\n")
-        self.assertFalse(src.exists())
-
-    def test_state_migration_retry_appends_only_grown_suffix(self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        src = legacy_logs / "demo.log"
-        src.write_text("old\n", encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("new\n", encoding="utf-8")
-        original_unlink = Path.unlink
-        failed = False
-
-        def fail_source_unlink(path: Path, *args, **kwargs):
-            nonlocal failed
-            if path == src and not failed:
-                failed = True
-                raise OSError("injected unlink failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "unlink", fail_source_unlink),
-            self.assertRaisesRegex(OSError, "injected unlink failure"),
-        ):
-            state_migration.apply(self.root)
-        with src.open("a", encoding="utf-8") as legacy:
-            legacy.write("late\n")
-
-        state_migration.apply(self.root)
-        self.assertEqual(
-            dest.read_text(encoding="utf-8"), "new\nold\nlate\n")
-        self.assertFalse(src.exists())
-
-    def test_state_migration_rejects_growth_after_unterminated_record(
-            self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        src = legacy_logs / "demo.log"
-        src.write_text('{"partial":', encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("new\n", encoding="utf-8")
-        original_unlink = Path.unlink
-        failed = False
-
-        def fail_source_unlink(path: Path, *args, **kwargs):
-            nonlocal failed
-            if path == src and not failed:
-                failed = True
-                raise OSError("injected unlink failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "unlink", fail_source_unlink),
-            self.assertRaisesRegex(OSError, "injected unlink failure"),
-        ):
-            state_migration.apply(self.root)
-        with src.open("a", encoding="utf-8") as legacy:
-            legacy.write("true}\n")
-
-        with self.assertRaisesRegex(OSError, "unterminated legacy log grew"):
-            state_migration.apply(self.root)
-        self.assertTrue(src.exists())
-
-    def test_state_migration_drains_source_growth_before_unlink(self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        src = legacy_logs / "demo.log"
-        src.write_text("old\n", encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text("new\n", encoding="utf-8")
-        original_read_bytes = Path.read_bytes
-        reads = 0
-
-        def grow_after_snapshot(path: Path):
-            nonlocal reads
-            content = original_read_bytes(path)
-            if path == src:
-                reads += 1
-                if reads == 2:
-                    with src.open("a", encoding="utf-8") as legacy:
-                        legacy.write("late\n")
-            return content
-
-        with mock.patch.object(Path, "read_bytes", grow_after_snapshot):
-            state_migration.apply(self.root)
-        self.assertEqual(
-            dest.read_text(encoding="utf-8"), "new\nold\nlate\n")
-        self.assertFalse(src.exists())
-
-    def test_state_migration_retry_ignores_concurrent_destination_append(
-            self) -> None:
-        legacy_logs = self.root / "Agents" / "logs"
-        legacy_logs.mkdir(parents=True)
-        src = legacy_logs / "demo.log"
-        src.write_text('{"ts":"old"}\n', encoding="utf-8")
-        dest = paths.repo_state_dir(self.root) / "logs" / "demo.log"
-        dest.parent.mkdir(parents=True)
-        dest.write_text('{"ts":"new"}\n', encoding="utf-8")
-        original_open = Path.open
-        original_unlink = Path.unlink
-        inserted = False
-        failed = False
-
-        def append_before_merge(path: Path, mode="r", *args, **kwargs):
-            nonlocal inserted
-            if path == dest and mode == "ab" and not inserted:
-                inserted = True
-                with original_open(dest, "a", encoding="utf-8") as log:
-                    log.write('{"ts":"old"}\n')
-            return original_open(path, mode, *args, **kwargs)
-
-        def fail_source_unlink(path: Path, *args, **kwargs):
-            nonlocal failed
-            if path == src and not failed:
-                failed = True
-                raise OSError("injected unlink failure")
-            return original_unlink(path, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "open", append_before_merge),
-            mock.patch.object(Path, "unlink", fail_source_unlink),
-            self.assertRaisesRegex(OSError, "injected unlink failure"),
-        ):
-            state_migration.apply(self.root)
-
-        state_migration.apply(self.root)
-        self.assertEqual(dest.read_text(encoding="utf-8"),
-                         '{"ts":"new"}\n'
-                         '{"ts":"old"}\n'
-                         '{"ts":"old"}\n')
-        self.assertFalse(src.exists())
-
-
 _HEALTH_SHIM = Path("/opt/agents-live/bin/agents-live")
 
 
@@ -3841,7 +3817,7 @@ class TestHealthCheckLoop(_TempProject):
             # Host-level: no `cd` into a project and no pinned --repo.
             self.assertNotIn(" cd ", f" {line}")
             self.assertNotIn("--repo", line)
-            self.assertIn("health-check --quiet", line)
+            self.assertIn("internal maintain --quiet", line)
             self.assertTrue(health_check.health_cron_line_matches(line))
 
     def test_matcher_ignores_legacy_agent_and_foreign_lines(self) -> None:
@@ -3851,6 +3827,300 @@ class TestHealthCheckLoop(_TempProject):
         self.assertFalse(health_check.health_cron_line_matches(legacy))
         self.assertFalse(health_check.health_cron_line_matches(
             "0 * * * * /usr/bin/backup health-check 2>&1"))
+
+    def test_path_backed_watcher_is_loaded_from_persisted_intent(self) -> None:
+        prompt = self.root / "my-agent.md"
+        prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
+        states: dict[str, dict] = {}
+        with mock.patch.object(
+                health_check, "list_reboot_watcher_agent_names",
+                return_value=[str(prompt)]):
+            health_check._add_persisted_agent_states(states)
+        self.assertIn(str(prompt), states)
+        self.assertEqual(states[str(prompt)]["name"], "my-agent")
+
+    def test_repair_dry_run_is_empty_when_schedule_is_converged(self) -> None:
+        canonical = self._canonical_lines()
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=canonical),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        self.assertEqual(json.loads(stdout.getvalue())["actions"], [])
+
+    def test_repair_dry_run_reports_schedule_replacement(self) -> None:
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=[]),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        actions = json.loads(stdout.getvalue())["actions"]
+        self.assertEqual(actions[0]["action"], "replace-maintenance-schedule")
+        self.assertEqual(actions[0]["add"], self._canonical_lines())
+
+    def test_repair_dry_run_reports_plugin_and_workspace_mutations(self) -> None:
+        plugin = plugins.Plugin(
+            "example-plugin", self.root / "example.whl", None, "1.0")
+        migration = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "plan": {
+                    "schedule": {
+                        "scheduled": [["old schedule"], ["new schedule"]]},
+                    "watcher": {},
+                    "missing": ["deleted"],
+                },
+            }), stderr="")
+        workspace = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "actions": [
+                    {"action": "restart-watcher", "agent": "watched"},
+                    {"action": "deactivate-for-ownership", "agent": "remote"},
+                ],
+            }), stderr="")
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=self._canonical_lines()),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[("project", self.root)]),
+            mock.patch.object(health_check.plugins, "union",
+                              return_value={"example-plugin": plugin}),
+            mock.patch.object(health_check.plugins, "_installed_state",
+                              return_value=(False, "missing")),
+            mock.patch.object(health_check.subprocess, "run",
+                              side_effect=[migration, workspace]),
+            mock.patch.object(health_check, "_resolve_smoketest_runtime",
+                              return_value=None),
+            mock.patch.object(health_check, "_git_head", return_value=None),
+            mock.patch.object(health_check.repos, "default_root",
+                              return_value=self.root),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        actions = json.loads(stdout.getvalue())["actions"]
+        self.assertEqual(
+            [action["action"] for action in actions],
+            [
+                "converge-plugins",
+                "rewrite-schedule",
+                "prune-orphaned-trigger",
+                "restart-watcher",
+                "deactivate-for-ownership",
+            ],
+        )
+
+    def test_workspace_repair_plan_ignores_unavailable_git(self) -> None:
+        with (
+            mock.patch.object(health_check, "_agent_states", return_value={}),
+            mock.patch.object(health_check, "_add_persisted_agent_states"),
+            mock.patch("agents_live.activate.list_active_agent_names",
+                       return_value=set()),
+            mock.patch.object(health_check, "list_agents", return_value=[]),
+            mock.patch.object(health_check.ownership, "load_owners",
+                              return_value={}),
+            mock.patch.object(
+                health_check, "list_reboot_watcher_agent_names",
+                return_value=[]),
+            mock.patch.object(health_check, "_git_head", return_value="abc"),
+            mock.patch.object(health_check.subprocess, "run",
+                              side_effect=FileNotFoundError("git missing")),
+        ):
+            self.assertEqual(health_check.plan_sweep(), [])
+
+    def test_workspace_repair_plan_uses_remote_main_for_registry_prune(
+            self) -> None:
+        def plan(remote_sha: str) -> list[dict]:
+            remote = subprocess.CompletedProcess(
+                [], 0, stdout=f"{remote_sha}\trefs/heads/main\n", stderr="")
+            with (
+                mock.patch.object(health_check, "_agent_states", return_value={}),
+                mock.patch.object(health_check, "_add_persisted_agent_states"),
+                mock.patch("agents_live.activate.list_active_agent_names",
+                           return_value=set()),
+                mock.patch.object(health_check, "list_agents", return_value=[]),
+                mock.patch.object(health_check.ownership, "load_owners",
+                                  return_value={"deleted": "this-host"}),
+                mock.patch.object(health_check.ownership, "current_host",
+                                  return_value="this-host"),
+                mock.patch.object(
+                    health_check, "list_reboot_watcher_agent_names",
+                    return_value=[]),
+                mock.patch.object(health_check, "_git_head", return_value="head"),
+                mock.patch.object(health_check.subprocess, "run",
+                                  return_value=remote),
+                mock.patch.object(health_check, "_agent_definition_exists",
+                                  return_value=False),
+            ):
+                return health_check.plan_sweep()
+
+        self.assertEqual(plan("newer-remote"), [])
+        self.assertEqual(plan("head"), [
+            {"action": "prune-ownership-record", "agent": "deleted"},
+        ])
+
+    def test_internal_dry_run_requires_workspace_sweep(self) -> None:
+        with (
+            mock.patch("sys.argv", ["agents-live internal maintain", "--dry-run"]),
+            mock.patch.object(health_check, "run_host_loop") as host_loop,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                health_check.main()
+        self.assertEqual(raised.exception.code, 2)
+        host_loop.assert_not_called()
+        self.assertIn("--dry-run requires --sweep", stderr.getvalue())
+
+    def test_repair_dry_run_skips_smoketest_without_git_head(self) -> None:
+        migration = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "plan": {"schedule": {}, "watcher": {}, "missing": []},
+            }), stderr="")
+        workspace = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"actions": []}), stderr="")
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=self._canonical_lines()),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[("global", self.root)]),
+            mock.patch.object(health_check.plugins, "union", return_value={}),
+            mock.patch.object(health_check.subprocess, "run",
+                              side_effect=[migration, workspace]),
+            mock.patch.object(health_check, "_resolve_smoketest_runtime",
+                              return_value="agency"),
+            mock.patch.object(health_check, "_git_head", return_value=None),
+            mock.patch.object(health_check.repos, "default_root",
+                              return_value=None),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        self.assertEqual(json.loads(stdout.getvalue())["actions"], [])
+
+    def test_repair_dry_run_runs_smoketest_when_prior_sha_is_missing(self) -> None:
+        migration = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "plan": {"schedule": {}, "watcher": {}, "missing": []},
+            }), stderr="")
+        workspace = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"actions": []}), stderr="")
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=self._canonical_lines()),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[("project", self.root)]),
+            mock.patch.object(health_check.plugins, "union", return_value={}),
+            mock.patch.object(health_check.subprocess, "run",
+                              side_effect=[migration, workspace]),
+            mock.patch.object(health_check, "_resolve_smoketest_runtime",
+                              return_value="agency"),
+            mock.patch.object(health_check, "_git_head", return_value="abc"),
+            mock.patch.object(health_check, "smoketest_source_fingerprint",
+                              return_value="same"),
+            mock.patch.object(health_check, "_load_previous_beacon",
+                              return_value={"smoketest": {
+                                  "status": "pass",
+                                  "source_fingerprint": "same",
+                              }}),
+            mock.patch.object(health_check.repos, "default_root",
+                              return_value=self.root),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["actions"][0]["action"],
+            "run-smoketest",
+        )
+
+    def test_repair_dry_run_deduplicates_overlapping_orphans(self) -> None:
+        migration = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "plan": {
+                    "schedule": {}, "watcher": {}, "missing": ["deleted"]},
+            }), stderr="")
+        workspace = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "actions": [
+                    {"action": "prune-orphaned-trigger", "agent": "deleted"}],
+            }), stderr="")
+        with (
+            mock.patch.object(health_check, "cli_shim_path",
+                              return_value=_HEALTH_SHIM),
+            mock.patch.object(health_check, "current_crontab_lines",
+                              return_value=self._canonical_lines()),
+            mock.patch.object(health_check, "_registered_roots",
+                              return_value=[("project", self.root)]),
+            mock.patch.object(health_check.plugins, "union", return_value={}),
+            mock.patch.object(health_check.subprocess, "run",
+                              side_effect=[migration, workspace]),
+            mock.patch.object(health_check, "_resolve_smoketest_runtime",
+                              return_value=None),
+            mock.patch.object(health_check, "_git_head", return_value=None),
+            mock.patch.object(health_check.repos, "default_root",
+                              return_value=self.root),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(health_check.repair(dry_run=True), 0)
+        actions = json.loads(stdout.getvalue())["actions"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "prune-orphaned-trigger")
+        self.assertTrue(all(
+            action.get("workspace") == str(self.root)
+            for action in actions[1:]
+        ))
+
+    def test_workspace_repair_plan_does_not_mutate_lifecycle(self) -> None:
+        states = {
+            "remote": {
+                "state": "active", "triggerStates": {"watcher": "active"}},
+            "watched": {
+                "state": "stopped", "triggerStates": {"watcher": "stopped"}},
+        }
+        git_result = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        with (
+            mock.patch.object(health_check, "_agent_states",
+                              return_value=states),
+            mock.patch.object(health_check, "_add_persisted_agent_states"),
+            mock.patch("agents_live.activate.list_active_agent_names",
+                       return_value={"orphan"}),
+            mock.patch.object(health_check, "list_agents", return_value=[]),
+            mock.patch.object(health_check, "agent_file_exists",
+                              return_value=False),
+            mock.patch.object(health_check.ownership, "load_owners",
+                              return_value={"remote": "other-host"}),
+            mock.patch.object(health_check.ownership, "current_host",
+                              return_value="this-host"),
+            mock.patch.object(
+                health_check, "list_reboot_watcher_agent_names",
+                return_value=["remote", "watched"]),
+            mock.patch.object(health_check, "_git_head", return_value=None),
+            mock.patch.object(health_check.subprocess, "run",
+                              return_value=git_result),
+            mock.patch.object(health_check, "_lifecycle") as lifecycle,
+        ):
+            actions = health_check.plan_sweep()
+        lifecycle.assert_not_called()
+        self.assertEqual(
+            [action["action"] for action in actions],
+            [
+                "prune-orphaned-trigger",
+                "deactivate-for-ownership",
+                "restart-watcher",
+            ],
+        )
 
     def test_ensure_converges_and_respects_opt_in(self) -> None:
         installed: dict[str, list[str]] = {}
@@ -3867,8 +4137,7 @@ class TestHealthCheckLoop(_TempProject):
                               return_value=[foreign]),
             mock.patch.object(health_check, "install_crontab", fake_install),
         ):
-            # Not installed + install=False: never adds (opt-in stays
-            # with an explicit health-check run).
+            # Not installed + install=False: never adds maintenance.
             self.assertFalse(
                 health_check.ensure_health_cron_lines(install=False))
             self.assertNotIn("lines", installed)
@@ -3943,7 +4212,7 @@ class TestHealthCheckLoop(_TempProject):
                 side_effect=health_check.ownership.OwnershipUnavailableError(
                     "no backend")),
             mock.patch.object(sys, "argv",
-                              ["agents-live health-check", "--sweep"]),
+                              ["agents-live internal maintain", "--sweep"]),
         ):
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -3955,11 +4224,13 @@ class TestHealthCheckLoop(_TempProject):
         self.assertEqual(payload["status"], "ok")
         self.assertIn("legacy-agent", stderr.getvalue())
 
-    def test_host_command_is_declared(self) -> None:
-        command = cli.COMMAND_BY_NAME["health-check"]
+    def test_maintenance_is_internal_only(self) -> None:
+        self.assertNotIn("health-check", cli.COMMAND_BY_NAME)
+        internal = cli.COMMAND_BY_NAME["internal"]
+        command = next(
+            child for child in internal.subcommands if child.name == "maintain")
         self.assertEqual(command.module, "health_check")
-        self.assertEqual(command.root, "none")
-        self.assertIn("crontab", command.probes)
+        self.assertTrue(command.hidden)
 
 
 if __name__ == "__main__":

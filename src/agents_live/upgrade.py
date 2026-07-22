@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, init, paths, plugins, preflight, repos, state_migration
+from . import __version__, init, paths, plugins, preflight, repos
 from .spawn import find_uv
 
 
@@ -22,6 +22,9 @@ def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
         return [("selected project", local)], []
 
     targets: dict[Path, str] = {}
+    global_root = paths.global_root()
+    if paths.config_source(global_root) is not None:
+        targets[global_root] = "global workspace"
     if local is not None:
         targets[local] = "current project"
 
@@ -32,6 +35,9 @@ def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
             continue
         root = Path(value)
         targets.setdefault(root, alias)
+    from . import health_check  # noqa: PLC0415
+    for root in health_check.persisted_roots():
+        targets.setdefault(root, f"active workspace {root.name}")
     return [(label, root) for root, label in targets.items()], errors
 
 
@@ -44,6 +50,17 @@ def _refresh_payload(root: Path) -> None:
     else:
         message = "skill payload already matches the installed package"
     print(f"{root}: {message}")
+
+
+def _migrate_triggers(root: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "agents_live.cli", "--repo", str(root),
+         "internal", "migrate"],
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise OSError(
+            f"trigger migration failed with exit {completed.returncode}")
 
 
 def _upgrade_runtime(roots: list[Path] | None = None) -> int:
@@ -132,16 +149,14 @@ def main() -> int:
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)
 
-    # Converge the built-in health-check loop's crontab entries: a
+    # Converge the built-in automatic maintenance crontab entries: a
     # runtime upgrade can re-home the pinned shim path they carry. This
     # branch runs in the freshly installed CLI, so the canonical lines
-    # are the new install's. Converge-only: hosts opt into the loop by
-    # running `agents-live health-check`, never as an upgrade side
-    # effect. Best-effort: no crontab is not fatal.
+    # are the new install's. Best-effort: no crontab is not fatal.
     try:
         from . import health_check  # noqa: PLC0415
-        if health_check.ensure_health_cron_lines(install=False):
-            print("Converged the health-check loop crontab entries")
+        if health_check.ensure_health_cron_lines():
+            print("Converged the automatic maintenance schedule")
     except Exception as exc:
         print(f"warning: could not converge health-check crontab entries: "
               f"{exc}", file=sys.stderr)
@@ -154,7 +169,7 @@ def main() -> int:
     for label, root in targets:
         print(f"Refreshing {label}: {root}")
         try:
-            state_migration.apply(root)
+            _migrate_triggers(root)
             _refresh_payload(root)
         except (OSError, ValueError) as exc:
             preflight.emit_failure(

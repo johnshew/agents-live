@@ -59,7 +59,7 @@ POST_COMMAND_ARGS = (GLOBAL_ARGS[0], HELP_ARG)
 COMMANDS = (
     Cmd(
         "run", "Execute an agent once.", "run", "in-process",
-        root="auto-marker", json=True, name_sugar=True, default_notice=True,
+        json=True, name_sugar=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
@@ -68,8 +68,8 @@ COMMANDS = (
     ),
     Cmd(
         "start", "Activate cron and watcher triggers.", "activate", "in-process",
-        root="auto-marker", probes=("crontab", "inotify"),
-        dynamic_probes="start", json=True, name_sugar=True, default_notice=True,
+        probes=("crontab", "inotify"), dynamic_probes="start", json=True,
+        name_sugar=True,
         mutually_exclusive=(("--yes", "--all"),),
         requires_one_of=("--name", "--all"),
         args=(
@@ -99,6 +99,21 @@ COMMANDS = (
             Cmd(
                 "list-reboot-watchers", "List durable watchers.", "activate",
                 "in-process",
+            ),
+            Cmd(
+                "maintain", "Run automatic host maintenance.", "health_check",
+                "in-process", hidden=True,
+                args=(
+                    Arg(("--quiet",), "Suppress progress output."),
+                    Arg(("--sweep",), "Run one workspace sweep.", hidden=True),
+                    Arg(("--dry-run",), "Show planned workspace repairs.",
+                        hidden=True),
+                ),
+            ),
+            Cmd(
+                "migrate", "Converge persisted trigger invocations.",
+                "migrate", "in-process", hidden=True,
+                args=(Arg(("--dry-run",), "Show planned trigger rewrites."),),
             ),
         ),
     ),
@@ -171,13 +186,21 @@ COMMANDS = (
         "doctor", "Check environment and installation readiness.", "doctor",
         "in-process", root="markerless", json=True,
         all_repos=True, update_notice=False,
+        mutually_exclusive=(("--all-repos", "--repair"),),
         args=(
             Arg(("--all-repos",), "Check every registered repository."),
+            Arg(("--repair",), "Run immediate repair before diagnosis."),
+            Arg(("--dry-run",), "Show the repair plan without mutating."),
         ),
     ),
     Cmd(
-        "init", "Initialize the project layout.", "init", "in-process",
+        "init", "Initialize the global or repository workspace.", "init",
+        "in-process",
         root="none", json=True,
+        args=(
+            Arg(("--repo",), "Initialize and enroll a repository.",
+                kind="value"),
+        ),
     ),
     Cmd(
         "upgrade", "Upgrade runtime and project skill payloads.", "upgrade",
@@ -186,23 +209,6 @@ COMMANDS = (
         args=(
             Arg(("--runtime-only",), "Upgrade only the runtime."),
             Arg(("--skills-only",), "Refresh only skill payloads."),
-        ),
-    ),
-    Cmd(
-        "migrate", "Converge persisted runtime invocations.", "migrate",
-        "in-process", probes=("crontab",), json=True, default_notice=True,
-        args=(
-            Arg(("--dry-run", "-n"), "Print the plan without mutating."),
-            Arg(("--adopt",), "Adopt entries from a moved root.", kind="value"),
-        ),
-    ),
-    Cmd(
-        "health-check", "Run the host check-and-repair loop.", "health_check",
-        "in-process", root="none", probes=("crontab",), json=True,
-        update_notice=False,
-        args=(
-            Arg(("--quiet",), "Suppress progress output."),
-            Arg(("--sweep",), "Internal per-repo sweep mode.", hidden=True),
         ),
     ),
     Cmd(
@@ -238,12 +244,6 @@ COMMANDS = (
         subcommands=(
             Cmd("list", "List registered repositories.", "repos", "in-process",
                 root="none"),
-            Cmd(
-                "add", "Register a repository.", "repos", "in-process",
-                root="none",
-                args=(Arg(("path",), "Repository path.", kind="positional",
-                          required=True),),
-            ),
             Cmd(
                 "default", "Set the fallback repository.", "repos",
                 "in-process", root="none",

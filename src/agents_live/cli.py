@@ -62,21 +62,8 @@ from .cli_spec import (
 )
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
-# inside a git repository that has no marker write the minimal local-mode
-# marker at the git root instead of failing, so the simple local case
-# needs no `init`. The guess happens once, is recorded in a file
-# `git status` shows, and never applies to scheduled work (persisted
-# invocations pin the root). Every other command - and any resolution
-# failure caused by a set-but-invalid AGENTS_LIVE_REPO - keeps the
-# fail-loudly contract.
-_MARKER_TEMPLATE = """\
-# agents-live project marker (auto-created by `agents-live {cmd}`).
-# Marks the project root and holds project config; an empty config means
-# all defaults (local ownership mode). Run `agents-live init` to install
-# the skill, seed agent directories, or declare non-local configuration.
-"""
-
 DOCS_URL = "https://github.com/johnshew/agents-live"
+INIT_REPO_ENV_VAR = "AGENTS_LIVE_INIT_REPO"
 
 
 def _usage() -> str:
@@ -100,6 +87,34 @@ def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
     if name_sugar and rest and not rest[0].startswith("-"):
         return ["--name", rest[0], *rest[1:]]
     return rest
+
+
+def _normalize_agent_path(command: Cmd, rest: list[str]) -> tuple[list[str], bool]:
+    """Canonicalize an explicit agent-file selector and report its presence."""
+    if not command.name_sugar:
+        return rest, False
+    index: int | None = None
+    if rest and not rest[0].startswith("-"):
+        index = 0
+    else:
+        for position, token in enumerate(rest):
+            if token == "--name" and position + 1 < len(rest):
+                index = position + 1
+                break
+    if index is None:
+        return rest, False
+    value = rest[index]
+    candidate = Path(value).expanduser()
+    is_path = (
+        candidate.suffix.lower() == ".md"
+        or any(separator in value for separator in (os.sep, os.altsep)
+               if separator)
+    )
+    if not is_path:
+        return rest, False
+    normalized = list(rest)
+    normalized[index] = str(candidate.resolve())
+    return normalized, True
 
 
 def _finish(code: int, command: Cmd | None, rest: list[str],
@@ -173,47 +188,6 @@ def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
     return code
 
 
-def _git_root(start: Path) -> Path | None:
-    """Nearest ancestor (or *start*) containing ``.git`` - a directory
-    for a normal checkout, a file for a worktree."""
-    current = start.resolve()
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
-def _adopt_git_root(cmd: str) -> Path | None:
-    """Write the minimal local-mode marker at the enclosing git root and
-    re-resolve. None (the caller falls through to the structured
-    ``no_project_root`` error) when AGENTS_LIVE_REPO is set (a typo'd
-    env root must fail loudly, not be papered over), there is no git
-    root, the marker already exists, or the write fails."""
-    if os.environ.get(paths.ENV_VAR, "").strip():
-        return None
-    git_root = _git_root(Path.cwd())
-    if git_root is None:
-        return None
-    marker = git_root / paths.CONFIG_DOTFILE
-    if marker.exists():
-        return None
-    try:
-        marker.write_text(_MARKER_TEMPLATE.format(cmd=cmd), encoding="utf-8")
-    except OSError:
-        return None
-    paths.clear_cache()
-    try:
-        root = paths.resolve_root()
-    except ValueError:
-        return None
-    print(
-        f"agents-live: no project marker found; created {marker} "
-        "(local mode; run `agents-live init` for more)",
-        file=sys.stderr,
-    )
-    return root
-
-
 def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
     """Trigger-derived capability set for ``start`` (2026-07-12 finding:
     a cron-only agent must not require inotify). None = the default probe
@@ -244,6 +218,27 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    selected_repo: Path | None = None
+
+    repo_indexes = [
+        index for index, token in enumerate(args) if token == "--repo"
+    ]
+    if len(repo_indexes) > 1:
+        _emit_failure(
+            "usage_error", "--repo", "--repo may be specified only once",
+            json_mode="--json" in args)
+        return 2
+    if repo_indexes:
+        index = repo_indexes[0]
+        if index + 1 >= len(args):
+            _emit_failure(
+                "usage_error", "--repo", "--repo requires a path or alias",
+                json_mode="--json" in args)
+            return 2
+        if index != 0:
+            selection = args[index:index + 2]
+            del args[index:index + 2]
+            args[0:0] = selection
 
     # Global flags, accepted in any order before the subcommand.
     json_mode = False
@@ -277,10 +272,14 @@ def main(argv: list[str] | None = None) -> int:
             # Env var carries the choice into in-process resolution and any
             # child processes (watchers, handlers, subprocess subcommands).
             os.environ[paths.ENV_VAR] = str(root)
+            selected_repo = root
             paths.clear_cache()
             args = args[2:]
             continue
         break
+
+    if args and args[0] == "init" and selected_repo is not None:
+        os.environ[INIT_REPO_ENV_VAR] = str(selected_repo)
 
     if not args or args[0] in ("-h", "--help"):
         print(_usage())
@@ -340,16 +339,15 @@ def main(argv: list[str] | None = None) -> int:
         _emit_failure("usage_error", cmd, invalid, json_mode=json_mode)
         return 2
 
+    rest, explicit_agent_path = _normalize_agent_path(command, rest)
+    if explicit_agent_path and not os.environ.get(paths.ENV_VAR, "").strip():
+        os.environ[paths.ENV_VAR] = str(Path.cwd().resolve())
+        paths.clear_cache()
+
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module.
     if command.root != "none" and not all_repos:
-        if (
-            command.root == "auto-marker"
-            and not os.environ.get(paths.ENV_VAR, "").strip()
-            and paths._walk_for_marker(Path.cwd()) is None
-        ):
-            _adopt_git_root(cmd)
         try:
             paths.resolve_root()
         except ValueError as exc:
@@ -357,19 +355,11 @@ def main(argv: list[str] | None = None) -> int:
                 command.root == "markerless"
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
-            if not allow_markerless_invocation and (
-                    command.root != "auto-marker"
-                    or _adopt_git_root(cmd) is None):
+            if not allow_markerless_invocation:
                 preflight.emit_error(preflight.CapabilityFailure(
                     "no_project_root", "project-root", cmd, str(exc)),
                     json_mode=json_mode)
                 return 2
-        if (
-            paths.resolution_source() == "default"
-            and command.default_notice
-        ):
-            print(f"agents-live: using default repo {paths.resolve_root()}",
-                  file=sys.stderr)
 
     rest = _apply_name_sugar(command.name_sugar, rest)
 
@@ -443,7 +433,17 @@ def main(argv: list[str] | None = None) -> int:
     import importlib
     # Package-aware dispatch (Phase 4): as loose scripts the modules are
     # top-level; installed as a package they are agents_live.<name>.
-    module_name = command.module
+    active = command
+    if rest:
+        child = next(
+            (item for item in command.subcommands if item.name == rest[0]),
+            None,
+        )
+        if child is not None:
+            active = child
+            if child.module != command.module:
+                rest = rest[1:]
+    module_name = active.module
     if __package__:
         module_name = f"{__package__}.{module_name}"
     module = importlib.import_module(module_name)
