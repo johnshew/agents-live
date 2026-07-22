@@ -9,6 +9,12 @@ history is retained in the source repository.
 - fix: render nested command help from the selected subcommand. (#112)
   `logs timeline --help` now lists only timeline arguments, documents its
   ISO-8601 time filter, and rejects unrelated parent log-query options.
+- feat!: simplify startup around explicit agent file paths. (#114)
+  Bare `init` bootstraps host support, `init --repo` enrolls an optional default
+  workspace, and direct `run` or `start` paths need no registration. Maintenance
+  and trigger migration are automatic; `doctor --repair --dry-run` previews
+  concrete repairs instead of exposing public `health-check` or `migrate`
+  commands, and `repos add` is retired in favor of `init --repo`.
 
 ## 2.2.0 - 2026-07-21
 
