@@ -20,74 +20,14 @@ title, decide where it belongs in the vault, and emit JSON:
 { "moves": [{ "from": "...", "to": "...", "content": "..." }] }
 ```
 
-Drop a raw note into `notes/inbox/` and the watcher fires within
-seconds; one agent run later the note is cleaned up and filed. **The
-agent thinks, a script acts**: the agent decides, but the only thing
-that touches your files is a deterministic handler you own.
+# agents-live
 
-## Safe by default
+**Take your agents live.** Add cron and file-watch automation to the Claude
+Code and GitHub Copilot agents you already use.
 
-Write access is a ladder with an explicit final rung:
-
-1. **plan** (the default) - the agent runs read-only and emits JSON; a
-   runner validates it (JSON Schema, size caps, path roots, provenance)
-   and hands it to your deterministic handler.
-2. **pipeline** - the agent's tool surface narrows to a schema-checked
-   `put`/`get` side-channel that your pre/post-processors mediate, over
-   a token-protected loopback endpoint that exists only for the
-   duration of one run.
-3. **write** - full write access: the last option, an explicit
-   per-agent opt-in.
-
-This ladder is tool policy, not a sandbox - agents inherit your local
-account's privileges unless you configure stricter CLI or OS isolation.
-
-## Lightweight
-
-No framework to learn, no APIs to call, no daemon to maintain - just
-things you use every day: git, files, markdown, cron, and scripts.
-Cron and inotifywait do the triggering; agents-live adds activation,
-debounce, concurrency, structured logs, and per-run token cost. If you
-can read a crontab, you can audit the whole system. No application
-daemons or gateways, no externally reachable inbound ports, no
-databases (plain-text JSONL logs, aged into monthly Parquet archives).
-The only persistent processes are one small watcher loop per
-file-watch agent; cron-only agents need none.
-
-## Install
-
-```bash
-uv tool install agents-live   # or: uv tool install <path-to-wheel>
-```
-
-Generate shell completion from the same command spec as the CLI:
-
-```bash
-source <(agents-live completions bash)
-# zsh: source <(agents-live completions zsh)
-```
-
-On interactive terminal invocations, agents-live checks PyPI for a newer
-stable release when its shared cached result is missing or one hour old. The
-result is stored under
-`$XDG_CACHE_HOME/agents-live/` (normally `~/.cache/agents-live/`). For ordinary
-commands, the refresh runs in the background and is skipped for
-scheduled/internal, quiet, JSON, piped, or redirected invocations. Network and
-cache failures never affect the command. This request sends only ordinary
-package-index request metadata; it does not include project or agent data.
-`agents-live doctor` displays the cached result without refreshing or writing
-it, preserving its read-only contract. Checks never install updates in the
-background. Run
-`agents-live upgrade` to reinstall the uv-managed runtime at the latest stable
-release without dropping co-installed requirements, converge project-declared
-plugins, and then refresh managed skill payloads using the newly installed CLI.
-
-Bare `agents-live upgrade` works outside a project and refreshes the current
-initialized project plus every available registered repository. An explicit
-`--repo PATH|ALIAS` limits payload refresh to that project. Use `--runtime-only`
-or `--skills-only` to run one half of the workflow. Unavailable registered
-repositories are reported without blocking other refreshes. `init` remains the
-first-time project setup command.
+An agent stays one Markdown file. A few frontmatter fields say when it runs
+and how it may act. No application server, database, or agent registry is
+required.
 
 ## Quick start
 
@@ -95,70 +35,95 @@ first-time project setup command.
 uv tool install agents-live
 agents-live init
 agents-live run ./my-agent.md
+```
+
+The path is authoritative. It resolves from the current directory and does
+not require an initialized repository or registered agent. After the
+foreground run looks right, activate its cron or file-watch triggers:
+
+```bash
 agents-live start ./my-agent.md
+```
+
+Inspect and stop it with the same path:
+
+```bash
 agents-live status
 agents-live logs
 agents-live stop ./my-agent.md
 ```
 
-An explicit agent path resolves from the current directory and requires no
-repository registration. Initialize an additional repository later with
-`agents-live init --repo ~/repos/example`.
+## One file
 
-Projects that need plugin-provided adapters or registry ownership declare the
-committed wheel in `.agents-live.toml`:
-
-```toml
-[plugins]
-example-plugin = { path = "Agents/plugins/example-plugin-1.0.0-py3-none-any.whl", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+```yaml
+---
+runtime: claude
+mode: plan
+watchPath: notes/inbox/
+post-processor: file-notes.sh
+---
+For each new file in notes/inbox/: add frontmatter and tags, fix the
+title, decide where it belongs, and emit JSON describing the changes.
 ```
 
-The path is repository-relative and the optional SHA-256 pins its contents.
-`init`, `start`, and `upgrade` converge declarations into the host-global uv
-tool environment. `doctor` reports missing or broken entry points.
+Drop a note into `notes/inbox/` and the watcher runs the agent. The agent
+decides what should happen; the deterministic post-processor you own changes
+the files.
 
-For work across projects, initialize normalized absolute repository paths in
-the user configuration (`$XDG_CONFIG_HOME/agents-live/config.toml`, normally
-`~/.config/agents-live/config.toml`):
+Use `schedule` instead of `watchPath` for cron, or declare both:
 
-```bash
-agents-live init --repo ~/repos/<target-project>
-agents-live --repo <target-project> status       # directory name also works
-agents-live status --all-repos
-agents-live doctor --all-repos
-agents-live dashboard --all-repos   # read-only repository selector
+```yaml
+schedule: "0 8 * * *"
 ```
 
-Repository initialization also selects that repository as the configured
-default for later name-based commands outside a repository.
+## Safe by default
 
-An explicit agent path bypasses workspace selection. Name-based selection
-precedence is explicit `--repo` path or registered name, `AGENTS_LIVE_REPO`,
-the nearest local marker, then the configured default and global workspace. A
-default never overrides the current project. Aggregate commands are read-only;
-lifecycle mutations target one selected workspace, and persisted commands pin
-its absolute path.
+Execution modes make write access explicit:
+
+1. `plan` is read-only. The agent emits JSON for a validated handler to apply.
+2. `pipeline` limits the agent to a schema-checked data channel shared with
+   your pre-processors and post-processors.
+3. `write` grants full write access as an explicit per-agent choice.
+
+This is tool policy, not a sandbox. Agents still inherit the permissions of
+your local account and agent CLI.
+
+## Lightweight
+
+Cron and `inotifywait` do the triggering. agents-live adds activation,
+debounce, concurrency control, structured logs, cost reporting, and automatic
+trigger repair.
+
+Cron-only agents have no persistent process. A file-watch agent uses one small
+local watcher. There are no externally reachable ports or databases.
+
+## Go further
+
+Repositories are optional. Initialize one later with `agents-live init --repo`
+when you need shared configuration or name-based commands.
+
+See the [command reference](src/agents_live/skill/docs/commands.md) for
+repository workflows, health checks and repair, upgrades, dashboards, shell
+completion, plugins, ownership, and multi-repository operations. The
+[architecture guide](src/agents_live/skill/docs/approach.md) covers runtime,
+safety, persistence, and maintenance behavior.
 
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- `crontab` (scheduled agents), `inotifywait` (file watchers; preflight
-  is trigger-derived, so cron-only setups don't need inotify)
-- An agent CLI for agent-backed definitions: `claude` or `copilot`
+- `crontab` for scheduled agents
+- `inotifywait` for file-watch agents
+- `claude` or `copilot` for agent-backed definitions
 
-Linux-first: Ubuntu on WSL is the reference platform, Windows support
-is partial, and macOS is untested. `agents-live doctor` reports
-exactly what this host is missing.
+Linux is the primary platform, with Ubuntu on WSL as the reference setup.
+Windows support is partial and macOS is untested. `agents-live doctor` reports
+what the current host needs.
 
 ## Documentation
 
-The `/agents-live` skill is optional conversational support for the
-CLI: `agents-live init` installs it for Claude Code, every flow it
-drives is an ordinary `agents-live` command, and the CLI is fully
-usable without it.
+The optional `/agents-live` skill is installed by `agents-live init`, but every
+workflow remains an ordinary CLI command.
 
 - [Overview](src/agents_live/skill/docs/overview.md)
-- [Architecture](src/agents_live/skill/docs/approach.md)
-- [Commands](src/agents_live/skill/docs/commands.md)
 - [Starter templates](src/agents_live/skill/templates/)
-- [SKILL.md](src/agents_live/skill/SKILL.md) - full reference
+- [Skill reference](src/agents_live/skill/SKILL.md)
