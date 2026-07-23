@@ -172,11 +172,15 @@ def state_home() -> Path:
     return base / "agents-live"
 
 
+def xdg_data_home() -> Path:
+    """User-level XDG data directory."""
+    root = os.environ.get("XDG_DATA_HOME", "").strip()
+    return Path(root).expanduser() if root else Path.home() / ".local" / "share"
+
+
 def data_home() -> Path:
     """User-level durable data root for host-global agent content."""
-    root = os.environ.get("XDG_DATA_HOME", "").strip()
-    base = Path(root).expanduser() if root else Path.home() / ".local" / "share"
-    return base / "agents-live"
+    return xdg_data_home() / "agents-live"
 
 
 def global_root() -> Path:

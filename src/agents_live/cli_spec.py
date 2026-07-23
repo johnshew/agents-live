@@ -261,22 +261,31 @@ COMMANDS = (
     Cmd(
         "completions", "Generate shell completion scripts.", "completions",
         "in-process", root="none",
-        help_details="""Install for the current shell session:
+        mutually_exclusive=(("shell", "--update"),),
+        requires_one_of=("shell", "--update"),
+        help_details="""Completions are installed automatically by init and runtime upgrades.
+
+Bash:
+    # Load completions for the current session.
     source <(agents-live completions bash)
+
+    Persistent discovery requires bash-completion to be installed and loaded.
+
+Zsh:
+    # Load completions for the current session.
     source <(agents-live completions zsh)
 
-Install persistently:
-    bash:
-        mkdir -p ~/.local/share/bash-completion/completions
-        agents-live completions bash > ~/.local/share/bash-completion/completions/agents-live
-    zsh:
-        mkdir -p ~/.zfunc
-        agents-live completions zsh > ~/.zfunc/_agents-live
+    Add the user site-functions directory to fpath before compinit:
+        fpath=("${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions" $fpath)
+        autoload -Uz compinit
+        compinit
 
-For zsh, add ~/.zfunc to fpath and run compinit from ~/.zshrc.""",
+Persistent install or repair:
+    agents-live completions --update""",
         args=(
-            Arg(("shell",), "Shell name.", kind="positional", required=True,
+            Arg(("shell",), "Shell name.", kind="positional",
                 choices=("bash", "zsh")),
+            Arg(("--update",), "Install or refresh both shells."),
         ),
     ),
     Cmd(
@@ -425,6 +434,25 @@ def _ebnf_command(command: Cmd) -> list[str]:
         suffix = _ebnf_flags(
             command, skip=frozenset({"--name", "--all"}))
         return [f"{prefix} {selector}" + (f" {suffix}" if suffix else "")]
+    exact_one = next(
+        (group for group in command.mutually_exclusive
+         if set(group) == set(command.requires_one_of)),
+        None,
+    )
+    if exact_one is not None:
+        alternatives = []
+        skip = set()
+        for selector in exact_one:
+            argument = next(
+                item for item in command.args if selector in item.flags)
+            skip.update(argument.flags)
+            if argument.kind == "positional" and argument.choices:
+                alternatives.extend(f'"{choice}"' for choice in argument.choices)
+            else:
+                alternatives.extend(f'"{flag}"' for flag in argument.flags)
+        suffix = _ebnf_flags(command, skip=frozenset(skip))
+        group = "( " + " | ".join(alternatives) + " )"
+        return [f"{prefix} {group}" + (f" {suffix}" if suffix else "")]
     if command.args and command.subcommands:
         # Own query flags OR a subcommand: render the query and each
         # subcommand's flags as named productions.
@@ -579,6 +607,21 @@ def _flag_present(argv: list[str], flag: str) -> bool:
                for token in argv)
 
 
+def _selector_present(command: Cmd, argv: list[str], selector: str) -> bool:
+    """Return whether a declared flag or positional selector is present."""
+    if selector.startswith("-"):
+        return _flag_present(argv, selector)
+    argument = next(
+        (item for item in command.args if selector in item.flags), None)
+    if argument is None or argument.kind != "positional":
+        return False
+    return any(
+        not token.startswith("-")
+        and (not argument.choices or token in argument.choices)
+        for token in argv
+    )
+
+
 def validation_error(command: Cmd, argv: list[str]) -> str | None:
     """Return a concise spec-derived usage error, or None.
 
@@ -600,15 +643,18 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
             return f"{command.name} requires one of: " + ", ".join(
                 item.name for item in command.subcommands if not item.hidden)
     for group in current.mutually_exclusive:
-        present = [flag for flag in group if _flag_present(argv, flag)]
+        present = [
+            selector for selector in group
+            if _selector_present(current, argv, selector)
+        ]
         if len(present) > 1:
             return " and ".join(present) + " are mutually exclusive"
     if current.requires_one_of:
         sugared = (current.name_sugar and argv
                    and not argv[0].startswith("-"))
         if not sugared and not any(
-                _flag_present(argv, flag)
-                for flag in current.requires_one_of):
+            _selector_present(current, argv, selector)
+            for selector in current.requires_one_of):
             options = [
                 "NAME, --name NAME" if flag == "--name" and current.name_sugar
                 else flag

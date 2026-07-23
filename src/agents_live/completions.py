@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
+from . import paths, preflight
 from .cli_spec import (
     COMMANDS,
     GLOBAL_ARGS,
@@ -154,10 +157,70 @@ compdef _agents_live agents-live
 """
 
 
+def destinations() -> tuple[Path, Path]:
+    """Return the Bash and Zsh user completion destinations."""
+    data_home = paths.xdg_data_home()
+    return (
+        data_home / "bash-completion" / "completions" / "agents-live",
+        data_home / "zsh" / "site-functions" / "_agents-live",
+    )
+
+
+def update() -> tuple[Path, Path]:
+    """Install both generated completion scripts for the current user."""
+    bash_path, zsh_path = destinations()
+    paths.atomic_write_text(bash_path, bash())
+    paths.atomic_write_text(zsh_path, zsh())
+    return bash_path, zsh_path
+
+
+def remove() -> tuple[Path, ...]:
+    """Remove completion files installed by agents-live."""
+    removed = []
+    for path in destinations():
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        removed.append(path)
+    return tuple(removed)
+
+
+def update_best_effort(operation: str) -> bool:
+    """Update completions without failing a larger lifecycle operation."""
+    try:
+        update()
+    except OSError as exc:
+        print(
+            f"warning: could not update shell completions during "
+            f"{operation}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("shell", choices=("bash", "zsh"))
+    parser.add_argument("shell", nargs="?", choices=("bash", "zsh"))
+    parser.add_argument(
+        "--update", action="store_true",
+        help="Install or refresh completions for both shells",
+    )
     args = parser.parse_args()
+    if args.update:
+        if args.shell is not None:
+            parser.error("--update cannot be combined with a shell")
+        try:
+            bash_path, zsh_path = update()
+        except OSError as exc:
+            preflight.emit_failure("completions", str(exc))
+            return 1
+        print(f"Installed Bash completions: {bash_path}")
+        print(f"Installed Zsh completions: {zsh_path}")
+        return 0
+    if args.shell is None:
+        parser.error("a shell or --update is required")
     print(bash() if args.shell == "bash" else zsh(), end="")
     return 0
 

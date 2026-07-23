@@ -668,6 +668,8 @@ class TestProjectPlugins(_TempProject):
             mock.patch.object(plugins, "converge", return_value=False) as converge,
             mock.patch.object(init, "install_skill", return_value=None),
             mock.patch.object(
+                completions, "update_best_effort", return_value=True) as update,
+            mock.patch.object(
                 health_check, "ensure_health_cron_lines", return_value=True),
             mock.patch("importlib.reload", return_value=mock.Mock(
                 main=mock.Mock(return_value=0))),
@@ -676,6 +678,7 @@ class TestProjectPlugins(_TempProject):
         ):
             self.assertEqual(init.main(), 0)
         converge.assert_called_once_with([paths.global_root(), self.root])
+        update.assert_called_once_with("init")
         self.assertEqual(repos.default_root(), self.root)
         self.assertIn(
             "into .claude/agents/<agent-name>.md", init_stdout.getvalue())
@@ -1962,6 +1965,71 @@ class TestCliContract(_TempProject):
                 self.assertEqual(cli.main(["completions", shell]), 0)
                 self.assertIn(marker, stdout.getvalue())
 
+    def test_completion_update_writes_both_xdg_scripts(self) -> None:
+        bash_path = (
+            self.root / "xdg-data" / "bash-completion" / "completions"
+            / "agents-live")
+        zsh_path = (
+            self.root / "xdg-data" / "zsh" / "site-functions"
+            / "_agents-live")
+        bash_path.parent.mkdir(parents=True)
+        bash_path.write_text("stale\n", encoding="utf-8")
+
+        self.assertEqual(completions.update(), (bash_path, zsh_path))
+
+        self.assertEqual(bash_path.read_text(encoding="utf-8"), completions.bash())
+        self.assertEqual(zsh_path.read_text(encoding="utf-8"), completions.zsh())
+
+    def test_completions_update_cli_reports_both_destinations(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(cli.main(["completions", "--update"]), 0)
+        output = stdout.getvalue()
+        self.assertIn(str(completions.destinations()[0]), output)
+        self.assertIn(str(completions.destinations()[1]), output)
+
+    def test_completions_requires_one_mode(self) -> None:
+        for argv in (["completions"],
+                     ["completions", "bash", "--update"]):
+            with (
+                self.subTest(argv=argv),
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                self.assertEqual(cli.main(argv), 2)
+                self.assertIn("error [usage_error]", stderr.getvalue())
+
+    def test_explicit_completion_update_reports_write_failure(self) -> None:
+        with (
+            mock.patch.object(
+                paths, "atomic_write_text", side_effect=PermissionError("denied")),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(cli.main(["completions", "--update"]), 1)
+        self.assertIn("error [operation_failed] completions: denied",
+                      stderr.getvalue())
+
+    def test_completion_update_best_effort_warns(self) -> None:
+        with (
+            mock.patch.object(
+                completions, "update", side_effect=PermissionError("denied")),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertFalse(completions.update_best_effort("init"))
+        self.assertIn(
+            "warning: could not update shell completions during init: denied",
+            stderr.getvalue(),
+        )
+
+    def test_completion_remove_preserves_sibling_files(self) -> None:
+        completions.update()
+        sibling = completions.destinations()[0].with_name("other-command")
+        sibling.write_text("keep\n", encoding="utf-8")
+
+        self.assertEqual(completions.remove(), completions.destinations())
+
+        self.assertFalse(completions.destinations()[0].exists())
+        self.assertFalse(completions.destinations()[1].exists())
+        self.assertTrue(sibling.is_file())
+
     def test_completions_help_explains_installation(self) -> None:
         for argv in (["completions", "help"], ["completions", "--help"],
                      ["help", "completions"]):
@@ -1970,11 +2038,11 @@ class TestCliContract(_TempProject):
                 mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             ):
                 self.assertEqual(cli.main(argv), 0)
-                self.assertIn(
-                    "~/.local/share/bash-completion/completions/agents-live",
-                    stdout.getvalue(),
-                )
-                self.assertIn("~/.zfunc/_agents-live", stdout.getvalue())
+                output = stdout.getvalue()
+                self.assertIn("source <(agents-live completions bash)", output)
+                self.assertIn("agents-live completions --update", output)
+                self.assertIn("bash-completion", output)
+                self.assertIn("fpath", output)
 
     def test_repos_list_exposes_structured_results(self) -> None:
         config_home = self.root / "contract-config"
@@ -2102,7 +2170,7 @@ class TestCliContract(_TempProject):
         ):
             self.assertEqual(cli.main(["upgrade"]), 0)
         runtime.assert_called_once_with([])
-        refresh.assert_called_once_with()
+        refresh.assert_called_once_with(refresh_skills=True)
         resolve_root.assert_not_called()
 
     def test_doctor_without_project_root_runs_host_checks(self) -> None:
@@ -3659,8 +3727,68 @@ class TestInstallSkill(_TempProject):
         ):
             self.assertEqual(upgrade.main(), 0)
         runtime.assert_called_once_with([target])
-        refresh.assert_called_once_with()
+        refresh.assert_called_once_with(refresh_skills=True)
         install.assert_not_called()
+
+    def test_runtime_only_upgrade_refreshes_installed_completions(self) -> None:
+        with (
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(upgrade, "_upgrade_runtime", return_value=0),
+            mock.patch.object(
+                upgrade, "_refresh_with_installed_cli", return_value=0) as refresh,
+            mock.patch("sys.argv", ["agents-live upgrade", "--runtime-only"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        refresh.assert_called_once_with(refresh_skills=False)
+
+    def test_installed_cli_refreshes_completions_before_skills(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(
+                headless, "cli_shim_path", return_value=Path("/bin/agents-live")),
+            mock.patch.object(
+                subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(
+                upgrade._refresh_with_installed_cli(refresh_skills=True), 0)
+        self.assertEqual(run.call_args_list, [
+            mock.call(
+                ["/bin/agents-live", "completions", "--update"], check=False),
+            mock.call(
+                ["/bin/agents-live", "upgrade", "--skills-only"], check=False),
+        ])
+
+    def test_completion_refresh_failure_does_not_block_skill_refresh(self) -> None:
+        failed = subprocess.CompletedProcess(args=[], returncode=1)
+        succeeded = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(
+                headless, "cli_shim_path", return_value=Path("/bin/agents-live")),
+            mock.patch.object(
+                subprocess, "run", side_effect=[failed, succeeded]) as run,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(
+                upgrade._refresh_with_installed_cli(refresh_skills=True), 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("warning: could not update shell completions",
+                      stderr.getvalue())
+
+    def test_completion_launch_failure_does_not_block_skill_refresh(self) -> None:
+        succeeded = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(
+                headless, "cli_shim_path", return_value=Path("/bin/agents-live")),
+            mock.patch.object(
+                subprocess, "run",
+                side_effect=[PermissionError("denied"), succeeded]) as run,
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertEqual(
+                upgrade._refresh_with_installed_cli(refresh_skills=True), 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("warning: could not update shell completions",
+                      stderr.getvalue())
 
     def test_skills_only_continues_after_project_refresh_failure(self) -> None:
         broken = Path("/repos/broken")
