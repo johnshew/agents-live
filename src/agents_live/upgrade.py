@@ -82,7 +82,7 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     return 0
 
 
-def _refresh_with_installed_cli() -> int:
+def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
     # cli_shim_path prefers the entry point beside the interpreter (the
     # uv tool env), so a freshly installed shim is found even when
     # ~/.local/bin is not on PATH yet.
@@ -91,14 +91,33 @@ def _refresh_with_installed_cli() -> int:
     try:
         executable = str(cli_shim_path())
     except AgentsLiveError as exc:
-        preflight.emit_failure(
-            "upgrade",
-            f"agents-live executable not found after runtime upgrade: {exc}")
+        detail = f"agents-live executable not found after runtime upgrade: {exc}"
+        if refresh_skills:
+            preflight.emit_failure("upgrade", detail)
+            return 1
+        print(f"warning: could not update shell completions: {detail}",
+              file=sys.stderr)
+        return 0
+    try:
+        completion_status = subprocess.run(
+            [executable, "completions", "--update"], check=False,
+        ).returncode
+    except OSError as exc:
+        completion_status = None
+        print(f"warning: could not update shell completions after runtime "
+              f"upgrade: {exc}", file=sys.stderr)
+    if completion_status not in (None, 0):
+        print("warning: could not update shell completions after runtime "
+              f"upgrade (exit {completion_status})", file=sys.stderr)
+    if not refresh_skills:
+        return 0
+    try:
+        return subprocess.run(
+            [executable, "upgrade", "--skills-only"], check=False,
+        ).returncode
+    except OSError as exc:
+        preflight.emit_failure("upgrade", f"skill refresh failed: {exc}")
         return 1
-    return subprocess.run(
-        [executable, "upgrade", "--skills-only"],
-        check=False,
-    ).returncode
 
 
 def main() -> int:
@@ -136,15 +155,17 @@ def main() -> int:
 
     if not args.skills_only:
         runtime_status = _upgrade_runtime(list(dict.fromkeys(target_roots)))
-        if runtime_status != 0 or args.runtime_only:
+        if runtime_status != 0:
             return runtime_status
+        if args.runtime_only:
+            return _refresh_with_installed_cli(refresh_skills=False)
         # After the runtime upgrade this process is still the old
         # version, so payload refresh must run in the freshly installed
         # CLI. One child covers every target: its own `_targets()`
         # resolves the current project and all registered repositories
         # (and honors AGENTS_LIVE_REPO), so per-repo children would only
         # multiply interpreter start-ups.
-        return _refresh_with_installed_cli()
+        return _refresh_with_installed_cli(refresh_skills=True)
 
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)

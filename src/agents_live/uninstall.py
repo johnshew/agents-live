@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import health_check, heartbeat, preflight
+from . import completions, health_check, heartbeat, preflight
 from .spawn import find_uv
 
 
@@ -41,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"warning: could not remove health-check crontab entries: "
               f"{exc}", file=sys.stderr)
+    try:
+        for path in completions.remove():
+            print(f"Removed shell completions: {path}")
+    except OSError as exc:
+        print(f"warning: could not remove shell completions: {exc}",
+              file=sys.stderr)
     try:
         uv = find_uv()
     except FileNotFoundError:

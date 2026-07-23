@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from . import health_check, paths, plugins, preflight, repos
+from . import completions, health_check, paths, plugins, preflight, repos
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -279,6 +279,8 @@ def main() -> int:
     elif skill_status == "refreshed":
         print("Refreshed skill payload to match the installed package: "
               ".claude/skills/agents-live/")
+
+    completions.update_best_effort("init")
 
     try:
         health_check.ensure_health_cron_lines()

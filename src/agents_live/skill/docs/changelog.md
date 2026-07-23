@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: install and maintain user shell completions automatically. (#117)
+  Init and runtime upgrades write XDG-aware Bash and Zsh scripts; explicit
+  update, current-session sourcing, shell prerequisites, and uninstall cleanup
+  remain available through the completion command and CLI reference.
+
 ## 3.0.0 - 2026-07-22
 
 - fix: render nested command help from the selected subcommand. (#112)
