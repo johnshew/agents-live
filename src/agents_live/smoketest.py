@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -15,9 +16,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TextIO
 
-from . import paths, preflight
+from . import hostruntime, paths, preflight
 from .headless import (
     AgentsLiveError,
     cron_is_active,
@@ -74,24 +74,8 @@ class SmokeInterrupted(RuntimeError):
     pass
 
 
-def _acquire_smoketest_lock(runtime: str, model: str) -> TextIO | None:
-    """Acquire the process-lifetime lock, returning None when another run owns it."""
-    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
-
-    SMOKETEST_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = SMOKETEST_LOCK_PATH.open("a+", encoding="utf-8")
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.seek(0)
-        owner = lock_file.read().strip() or "owner metadata unavailable"
-        preflight.emit_failure(
-            "smoketest",
-            f"another framework smoketest is running ({owner})",
-            code="resource_busy")
-        lock_file.close()
-        return None
-
+def _record_lock_owner(runtime: str, model: str) -> None:
+    """Write owner metadata into the held lock file for other runs to report."""
     owner = {
         "pid": os.getpid(),
         "host": socket.gethostname(),
@@ -99,21 +83,24 @@ def _acquire_smoketest_lock(runtime: str, model: str) -> TextIO | None:
         "model": model,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(json.dumps(owner, separators=(",", ":")) + "\n")
-    lock_file.flush()
-    os.fsync(lock_file.fileno())
-    return lock_file
+    with SMOKETEST_LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(json.dumps(owner, separators=(",", ":")) + "\n")
+        lock_file.flush()
+        os.fsync(lock_file.fileno())
 
 
-def _release_smoketest_lock(lock_file: TextIO) -> None:
-    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
-
+def _report_lock_busy() -> None:
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    finally:
-        lock_file.close()
+        owner = SMOKETEST_LOCK_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        owner = ""
+    preflight.emit_failure(
+        "smoketest",
+        f"another framework smoketest is running "
+        f"({owner or 'owner metadata unavailable'})",
+        code="resource_busy")
 
 
 def _in_vscode_sandbox() -> tuple[bool, str]:
@@ -459,9 +446,14 @@ def main() -> int:
     started_at = time.time()
     model_for_verdict = args.model or ("sonnet" if args.runtime in ("claude", "agency claude") else "claude-haiku-4.5")
 
-    lock_file = _acquire_smoketest_lock(args.runtime, model_for_verdict)
-    if lock_file is None:
+    smoketest_lock = contextlib.ExitStack()
+    try:
+        smoketest_lock.enter_context(
+            hostruntime.exclusive_lock(SMOKETEST_LOCK_PATH))
+    except hostruntime.LockBusy:
+        _report_lock_busy()
         return SMOKETEST_BUSY_EXIT
+    _record_lock_owner(args.runtime, model_for_verdict)
 
     handled_signals = (signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {signum: signal.getsignal(signum) for signum in handled_signals}
@@ -523,7 +515,7 @@ def main() -> int:
             signal.signal(signal.SIGINT, sigint_handler)
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
-            _release_smoketest_lock(lock_file)
+            smoketest_lock.close()
     if preflight.json_mode():
         try:
             verdict = json.loads(

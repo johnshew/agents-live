@@ -46,6 +46,7 @@ from .headless import (
     agent_file_exists,
 )
 
+from . import hostruntime
 from . import ownership
 from . import paths
 from . import preflight
@@ -566,14 +567,11 @@ def activate_watcher(name: str) -> int:
     ensure_logs_dir()
     loop_argv = cli_invocation("internal", "watch-loop", name,
                                flat_script=SCRIPT_PATH)
-    with open("/dev/null", "w") as devnull:
-        process = subprocess.Popen(
-            loop_argv,
-            cwd=repo_root(),
-            stdout=devnull,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+    process = hostruntime.spawn_detached(
+        loop_argv,
+        cwd=repo_root(),
+        stderr=subprocess.PIPE,
+    )
 
     time.sleep(1)
     if process.poll() is not None:

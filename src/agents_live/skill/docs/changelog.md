@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- refactor: move locking, detached spawning, liveness, and termination onto
+  the host-runtime seam. (#126)
+  Locks are file locks on every platform, and stopping a process now stops the
+  tree it started rather than a POSIX process group alone. Linux and WSL
+  behavior is unchanged.
 - refactor: extract the host-runtime seam. (#120)
   Triggers are described by a spec and rendered into crontab lines in one
   place, watcher policy decides batches without a live event source, and

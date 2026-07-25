@@ -27,6 +27,15 @@ import time
 from pathlib import Path
 
 
+def _hostruntime():
+    """The host-runtime seam, for both the packaged and flat layouts."""
+    try:
+        from . import hostruntime  # noqa: PLC0415 - layout-dependent
+    except ImportError:
+        import hostruntime  # noqa: PLC0415 - flat scripts checkout
+    return hostruntime
+
+
 def find_uv() -> str:
     """Locate the uv binary, searching common install paths if PATH is minimal.
 
@@ -96,8 +105,9 @@ def spawn_agent(
     """Spawn an Agents Live agent as a detached background process.
 
     Works reliably in all execution contexts by resolving uv via find_uv().
-    Detachment is ``start_new_session=True``: the child gets its own session
-    and process group, so it survives the caller's exit.
+    Detachment goes through ``hostruntime.spawn_detached``: the child leads
+    its own group or tree, so it survives the caller's exit and can still be
+    stopped as a unit.
 
     Args:
         root: Repository root path.
@@ -143,13 +153,11 @@ def spawn_agent(
         stderr_fh = subprocess.DEVNULL
 
     try:
-        proc = subprocess.Popen(
+        proc = _hostruntime().spawn_detached(
             agent_cmd,
-            cwd=str(root),
+            cwd=root,
             env=env,
-            stdout=subprocess.DEVNULL,
             stderr=stderr_fh,
-            start_new_session=True,
         )
         op_summary = ", ".join(op.get("type", "?") for op in (operations or []))
         files_summary = ", ".join(Path(f).name for f in changed_files[:3])

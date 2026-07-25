@@ -127,16 +127,10 @@ def _registry_lock() -> Iterator[None]:
     Without it, two concurrent repository registrations each rewrite the file
     from their own snapshot and the last rename silently drops the other
     repo."""
-    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
+    from .hostruntime import exclusive_lock  # noqa: PLC0415 - stdlib-only module
 
-    lock_path = config_path().parent / ".config.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with exclusive_lock(config_path().parent / ".config.lock", blocking=True):
+        yield
 
 
 def _write(registry: dict) -> None:

@@ -36,13 +36,12 @@ import re
 import shlex
 import shutil
 import sys
-import signal
 import subprocess
 import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -52,6 +51,7 @@ from typing import Any, Iterator
 import yaml
 
 from . import agent_adapters
+from . import hostruntime
 from . import paths
 from . import triggers
 from .mcp_config_loader import McpConfigError, load_mcp_servers
@@ -2612,27 +2612,23 @@ def install_crontab(lines: list[str]) -> None:
 @contextmanager
 def crontab_lock() -> Iterator[None]:
     """Fail fast if another agents-live process is mutating the user crontab."""
-    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
-
     from .heartbeat import state_dir  # noqa: PLC0415 - stdlib-only module
 
     # One resolver for the host state dir: heartbeat.state_dir() applies
     # expanduser() to XDG_STATE_HOME, and heartbeat.uninstall cleans up
     # this lock file - a second inline resolution here would drift.
-    lock_path = state_dir() / "crontab.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    # Never truncate or replace the inode another process may have locked.
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise AgentsLiveError(
-                "crontab is busy; another agents-live process is updating it; retry"
-            ) from exc
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock = ExitStack()
+    try:
+        lock.enter_context(
+            hostruntime.exclusive_lock(state_dir() / "crontab.lock"))
+    except hostruntime.LockBusy as exc:
+        raise AgentsLiveError(
+            "crontab is busy; another agents-live process is updating it; retry"
+        ) from exc
+    try:
+        yield
+    finally:
+        lock.close()
 
 
 def crontab_line_belongs_to_repo(line: str) -> bool:
@@ -2688,16 +2684,6 @@ def _list_active_cron_agent_names() -> list[str]:
     """
     lines = current_crontab_lines() or []
     return [name for line in lines if (name := _cron_line_agent_name(line))]
-
-
-def _pid_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _find_all_watcher_pids(name: str) -> list[int]:
@@ -2880,7 +2866,7 @@ def _wait_for_pids_to_stop(
         for pid in pids:
             if pid in stopped_pids:
                 continue
-            if not _pid_is_running(pid):
+            if not hostruntime.is_alive(pid):
                 stopped_pids.add(pid)
         if len(stopped_pids) == len(pids):
             return next(iter(stopped_pids))
@@ -2889,35 +2875,19 @@ def _wait_for_pids_to_stop(
 
 
 def stop_watcher(name: str) -> int | None:
-    """Stop all live watcher processes for an agent and return the first stopped PID found."""
-    pids = [pid for pid in _find_all_watcher_pids(name) if _pid_is_running(pid)]
+    """Stop all live watcher processes for an agent and return the first stopped PID found.
+
+    Each watcher leads its own group or tree, so termination reaches the
+    change-notification process it spawned rather than orphaning it.
+    """
+    pids = [pid for pid in _find_all_watcher_pids(name) if hostruntime.is_alive(pid)]
     if not pids:
         return None
 
-    stopped_pids: set[int] = set()
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
+        hostruntime.terminate(pid, grace_s=5)
 
-    stopped_pid = _wait_for_pids_to_stop(pids, stopped_pids, timeout_s=5)
-    if stopped_pid is not None:
-        return stopped_pid
-
-    for pid in pids:
-        if pid in stopped_pids:
-            continue
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            # A missing PID is already fully stopped, so treat it as complete here.
-            stopped_pids.add(pid)
-
-    stopped_pid = _wait_for_pids_to_stop(pids, stopped_pids, timeout_s=2)
-    if stopped_pid is not None:
-        return stopped_pid
-
+    stopped_pids = {pid for pid in pids if not hostruntime.is_alive(pid)}
     return next(iter(stopped_pids)) if stopped_pids else None
 
 
