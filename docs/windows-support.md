@@ -5,16 +5,9 @@ ms.date: 2026-07-25
 ms.topic: concept
 ---
 
-Status: draft. Whether to do this work at all is undecided and depends on
-the feasibility spike below. The design decisions recorded here stand
-unless that spike or implementation experience overturns them; see the
-decision log at the end.
-
-> [!IMPORTANT]
-> The first decision is feasibility, not architecture hardening. Test the
-> native Windows Copilot CLI with redirected output and ConPTY before changing
-> the existing runtime. If neither path is viable, the proposal either narrows
-> to Claude or stops.
+Status: draft. Feasibility is settled; the open question is whether the
+work is worth doing. The design decisions recorded here stand unless
+implementation experience overturns them; see the decision log at the end.
 
 Agents Live runs on Linux, with Ubuntu on WSL as the reference setup. The
 runtime itself is `uv` plus Python 3.12, which already runs on Windows.
@@ -36,12 +29,57 @@ second implementation of dispatch, process state, and locking, plus an
 ownership model that can say which of the two runtimes on one physical
 machine owns an agent.
 
+## Invoking the Copilot CLI on Windows
+
+The Windows Copilot CLI runs headlessly with plain pipes. No
+pseudo-terminal, no ConPTY, no new dependency. This holds in a detached
+process with no console at all, which is the case a scheduled task
+presents, so the runtime spawns the CLI the same way in every context:
+
+```text
+<pinned copilot.exe> -p "<prompt>" --autopilot --deny-tool shell
+                     --deny-tool write --no-ask-user --no-custom-instructions
+```
+
+That is the plan-mode form; write and pipeline modes differ only in the
+flags [agent_adapters.py](../src/agents_live/agent_adapters.py) already
+builds. Five rules follow from how the CLI behaves, and each one is a bug
+the Windows path would otherwise ship:
+
+1. **Pin a fully qualified `copilot.exe`; never resolve by name.** The
+   `copilot` on an interactive PATH can be a PowerShell bootstrapper
+   rather than the CLI, and VS Code installs exactly such a shim
+   (`copilot.ps1` in its extension storage) that can prompt to install or
+   update. `CreateProcess` cannot execute a `.ps1`, and a scheduled task
+   does not inherit that PATH in any case. This is the concrete failure
+   security-model item 4 is written against, and it presents as "Copilot
+   does not work headlessly" if it is not ruled out first.
+2. **Read both streams.** stdout carries only the model's answer; the
+   usage summary, credit cost, and resume identifier go to stderr. This
+   is the opposite of the Linux `script -qc` path, where everything
+   interleaves into one transcript, so the Windows path needs no
+   `COPILOT_NOISE_PREFIXES` filtering on stdout and must not discard
+   stderr.
+3. **Decode both streams as UTF-8 explicitly.** Capturing through
+   Python's text mode without `encoding="utf-8"` falls back to the ANSI
+   code page and corrupts the stderr summary.
+4. **Do not assume a single output block.** The same prompt yields the
+   answer once, twice, or followed by a completion marker depending on
+   launch context. Normalization tolerates repetition and trailing
+   markers.
+5. **Expect LF, not CRLF.** No `\r` stripping is required.
+
+Failure paths are not yet characterized: cancellation and timeout partway
+through a run, streaming for long outputs, an expired credential in a
+non-interactive context, and logged-off sessions. These belong to the
+vertical slice, not to a viability decision.
+
 ## What is already portable
 
 | Area | State |
 |---|---|
 | CLI, config parsing, agent discovery | Portable. TOML, JSON, YAML frontmatter, `pathlib` throughout |
-| `run` / `headless` orchestration, modes, pipeline MCP | Mostly portable after process, handler, executable-resolution, and Copilot PTY paths are abstracted |
+| `run` / `headless` orchestration, modes, pipeline MCP | Mostly portable after process, handler, and executable-resolution paths are abstracted; the Copilot CLI itself needs no PTY on Windows |
 | Structured logging, `logs`, `timeline`, `dashboard`, `qlog` | Portable |
 | Repo-relative path model | Directionally portable, but Windows needs rooted-path rejection, reparse-point handling, and handle-based identity checks beyond the current resolved-path containment check ([headless.py](../src/agents_live/headless.py)) |
 | Changed-file payload | Repo-relative today, but `str(Path)` emits Windows separators; the shared layer must call `as_posix()` explicitly |
@@ -57,7 +95,7 @@ machine owns an agent.
 | `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | A per-user named mutex with an explicit DACL; overlapped I/O or a reader thread |
 | `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | A Job Object and an explicit process group or control channel; detached/no-console flags cannot assume `CTRL_BREAK_EVENT` remains available |
 | `sh -c "cd X && PATH=Y agents-live ..."` cron lines | [activate.py](../src/agents_live/activate.py) | A Task Scheduler executable path, one Windows-quoted argument string, and a working directory; Task Scheduler does not store an argument vector |
-| `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | ConPTY through `pywinpty`, or no PTY at all |
+| `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | Not needed. The Windows CLI writes clean text to a redirected stdout with no console, so plain pipes suffice (see Invoking the Copilot CLI on Windows) |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `.sh` requires Git Bash and is otherwise refused (see Handlers on Windows) |
 | `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | `socket.gethostname()` fallback already exists |
 
@@ -426,44 +464,41 @@ changes.
 
 ## Recommended implementation order
 
-1. **Test native Copilot CLI I/O.** On a native Windows host, run the Windows
-   Copilot CLI with redirected standard streams. Record output, escape
-   sequences, exit behavior, cancellation, and authentication behavior. If
-   redirected I/O fails, repeat through ConPTY. This determines whether the
-   primary runtime is possible and whether `pywinpty` is required.
-2. **Build one direct foreground run.** Make `agents-live run` execute one
+1. **Build one direct foreground run.** Make `agents-live run` execute one
    approved agent from a Windows repository without scheduling or watching.
-   Resolve process creation, path spelling, handler selection, and logs before
-   adding persistence.
-3. **Add the native Windows runtime ID.** Generate `windows:<uuid>` in the
+   Resolve process creation, path spelling, handler selection, executable
+   pinning, and logs before adding persistence. Agent invocation is already
+   settled (see Invoking the Copilot CLI on Windows); this step is the
+   orchestration around it, including the failure paths that invocation
+   work did not cover.
+2. **Add the native Windows runtime ID.** Generate `windows:<uuid>` in the
    Windows user state home and use it for Windows ownership matching. Leave
    Linux and WSL hostname behavior unchanged.
-4. **Register one scheduled run.** Use a user-scoped Task Scheduler action with
+3. **Register one scheduled run.** Use a user-scoped Task Scheduler action with
    a fully qualified executable, Windows-correct arguments, an explicit
    working directory, and enough metadata to identify the task during removal.
-5. **Confirm schedule semantics.** Translate a real agent's cron expression
+4. **Confirm schedule semantics.** Translate a real agent's cron expression
    into native triggers, measure how much of the existing schedule
    vocabulary maps exactly, and confirm DST, sleep, missed-start, and
    restart behavior on a live task before generalizing activation and
    status.
-6. **Build one watcher.** Compare `ReadDirectoryChangesW` and `watchdog` on a
+5. **Build one watcher.** Compare `ReadDirectoryChangesW` and `watchdog` on a
    native Windows repository. Prove cancellation, rename, overflow, root
    deletion, and bounded rescan behavior before choosing the implementation.
-7. **Extract the host runtime.** Refactor only the abstractions proven by the
+6. **Extract the host runtime.** Refactor only the abstractions proven by the
    foreground, scheduler, and watcher prototypes. Keep existing Linux and WSL
    behavior unchanged and avoid speculative interface methods.
-8. **Complete lifecycle commands.** Add `start`, `status`, `doctor`, `stop`,
+7. **Complete lifecycle commands.** Add `start`, `status`, `doctor`, `stop`,
    `uninstall`, and `upgrade` parity. Verify task identity before replacement
    or deletion and process identity before forced termination.
-9. **Harden failure paths.** Bound watcher queues and payloads, define
+8. **Harden failure paths.** Bound watcher queues and payloads, define
    logged-off execution limits, and make interrupted task updates recoverable.
    This is correctness hardening within the trusted-administrator model, not
    sandboxing.
-10. **Add Windows CI and regression tests.** Cover argument quoting, task
-    identity and collisions, stale PID reuse, rejected path forms, watcher
-    overflow, interrupted upgrades, and uninstall cleanup after the
-    implementation
-    exists to test.
+9. **Add Windows CI and regression tests.** Cover argument quoting, task
+   identity and collisions, stale PID reuse, rejected path forms, watcher
+   overflow, interrupted upgrades, and uninstall cleanup after the
+   implementation exists to test.
 
 ## Testing on Windows without publishing
 
@@ -520,12 +555,14 @@ tool path is itself under test, and uninstall afterward; it puts a real
 `agents-live` on PATH. Never run `agents-live upgrade` on the test host:
 it fetches from PyPI and replaces the build being tested.
 
-### The feasibility spike needs none of this
+### Verifying agent invocation needs none of this
 
-Step 1 answers whether the Windows Copilot CLI produces usable output on a
-redirected stdout. That is a PowerShell session on a Windows host with no
-agents-live installed at all. Answer it before setting up any of the
-above.
+Checking that the Copilot CLI still behaves as Invoking the Copilot CLI on
+Windows describes takes a PowerShell session on a Windows host with no
+agents-live installed, plus a throwaway scheduled task that is unregistered
+afterward. It is the cheapest way to re-confirm the foundation after a CLI
+upgrade. Everything else in this section applies from the foreground run
+onward.
 
 ### Cleaning up is the part Linux does not teach
 
@@ -554,8 +591,8 @@ Viewer explains why a trigger did not fire. Read those first, then
 [test_smoke.py](../tests/test_smoke.py) runs against temporary projects, so
 it should run unchanged on Windows once the host runtime exists. Until
 then it exercises POSIX mechanics and is not a Windows gate. The Windows CI
-job in phase 5 runs it alongside the regression checks named in the
-security model.
+job in the hardening phase runs it alongside the regression checks named
+in the security model.
 
 ## Size and blast radius
 
@@ -587,22 +624,22 @@ sprawl would come from if it is not designed deliberately.
 
 ## Phasing
 
-1. Feasibility spike: Copilot redirected I/O, then ConPTY only if needed.
-2. Vertical slice: foreground `run`, one scheduled agent, and one watched
+1. Vertical slice: foreground `run`, one scheduled agent, and one watched
    agent on native Windows.
-3. Consolidation: extract the host runtime around the working slice and add
+2. Consolidation: extract the host runtime around the working slice and add
    the Windows runtime UUID without changing Linux or WSL behavior.
-4. Productization: complete lifecycle commands, diagnostics, supported
+3. Productization: complete lifecycle commands, diagnostics, supported
    handlers, schedule semantics, and operator documentation.
-5. Hardening: add Windows CI, regression tests for the identity and quoting
+4. Hardening: add Windows CI, regression tests for the identity and quoting
    checks, bounded failure handling, and transactional upgrade and uninstall
    behavior.
 
-Each phase has an explicit stop decision. Failure of Copilot redirected I/O
-and ConPTY narrows the supported runtime or ends the work before a broad
-refactor. Hardening beyond the checks listed in the security model follows a
-working vertical slice rather than attempting to design isolation that the
-trusted-administrator model cannot provide.
+Each phase has an explicit stop decision. The nearest one belongs to the
+vertical slice: if foreground `run`, a registered task, or a watcher cannot
+be made to work on a native repository, the proposal narrows or ends there
+rather than after a broad refactor. Hardening beyond the checks listed in
+the security model follows a working vertical slice rather than attempting
+to design isolation that the trusted-administrator model cannot provide.
 
 ## Non-goals
 
@@ -617,15 +654,11 @@ trusted-administrator model cannot provide.
 
 ## Open questions
 
-- Does the Copilot CLI work headlessly on Windows without a PTY?
-  **Investigate on Windows only.** Run the Windows Copilot CLI with `-p`
-  and a redirected stdout on a native Windows host and record whether
-  the agent output arrives on stdout, whether TUI escape sequences need
-  filtering, and what the exit code is. Do not attempt this from WSL:
-  the Linux binary is a different build with a different terminal
-  assumption, so a WSL result would be misleading either way. If output
-  does not reach a redirected stdout, the follow-up question is whether
-  ConPTY through `pywinpty` is acceptable as a dependency.
+- How does the Copilot CLI behave on its failure paths in a
+  non-interactive context: cancellation and timeout partway through a
+  run, streaming for long outputs, an expired credential, and a
+  logged-off session? Answered by the foreground run, not in the
+  abstract.
 - How much of the real schedule vocabulary translates exactly, and how
   coarse the superset triggers have to be for the rest? Measured on the
   first registered task, not settled in the abstract.
@@ -634,6 +667,24 @@ trusted-administrator model cannot provide.
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.
+
+### 2026-07-25: no PTY on Windows, and the executable is pinned
+
+The Windows Copilot CLI was exercised headlessly in three launch
+contexts, including a fully detached process with no console, and
+produced clean output and a zero exit in all of them. ConPTY and
+`pywinpty` are therefore out of the design, and the earlier draft's
+feasibility gate is closed in favor of the vertical slice.
+
+Two consequences reach beyond Windows. `use_pty` and `filters_tui_noise`
+on the Copilot adapter
+([agent_adapters.py](../src/agents_live/agent_adapters.py)) describe the
+Linux `script -qc` path rather than the Copilot family, so they become
+host-specific rather than adapter-wide. And `copilot` on an interactive
+PATH can be a PowerShell bootstrapper rather than the CLI, which promotes
+"pin a fully qualified executable" from hygiene to a correctness
+requirement: name resolution fails in a way that reads as "Copilot does
+not work headlessly".
 
 ### 2026-07-25: scheduling uses native triggers plus a dueness check
 

@@ -38,9 +38,12 @@ direction rather than committed work; file an issue before starting.
 A draft proposal for a native Windows runtime, replacing cron and
 inotifywait with Task Scheduler and Windows change notification behind a
 small host-runtime interface, is in
-[windows-support.md](windows-support.md). Feasibility remains undecided and
-starts with a native Windows Copilot CLI experiment. Windows CI and adversarial
-lifecycle coverage follows a working vertical slice.
+[windows-support.md](windows-support.md). Agent invocation is settled: the
+Windows Copilot CLI runs headlessly with plain pipes, no ConPTY. What
+remains undecided is whether the dispatch, process, and lifecycle work is
+worth doing; the next question is a foreground `run` on a native Windows
+repository. Windows CI and adversarial lifecycle coverage follows a
+working vertical slice.
 ([#119](https://github.com/johnshew/agents-live/issues/119))
 
 ## Maintaining this file
