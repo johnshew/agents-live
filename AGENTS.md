@@ -21,6 +21,7 @@ work on it.
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
 | Creating, running, or debugging triggered agents in this checkout | [.agents/agents-live.md](.agents/agents-live.md) |
 | Changing the skill payload, docs, or templates | [src/agents_live/skill/SKILL.md](src/agents_live/skill/SKILL.md) and [docs/](src/agents_live/skill/docs/) |
+| Recording a design decision or checking project direction | [docs/README.md](docs/README.md) and [docs/backlog.md](docs/backlog.md) |
 | Investigating runtime behavior (debounce, watchers, adapters) | [approach.md](src/agents_live/skill/docs/approach.md), then [key-learnings.md](src/agents_live/skill/docs/key-learnings.md) |
 
 ## Quick commands
@@ -77,11 +78,13 @@ The standard loop for any change that lands as commits:
 - **`Agents/` is runtime, not source.** Handlers and logs there
   support local use of the tool; package behavior lives under
   `src/agents_live/`.
-- **The backlog lives in GitHub issues, not in-tree docs.** Check
-  `gh issue list` before starting work; file new findings as issues
-  and reference them from commits (`Fixes #N` closes on merge). A
-  task that is blocked, deferred, or handed back to the developer
-  gets an issue before moving on, so it survives the session.
+- **Work items live in GitHub issues; only themes live in
+  `docs/backlog.md`.** Check `gh issue list` before starting work; file
+  new findings as issues and reference them from commits (`Fixes #N`
+  closes on merge). A task that is blocked, deferred, or handed back to
+  the developer gets an issue before moving on, so it survives the
+  session. `docs/backlog.md` records direction and links to those
+  issues; it never restates their detail.
 - **Never hand-parse runtime logs.** Use `agents-live logs` and
   `agents-live logs timeline` - they correlate events across log
   files and agent transcripts. Reading `Agents/logs/*.log` directly
@@ -121,6 +124,8 @@ The standard loop for any change that lands as commits:
   skill payload (`skill/` with SKILL.md, docs, starter templates)
 - `tests/` - export-safe smoke suite
 - `tools/` - release tooling (audit and guarded publish workflow)
+- `docs/` - repository design documents and the high-level backlog (not
+  shipped with the skill)
 - `Agents/` - local triggered-agent runtime dir (handlers, logs)
 - `.agents/` - agent-facing guides (this file's targets)
 - `.github/workflows/` - CI: publish to PyPI on GitHub release

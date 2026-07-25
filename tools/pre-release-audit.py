@@ -31,6 +31,7 @@ INCLUDED_DIRS = [
     ".claude/skills/agents-live",
     ".agents",
     "Agents",
+    "docs",
     "src",
     "tools",
 ]

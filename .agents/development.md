@@ -16,6 +16,9 @@ How to build, test, and change the code in this repository.
   secrets, and nonportable paths. Must pass before any release.
 - `Agents/` - local runtime directory (handlers, logs) used when
   agents-live is exercised in this checkout; not package source.
+- `docs/` - design documents and the high-level backlog for the project
+  itself; not part of the installed skill payload.
+  See [docs/README.md](../docs/README.md).
 
 ## Commands
 
@@ -119,8 +122,12 @@ current `origin/main`; do not merge `origin/main` into it merely to synchronize.
 ## Backlog
 
 Pending work is tracked as GitHub issues on this repo (`gh issue
-list`), deliberately not as in-tree docs. File bugs and design
-questions there; reference them from commit messages (`Fixes #N`).
+list`). File bugs and design questions there; reference them from commit
+messages (`Fixes #N`).
+
+[docs/backlog.md](../docs/backlog.md) holds only the high-level themes
+and links them to their issues. Keep acceptance criteria, repro steps,
+and status in the issue, never in the backlog document.
 
 ## Source of truth
 

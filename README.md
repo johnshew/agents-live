@@ -114,3 +114,6 @@ workflow remains an ordinary CLI command.
 - [Overview](src/agents_live/skill/docs/overview.md)
 - [Starter templates](src/agents_live/skill/templates/)
 - [Skill reference](src/agents_live/skill/SKILL.md)
+
+Design documents and the high-level backlog for the project itself live in
+[docs/](docs/); they are not installed with the skill.
