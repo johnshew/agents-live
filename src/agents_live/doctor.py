@@ -38,6 +38,7 @@ from . import paths
 from . import preflight
 from . import update_check
 from . import repos
+from . import hostruntime
 from .paths import resolve_root
 
 try:
@@ -106,13 +107,6 @@ def _agent_cli_needed_by_host(host: str) -> dict[str, dict[str, list[str]]]:
             if keyword in runtime.split():
                 result[keyword][bucket].append(name)
     return result
-
-
-def _is_wsl() -> bool:
-    try:
-        return "microsoft" in Path("/proc/version").read_text().lower()
-    except OSError:
-        return False
 
 
 def _node_is_wsl_native() -> bool:
@@ -469,7 +463,7 @@ def collect() -> list[dict]:
     def add_host_runtime_checks() -> None:
         add("node", _has("node"), False, "install Node.js (e.g. nvm install --lts)")
         add("npm", _has("npm"), False, "install Node.js (e.g. nvm install --lts)")
-        if _is_wsl():
+        if hostruntime.id() == hostruntime.WSL:
             add("node is WSL-native (not /mnt/c interop)",
                 _node_is_wsl_native(), False,
                 ". ~/.nvm/nvm.sh && nvm use node  "
@@ -524,7 +518,7 @@ def collect() -> list[dict]:
     add_host_runtime_checks()
 
     if not project_checks:
-        if _is_wsl():
+        if hostruntime.id() == hostruntime.WSL:
             _add_windows_heartbeat_checks(add)
         return checks
 
@@ -694,7 +688,7 @@ def collect() -> list[dict]:
                 "format against the installed copilot CLI (convergence "
                 "risk 1)", note=probe_note)
 
-    if _is_wsl():
+    if hostruntime.id() == hostruntime.WSL:
         _add_windows_heartbeat_checks(add)
 
     return checks

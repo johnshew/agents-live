@@ -32,15 +32,6 @@ def task_name(distro: str) -> str:
     return f"{TASK_PREFIX} ({distro})"
 
 
-def is_wsl() -> bool:
-    """True when running inside WSL (the only host with Windows-side
-    heartbeat integrations)."""
-    try:
-        return "microsoft" in Path("/proc/version").read_text().lower()
-    except OSError:
-        return False
-
-
 def current_distro(distro: str | None = None) -> str:
     selected = (distro or os.environ.get("WSL_DISTRO_NAME", "")).strip()
     if not selected:

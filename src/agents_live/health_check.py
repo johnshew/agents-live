@@ -47,7 +47,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import heartbeat, ownership, paths, plugins, preflight, repos
+from . import (
+    heartbeat, hostruntime, ownership, paths, plugins, preflight, repos)
 from .headless import (
     AgentsLiveError,
     EventLog,
@@ -778,7 +779,7 @@ def persisted_roots() -> list[Path]:
 
 
 def _check_windows_heartbeat(events: list[dict[str, str]]) -> None:
-    if not heartbeat.is_wsl():
+    if hostruntime.id() != hostruntime.WSL:
         return
     beacon = heartbeat.beacon_path()
     if beacon.is_file():

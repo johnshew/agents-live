@@ -36,8 +36,8 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, health_check,
-        heartbeat, init, migrate, ownership, paths, plugins, preflight,
-        doctor, repos, run, spawn, status, uninstall,
+        heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
+        preflight, doctor, repos, run, spawn, status, uninstall,
         update_check, upgrade,
     )
     from agents_live.cli_spec import (
@@ -54,6 +54,7 @@ except ImportError:  # flat checkout layout
     import headless
     import health_check
     import heartbeat
+    import hostruntime
     import init
     import migrate
     import ownership
@@ -640,7 +641,8 @@ class TestProjectPlugins(_TempProject):
             mock.patch.object(doctor, "_project_checks_enabled", return_value=True),
             mock.patch.object(doctor, "_has", return_value=True),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(doctor, "_package_checks", return_value=[]),
             mock.patch.object(doctor, "_native_agents", return_value=None),
@@ -2432,7 +2434,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=True),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "refresh"),
             mock.patch.object(update_check, "interactive", return_value=False),
@@ -2452,7 +2455,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=False),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=False),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "interactive", return_value=False),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
@@ -2772,6 +2776,52 @@ class TestPreReleaseAudit(unittest.TestCase):
             )
 
 
+class TestHostRuntimeIdentity(unittest.TestCase):
+    """The seam member every host-specific branch now reads."""
+
+    def _proc_version(self, text: str) -> Path:
+        version = Path(self._tmp.name) / "proc-version"
+        version.write_text(text, encoding="utf-8")
+        return version
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_wsl_kernel_string_identifies_wsl(self) -> None:
+        version = self._proc_version(
+            "Linux version 5.15.0-microsoft-standard-WSL2 (gcc ...)\n")
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", version),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.WSL)
+
+    def test_plain_kernel_string_identifies_linux(self) -> None:
+        version = self._proc_version("Linux version 6.8.0-generic (gcc ...)\n")
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", version),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.LINUX)
+
+    def test_missing_proc_version_identifies_linux(self) -> None:
+        absent = Path(self._tmp.name) / "does-not-exist"
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", absent),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.LINUX)
+
+    def test_windows_is_identified_without_reading_proc(self) -> None:
+        absent = Path(self._tmp.name) / "does-not-exist"
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "PROC_VERSION", absent),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.WINDOWS)
+
+
 class TestWindowsHeartbeat(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -2870,7 +2920,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
 
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
-            mock.patch.object(heartbeat, "is_wsl", return_value=True),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WSL),
             mock.patch.object(
                 heartbeat, "uninstall", side_effect=RuntimeError("denied")),
             mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
@@ -2883,7 +2934,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_tool_uninstall_skips_host_cleanup_off_wsl(self) -> None:
         completed = subprocess.CompletedProcess(["uv"], 0)
         with (
-            mock.patch.object(heartbeat, "is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
             mock.patch.object(uninstall.health_check,
                               "remove_health_cron_lines",
