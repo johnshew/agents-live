@@ -7,8 +7,9 @@ ms.topic: concept
 
 Status: draft. Feasibility is settled, the host-runtime seam has landed
 on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
-and its locking and process members are now written and measured on a
-native Windows host. What remains is the rest of the vertical slice
+its locking and process members are written and measured on a native
+Windows host, and a foreground `agents-live run` now executes an agent
+end to end there. What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
@@ -84,7 +85,7 @@ vertical slice, not to a viability decision.
 | Area | State |
 |---|---|
 | CLI, config parsing, agent discovery | Portable. TOML, JSON, YAML frontmatter, `pathlib` throughout |
-| `run` / `headless` orchestration, modes, pipeline MCP | Mostly portable after process, handler, and executable-resolution paths are abstracted; the Copilot CLI itself needs no PTY on Windows |
+| `run` / `headless` orchestration, modes, pipeline MCP | Portable. Process creation, environment construction, executable pinning, and handler selection go through the host runtime, and a foreground run completes on Windows; the Copilot CLI itself needs no PTY there |
 | Structured logging, `logs`, `timeline`, `dashboard`, `qlog` | Portable |
 | Repo-relative path model | Directionally portable, but Windows needs rooted-path rejection, reparse-point handling, and handle-based identity checks beyond the current resolved-path containment check ([headless.py](../src/agents_live/headless.py)) |
 | Changed-file payload | Repo-relative today, but `str(Path)` emits Windows separators; the shared layer must call `as_posix()` explicitly |
@@ -100,8 +101,11 @@ vertical slice, not to a viability decision.
 | `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex; overlapped I/O or a reader thread |
 | `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `DETACHED_PROCESS` with a new process group; termination walks the tree, since detached/no-console flags cannot assume `CTRL_BREAK_EVENT` remains available |
 | `sh -c "cd X && PATH=Y agents-live ..."` cron lines | [activate.py](../src/agents_live/activate.py) | A Task Scheduler executable path, one Windows-quoted argument string, and a working directory; Task Scheduler does not store an argument vector |
-| `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | Not needed. The Windows CLI writes clean text to a redirected stdout with no console, so plain pipes suffice (see Invoking the Copilot CLI on Windows) |
-| `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `.sh` requires Git Bash and is otherwise refused (see Handlers on Windows) |
+| `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | Not needed. The Windows CLI writes clean text to a redirected stdout with no console, so plain pipes suffice, and `supports_pty` selects the plain path (see Invoking the Copilot CLI on Windows) |
+| `env -i` plus `HOME` and `PATH` as the whole agent environment | [headless.py](../src/agents_live/headless.py) | A Windows child needs `SystemRoot` to load at all, plus the profile, temp, and processor variables; `base_env` supplies that floor, and PATH is inherited rather than constructed (see the decision log) |
+| Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
+| ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
+| `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
 | `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | `socket.gethostname()` fallback already exists |
 
 ## Design principles
@@ -493,19 +497,22 @@ checkout and require no cross-runtime lease or ownership migration.
 ## Handlers on Windows
 
 Handlers are dispatched by file extension: `.py` through
-`uv run --with`, `.js` through `node`, anything else through `bash`
-([headless.py](../src/agents_live/headless.py)). Python and Node
-handlers are mostly portable, so plan mode works on Windows after executable
-resolution and process creation are abstracted. TypeScript is currently passed
-to `node` directly, which only works when the installed Node.js runtime
-supports that file's syntax. Any extension not explicitly recognized currently
-falls through to `bash`; Windows support must replace that fallback with an
-allowlist and reject unknown extensions.
+`uv run --with`, `.js` through `node`, anything else through the host's
+shell ([headless.py](../src/agents_live/headless.py)). Python and Node
+handlers are mostly portable, so plan mode works on Windows. TypeScript is
+currently passed to `node` directly, which only works when the installed
+Node.js runtime supports that file's syntax. The shell fallback is where
+Windows stops: `shell_interpreter` reports that the host has none, so a
+`.sh` handler and any unrecognized extension are refused with an error
+naming the two extensions that do run. That is the allowlist an earlier
+draft asked for, expressed as a host capability rather than a platform
+test.
 
 Decision: fail closed, and say so at three layers, reusing the existing
 capability-probe contract in [preflight.py](../src/agents_live/preflight.py)
 with a new capability name (`handler_interpreter`) and the existing
-`dependency_missing` code.
+`dependency_missing` code. The refusal at dispatch is the last of the
+three; the two ahead of it are still to build.
 
 1. **Activation refuses.** `start` probes the interpreter each agent's
    handler needs and refuses the agent when it is unavailable. Nothing
@@ -784,11 +791,71 @@ design isolation that the trusted-administrator model cannot provide.
 - How much of the real schedule vocabulary translates exactly, and how
   coarse the superset triggers have to be for the rest? Measured on the
   first registered task, not settled in the abstract.
+- What does an installed Copilot CLI look like on Windows, now that
+  pinning refuses batch shims? If the npm package's global bin entry is
+  a `.cmd` rather than an executable, the runtime has to pin the
+  interpreter and entry script instead, and the adapter's `binary` grows
+  a Windows spelling.
 
 ## Decision log
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.
+
+### 2026-07-26: a Windows run builds its environment and inherits its PATH
+
+Step 7 ran an agent to completion on a native Windows repository. Four
+things about launching a CLI there differ from the POSIX path, and all
+four are seam members rather than branches in the run path.
+
+A Windows child cannot start without `SystemRoot`. The POSIX path hands
+an agent `HOME` and a constructed `PATH` and nothing else; doing the
+same on Windows produced exit status 3221226505 (`STATUS_STACK_BUFFER_OVERRUN`)
+with nothing on either stream, because the loader could not find the
+system DLLs. `base_env` supplies the platform floor - `SystemRoot` first,
+then the profile, temp, shell, and processor variables a Windows program
+expects to read - and the run path keeps building the environment rather
+than inheriting one.
+
+PATH is inherited on Windows and constructed on POSIX. Cron hands a job
+almost nothing, which is why `clean_path` exists; Task Scheduler runs a
+task with the owning user's environment block, so the inherited PATH is
+the same one an interactive run sees. Dropping it would lose every
+per-user install location a Windows CLI actually lands in - winget
+shims, npm's global bin, nvm4w - for no gain, so `inherits_path` says
+yes there and `find_tool` (the off-PATH search for `uv` and `node`)
+returns nothing, because `shutil.which` has already looked everywhere it
+would.
+
+What is lost that way is PATH hygiene, and pinning replaces it.
+`CreateProcess` resolves a bare command name against the launching
+process's PATH, not the environment handed to the child, so a name pins
+nothing on Windows regardless. `pin_executable` resolves argv[0] to an
+absolute executable before launch and refuses two kinds of answer: a
+`.ps1`, which Windows cannot execute and which on this host is exactly
+the VS Code Copilot bootstrapper rule 1 above warns about, and a `.bat`
+or `.cmd`, which Windows runs through `cmd.exe` - a second parse of the
+argument string, and a prompt body carrying `&` or `|` would run as a
+command. POSIX returns the name unchanged, where `execvp` searches the
+child's own PATH and the constructed PATH is the pin.
+
+Output has to be UTF-8 on purpose. A Windows console defaults to a
+legacy code page and Python follows it, so `agents-live logs` died with
+`UnicodeEncodeError` on the box-drawing characters in its own table. The
+project's own console output is ASCII by policy, but that policy cannot
+reach the two sources that matter here: DuckDB renders the log table,
+and the agent's answer is whatever the model wrote. `use_utf8_io`
+reconfigures this process's streams, exports `PYTHONUTF8` so the
+subcommand scripts the CLI launches start the same way, and switches the
+console code page for the life of the run, restoring it on exit because
+the console belongs to the shell rather than to the run.
+
+The run that proved this used the `claude` runtime, which installs a
+native executable. The `copilot` runtime is still unproven on Windows
+orchestration: this host has no Copilot CLI executable at all, only the
+VS Code bootstrapper, which pinning now refuses by design. The failure
+paths step 7 was meant to close - cancellation, timeout, expired
+credentials, streaming - therefore remain open for that runtime.
 
 ### 2026-07-26: locking is a file lock and termination is a tree walk
 
