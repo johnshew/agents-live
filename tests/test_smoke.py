@@ -38,7 +38,7 @@ try:  # installed package layout
         activate, agent_adapters, cli, completions, headless, health_check,
         heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
         preflight, doctor, repos, run, spawn, status, uninstall,
-        update_check, upgrade, watchpolicy,
+        update_check, upgrade, triggers, watchpolicy,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -69,11 +69,22 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
+    import triggers
     import watchpolicy
     from cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
     )
+
+
+def schedule_lines(name: str) -> list[str]:
+    """The crontab lines activation would install for *name*."""
+    return triggers.render(headless.schedule_spec(name))
+
+
+def watcher_reboot_line(name: str) -> str:
+    """The @reboot respawn line activation would install for *name*."""
+    return triggers.render(headless.watcher_spec(name))[0]
 
 
 class _TempProject(unittest.TestCase):
@@ -989,8 +1000,7 @@ class TestInvocationForms(_TempProject):
     def test_path_backed_cron_preserves_canonical_agent_file(self) -> None:
         prompt = self.root / "my-agent.md"
         prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
-        with mock.patch.object(activate, "_validate_handler_paths"):
-            lines = activate.build_cron_lines(str(prompt))
+        lines = schedule_lines(str(prompt))
         self.assertIn(str(prompt), lines[0])
         self.assertTrue(headless.cron_line_matches(lines[0], str(prompt)))
 
@@ -1002,7 +1012,7 @@ class TestInvocationForms(_TempProject):
     def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
         cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
-        watcher = headless.build_reboot_watcher_line("shared")
+        watcher = watcher_reboot_line("shared")
         self.assertTrue(headless.cron_line_matches(cron, "shared"))
         self.assertFalse(headless.cron_line_matches(
             cron.replace(str(self.root), FOREIGN_REPO), "shared"))
@@ -1023,7 +1033,7 @@ class TestInvocationForms(_TempProject):
     def test_removal_preserves_foreign_same_named_entries(self) -> None:
         cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
-        watcher = headless.build_reboot_watcher_line("shared")
+        watcher = watcher_reboot_line("shared")
         foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
         foreign_watcher = watcher.replace(str(self.root), FOREIGN_REPO)
         with (
@@ -1041,15 +1051,14 @@ class TestInvocationForms(_TempProject):
             [mock.call([foreign_cron]), mock.call([foreign_watcher])])
 
     def test_reboot_line_round_trips_agent_name(self) -> None:
-        line = headless.build_reboot_watcher_line("t")
+        line = watcher_reboot_line("t")
         self.assertIn("internal ensure-watcher t", line)
         self.assertNotIn("start --ensure-watcher", line)
 
     def test_persisted_lines_carry_inline_path(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        with mock.patch.object(activate, "_validate_handler_paths"):
-            cron_lines = activate.build_cron_lines("smoke-fixture")
-        watcher_line = headless.build_reboot_watcher_line("smoke-fixture")
+        cron_lines = schedule_lines("smoke-fixture")
+        watcher_line = watcher_reboot_line("smoke-fixture")
         for line in [*cron_lines, watcher_line]:
             self.assertIn("PATH=", line)
         self.assertTrue(
@@ -1233,7 +1242,7 @@ class TestInvocationForms(_TempProject):
 class TestMigratePlanning(_TempProject):
     def test_canonical_lines_are_no_op(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        canonical = activate.build_cron_lines("smoke-fixture")
+        canonical = schedule_lines("smoke-fixture")
         plan = migrate.plan_migration(canonical)
         self.assertEqual(plan["schedule"], {})
         self.assertEqual(plan["missing"], [])
@@ -1293,7 +1302,7 @@ class TestMigratePlanning(_TempProject):
         near_match = old_schedule.replace(str(old_root), f"{old_root}-other")
         mixed_live = old_schedule.replace(
             f"--repo {old_root}", f"--repo {self.root}")
-        live_entry = activate.build_cron_lines("smoke-fixture")[0]
+        live_entry = schedule_lines("smoke-fixture")[0]
         lines = [
             old_schedule, old_watcher, undefined, near_match, mixed_live,
             live_entry,
@@ -1445,7 +1454,7 @@ else:
 
     def test_repeated_installs_converge_on_one_entry(self) -> None:
         self.seed([self.USER_LINE, self.foreign_line])
-        canonical = activate.build_cron_lines("smoke-fixture")
+        canonical = schedule_lines("smoke-fixture")
 
         activate.install_cron_agent("smoke-fixture")
         after_first = self.installed_lines()
@@ -1465,7 +1474,7 @@ else:
                  f"--script {self.root}/scripts/run.py --name smoke-fixture "
                  "--quiet 2>&1")
         self.seed([self.USER_LINE, stale, self.foreign_line])
-        canonical = activate.build_cron_lines("smoke-fixture")
+        canonical = schedule_lines("smoke-fixture")
         self.assertNotIn(stale, canonical)
 
         plan = migrate.plan_migration(self.installed_lines())
@@ -1720,6 +1729,71 @@ class TestWatchPolicy(unittest.TestCase):
         self.assertEqual(window.take(), ["a.md", "b.md"])
         self.assertEqual(window.take(), [])
         self.assertIsNone(window.remaining(5.0))
+
+
+class TestTriggerSpecs(unittest.TestCase):
+    """The vocabulary both trigger kinds share."""
+
+    def spec(self, *, name: str = "agent", kind: str = triggers.SCHEDULE,
+             root: str = "/repo", schedules: tuple[str, ...] = ("0 * * * *",),
+             command: tuple[str, ...] = ("agents-live", "run", "--name",
+                                         "agent"),
+             ) -> triggers.TriggerSpec:
+        return triggers.TriggerSpec(
+            name=name, kind=kind, root=Path(root), schedules=schedules,
+            command=command, path="/usr/bin")
+
+    def test_one_line_per_schedule_carries_root_and_path(self) -> None:
+        lines = triggers.render(self.spec(schedules=("@reboot", "0 * * * *")))
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("@reboot cd /repo && PATH=/usr/bin "))
+        self.assertTrue(all(line.endswith("2>&1") for line in lines))
+
+    def test_a_spec_matches_the_lines_it_renders(self) -> None:
+        spec = self.spec()
+        self.assertTrue(all(
+            triggers.matches(line, root=spec.root, name=spec.name,
+                             kind=spec.kind)
+            for line in triggers.render(spec)))
+
+    def test_another_projects_line_is_never_this_projects_trigger(self) -> None:
+        line = triggers.render(self.spec(root="/other"))[0]
+        self.assertFalse(triggers.matches(line, root=Path("/repo"),
+                                          name="agent",
+                                          kind=triggers.SCHEDULE))
+
+    def test_a_watcher_line_is_not_a_schedule_line(self) -> None:
+        watcher = triggers.render(self.spec(
+            kind=triggers.WATCHER, schedules=("@reboot",),
+            command=("agents-live", "internal", "ensure-watcher", "agent")))[0]
+        self.assertTrue(triggers.matches(watcher, root=Path("/repo"),
+                                         name="agent", kind=triggers.WATCHER))
+        self.assertFalse(triggers.matches(watcher, root=Path("/repo"),
+                                          name="agent",
+                                          kind=triggers.SCHEDULE))
+
+    def test_names_that_are_substrings_stay_distinct(self) -> None:
+        line = triggers.render(self.spec(
+            command=("agents-live", "run", "--name", "todo")))[0]
+        self.assertTrue(triggers.matches(line, root=Path("/repo"),
+                                         name="todo",
+                                         kind=triggers.SCHEDULE))
+        self.assertFalse(triggers.matches(line, root=Path("/repo"),
+                                          name="todo-push",
+                                          kind=triggers.SCHEDULE))
+
+    def test_an_unrelated_entry_in_the_repo_names_no_agent(self) -> None:
+        self.assertIsNone(triggers.agent_name(
+            "0 * * * * cd /repo && ./tidy.sh --name agent",
+            root=Path("/repo"), kind=triggers.SCHEDULE))
+
+    def test_canonical_ignores_order_but_not_content(self) -> None:
+        spec = self.spec(schedules=("@reboot", "0 * * * *"))
+        rendered = triggers.render(spec)
+        self.assertTrue(triggers.is_canonical(list(reversed(rendered)), spec))
+        self.assertFalse(triggers.is_canonical(rendered[:1], spec))
+        self.assertFalse(triggers.is_canonical(
+            [line.replace("/usr/bin", "/opt/bin") for line in rendered], spec))
 
 
 class TestAdapterRegistry(unittest.TestCase):

@@ -292,6 +292,17 @@ exist only to serve the second implementation, so their interfaces are
 written against what both platforms can honor rather than against what
 POSIX happens to offer.
 
+Track 1 and track 2 have landed as far as Linux alone justifies.
+`TriggerSpec` and the crontab rendering and matchers now live in
+[triggers.py](../src/agents_live/triggers.py), and
+[migrate.py](../src/agents_live/migrate.py) converges against a spec
+rather than a rebuilt string. The watcher rules live in
+[watchpolicy.py](../src/agents_live/watchpolicy.py), reachable without
+an event source. Runtime identity answers once, in
+[hostruntime.py](../src/agents_live/hostruntime.py). What remains is the
+`PosixRuntime` class those pieces become internals of, which waits on
+the Windows spike that settles the disagreements below.
+
 ### Where the two platforms genuinely disagree
 
 Four places where a POSIX-derived interface would be wrong rather than

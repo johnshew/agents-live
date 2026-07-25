@@ -10,7 +10,6 @@ import contextlib
 import hashlib
 import os
 import json
-import shlex
 import shutil
 import signal
 import subprocess
@@ -23,7 +22,6 @@ from .headless import (
     MAX_LOG_FIELD_LENGTH,
     AgentConfig,
     AgentsLiveError,
-    clean_path,
     cli_invocation,
     crontab_lock,
     cron_line_matches,
@@ -42,6 +40,7 @@ from .headless import (
     remove_watcher_reboot_line,
     repo_root,
     run_invocation,
+    schedule_spec,
     stop_watcher,
     system_log,
     agent_file_exists,
@@ -50,6 +49,7 @@ from .headless import (
 from . import ownership
 from . import paths
 from . import preflight
+from . import triggers
 from . import watchpolicy
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -119,39 +119,13 @@ def _validate_handler_paths(config: AgentConfig) -> None:
         )
 
 
-def build_cron_lines(name: str) -> list[str]:
-    """The canonical crontab schedule lines for *name* in the current
-    execution context (§3.4.2): packaged installs persist the pinned
-    shim + --repo; the flat checkout keeps the script form until the F7
-    flip migrates it. Shared by activation and `migrate`'s convergence
-    check."""
-    config = load_agent_config(name)
-    if not config.schedule:
-        raise AgentsLiveError(f"agent '{name}' has no schedule")
-    repo = repo_root()
-    run_command = run_invocation(name)
-    # An agent may declare several schedules (e.g. "@reboot" plus an hourly
-    # cron); emit one crontab line per entry. They all carry the same
-    # `--name`, so cron_line_matches removes and re-adds them as a group.
-    # PATH rides inside each line (§3.4.2 self-contained crontab lines) so
-    # no global PATH= line - which the user or another project may own -
-    # ever needs to be touched.
-    path_prefix = f"PATH={shlex.quote(clean_path())}"
-    return [
-        f"{sched} cd {shlex.quote(str(repo))} && {path_prefix} "
-        f"{shlex.join(run_command)} 2>&1"
-        for sched in config.schedule
-    ]
-
-
 def install_cron_agent(name: str) -> str:
     config = load_agent_config(name)
-    if not config.schedule:
-        raise AgentsLiveError(f"agent '{name}' has no schedule")
+    spec = schedule_spec(name)
     _validate_handler_paths(config)
 
     ensure_logs_dir()
-    new_cron_lines = build_cron_lines(name)
+    new_cron_lines = triggers.render(spec)
 
     # Exact --name token matching: a plain substring test would also drop
     # entries for sibling agents whose name contains this one (todo vs

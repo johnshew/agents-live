@@ -53,6 +53,7 @@ import yaml
 
 from . import agent_adapters
 from . import paths
+from . import triggers
 from .mcp_config_loader import McpConfigError, load_mcp_servers
 
 HEADLESS_PROMPT = (
@@ -161,7 +162,8 @@ __all__ = [
     "cli_shim_path",
     "run_invocation",
     "ensure_watcher_invocation",
-    "build_reboot_watcher_line",
+    "schedule_spec",
+    "watcher_spec",
     "install_watcher_reboot_line",
     "remove_watcher_reboot_line",
     "list_reboot_watcher_agent_names",
@@ -662,6 +664,34 @@ def ensure_watcher_invocation(name: str) -> list[str]:
                           flat_script=ACTIVATE_SCRIPT_PATH)
 
 
+def schedule_spec(name: str) -> triggers.TriggerSpec:
+    """What *name*'s cron schedule should be in the current execution
+    context (§3.4.2): packaged installs persist the pinned shim +
+    ``--repo``, the flat checkout keeps the script form until the F7
+    flip migrates it.
+
+    An agent may declare several schedules (e.g. "@reboot" plus an
+    hourly cron); they all carry the same ``--name``, so they install
+    and remove as a group.
+    """
+    config = load_agent_config(name)
+    if not config.schedule:
+        raise AgentsLiveError(f"agent '{name}' has no schedule")
+    return triggers.TriggerSpec(
+        name=name, kind=triggers.SCHEDULE, root=repo_root(),
+        schedules=tuple(config.schedule),
+        command=tuple(run_invocation(name)), path=clean_path())
+
+
+def watcher_spec(name: str) -> triggers.TriggerSpec:
+    """What *name*'s watcher respawn trigger should be: one @reboot
+    entry running the guarded, idempotent ``ensure-watcher`` path."""
+    return triggers.TriggerSpec(
+        name=name, kind=triggers.WATCHER, root=repo_root(),
+        schedules=("@reboot",),
+        command=tuple(ensure_watcher_invocation(name)), path=clean_path())
+
+
 def cli_invocation(subcommand: str, *args: str, flat_script: Path) -> list[str]:
     """argv that re-enters the CLI for *subcommand* in the current layout.
 
@@ -684,28 +714,14 @@ def _watcher_reboot_line_matches(line: str, name: str) -> bool:
     """Return True if a crontab line is the @reboot watcher respawn for
     name. Legacy flag-form lines remain recognizable so `migrate` and
     lifecycle operations can replace or remove them."""
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    return crontab_line_belongs_to_repo(line) and any(
-        first in ("ensure-watcher", "--ensure-watcher") and second == name
-        for first, second in zip(tokens, tokens[1:])
-    )
+    return triggers.matches(line, root=repo_root(), name=name,
+                            kind=triggers.WATCHER)
 
 
 def _reboot_watcher_line_agent_name(line: str) -> str | None:
     """Return the agent name carried by a watcher @reboot line, else None."""
-    if "ensure-watcher" not in line:
-        return None
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    for first, second in zip(tokens, tokens[1:]):
-        if first in ("ensure-watcher", "--ensure-watcher"):
-            return second
-    return None
+    return triggers.agent_name(line, root=repo_root(),
+                               kind=triggers.WATCHER)
 
 
 def list_reboot_watcher_agent_names() -> list[str]:
@@ -727,16 +743,6 @@ def list_reboot_watcher_agent_names() -> list[str]:
     return sorted(set(names))
 
 
-def build_reboot_watcher_line(name: str) -> str:
-    """The canonical @reboot respawn line for *name*'s watcher in the
-    current execution context. Shared by activation and `migrate`'s
-    convergence check. PATH rides inside the line (§3.4.2 self-contained
-    crontab lines) so no shared ``PATH=`` line is needed."""
-    return (f"@reboot cd {shlex.quote(str(repo_root()))} && "
-            f"PATH={shlex.quote(clean_path())} "
-            f"{shlex.join(ensure_watcher_invocation(name))} 2>&1")
-
-
 def install_watcher_reboot_line(name: str) -> str:
     """Install the @reboot respawn line for a watcher (idempotent).
 
@@ -744,7 +750,7 @@ def install_watcher_reboot_line(name: str) -> str:
     (including the agent's own run.py schedule lines and any user-authored
     ``PATH=`` line) untouched.
     """
-    new_line = build_reboot_watcher_line(name)
+    new_line = triggers.render(watcher_spec(name))[0]
     with crontab_lock():
         lines = current_crontab_lines()
         if lines is None:
@@ -2631,31 +2637,13 @@ def crontab_lock() -> Iterator[None]:
 
 def crontab_line_belongs_to_repo(line: str) -> bool:
     """Return whether a persisted trigger line names the current repo root."""
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    root = str(repo_root())
-    return any(
-        first in {"cd", "--repo"} and second == root
-        for first, second in zip(tokens, tokens[1:])
-    )
+    return triggers.belongs_to_root(line, repo_root())
 
 
 def cron_line_matches(line: str, name: str) -> bool:
-    """Return whether a current-repo line carries exact ``--name <name>``.
-
-    Exact repo and name tokens prevent collisions with other projects and with
-    agent names that are substrings of one another (``todo`` vs ``todo-push``).
-    """
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    return crontab_line_belongs_to_repo(line) and any(
-        first == "--name" and second == name
-        for first, second in zip(tokens, tokens[1:])
-    )
+    """Return whether a current-repo line is *name*'s schedule trigger."""
+    return triggers.matches(line, root=repo_root(), name=name,
+                            kind=triggers.SCHEDULE)
 
 
 def remove_cron_entries(name: str) -> bool:
@@ -2687,19 +2675,8 @@ def _cron_line_agent_name(line: str) -> str | None:
     (basename ``agents-live``, never substring) - so unrelated crontab
     entries are ignored.
     """
-    if not crontab_line_belongs_to_repo(line):
-        return None
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    if not any("run.py" in token or Path(token).name == "agents-live"
-               for token in tokens):
-        return None
-    for first, second in zip(tokens, tokens[1:]):
-        if first == "--name":
-            return second
-    return None
+    return triggers.agent_name(line, root=repo_root(),
+                               kind=triggers.SCHEDULE)
 
 
 def _list_active_cron_agent_names() -> list[str]:
