@@ -88,8 +88,9 @@ machine owns an agent.
 6. Preserve the Linux and WSL security posture. Native Windows support adds
    platform mechanics, not a sandbox, policy engine, or new approval system.
 7. Deliver a narrow working path before hardening it: Copilot CLI process I/O,
-   one scheduled agent, then one watcher. Add lifecycle and adversarial tests
-   once those paths are demonstrably viable.
+   one scheduled agent, then one watcher. Carry only the few identity and
+   quoting checks that prevent acting on the wrong target, and add the rest of
+   the lifecycle and failure tests once those paths are demonstrably viable.
 
 ## Security model
 
@@ -100,29 +101,57 @@ support does not claim to isolate an agent from the user, defend against an
 administrator, or contain same-user malware. Those goals require operating
 system or service isolation beyond this project.
 
-The relevant attack surface is unintended authority caused by implementation
-errors: registering or deleting the wrong scheduled task, launching the wrong
-executable, misquoting arguments, following an unexpected path, terminating an
-unrelated process, exposing credentials in command lines or logs, or leaving
-persistent tasks behind after uninstall. The baseline should match current WSL
-behavior, then use normal Windows APIs and user-scoped state correctly.
+So the thing worth engineering against is not an attacker; it is this tool's
+own bugs acting with that authority on the wrong target: deleting a task it
+does not own, terminating a recycled PID, mis-splitting an argument string,
+or leaving persistence behind after uninstall. A check earns its place when it
+prevents a bug class that would otherwise ship, costs almost nothing, and does
+not delay the first working agent. Anything that only defends the developer
+from the developer is theater here, and is deferred by default.
 
-Practical hardening, after feasibility, is:
+Built in from the start, because each is cheap and each prevents a real
+failure:
 
-1. Create tasks in a dedicated `\AgentsLive\` folder with deterministic
-   repository-scoped names. Before replacement or deletion, verify the task's
-   action and working directory belong to Agents Live.
-2. Persist fully qualified executable paths and use Windows-correct argument
-   quoting. Avoid unnecessary shell mediation in scheduled actions.
-3. Keep state, logs, and temporary payloads in the user's normal private local
-   application-data directory. Do not put credentials in command lines, and
-   retain the existing log-redaction expectations.
-4. Initially support interactive-token tasks. Logged-off execution, stored
-   credentials, S4U, mapped drives, and network repositories remain separate
+1. **Verify argument quoting by round trip.** Task Scheduler stores one
+   argument string, so a repository path containing a space or a quote
+   silently changes the command that runs. Build the string, parse it back
+   with `CommandLineToArgvW`, and refuse on mismatch. Highest value per line
+   in this list.
+2. **Verify task identity before replacing or deleting.** Register in a
+   dedicated `\AgentsLive\` folder with deterministic repository-scoped
+   names, and confirm the action and working directory are ours first. This
+   is the same check `cron_line_matches` already performs on Linux.
+3. **Verify process identity before terminating.** Compare PID, process
+   creation time, and expected image name. PID reuse is common; stale state
+   killing an unrelated process is the bug this prevents.
+4. **Pin a fully qualified executable and an explicit working directory.**
+   Required regardless, since a scheduled task does not inherit the
+   interactive `PATH`, and it removes the case where a different executable
+   answers to the same name.
+5. **Pass changed-file payloads through a file in the state directory.** The
+   command line is length-limited, so a large batch would truncate or fail;
+   that bound, not secrecy, is the reason.
+6. **Keep state, logs, and payloads under the user's local application-data
+   directory, keep credentials off command lines, and keep existing log
+   redaction.** Nothing new, just no regression from current behavior.
+
+Deliberately deferred, with the condition that would bring each back:
+
+- **Custom ACLs on tasks, state, and named kernel objects.** Default per-user
+   ACLs already match the trust model. Revisit only if Agents Live ever runs
+   as a service or under a different principal than the developer.
+- **SIDs, repository IDs, and launch nonces in process identity.** PID plus
+   creation time plus image name already answers "is this the process I
+   started". Revisit if multi-principal execution appears.
+- **Job objects for watcher process trees.** Revisit if orphaned grandchild
+   processes show up in practice.
+- **Handle-based volume and file identity revalidated before each use.** This
+   is TOCTOU hardening for code running at a different privilege level than
+   the file's owner. Here the two are the same account. Lexical containment
+   plus explicit rejection of unsupported path forms is proportionate.
+- **Logged-off execution.** Interactive-token tasks first; stored
+   credentials, S4U, mapped drives, and network repositories are separate
    follow-up work.
-5. Verify process creation time and executable identity before terminating a
-   PID. This prevents stale state from stopping an unrelated process without
-   pretending to provide a security boundary against the administrator.
 
 ## The seam
 
@@ -165,13 +194,13 @@ class HostRuntime(Protocol):
 The interface stays small, but its results cannot erase provenance or failure
 states. `TriggerSpec` is the desired state: the parsed schedule expressions,
 watch paths, and repository identity. `TriggerIdentity` is what is actually
-registered: the task path, principal, action, working
-directory, settings, ACL fingerprint, and ownership marker. `ProcessIdentity`
-includes PID, creation time, canonical executable, user SID, repository ID,
-and a random launch nonce. `WatchBatch` distinguishes changes, overflow, root
-invalidation, degraded rescan, and fatal error. `LockLease` identifies the
-held kernel object. Registration and deletion verify ownership rather than
-blindly replacing a matching name.
+registered: the task path, principal, action, working directory, settings, and
+ownership marker. `ProcessIdentity` is PID, creation time, and canonical
+executable, which together answer whether this is still the process that was
+started. `WatchBatch` distinguishes changes, overflow, root invalidation,
+degraded rescan, and fatal error. `LockLease` identifies the held kernel
+object. Registration and deletion verify ownership rather than blindly
+replacing a matching name.
 
 `installed_agent_names` returns `None` for "state
 is unreadable here", which the existing sandbox handling in
@@ -221,9 +250,9 @@ estimate before overflow, cancellation, and rescan tests pass. C trades a
 well-understood in-process failure mode for an interop and quoting boundary.
 
 Event storms need explicit limits on queued paths, batch bytes, debounce
-memory, file size hashed, rescan frequency, and total rescan work. Changed-file
-payloads must use an ACL-protected spool file or pipe, not the command line,
-which is size-limited and visible to local process inspection.
+memory, file size hashed, rescan frequency, and total rescan work. A batch of
+changed files goes to a file in the state directory rather than onto the
+command line, which is length-limited.
 
 ## Scheduling on Windows
 
@@ -282,9 +311,8 @@ dispatch.
 Task Scheduler stores an executable path, one argument string, and a
 working directory. Build the argument string with Windows
 `CommandLineToArgvW`-compatible quoting and verify it by round trip. Pin
-a fully qualified, ACL-verified executable, not a PATH-resolved or
-writable shim, then read back and compare the complete registered task
-definition.
+a fully qualified executable rather than a PATH-resolved name, then read
+back and compare the registered task definition.
 
 ### Watchers are started by Task Scheduler, not scheduled by it
 
@@ -347,11 +375,11 @@ checkout and require no cross-runtime lease or ownership migration.
    unsupported forms explicitly.
 - `watchPath: /` is rooted on both POSIX and Windows. Use `.` for the
    repository root and reject all rooted watch paths.
-- `Path.resolve()` plus ancestry comparison is a useful lexical check, not a
-   complete Windows containment boundary. Reject unexpected reparse points,
-   open the target by handle, obtain its final path and volume/file identity,
-   and revalidate immediately before watching, executing, or mutating it. Fail
-   closed if identity changes.
+- `Path.resolve()` plus ancestry comparison is a lexical check, not a complete
+   Windows containment boundary, and it is the proportionate one here: the
+   watcher and the watched files belong to the same account. Reject
+   unsupported path forms and unexpected reparse points explicitly, and treat
+   root invalidation as a watcher state rather than something to prevent.
 
 ## Handlers on Windows
 
@@ -427,13 +455,14 @@ changes.
 8. **Complete lifecycle commands.** Add `start`, `status`, `doctor`, `stop`,
    `uninstall`, and `upgrade` parity. Verify task identity before replacement
    or deletion and process identity before forced termination.
-9. **Harden failure paths.** Bound watcher queues and payloads, remove secrets
-   from command lines, define logged-off execution limits, and make interrupted
-   task updates recoverable. This is correctness hardening within the trusted-
-   administrator model, not sandboxing.
-10. **Add Windows CI and adversarial tests.** Cover quoting, task collisions,
-    stale PID reuse, path aliases and reparse points, watcher overflow,
-    interrupted upgrades, and uninstall cleanup after the implementation
+9. **Harden failure paths.** Bound watcher queues and payloads, define
+   logged-off execution limits, and make interrupted task updates recoverable.
+   This is correctness hardening within the trusted-administrator model, not
+   sandboxing.
+10. **Add Windows CI and regression tests.** Cover argument quoting, task
+    identity and collisions, stale PID reuse, rejected path forms, watcher
+    overflow, interrupted upgrades, and uninstall cleanup after the
+    implementation
     exists to test.
 
 ## Size and blast radius
@@ -473,13 +502,15 @@ sprawl would come from if it is not designed deliberately.
    the Windows runtime UUID without changing Linux or WSL behavior.
 4. Productization: complete lifecycle commands, diagnostics, supported
    handlers, schedule semantics, and operator documentation.
-5. Hardening: add Windows CI, adversarial tests, bounded failure handling, and
-   transactional upgrade and uninstall behavior.
+5. Hardening: add Windows CI, regression tests for the identity and quoting
+   checks, bounded failure handling, and transactional upgrade and uninstall
+   behavior.
 
 Each phase has an explicit stop decision. Failure of Copilot redirected I/O
 and ConPTY narrows the supported runtime or ends the work before a broad
-refactor. Hardening follows a working vertical slice rather than attempting to
-design isolation that the trusted-administrator model cannot provide.
+refactor. Hardening beyond the checks listed in the security model follows a
+working vertical slice rather than attempting to design isolation that the
+trusted-administrator model cannot provide.
 
 ## Non-goals
 
@@ -551,3 +582,12 @@ work.
 the hostname kept as a display label only. Linux and WSL hostname
 matching is unchanged, and no cross-runtime migration is needed because
 the two environments never share a checkout.
+
+### 2026-07-25: hardening narrowed to bug prevention
+
+The security model now names six cheap checks that ship with the first
+working path, and defers custom ACLs, SID and nonce process identity, job
+objects, and handle-based TOCTOU revalidation with a stated condition for
+revisiting each. The earlier draft carried those as requirements, which
+would have added privilege-boundary machinery to a tool that runs as the
+developer and makes no claim to constrain them.
