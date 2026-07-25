@@ -5,7 +5,10 @@ ms.date: 2026-07-25
 ms.topic: concept
 ---
 
-Status: draft for discussion. No decision has been made.
+Status: draft. Whether to do this work at all is undecided and depends on
+the feasibility spike below. The design decisions recorded here stand
+unless that spike or implementation experience overturns them; see the
+decision log at the end.
 
 > [!IMPORTANT]
 > The first decision is feasibility, not architecture hardening. Test the
@@ -47,7 +50,7 @@ machine owns an agent.
 
 | Dependency | Where | Windows equivalent |
 |---|---|---|
-| `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | Task Scheduler, or one tick task plus an internal scheduler |
+| `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows) |
 | `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW`, or .NET `FileSystemWatcher` |
 | `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | PID files plus `OpenProcess`, or WMI `Win32_Process` |
 | `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | Protected stop IPC and a Job Object, then termination of an identity-verified process tree |
@@ -68,17 +71,23 @@ machine owns an agent.
    boundary. `.` in a `watchPath` means the repository root, not the
    filesystem root. Logs, hashes, changed-file payloads, and status
    output keep one spelling on every platform.
-3. Windows and WSL never share an on-disk repository. WSL repositories live
-   under the distro's `/mnt` hierarchy and Windows repositories do not. The
-   Windows runtime refuses WSL namespace paths, and the WSL runtime retains its
-   current behavior. Cross-runtime file watching and coordination are out of
-   scope by deployment rule.
+3. Windows and WSL never share an on-disk repository. A WSL repository lives
+   in the distro's own filesystem; a Windows repository lives on a Windows
+   volume, which the distro sees under `/mnt/<drive>`. The Windows runtime
+   refuses repositories in the WSL namespace (`\\wsl.localhost`, `\\wsl$`),
+   and the WSL runtime retains its current behavior. Cross-runtime file
+   watching and coordination are out of scope by deployment rule.
 4. Platform code is a leaf. The scheduler, debounce, cascade guard,
    fire-rate breaker, dispatch, ownership, and logging stay single
    implementations that call down into a small interface.
-5. Preserve the Linux and WSL security posture. Native Windows support adds
+5. The host's native mechanisms dispatch; Agents Live does not keep a clock.
+   Scheduling and change notification are surfaced to Task Scheduler and to
+   the Windows change-notification API rather than reimplemented on top of a
+   resident poller. A `uv`-launched dispatcher is fine when a native trigger
+   is what launches it.
+6. Preserve the Linux and WSL security posture. Native Windows support adds
    platform mechanics, not a sandbox, policy engine, or new approval system.
-6. Deliver a narrow working path before hardening it: Copilot CLI process I/O,
+7. Deliver a narrow working path before hardening it: Copilot CLI process I/O,
    one scheduled agent, then one watcher. Add lifecycle and adversarial tests
    once those paths are demonstrably viable.
 
@@ -127,30 +136,36 @@ class HostRuntime(Protocol):
     id: str                      # "linux" | "wsl" | "windows"
 
     # trigger persistence (replaces crontab reads and writes)
-      def install_triggers(
-         self, desired: TriggerIdentity
-      ) -> TriggerIdentity: ...
+    def install_triggers(self, desired: TriggerSpec) -> TriggerIdentity: ...
     def remove_triggers(self, name: str) -> None: ...
     def installed_agent_names(self, root: Path) -> list[str] | None: ...
-      def trigger_state(self, name: str) -> TriggerIdentity | None: ...
+    def trigger_state(self, name: str) -> TriggerIdentity | None: ...
 
     # watchers
-    def spawn_detached(self, argv: list[str], cwd: Path) -> ProcessRef: ...
-      def watch_events(self, dirs: list[Path]) -> Iterator[WatchBatch]: ...
+    def spawn_detached(
+        self, argv: list[str], cwd: Path
+    ) -> ProcessIdentity: ...
+    def watch_events(self, dirs: list[Path]) -> Iterator[WatchBatch]: ...
 
     # process state
-      def find_process(self, name: str, kind: str) -> ProcessIdentity | None: ...
-      def is_alive(self, ref: ProcessIdentity) -> bool: ...
-      def terminate(
-         self, ref: ProcessIdentity, *, force: bool = False
-      ) -> None: ...
+    def find_process(
+        self, name: str, kind: str
+    ) -> ProcessIdentity | None: ...
+    def is_alive(self, ref: ProcessIdentity) -> bool: ...
+    def terminate(
+        self, ref: ProcessIdentity, *, force: bool = False
+    ) -> None: ...
 
     # coordination
-      def exclusive_lock(self, key: str) -> AbstractContextManager[LockLease]: ...
+    def exclusive_lock(
+        self, key: str
+    ) -> AbstractContextManager[LockLease]: ...
 ```
 
 The interface stays small, but its results cannot erase provenance or failure
-states. `TriggerIdentity` includes the task path, principal, action, working
+states. `TriggerSpec` is the desired state: the parsed schedule expressions,
+watch paths, and repository identity. `TriggerIdentity` is what is actually
+registered: the task path, principal, action, working
 directory, settings, ACL fingerprint, and ownership marker. `ProcessIdentity`
 includes PID, creation time, canonical executable, user SID, repository ID,
 and a random launch nonce. `WatchBatch` distinguishes changes, overflow, root
@@ -167,7 +182,7 @@ root invalidation before applying debounce, ignore rules, the content-hash
 cascade guard, and the fire-rate breaker in
 [activate.py](../src/agents_live/activate.py).
 
-`Triggers` carries the parsed schedule expressions and watch paths
+`TriggerSpec` carries the parsed schedule expressions and watch paths
 rather than a preformatted cron line. That is the important change on
 the POSIX side: `build_cron_lines` becomes an implementation detail of
 `PosixRuntime` instead of a shared concept, and
@@ -210,52 +225,85 @@ memory, file size hashed, rescan frequency, and total rescan work. Changed-file
 payloads must use an ACL-protected spool file or pipe, not the command line,
 which is size-limited and visible to local process inspection.
 
-Independent of the choice, a Windows watcher process needs to survive
-logoff and reboot. On Linux that is an `@reboot` respawn line plus the
-health check. On Windows it is one scheduled task per watcher with a
-logon or startup trigger plus a repetition interval, running
-`agents-live internal ensure-watcher <name>`, which is a no-op when the
-watcher is alive. That single mechanism replaces both the `@reboot` line
-and the health-check restart.
-
 ## Scheduling on Windows
 
-**Option 1: translate schedules to native triggers.** Each agent
-schedule becomes a registered task, named by convention so it can be
-enumerated and removed the way cron lines are today. The repository
-already drives `Register-ScheduledTask` through PowerShell for the
-heartbeat, so the machinery exists. The problem is expressiveness: cron
-lists, ranges, and steps do not map onto Daily, Weekly, and Monthly
-triggers without either multiple triggers per agent or a Once trigger
-with a repetition interval, and some expressions cannot be represented
-at all. That means a documented supported subset and a rejection path
-for the rest, which is a lasting behavioral difference between
-platforms.
+Task Scheduler owns the timing. Agents Live registers one task per agent,
+translating that agent's cron expressions into native triggers, and the
+task action runs a dispatcher that confirms the agent is due before
+running it. Windows decides when to wake; the dispatcher decides whether
+this particular wake is a real firing time. No resident process, no
+internal clock.
 
-**Option 2: one tick task plus an internal scheduler.** Register a
-single per-user task that fires every minute and runs
-`agents-live internal tick`. That command evaluates every activated
-agent's cron expression against the current minute and dispatches. Cron
-syntax stays the universal schedule language, no translation is lost,
-and `status` reads one state file instead of querying Task Scheduler.
-The costs include a maintained cron evaluator, last-fired bookkeeping,
-serialized tick execution, a process start per minute, and explicit policies
-for time zones, daylight-saving folds and gaps, clock rollback, sleep and
-catch-up, overlapping runs, and `@reboot` semantics. Task Scheduler must
-reject overlapping tick instances, and last-fired state must be committed
-atomically before dispatch.
+Translation is exact wherever cron maps cleanly onto a native trigger. A
+task carries many triggers, so lists and ranges expand instead of
+failing:
 
-Recommendation: Option 2, using a maintained parser rather than a new compact
-cron rules engine and differential tests against current cron behavior. It
-keeps one schedule language and one state model. Option 1 remains the better
-answer if per-agent visibility inside the Windows Task Scheduler UI turns out
-to matter to operators.
+| Cron form | Native trigger |
+|---|---|
+| `M H * * *` | Daily at H:M |
+| `M H * * D` | Weekly on D at H:M |
+| `M H D * *` | Monthly on day D at H:M |
+| `*/N * * * *` | Once, repeating every N minutes, indefinite duration |
+| `0,30 * * * *` | Two triggers, or Once plus a 30-minute repetition |
+| `0 9-17 * * 1-5` | Cross product: 5 days by 9 hours, 45 triggers |
+| `@reboot` | At startup |
 
-Either way, Task Scheduler stores an executable path, one argument string, and
-a working directory. Build the argument string with Windows
-`CommandLineToArgvW`-compatible quoting and verify it by round trip. Pin a
-fully qualified, ACL-verified executable, not a PATH-resolved or writable
-shim, then read back and compare the complete registered task definition.
+Where cron does not map exactly, translation produces a superset of the
+true firing times, a coarser trigger such as hourly or every fifteen
+minutes, and the dispatcher declines the fires that are not due.
+Guaranteeing a superset is far easier than guaranteeing exactness, so no
+expression is refused and cron stays the single schedule language on
+both platforms. The cases that need it are day-of-month and day-of-week
+both restricted, which cron ORs and no single native trigger expresses;
+step values that do not divide their field evenly, where a native
+repetition anchored at registration time would drift off the cron
+minute; and expressions whose exact expansion exceeds the trigger cap.
+
+The dispatcher is a predicate, not a scheduler. Given one expression and
+one timestamp it answers due or not due. No run queue, no catch-up
+policy, no drift compensation: those stay with Task Scheduler, including
+its "run as soon as possible after a missed start" behavior for machines
+that were asleep. Coarse triggers carry exactly one piece of state, the
+last fired minute per agent, so a repetition that fires twice inside one
+matching minute still runs the agent once.
+
+Two consequences to document for operators: a coarse trigger shows a
+cadence in the Task Scheduler UI that does not match the agent's stated
+schedule, and a declined fire costs a process start. Keeping supersets
+tight keeps both small.
+
+Rejected: a single per-minute tick task driving an internal scheduler.
+It reduces Task Scheduler to a pulse generator and moves time zones,
+daylight-saving folds and gaps, clock rollback, sleep and catch-up, and
+overlap policy into Agents Live. Less code to write, far more to own,
+and it contradicts the principle that the host's native mechanisms
+dispatch.
+
+Task Scheduler stores an executable path, one argument string, and a
+working directory. Build the argument string with Windows
+`CommandLineToArgvW`-compatible quoting and verify it by round trip. Pin
+a fully qualified, ACL-verified executable, not a PATH-resolved or
+writable shim, then read back and compare the complete registered task
+definition.
+
+### Watchers are started by Task Scheduler, not scheduled by it
+
+Each file-watch agent keeps one small watcher process, exactly as on
+Linux today. A scheduled task with a logon trigger, a startup trigger,
+and a repetition interval runs
+`agents-live internal ensure-watcher <name>`, which exits immediately
+when the watcher is alive and respawns it when it is not. That one task
+replaces both the `@reboot` respawn line and the health-check restart.
+
+The watcher stays resident because Windows publishes no native trigger
+for "this directory changed". Task Scheduler event triggers read the
+Windows event log, and file-system changes are not written there. The
+one genuinely process-free alternative, a permanent WMI event consumer
+over `CIM_DataFile`, requires administrator registration, polls
+expensively, and is a well-known malware persistence pattern that
+endpoint protection flags on sight; it is rejected. So the native
+mechanism's job is to start the watcher and keep it started, which is
+what the ensure-watcher task does.
 
 ## Ownership generalization
 
@@ -365,9 +413,11 @@ changes.
 4. **Register one scheduled run.** Use a user-scoped Task Scheduler action with
    a fully qualified executable, Windows-correct arguments, an explicit
    working directory, and enough metadata to identify the task during removal.
-5. **Choose schedule semantics.** Prototype the one-minute tick with a
-   maintained cron parser. Confirm DST, overlap, sleep, and restart behavior
-   before generalizing activation and status.
+5. **Confirm schedule semantics.** Translate a real agent's cron expression
+   into native triggers, measure how much of the existing schedule
+   vocabulary maps exactly, and confirm DST, sleep, missed-start, and
+   restart behavior on a live task before generalizing activation and
+   status.
 6. **Build one watcher.** Compare `ReadDirectoryChangesW` and `watchdog` on a
    native Windows repository. Prove cancellation, rename, overflow, root
    deletion, and bounded rescan behavior before choosing the implementation.
@@ -388,7 +438,8 @@ changes.
 
 ## Size and blast radius
 
-Rough, and stated as a range because the refactor comes first:
+Rough, and stated as a range because the prototypes come before the
+refactor that generalizes them:
 
 - Extraction of `HostRuntime` and the POSIX implementation: mostly moved
   code, close to zero net new lines, but it touches `activate.py`,
@@ -399,7 +450,7 @@ Rough, and stated as a range because the refactor comes first:
 - Windows implementation: 700 to 1,000 new lines, concentrated in one
   or two modules. Task registration and enumeration around 250,
   `ReadDirectoryChangesW` around 250, process and lock primitives around
-  150, tick scheduler and cron evaluation around 200.
+  150, cron-to-trigger translation and the due predicate around 200.
 - Ownership grammar: under 100 lines plus migration.
 - Doctor, preflight, and status parity: a few hundred lines spread
   across existing modules, mostly branching on `runtime.id` for
@@ -452,4 +503,51 @@ design isolation that the trusted-administrator model cannot provide.
   assumption, so a WSL result would be misleading either way. If output
   does not reach a redirected stdout, the follow-up question is whether
   ConPTY through `pywinpty` is acceptable as a dependency.
-- Tick scheduler or translated per-agent tasks?
+- How much of the real schedule vocabulary translates exactly, and how
+  coarse the superset triggers have to be for the rest? Measured on the
+  first registered task, not settled in the abstract.
+
+## Decision log
+
+Decisions that changed the approach recorded above. The document states
+the current approach; this log says when it changed and why.
+
+### 2026-07-25: scheduling uses native triggers plus a dueness check
+
+Task Scheduler owns the timing. Cron expressions translate to native
+triggers exactly wherever they map cleanly, and to a coarser superset
+otherwise, with a dispatcher that declines fires that are not due.
+Chosen over exact-translation-only, which would have to refuse
+expressions that no single native trigger expresses, and over a
+per-minute tick task with an internal scheduler, which would reduce
+Windows to a pulse generator and move time zones, daylight-saving
+handling, catch-up, and overlap policy into Agents Live. The earlier
+draft of this document recommended the tick task; that recommendation is
+withdrawn. Mechanics get confirmed on the first registered task.
+
+### 2026-07-25: watchers stay resident, started by a scheduled task
+
+One watcher process per file-watch agent, kept alive by a scheduled task
+with logon, startup, and repetition triggers running
+`agents-live internal ensure-watcher <name>`. Windows publishes no
+native trigger for a directory change, and the process-free alternative,
+a permanent WMI event consumer, needs administrator rights, polls
+expensively, and looks like malware persistence to endpoint protection.
+Residency is therefore inherent to file watching, not a design
+preference, and the native mechanism's role is to start and restart the
+watcher.
+
+### 2026-07-25: `.sh` handlers are refused on Windows
+
+Python and Node handlers already run natively, so plan mode is not
+blocked. `.sh` requires Git Bash or an explicitly configured
+interpreter; the WSL launcher on PATH is rejected by identity because
+accepting it would run handlers against the wrong root and appear to
+work.
+
+### 2026-07-25: Windows ownership is a generated UUID
+
+`windows:<uuid>`, generated once into the Windows user state home, with
+the hostname kept as a display label only. Linux and WSL hostname
+matching is unchanged, and no cross-runtime migration is needed because
+the two environments never share a checkout.
