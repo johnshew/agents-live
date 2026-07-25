@@ -9,11 +9,11 @@ Scope: crontab schedule lines (``--name <agent>``) and @reboot watcher
 respawn lines (``ensure-watcher <agent>`` or its legacy flag form) that
 reference THIS project
 (the crontab is host-global; other projects' lines are never touched).
-Every entry is compared against what activation would write today -
-``activate.build_cron_lines`` / ``headless.build_reboot_watcher_line`` -
-so migrate always converges entries to the running context's form: the
-script-path form in the flat checkout, the pinned-shim + ``--repo`` form
-once installed as a package (§3.4.2). This is what retires stale
+Every entry is compared against the trigger spec activation would
+install today - ``headless.schedule_spec`` / ``headless.watcher_spec``
+- so migrate always converges entries to the running context's form:
+the script-path form in the flat checkout, the pinned-shim + ``--repo``
+form once installed as a package (§3.4.2). This is what retires stale
 ``uv run .../scripts/*.py`` lines at the F7 flip.
 
 A running watcher whose respawn line was rewritten is restarted so its
@@ -31,14 +31,15 @@ import shlex
 import sys
 from pathlib import Path
 
-from . import headless, preflight
+from . import headless, preflight, triggers
 from .headless import (
     AgentsLiveError,
-    build_reboot_watcher_line,
     cron_line_matches,
     find_watcher_pid,
     install_watcher_reboot_line,
+    schedule_spec,
     stop_watcher,
+    watcher_spec,
     agent_file_exists,
 )
 
@@ -57,11 +58,10 @@ def _token_pair_value(line: str, flag: str) -> str | None:
 
 def plan_migration(lines: list[str]) -> dict:
     """Pure planning core: compare this project's entries against the
-    canonical forms. Returns ``{"schedule": {name: (old, new)},
-    "watcher": {name: (old, new)}, "missing": [name, ...]}`` where old/new
-    are line lists (old == new entries are omitted)."""
-    from . import activate
-
+    trigger specs activation would install. Returns ``{"schedule":
+    {name: (old, new)}, "watcher": {name: (old, new)}, "missing":
+    [name, ...]}`` where old/new are line lists (already-canonical
+    entries are omitted)."""
     schedule_names: set[str] = set()
     watcher_names: set[str] = set()
     for line in lines:
@@ -84,25 +84,24 @@ def plan_migration(lines: list[str]) -> dict:
             continue
         old = [l for l in lines if cron_line_matches(l, name)]
         try:
-            new = activate.build_cron_lines(name)
+            spec = schedule_spec(name)
         except AgentsLiveError:
             # Defined but currently unloadable/scheduleless: leave alone,
             # report as missing-from-migration rather than guessing.
             plan["missing"].append(name)
             continue
-        if sorted(old) != sorted(new):
-            plan["schedule"][name] = (old, new)
+        if not triggers.is_canonical(old, spec):
+            plan["schedule"][name] = (old, triggers.render(spec))
     for name in sorted(watcher_names):
         if not agent_file_exists(name):
             if name not in plan["missing"]:
                 plan["missing"].append(name)
             continue
         old = [l for l in lines
-               if headless.crontab_line_belongs_to_repo(l)
-               and headless._reboot_watcher_line_agent_name(l) == name]
-        new = [build_reboot_watcher_line(name)]
-        if sorted(old) != sorted(new):
-            plan["watcher"][name] = (old, new)
+               if headless._reboot_watcher_line_agent_name(l) == name]
+        spec = watcher_spec(name)
+        if not triggers.is_canonical(old, spec):
+            plan["watcher"][name] = (old, triggers.render(spec))
     return plan
 
 
@@ -123,8 +122,6 @@ def _line_belongs_to_root(line: str, root: Path) -> bool:
 
 def plan_adoption(lines: list[str], old_root: Path) -> dict:
     """Plan canonical replacements for trigger entries from *old_root*."""
-    from . import activate
-
     candidates = [line for line in lines if _line_belongs_to_root(line, old_root)]
     schedule: dict[str, list[str]] = {}
     watcher: dict[str, list[str]] = {}
@@ -148,7 +145,7 @@ def plan_adoption(lines: list[str], old_root: Path) -> dict:
             plan["unmatched"].extend(old)
             continue
         try:
-            new = activate.build_cron_lines(name)
+            new = triggers.render(schedule_spec(name))
         except AgentsLiveError:
             plan["unmatched"].extend(old)
             continue
@@ -157,7 +154,7 @@ def plan_adoption(lines: list[str], old_root: Path) -> dict:
         if not agent_file_exists(name):
             plan["unmatched"].extend(old)
             continue
-        plan["watcher"][name] = (old, [build_reboot_watcher_line(name)])
+        plan["watcher"][name] = (old, triggers.render(watcher_spec(name)))
     return plan
 
 

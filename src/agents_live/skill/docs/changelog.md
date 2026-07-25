@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- refactor: extract the host-runtime seam. (#120)
+  Triggers are described by a spec and rendered into crontab lines in one
+  place, watcher policy decides batches without a live event source, and
+  runtime identity is answered once. Linux and WSL behavior is unchanged; the
+  package also imports on hosts without `fcntl`.
 - fix: keep console output ASCII-only. (#121)
   The pre-release audit summary, qlog traceback header, timeline separator,
   and smoketest step labels no longer require a UTF-8 capable console.

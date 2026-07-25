@@ -6,11 +6,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import os
 import json
-from collections import deque
-import shlex
 import shutil
 import signal
 import subprocess
@@ -23,7 +22,6 @@ from .headless import (
     MAX_LOG_FIELD_LENGTH,
     AgentConfig,
     AgentsLiveError,
-    clean_path,
     cli_invocation,
     crontab_lock,
     cron_line_matches,
@@ -42,6 +40,7 @@ from .headless import (
     remove_watcher_reboot_line,
     repo_root,
     run_invocation,
+    schedule_spec,
     stop_watcher,
     system_log,
     agent_file_exists,
@@ -50,12 +49,15 @@ from .headless import (
 from . import ownership
 from . import paths
 from . import preflight
+from . import triggers
+from . import watchpolicy
 
 SCRIPT_PATH = Path(__file__).resolve()
 RUN_ONCE_PATH = SCRIPT_PATH.with_name("run.py")
 
 
-# --- Content-hash cascade guard helpers ---
+# --- Content-hash cascade guard state ---
+# The rules live in watchpolicy; the cache below is the state they read.
 
 def _hash_file_content(filepath: Path) -> str | None:
     """SHA-256 hex digest of file content, or None if unreadable."""
@@ -99,28 +101,6 @@ def _save_watch_hashes(name: str, hashes: dict) -> None:
     p.write_text(json.dumps(hashes, indent=2) + "\n")
 
 
-# Only apply hash filtering within this window after the last dispatch.
-# Cascades happen within seconds; intentional touches come later.
-CASCADE_WINDOW_SECS = 120
-
-# --- Watcher fire-rate circuit breaker ---
-# Last-resort backstop against a self-triggering cascade (a post-processor
-# writing into its own watched dir, or a mutating-filename rename loop). The
-# content-hash guard above stops identical re-fires but not loops whose
-# content keeps changing (the 2026-05-02 outage: ~88 concurrent runs from a
-# rename loop). If a single watcher process dispatches more than
-# FIRE_RATE_MAX_DISPATCHES batches within a FIRE_RATE_WINDOW_SECS sliding
-# window, log an error-level alert (picked up by self-heal-log-alerts) and
-# exit. Watchers are detached processes (start_new_session), so exiting stays
-# down with no auto-restart until reactivated. The cap is set well above any
-# human editing rate - a person grooming the task backlog cannot dispatch
-# dozens of batches in ten minutes - so legitimate heavy manual use never
-# trips it, while a machine-speed cascade blows past it in seconds. Tune here
-# if an agent legitimately needs a different ceiling.
-FIRE_RATE_WINDOW_SECS = 600
-FIRE_RATE_MAX_DISPATCHES = 40
-
-
 def _validate_handler_paths(config: AgentConfig) -> None:
     """Verify that all referenced handler files exist before activation.
 
@@ -139,39 +119,13 @@ def _validate_handler_paths(config: AgentConfig) -> None:
         )
 
 
-def build_cron_lines(name: str) -> list[str]:
-    """The canonical crontab schedule lines for *name* in the current
-    execution context (§3.4.2): packaged installs persist the pinned
-    shim + --repo; the flat checkout keeps the script form until the F7
-    flip migrates it. Shared by activation and `migrate`'s convergence
-    check."""
-    config = load_agent_config(name)
-    if not config.schedule:
-        raise AgentsLiveError(f"agent '{name}' has no schedule")
-    repo = repo_root()
-    run_command = run_invocation(name)
-    # An agent may declare several schedules (e.g. "@reboot" plus an hourly
-    # cron); emit one crontab line per entry. They all carry the same
-    # `--name`, so cron_line_matches removes and re-adds them as a group.
-    # PATH rides inside each line (§3.4.2 self-contained crontab lines) so
-    # no global PATH= line - which the user or another project may own -
-    # ever needs to be touched.
-    path_prefix = f"PATH={shlex.quote(clean_path())}"
-    return [
-        f"{sched} cd {shlex.quote(str(repo))} && {path_prefix} "
-        f"{shlex.join(run_command)} 2>&1"
-        for sched in config.schedule
-    ]
-
-
 def install_cron_agent(name: str) -> str:
     config = load_agent_config(name)
-    if not config.schedule:
-        raise AgentsLiveError(f"agent '{name}' has no schedule")
+    spec = schedule_spec(name)
     _validate_handler_paths(config)
 
     ensure_logs_dir()
-    new_cron_lines = build_cron_lines(name)
+    new_cron_lines = triggers.render(spec)
 
     # Exact --name token matching: a plain substring test would also drop
     # entries for sibling agents whose name contains this one (todo vs
@@ -267,42 +221,6 @@ def _validate_watcher_prereqs(config: AgentConfig) -> list[Path]:
     return watch_targets
 
 
-def should_ignore_watch_change(changed_file: str, watch_ignore: list[str] | None = None) -> bool:
-    changed_path = Path(changed_file)
-    if not changed_path.is_absolute():
-        changed_path = (repo_root() / changed_path).resolve()
-
-    try:
-        relative = changed_path.relative_to(repo_root())
-    except ValueError:
-        return False
-
-    if any(part.startswith(".") for part in relative.parts):
-        return True
-    if any(part == "__pycache__" for part in relative.parts):
-        return True
-    if relative.name == "_index_.md":
-        return True
-    # Ignore JSONL log files written by the agents-live system itself
-    # (prevents recursive triggers), but allow other files under Agents/logs/
-    # so watcher agents that deliberately watch subdirectories still fire.
-    if relative.suffix == ".log" and (
-        relative == Path("Agents/logs") / relative.name
-        or Path("Agents/logs") in relative.parents
-    ):
-        return True
-    if watch_ignore and relative.name in watch_ignore:
-        return True
-    # Support directory-prefix ignores: entries ending with '/' match any
-    # file whose repo-relative path starts with that prefix.
-    if watch_ignore:
-        rel_str = relative.as_posix()
-        for pattern in watch_ignore:
-            if pattern.endswith("/") and (rel_str + "/").startswith(pattern):
-                return True
-    return False
-
-
 def watch_loop(name: str) -> int:
     config = load_agent_config(name)
     watch_targets = _validate_watcher_prereqs(config)
@@ -329,12 +247,24 @@ def watch_loop(name: str) -> int:
     # Separate file targets (watch parent dir + filter) from directory targets.
     watch_dirs: list[Path] = []
     target_filenames: set[str] = set()
+    dir_targets: list[Path] = []
     for t in watch_targets:
         if t.is_file() or t.suffix:
             target_filenames.add(t.name)
             watch_dirs.append(t.parent)
         else:
             watch_dirs.append(t)
+            dir_targets.append(t)
+
+    root = repo_root()
+
+    def _accept(raw_paths: list[str]) -> list[str]:
+        """Repo-relative paths from raw event paths, policy applied."""
+        return watchpolicy.select_batch(
+            raw_paths, root=root,
+            target_filenames=frozenset(target_filenames),
+            dir_targets=dir_targets,
+            watch_ignore=config.watch_ignore)
 
     # Deduplicate dirs
     seen: set[Path] = set()
@@ -371,8 +301,8 @@ def watch_loop(name: str) -> int:
              message=f"inotifywait started, watching {watch_desc}")
 
     _started_at = time.monotonic()
-    # Per-process sliding window of dispatch timestamps for the circuit breaker.
-    _dispatch_history: deque[float] = deque()
+    # Per-process dispatch rate, the last line of defence against a cascade.
+    breaker = watchpolicy.FireRateBreaker()
     shutdown_requested = False
     shutdown_signal: int | None = None
 
@@ -420,20 +350,16 @@ def watch_loop(name: str) -> int:
         flags = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        DEBOUNCE_SECS = 1.0  # collect events for this long before firing
+        COLLECT_SECS = 1.0  # drain events for this long before deciding
 
-        # Layer-2 debounce state (frontmatter `debounce: N`): batches
-        # accumulate here and dispatch only after N seconds of quiet,
-        # timed in-process via the select timeout below.
-        debounce_files: list[str] = []
-        debounce_deadline: float | None = None
+        # Layer-2 debounce (frontmatter `debounce: N`): batches accumulate
+        # in the window and dispatch only after N seconds of quiet, timed
+        # in-process via the select timeout below.
+        debounce = watchpolicy.DebounceWindow(config.debounce or 0)
 
         def _fire_debounce(reason: str) -> None:
             """Dispatch everything accumulated in the debounce window."""
-            nonlocal debounce_files, debounce_deadline
-            files = debounce_files
-            debounce_files = []
-            debounce_deadline = None
+            files = debounce.take()
             if not files:
                 return
             log_event(config.agent_log, level="info", phase="watcher",
@@ -443,21 +369,19 @@ def watch_loop(name: str) -> int:
 
         def _drop_debounce(reason: str) -> None:
             """Discard pending debounced files on deliberate shutdown."""
-            nonlocal debounce_files, debounce_deadline
-            if debounce_files:
+            files = debounce.take()
+            if files:
                 log_event(config.agent_log, level="warning", phase="watcher",
-                          message=f"dropping {len(debounce_files)} pending "
+                          message=f"dropping {len(files)} pending "
                                   f"debounced file(s) on {reason}",
-                          changed_files=debounce_files)
-            debounce_files = []
-            debounce_deadline = None
+                          changed_files=files)
 
         pending_line = ""
         while True:
             # Block until an event arrives or, when a Layer-2 debounce
             # window is pending, until that window expires.
-            if debounce_deadline is not None:
-                remaining_window = debounce_deadline - time.monotonic()
+            remaining_window = debounce.remaining(time.monotonic())
+            if remaining_window is not None:
                 if remaining_window > 0:
                     ready, _, _ = select.select([fd], [], [], remaining_window)
                 else:
@@ -475,7 +399,7 @@ def watch_loop(name: str) -> int:
                     return 0
 
             # Read all immediately available events
-            changed_files: list[str] = []
+            raw_events: list[str] = []
             try:
                 while True:
                     raw = os.read(fd, 8192)
@@ -498,34 +422,18 @@ def watch_loop(name: str) -> int:
                     pending_line += chunk
                     while "\n" in pending_line:
                         line, pending_line = pending_line.split("\n", 1)
-                        f = line.strip()
-                        if not f:
-                            continue
-                        # File-target filter: when watching a parent dir on behalf of
-                        # a specific file, only accept events for those files. Events
-                        # from recursively-watched subdirs of directory targets pass through.
-                        if target_filenames:
-                            changed = Path(f)
-                            # Accept if the file matches a target filename, or if
-                            # it's under a directory target (not a file-target parent)
-                            if changed.name not in target_filenames:
-                                # Check if this event is from a dir we're watching recursively
-                                is_under_dir_target = any(
-                                    t.is_dir() and str(changed).startswith(str(t))
-                                    for t in watch_targets
-                                )
-                                if not is_under_dir_target:
-                                    continue
-                        if not should_ignore_watch_change(f, config.watch_ignore):
-                            changed_files.append(f)
+                        if line.strip():
+                            raw_events.append(line.strip())
             except (BlockingIOError, IOError):
                 pass
 
+            changed_files = _accept(raw_events)
             if not changed_files:
                 continue
 
-            # Wait briefly for more events to arrive (debounce)
-            deadline = time.monotonic() + DEBOUNCE_SECS
+            # Wait briefly for more events to arrive (collection window)
+            raw_events = []
+            deadline = time.monotonic() + COLLECT_SECS
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -544,55 +452,27 @@ def watch_loop(name: str) -> int:
                     pending_line += chunk
                     while "\n" in pending_line:
                         line, pending_line = pending_line.split("\n", 1)
-                        f = line.strip()
-                        if not f:
-                            continue
-                        if target_filenames:
-                            changed = Path(f)
-                            if changed.name not in target_filenames:
-                                is_under_dir_target = any(
-                                    t.is_dir() and str(changed).startswith(str(t))
-                                    for t in watch_targets
-                                )
-                                if not is_under_dir_target:
-                                    continue
-                        if not should_ignore_watch_change(f, config.watch_ignore):
-                            changed_files.append(f)
+                        if line.strip():
+                            raw_events.append(line.strip())
                 except (BlockingIOError, IOError):
                     break
+            changed_files.extend(_accept(raw_events))
 
-            # Deduplicate, keep all unique changed files - convert to repo-relative paths
-            root = repo_root()
-            unique_files = list(dict.fromkeys(changed_files))
-            relative_files = []
-            for f in unique_files:
-                try:
-                    relative_files.append(str(Path(f).relative_to(root)))
-                except ValueError:
-                    relative_files.append(f)
+            relative_files = list(dict.fromkeys(changed_files))
             # Content-hash cascade guard: drop individual files whose
             # content hasn't changed since the last dispatch for this agent.
-            # Only active within CASCADE_WINDOW_SECS of the last dispatch -
-            # outside the window, every event dispatches (so touch works).
             cached = _load_watch_hashes(name)
             cached_hashes: dict[str, str] = cached.get("files", {})
-            last_dispatch = cached.get("_dispatched_at", 0)
-            in_cascade_window = (time.time() - last_dispatch) < CASCADE_WINDOW_SECS
-
-            current_hashes: dict[str, str] = {}
-            actually_changed: list[str] = []
-            hash_skipped: list[str] = []
-            for f in relative_files:
-                h = _hash_file_content(root / f)
-                if h:
-                    current_hashes[f] = h
-                    if in_cascade_window and cached_hashes.get(f) == h:
-                        hash_skipped.append(f)
-                    else:
-                        actually_changed.append(f)
-                else:
-                    # Can't hash (deleted/unreadable) - keep it in the batch
-                    actually_changed.append(f)
+            guarded = watchpolicy.apply_cascade_guard(
+                relative_files,
+                cached_hashes=cached_hashes,
+                last_dispatch_at=cached.get("_dispatched_at", 0),
+                now=time.time(),
+                hasher=lambda f: _hash_file_content(root / f),
+            )
+            actually_changed = guarded.dispatch
+            hash_skipped = guarded.skipped
+            current_hashes = guarded.hashes
 
             if hash_skipped:
                 short = {f: current_hashes[f][:12] for f in hash_skipped}
@@ -619,47 +499,39 @@ def watch_loop(name: str) -> int:
                       changed_files=actually_changed, hashes=short_hashes)
 
             # Fire-rate circuit breaker: a real dispatch is about to happen.
-            # Record it, prune the sliding window, and trip if the rate
-            # indicates a cascade rather than human-speed editing.
-            _now = time.monotonic()
-            _dispatch_history.append(_now)
-            _cutoff = _now - FIRE_RATE_WINDOW_SECS
-            while _dispatch_history and _dispatch_history[0] < _cutoff:
-                _dispatch_history.popleft()
-            if len(_dispatch_history) > FIRE_RATE_MAX_DISPATCHES:
-                window_min = round(FIRE_RATE_WINDOW_SECS / 60)
+            # Record it and trip if the rate indicates a cascade rather than
+            # human-speed editing.
+            if breaker.record(time.monotonic()):
+                window_min = round(breaker.window_secs / 60)
                 breaker_msg = (
-                    f"CIRCUIT BREAKER: {len(_dispatch_history)} dispatches in "
-                    f"<{window_min}min exceeds cap of {FIRE_RATE_MAX_DISPATCHES} - "
+                    f"CIRCUIT BREAKER: {breaker.count} dispatches in "
+                    f"<{window_min}min exceeds cap of {breaker.max_dispatches} - "
                     f"likely a watcher cascade; stopping watcher '{name}'"
                 )
                 log_event(config.agent_log, level="error", phase="watcher",
                           status="circuit_breaker",
                           error_category="cascade_circuit_breaker",
                           message=breaker_msg,
-                          dispatch_count=len(_dispatch_history),
-                          window_secs=FIRE_RATE_WINDOW_SECS,
+                          dispatch_count=breaker.count,
+                          window_secs=breaker.window_secs,
                           last_files=actually_changed)
                 log_event(system_log(), level="error", agent_name=name, phase="watcher",
                           status="circuit_breaker",
                           error_category="cascade_circuit_breaker",
                           message=breaker_msg,
-                          dispatch_count=len(_dispatch_history),
-                          window_secs=FIRE_RATE_WINDOW_SECS)
+                          dispatch_count=breaker.count,
+                          window_secs=breaker.window_secs)
                 return 1
 
             if config.debounce:
                 # Layer-2 debounce: accumulate this batch and (re)start the
                 # quiet window. Dispatch happens at the top of the loop when
                 # the window expires with no new batches.
-                for f in actually_changed:
-                    if f not in debounce_files:
-                        debounce_files.append(f)
-                debounce_deadline = time.monotonic() + config.debounce
+                debounce.add(actually_changed, time.monotonic())
                 log_event(config.agent_log, level="info", phase="watcher",
                           message=f"debounce window (re)started: dispatch in "
                                   f"{config.debounce}s "
-                                  f"({len(debounce_files)} file(s) accumulated)")
+                                  f"({len(debounce.files)} file(s) accumulated)")
             else:
                 # Immediate dispatch (default).
                 _dispatch_run_once(name, actually_changed)
@@ -672,6 +544,12 @@ def watch_loop(name: str) -> int:
     finally:
         sys.stderr = _orig_stderr
         process.terminate()
+        # Close the pipes we own: a watcher that returns without this
+        # leaks both descriptors until the process itself exits.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
     return 0
 
 

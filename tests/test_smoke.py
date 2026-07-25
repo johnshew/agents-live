@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -35,9 +36,9 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, health_check,
-        heartbeat, init, migrate, ownership, paths, plugins, preflight,
-        doctor, repos, run, spawn, status, uninstall,
-        update_check, upgrade,
+        heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
+        preflight, doctor, repos, run, spawn, status, uninstall,
+        update_check, upgrade, triggers, watchpolicy,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -53,6 +54,7 @@ except ImportError:  # flat checkout layout
     import headless
     import health_check
     import heartbeat
+    import hostruntime
     import init
     import migrate
     import ownership
@@ -67,10 +69,22 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
+    import triggers
+    import watchpolicy
     from cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
     )
+
+
+def schedule_lines(name: str) -> list[str]:
+    """The crontab lines activation would install for *name*."""
+    return triggers.render(headless.schedule_spec(name))
+
+
+def watcher_reboot_line(name: str) -> str:
+    """The @reboot respawn line activation would install for *name*."""
+    return triggers.render(headless.watcher_spec(name))[0]
 
 
 class _TempProject(unittest.TestCase):
@@ -639,7 +653,8 @@ class TestProjectPlugins(_TempProject):
             mock.patch.object(doctor, "_project_checks_enabled", return_value=True),
             mock.patch.object(doctor, "_has", return_value=True),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(doctor, "_package_checks", return_value=[]),
             mock.patch.object(doctor, "_native_agents", return_value=None),
@@ -897,10 +912,10 @@ class TestAgentParsing(_TempProject):
         self.assertEqual(record.candidate_count, 2)
 
     def test_watcher_ignores_generated_index_files(self) -> None:
-        self.assertTrue(activate.should_ignore_watch_change(
-            self.root / "Agents" / "notes" / "_index_.md"))
-        self.assertFalse(activate.should_ignore_watch_change(
-            self.root / "Agents" / "notes" / "trigger.txt"))
+        self.assertTrue(watchpolicy.should_ignore(
+            self.root / "Agents" / "notes" / "_index_.md", root=self.root))
+        self.assertFalse(watchpolicy.should_ignore(
+            self.root / "Agents" / "notes" / "trigger.txt", root=self.root))
 
     def test_unknown_runtime_fails_closed(self) -> None:
         self.write_agent("bad-runtime", AGENT_DEFINITION.replace("runtime: none",
@@ -985,8 +1000,7 @@ class TestInvocationForms(_TempProject):
     def test_path_backed_cron_preserves_canonical_agent_file(self) -> None:
         prompt = self.root / "my-agent.md"
         prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
-        with mock.patch.object(activate, "_validate_handler_paths"):
-            lines = activate.build_cron_lines(str(prompt))
+        lines = schedule_lines(str(prompt))
         self.assertIn(str(prompt), lines[0])
         self.assertTrue(headless.cron_line_matches(lines[0], str(prompt)))
 
@@ -998,7 +1012,7 @@ class TestInvocationForms(_TempProject):
     def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
         cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
-        watcher = headless.build_reboot_watcher_line("shared")
+        watcher = watcher_reboot_line("shared")
         self.assertTrue(headless.cron_line_matches(cron, "shared"))
         self.assertFalse(headless.cron_line_matches(
             cron.replace(str(self.root), FOREIGN_REPO), "shared"))
@@ -1019,7 +1033,7 @@ class TestInvocationForms(_TempProject):
     def test_removal_preserves_foreign_same_named_entries(self) -> None:
         cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
                 "--name shared --quiet")
-        watcher = headless.build_reboot_watcher_line("shared")
+        watcher = watcher_reboot_line("shared")
         foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
         foreign_watcher = watcher.replace(str(self.root), FOREIGN_REPO)
         with (
@@ -1037,15 +1051,14 @@ class TestInvocationForms(_TempProject):
             [mock.call([foreign_cron]), mock.call([foreign_watcher])])
 
     def test_reboot_line_round_trips_agent_name(self) -> None:
-        line = headless.build_reboot_watcher_line("t")
+        line = watcher_reboot_line("t")
         self.assertIn("internal ensure-watcher t", line)
         self.assertNotIn("start --ensure-watcher", line)
 
     def test_persisted_lines_carry_inline_path(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        with mock.patch.object(activate, "_validate_handler_paths"):
-            cron_lines = activate.build_cron_lines("smoke-fixture")
-        watcher_line = headless.build_reboot_watcher_line("smoke-fixture")
+        cron_lines = schedule_lines("smoke-fixture")
+        watcher_line = watcher_reboot_line("smoke-fixture")
         for line in [*cron_lines, watcher_line]:
             self.assertIn("PATH=", line)
         self.assertTrue(
@@ -1229,7 +1242,7 @@ class TestInvocationForms(_TempProject):
 class TestMigratePlanning(_TempProject):
     def test_canonical_lines_are_no_op(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        canonical = activate.build_cron_lines("smoke-fixture")
+        canonical = schedule_lines("smoke-fixture")
         plan = migrate.plan_migration(canonical)
         self.assertEqual(plan["schedule"], {})
         self.assertEqual(plan["missing"], [])
@@ -1289,7 +1302,7 @@ class TestMigratePlanning(_TempProject):
         near_match = old_schedule.replace(str(old_root), f"{old_root}-other")
         mixed_live = old_schedule.replace(
             f"--repo {old_root}", f"--repo {self.root}")
-        live_entry = activate.build_cron_lines("smoke-fixture")[0]
+        live_entry = schedule_lines("smoke-fixture")[0]
         lines = [
             old_schedule, old_watcher, undefined, near_match, mixed_live,
             live_entry,
@@ -1368,6 +1381,419 @@ class TestMigratePlanning(_TempProject):
             mock.patch.object(doctor.subprocess, "run", return_value=completed),
         ):
             self.assertEqual(doctor._crontab_inconsistencies(), ([], []))
+
+
+class _FakeHostBinaries(_TempProject):
+    """Base for tests that drive the real POSIX dispatch mechanisms.
+
+    The rest of the suite patches ``current_crontab_lines``,
+    ``install_crontab``, and never starts ``inotifywait`` - exactly the
+    subsystems a host-runtime seam replaces. These tests instead put a
+    fake executable on PATH and assert on observable outcomes (the
+    resulting table, the dispatched batch), so they keep holding when
+    the mechanism behind them changes.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bin_dir = self.root / "fake-bin"
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self._saved_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._saved_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", self._saved_path)
+
+    def write_executable(self, name: str, body: str) -> Path:
+        path = self.bin_dir / name
+        path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+
+class TestCrontabConvergenceBehavior(_FakeHostBinaries):
+    """Install, converge, and remove against a real ``crontab`` process."""
+
+    USER_LINE = "MAILTO=nobody"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.table = self.root / "crontab.txt"
+        self.write_executable("crontab", f"""
+import sys
+from pathlib import Path
+
+table = Path({str(self.table)!r})
+flag = sys.argv[1] if len(sys.argv) > 1 else ""
+if flag == "-l":
+    if not table.exists():
+        sys.stderr.write("no crontab for tester\\n")
+        raise SystemExit(1)
+    sys.stdout.write(table.read_text(encoding="utf-8"))
+elif flag == "-":
+    table.write_text(sys.stdin.read(), encoding="utf-8")
+elif flag == "-r":
+    table.unlink(missing_ok=True)
+else:
+    sys.stderr.write(f"unsupported crontab flag: {{flag}}\\n")
+    raise SystemExit(2)
+""")
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        (self.root / "Agents" / "handlers").mkdir(parents=True, exist_ok=True)
+        (self.root / "Agents" / "handlers" / "prep.py").write_text(
+            "print('{}')\n", encoding="utf-8")
+        self.foreign_line = (
+            f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && agents-live "
+            f"--repo {FOREIGN_REPO} run --name smoke-fixture --quiet 2>&1")
+
+    def installed_lines(self) -> list[str]:
+        if not self.table.exists():
+            return []
+        return [l for l in self.table.read_text(encoding="utf-8").splitlines() if l]
+
+    def seed(self, lines: list[str]) -> None:
+        self.table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_repeated_installs_converge_on_one_entry(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        canonical = schedule_lines("smoke-fixture")
+
+        activate.install_cron_agent("smoke-fixture")
+        after_first = self.installed_lines()
+        activate.install_cron_agent("smoke-fixture")
+        after_second = self.installed_lines()
+
+        self.assertEqual(after_first, after_second)
+        self.assertEqual(
+            [l for l in after_second if l in canonical], canonical)
+        # Unrelated user content and another project's entry for the same
+        # agent name both survive an install here.
+        self.assertIn(self.USER_LINE, after_second)
+        self.assertIn(self.foreign_line, after_second)
+
+    def test_stale_entry_is_migrated_to_the_canonical_form(self) -> None:
+        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && /usr/bin/uv run "
+                 f"--script {self.root}/scripts/run.py --name smoke-fixture "
+                 "--quiet 2>&1")
+        self.seed([self.USER_LINE, stale, self.foreign_line])
+        canonical = schedule_lines("smoke-fixture")
+        self.assertNotIn(stale, canonical)
+
+        plan = migrate.plan_migration(self.installed_lines())
+        self.assertEqual(plan["schedule"]["smoke-fixture"], ([stale], canonical))
+
+        with (
+            mock.patch("sys.argv", ["agents-live migrate"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(migrate.main(), 0)
+
+        converged = self.installed_lines()
+        self.assertNotIn(stale, converged)
+        for line in canonical:
+            self.assertIn(line, converged)
+        self.assertIn(self.USER_LINE, converged)
+        self.assertIn(self.foreign_line, converged)
+
+        # Converged input is a no-op: the second pass plans nothing.
+        self.assertEqual(migrate.plan_migration(converged)["schedule"], {})
+
+    def test_removal_takes_only_this_repos_entries(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        activate.install_cron_agent("smoke-fixture")
+        headless.install_watcher_reboot_line("smoke-fixture")
+        self.assertTrue(headless.remove_cron_entries("smoke-fixture"))
+        self.assertTrue(headless.remove_watcher_reboot_line("smoke-fixture"))
+        self.assertEqual(
+            self.installed_lines(), [self.USER_LINE, self.foreign_line])
+
+    def test_unreadable_crontab_never_rewrites_the_table(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        self.write_executable("crontab", """
+import sys
+
+sys.stderr.write("crontab: not allowed here\\n")
+raise SystemExit(1)
+""")
+        with self.assertRaisesRegex(headless.AgentsLiveError, "not accessible"):
+            activate.install_cron_agent("smoke-fixture")
+        self.assertEqual(
+            self.installed_lines(), [self.USER_LINE, self.foreign_line])
+
+
+WATCHER_DEFINITION = """---
+description: Smoke fixture. Never delegate to this agent.
+disable-model-invocation: true
+runtime: none
+mode: plan
+watchPath: .
+watchIgnore:
+  - skip.md
+  - "Agents/data/"
+---
+Watcher smoke fixture body.
+"""
+
+
+class TestWatchLoopBehavior(_FakeHostBinaries):
+    """Drive ``watch_loop`` end to end against a scripted ``inotifywait``."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.events_file = self.root / "fake-events.txt"
+        self.write_executable("inotifywait", f"""
+import sys
+from pathlib import Path
+
+# Emit the scripted paths and exit: EOF on stdout is a supported watcher
+# state, so the loop drains what it has and returns.
+events = Path({str(self.events_file)!r})
+sys.stdout.write(events.read_text(encoding="utf-8"))
+sys.stdout.flush()
+""")
+        self._saved_handlers = {
+            sig: signal.getsignal(sig)
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+        }
+        self.addCleanup(self._restore_handlers)
+
+    def _restore_handlers(self) -> None:
+        for sig, handler in self._saved_handlers.items():
+            signal.signal(sig, handler)
+
+    def write_repo_file(self, relative: str, content: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def run_watch_loop(self, name: str, changed: list[str]) -> list[list[str]]:
+        """Feed *changed* to the loop; return the dispatched batches."""
+        self.events_file.write_text(
+            "".join(f"{self.root / c}\n" for c in changed), encoding="utf-8")
+        batches: list[list[str]] = []
+        with (
+            mock.patch.object(activate, "_dispatch_run_once",
+                              side_effect=lambda _n, files: batches.append(files)),
+            # watch_loop registers exit hooks for the watcher process; in
+            # a test they would fire against a deleted temp state home.
+            mock.patch("atexit.register"),
+        ):
+            self.assertEqual(activate.watch_loop(name), 0)
+        return batches
+
+    def test_dispatch_carries_repo_relative_paths_and_drops_ignored_ones(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION)
+        changed = [
+            "notes/keep.md",          # dispatched
+            "skip.md",                # watchIgnore entry
+            "Agents/data/state.json",  # watchIgnore directory prefix
+            "notes/_index_.md",       # generated index
+            ".hidden/secret.md",      # dotted path component
+            "notes/__pycache__/x.pyc",
+        ]
+        for relative in changed:
+            self.write_repo_file(relative, f"content of {relative}\n")
+
+        self.assertEqual(self.run_watch_loop("watch-fixture", changed),
+                         [["notes/keep.md"]])
+
+    def test_unchanged_content_is_filtered_inside_the_cascade_window(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION)
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [["notes/keep.md"]])
+
+        # Same content again: a cascade re-touch, not an edit.
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [])
+
+        self.write_repo_file("notes/keep.md", "second\n")
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [["notes/keep.md"]])
+
+    def test_debounced_batch_survives_watcher_exit(self) -> None:
+        self.write_agent(
+            "watch-fixture",
+            WATCHER_DEFINITION.replace("---\nWatcher", "debounce: 30\n---\nWatcher"))
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.write_repo_file("notes/other.md", "other\n")
+
+        # A 30s quiet window never elapses here; the pending batch must
+        # still dispatch once when the watcher process goes away.
+        self.assertEqual(
+            self.run_watch_loop("watch-fixture", ["notes/keep.md", "notes/other.md"]),
+            [["notes/keep.md", "notes/other.md"]])
+
+    def test_file_target_watch_filters_by_filename(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION.replace(
+            "watchPath: .", "watchPath: notes/keep.md"))
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.write_repo_file("notes/other.md", "other\n")
+
+        self.assertEqual(
+            self.run_watch_loop("watch-fixture", ["notes/other.md", "notes/keep.md"]),
+            [["notes/keep.md"]])
+
+
+class TestWatchPolicy(unittest.TestCase):
+    """The watcher rules, exercised without an event source."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def select(self, paths: list[str], **kwargs: object) -> list[str]:
+        return watchpolicy.select_batch(
+            [str(self.root / p) for p in paths], root=self.root, **kwargs)
+
+    def test_generated_and_hidden_paths_never_reach_an_agent(self) -> None:
+        self.assertEqual(
+            self.select([
+                "notes/keep.md", ".git/index", "notes/_index_.md",
+                "lib/__pycache__/x.pyc", "Agents/logs/note-index.log",
+            ]),
+            ["notes/keep.md"])
+
+    def test_ignore_entries_match_names_and_directory_prefixes(self) -> None:
+        self.assertEqual(
+            self.select(
+                ["notes/keep.md", "notes/skip.md", "Agents/data/state.json"],
+                watch_ignore=["skip.md", "Agents/data/"]),
+            ["notes/keep.md"])
+
+    def test_repeated_events_collapse_to_one_entry(self) -> None:
+        self.assertEqual(
+            self.select(["notes/keep.md", "notes/keep.md"]),
+            ["notes/keep.md"])
+
+    def test_file_targets_admit_their_own_name_and_directory_targets(self) -> None:
+        self.assertEqual(
+            self.select(
+                ["notes/keep.md", "notes/other.md", "watched/deep/new.md"],
+                target_filenames=frozenset({"keep.md"}),
+                dir_targets=[self.root / "watched"]),
+            ["notes/keep.md", "watched/deep/new.md"])
+
+    def test_paths_outside_the_repo_stay_absolute(self) -> None:
+        outside = "/elsewhere/file.md"
+        self.assertEqual(
+            watchpolicy.select_batch([outside], root=self.root), [outside])
+
+    def test_unchanged_files_are_dropped_inside_the_cascade_window(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["same.md", "edited.md"],
+            cached_hashes={"same.md": "aaa", "edited.md": "bbb"},
+            last_dispatch_at=1000.0, now=1001.0,
+            hasher=lambda f: {"same.md": "aaa", "edited.md": "ccc"}[f])
+        self.assertEqual(decision.dispatch, ["edited.md"])
+        self.assertEqual(decision.skipped, ["same.md"])
+        self.assertEqual(decision.hashes["edited.md"], "ccc")
+
+    def test_outside_the_window_an_unchanged_file_still_dispatches(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["same.md"], cached_hashes={"same.md": "aaa"},
+            last_dispatch_at=1000.0,
+            now=1000.0 + watchpolicy.CASCADE_WINDOW_SECS + 1,
+            hasher=lambda _f: "aaa")
+        self.assertEqual(decision.dispatch, ["same.md"])
+        self.assertEqual(decision.skipped, [])
+
+    def test_a_file_that_cannot_be_hashed_stays_in_the_batch(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["deleted.md"], cached_hashes={"deleted.md": "aaa"},
+            last_dispatch_at=1000.0, now=1001.0, hasher=lambda _f: None)
+        self.assertEqual(decision.dispatch, ["deleted.md"])
+        self.assertEqual(decision.hashes, {})
+
+    def test_breaker_trips_only_past_the_cap(self) -> None:
+        breaker = watchpolicy.FireRateBreaker(window_secs=60,
+                                              max_dispatches=3)
+        self.assertEqual(
+            [breaker.record(float(n)) for n in range(4)],
+            [False, False, False, True])
+
+    def test_breaker_forgets_dispatches_older_than_the_window(self) -> None:
+        breaker = watchpolicy.FireRateBreaker(window_secs=60,
+                                              max_dispatches=3)
+        for second in range(4):
+            breaker.record(float(second))
+        self.assertFalse(breaker.record(1000.0))
+        self.assertEqual(breaker.count, 1)
+
+    def test_debounce_merges_batches_and_restarts_the_window(self) -> None:
+        window = watchpolicy.DebounceWindow(10.0)
+        self.assertIsNone(window.remaining(0.0))
+        window.add(["a.md"], 0.0)
+        window.add(["a.md", "b.md"], 5.0)
+        self.assertEqual(window.remaining(5.0), 10.0)
+        self.assertEqual(window.take(), ["a.md", "b.md"])
+        self.assertEqual(window.take(), [])
+        self.assertIsNone(window.remaining(5.0))
+
+
+class TestTriggerSpecs(unittest.TestCase):
+    """The vocabulary both trigger kinds share."""
+
+    def spec(self, *, name: str = "agent", kind: str = triggers.SCHEDULE,
+             root: str = "/repo", schedules: tuple[str, ...] = ("0 * * * *",),
+             command: tuple[str, ...] = ("agents-live", "run", "--name",
+                                         "agent"),
+             ) -> triggers.TriggerSpec:
+        return triggers.TriggerSpec(
+            name=name, kind=kind, root=Path(root), schedules=schedules,
+            command=command, path="/usr/bin")
+
+    def test_one_line_per_schedule_carries_root_and_path(self) -> None:
+        lines = triggers.render(self.spec(schedules=("@reboot", "0 * * * *")))
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("@reboot cd /repo && PATH=/usr/bin "))
+        self.assertTrue(all(line.endswith("2>&1") for line in lines))
+
+    def test_a_spec_matches_the_lines_it_renders(self) -> None:
+        spec = self.spec()
+        self.assertTrue(all(
+            triggers.matches(line, root=spec.root, name=spec.name,
+                             kind=spec.kind)
+            for line in triggers.render(spec)))
+
+    def test_another_projects_line_is_never_this_projects_trigger(self) -> None:
+        line = triggers.render(self.spec(root="/other"))[0]
+        self.assertFalse(triggers.matches(line, root=Path("/repo"),
+                                          name="agent",
+                                          kind=triggers.SCHEDULE))
+
+    def test_a_watcher_line_is_not_a_schedule_line(self) -> None:
+        watcher = triggers.render(self.spec(
+            kind=triggers.WATCHER, schedules=("@reboot",),
+            command=("agents-live", "internal", "ensure-watcher", "agent")))[0]
+        self.assertTrue(triggers.matches(watcher, root=Path("/repo"),
+                                         name="agent", kind=triggers.WATCHER))
+        self.assertFalse(triggers.matches(watcher, root=Path("/repo"),
+                                          name="agent",
+                                          kind=triggers.SCHEDULE))
+
+    def test_names_that_are_substrings_stay_distinct(self) -> None:
+        line = triggers.render(self.spec(
+            command=("agents-live", "run", "--name", "todo")))[0]
+        self.assertTrue(triggers.matches(line, root=Path("/repo"),
+                                         name="todo",
+                                         kind=triggers.SCHEDULE))
+        self.assertFalse(triggers.matches(line, root=Path("/repo"),
+                                          name="todo-push",
+                                          kind=triggers.SCHEDULE))
+
+    def test_an_unrelated_entry_in_the_repo_names_no_agent(self) -> None:
+        self.assertIsNone(triggers.agent_name(
+            "0 * * * * cd /repo && ./tidy.sh --name agent",
+            root=Path("/repo"), kind=triggers.SCHEDULE))
+
+    def test_canonical_ignores_order_but_not_content(self) -> None:
+        spec = self.spec(schedules=("@reboot", "0 * * * *"))
+        rendered = triggers.render(spec)
+        self.assertTrue(triggers.is_canonical(list(reversed(rendered)), spec))
+        self.assertFalse(triggers.is_canonical(rendered[:1], spec))
+        self.assertFalse(triggers.is_canonical(
+            [line.replace("/usr/bin", "/opt/bin") for line in rendered], spec))
 
 
 class TestAdapterRegistry(unittest.TestCase):
@@ -2180,7 +2606,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=True),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "refresh"),
             mock.patch.object(update_check, "interactive", return_value=False),
@@ -2200,7 +2627,8 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=False),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=False),
-            mock.patch.object(doctor, "_is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
             mock.patch.object(update_check, "interactive", return_value=False),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
@@ -2520,6 +2948,52 @@ class TestPreReleaseAudit(unittest.TestCase):
             )
 
 
+class TestHostRuntimeIdentity(unittest.TestCase):
+    """The seam member every host-specific branch now reads."""
+
+    def _proc_version(self, text: str) -> Path:
+        version = Path(self._tmp.name) / "proc-version"
+        version.write_text(text, encoding="utf-8")
+        return version
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_wsl_kernel_string_identifies_wsl(self) -> None:
+        version = self._proc_version(
+            "Linux version 5.15.0-microsoft-standard-WSL2 (gcc ...)\n")
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", version),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.WSL)
+
+    def test_plain_kernel_string_identifies_linux(self) -> None:
+        version = self._proc_version("Linux version 6.8.0-generic (gcc ...)\n")
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", version),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.LINUX)
+
+    def test_missing_proc_version_identifies_linux(self) -> None:
+        absent = Path(self._tmp.name) / "does-not-exist"
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "PROC_VERSION", absent),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.LINUX)
+
+    def test_windows_is_identified_without_reading_proc(self) -> None:
+        absent = Path(self._tmp.name) / "does-not-exist"
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "PROC_VERSION", absent),
+        ):
+            self.assertEqual(hostruntime.id(), hostruntime.WINDOWS)
+
+
 class TestWindowsHeartbeat(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -2618,7 +3092,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
 
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
-            mock.patch.object(heartbeat, "is_wsl", return_value=True),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WSL),
             mock.patch.object(
                 heartbeat, "uninstall", side_effect=RuntimeError("denied")),
             mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
@@ -2631,7 +3106,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_tool_uninstall_skips_host_cleanup_off_wsl(self) -> None:
         completed = subprocess.CompletedProcess(["uv"], 0)
         with (
-            mock.patch.object(heartbeat, "is_wsl", return_value=False),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
             mock.patch.object(uninstall.health_check,
                               "remove_health_cron_lines",
