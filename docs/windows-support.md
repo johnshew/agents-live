@@ -465,6 +465,98 @@ changes.
     implementation
     exists to test.
 
+## Testing on Windows without publishing
+
+Every step above needs a native Windows host, and none of them should
+require a PyPI release or disturb a WSL deployment running on the same
+machine. The separation this design already assumes makes that
+straightforward: the two runtimes have different state homes, different
+registries, and physically separate checkouts, so a Windows experiment and
+a live WSL deployment coexist on one machine without seeing each other.
+
+### The edit and test loop
+
+Development stays where it is. Edit in the WSL checkout, commit to a
+branch, and push. On the Windows host, keep a separate native clone of
+this repository under the Windows user profile and `git pull` that branch.
+Two checkouts of the same repository, synchronized through the remote.
+
+Do not shortcut that by pointing Windows `uv` at `\\wsl.localhost\...`. It
+is the exact boundary the runtime is designed to refuse, and a green
+result there would say nothing about a native checkout.
+
+From PowerShell in the Windows clone, the command prefixes from
+[testing.md](../.agents/testing.md) apply unchanged:
+
+```powershell
+uv run --with-editable . agents-live --repo $HOME\scratch\win-test doctor
+uv run --with-editable . agents-live --repo $HOME\scratch\win-test start
+```
+
+The boundary table in that runbook still holds: an editable-source pass
+does not prove the wheel works, and the wheel does not prove the installed
+tool works.
+
+### The target project is always scratch
+
+Never the agents-live clone itself, never a real project. `agents-live
+init` into a scratch directory under the Windows profile, then add one
+cron agent and one watch agent. Mutating commands carry an explicit
+`--repo`. This is the same discipline as Linux testing, and it matters
+more here because a mistake registers persistent scheduled tasks rather
+than a crontab line.
+
+### Proving the artifact without a release
+
+Build in the Windows clone and run the wheel in an isolated environment:
+
+```powershell
+uv build
+uvx --from dist\agents_live-<version>-py3-none-any.whl agents-live --help
+```
+
+Use `uv tool install --from <wheel> agents-live` only when the installed
+tool path is itself under test, and uninstall afterward; it puts a real
+`agents-live` on PATH. Never run `agents-live upgrade` on the test host:
+it fetches from PyPI and replaces the build being tested.
+
+### The feasibility spike needs none of this
+
+Step 1 answers whether the Windows Copilot CLI produces usable output on a
+redirected stdout. That is a PowerShell session on a Windows host with no
+agents-live installed at all. Answer it before setting up any of the
+above.
+
+### Cleaning up is the part Linux does not teach
+
+This is the real difference. A stray cron line is visible in `crontab -l`
+and disappears with the crontab. A registered task lives in a machine-wide
+store, survives reboots, and keeps running whether or not the developer
+remembers creating it. Test hygiene has to be explicit:
+
+- Everything Agents Live registers is under `\AgentsLive\`, so one
+  enumeration shows the whole footprint:
+  `Get-ScheduledTask -TaskPath '\AgentsLive\*'`.
+- Tear down with `agents-live stop` and `agents-live uninstall`. The
+  enumeration above is how the developer confirms teardown worked, not the
+  routine way to remove things.
+- End a session by confirming that enumeration is empty and that no
+  watcher processes are left running.
+
+Two Windows facilities answer most "it did not run" questions before
+anything in the agents-live logs does: `Get-ScheduledTaskInfo` reports last
+run time and last result, and the Task Scheduler operational log in Event
+Viewer explains why a trigger did not fire. Read those first, then
+`agents-live logs`.
+
+### Where the smoke suite fits
+
+[test_smoke.py](../tests/test_smoke.py) runs against temporary projects, so
+it should run unchanged on Windows once the host runtime exists. Until
+then it exercises POSIX mechanics and is not a Windows gate. The Windows CI
+job in phase 5 runs it alongside the regression checks named in the
+security model.
+
 ## Size and blast radius
 
 Rough, and stated as a range because the prototypes come before the
