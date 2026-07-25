@@ -5,10 +5,12 @@ ms.date: 2026-07-25
 ms.topic: concept
 ---
 
-Status: draft. Feasibility is settled and the first work is the host-runtime
-seam, extracted on Linux and WSL before any Windows implementation begins;
-whether the Windows half is worth building stays open. The design decisions
-recorded here stand unless implementation experience overturns them; see the
+Status: draft. Feasibility is settled and the host-runtime seam has landed
+on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
+so the next work is the vertical slice on a native Windows host
+([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
+Windows half is worth building stays open. The design decisions recorded
+here stand unless implementation experience overturns them; see the
 decision log at the end.
 
 Agents Live runs on Linux, with Ubuntu on WSL as the reference setup. The

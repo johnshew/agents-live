@@ -47,14 +47,17 @@ inotifywait with Task Scheduler and Windows change notification behind a
 small host-runtime interface, is in
 [windows-support.md](windows-support.md). Agent invocation is settled: the
 Windows Copilot CLI runs headlessly with plain pipes, no ConPTY. The seam
-itself comes first and lands on Linux and WSL, where two of its four tracks
-pay for themselves regardless of Windows: the trigger vocabulary that
-currently leaks cron-line strings across modules, and the watcher loop whose
-policy cannot be tested without a live inotifywait. Whether the Windows half
-is worth building stays open; the next question there is a foreground `run`
-on a native Windows repository. Windows CI and adversarial lifecycle coverage
-follows a working vertical slice.
-([#120](https://github.com/johnshew/agents-live/issues/120),
+landed first on Linux and WSL, and the two tracks that were meant to pay
+for themselves regardless of Windows did: the trigger vocabulary no longer
+leaks cron-line strings across modules, and watcher policy is now testable
+without a live inotifywait. Locking and process-tree termination stayed out,
+because a POSIX-derived shape would be wrong for them rather than merely
+incomplete. Whether the Windows half is worth building stays open, and the
+vertical slice on a native Windows host carries that stop decision: if a
+foreground `run`, a registered task, or a watcher cannot be made to work
+there, the proposal narrows or ends. Windows CI and adversarial lifecycle
+coverage follows a working vertical slice.
+([#126](https://github.com/johnshew/agents-live/issues/126),
 [#119](https://github.com/johnshew/agents-live/issues/119))
 
 ## Maintaining this file
