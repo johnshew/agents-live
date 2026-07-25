@@ -313,7 +313,7 @@ def main() -> None:
     # Summary stats
     done_entries = [e for e in deduped if e.get("phase") == "done"]
     if done_entries:
-        print(f"\n{'─' * 80}")
+        print(f"\n{'-' * 80}")
         ok = sum(1 for e in done_entries if e.get("status") == "ok")
         err = sum(1 for e in done_entries if e.get("status") == "error")
         skip = sum(1 for e in done_entries if e.get("status") == "skipped")

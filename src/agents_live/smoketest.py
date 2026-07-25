@@ -828,7 +828,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         print("")
         current_step = "8/13 pre-processor pipeline"
-        print("[8/13] Validating pre-processor → post-processor pipeline (agent: none)...")
+        print("[8/13] Validating pre-processor -> post-processor pipeline (agent: none)...")
         preprocessor_name = "_smoketest-preprocessor"
         handlers_dir = repo_root() / "Agents" / "handlers"
         handlers_dir.mkdir(parents=True, exist_ok=True)
@@ -868,7 +868,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 "",
                 "# Smoketest Pre-processor Agent",
                 "",
-                "Validates the pre-processor → post-processor pipeline with agent: none.",
+                "Validates the pre-processor -> post-processor pipeline with agent: none.",
             ]),
             encoding="utf-8",
         )
@@ -907,7 +907,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             fail("No post-processor phase logged in JSONL")
         print("  Pre-processor logged: OK")
         print("  Post-processor received pre-processor data: OK")
-        print("  pre-processor → post-processor (agent: none): PASS")
+        print("  pre-processor -> post-processor (agent: none): PASS")
 
         print("")
         current_step = "9/13 skip gating"

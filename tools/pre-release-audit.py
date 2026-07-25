@@ -335,7 +335,7 @@ def main() -> int:
     print()
 
     if all_findings:
-        print(f"⚠️  {len(all_findings)} finding(s):")
+        print(f"FAIL: {len(all_findings)} finding(s):")
         print()
         for finding in all_findings:
             print(finding)
@@ -344,7 +344,7 @@ def main() -> int:
         print("pattern to SAFE_PATTERNS in this script.")
         return 1
 
-    print("✅ No issues found. Ready for release.")
+    print("OK: no issues found. Ready for release.")
     return 0
 
 

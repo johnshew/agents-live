@@ -6,6 +6,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep console output ASCII-only. (#121)
+  The pre-release audit summary, qlog traceback header, timeline separator,
+  and smoketest step labels no longer require a UTF-8 capable console.
 - feat: install and maintain user shell completions automatically. (#117)
   Init and runtime upgrades write XDG-aware Bash and Zsh scripts; explicit
   update, current-session sourcing, shell prerequisites, and uninstall cleanup
