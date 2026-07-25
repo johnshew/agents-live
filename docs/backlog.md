@@ -47,7 +47,8 @@ policy cannot be tested without a live inotifywait. Whether the Windows half
 is worth building stays open; the next question there is a foreground `run`
 on a native Windows repository. Windows CI and adversarial lifecycle coverage
 follows a working vertical slice.
-([#119](https://github.com/johnshew/agents-live/issues/119))
+([#120](https://github.com/johnshew/agents-live/issues/120),
+[#119](https://github.com/johnshew/agents-live/issues/119))
 
 ## Maintaining this file
 
