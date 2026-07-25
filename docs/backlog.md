@@ -38,8 +38,10 @@ direction rather than committed work; file an issue before starting.
 A draft proposal for a native Windows runtime, replacing cron and
 inotifywait with Task Scheduler and Windows change notification behind a
 small host-runtime interface, is in
-[windows-support.md](windows-support.md). It is undecided and has no
-issue yet.
+[windows-support.md](windows-support.md). Feasibility remains undecided and
+starts with a native Windows Copilot CLI experiment. Windows CI and adversarial
+lifecycle coverage follows a working vertical slice.
+([#119](https://github.com/johnshew/agents-live/issues/119))
 
 ## Maintaining this file
 
