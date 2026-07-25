@@ -52,7 +52,7 @@ Schema of the `log` view
     level          VARCHAR  (info|warning|error|...)
     message        VARCHAR
     error_category VARCHAR  (auto-injected into --columns when --errors is set)
-    traceback      VARCHAR  -- printed separately under "── Tracebacks ──" in table mode
+    traceback      VARCHAR  -- printed separately under "-- Tracebacks --" in table mode
     _files         VARCHAR  -- basename list derived from changed_files (if present)
 
 Other fields from the JSON (account, output, stderr, etc.) are exposed
@@ -478,7 +478,7 @@ def main() -> int:
             )
             rows = tb_rel.fetchall()
             if rows:
-                print("\n── Tracebacks ──")
+                print("\n-- Tracebacks --")
                 for ts, agent_name, tb in rows:
                     # Show last 20 lines of traceback
                     lines = tb.strip().splitlines()
