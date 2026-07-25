@@ -38,7 +38,7 @@ try:  # installed package layout
         activate, agent_adapters, cli, completions, headless, health_check,
         heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
         preflight, doctor, repos, run, spawn, status, uninstall,
-        update_check, upgrade,
+        update_check, upgrade, watchpolicy,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -69,6 +69,7 @@ except ImportError:  # flat checkout layout
     import update_check
     import upgrade
     import uninstall
+    import watchpolicy
     from cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
@@ -900,10 +901,10 @@ class TestAgentParsing(_TempProject):
         self.assertEqual(record.candidate_count, 2)
 
     def test_watcher_ignores_generated_index_files(self) -> None:
-        self.assertTrue(activate.should_ignore_watch_change(
-            self.root / "Agents" / "notes" / "_index_.md"))
-        self.assertFalse(activate.should_ignore_watch_change(
-            self.root / "Agents" / "notes" / "trigger.txt"))
+        self.assertTrue(watchpolicy.should_ignore(
+            self.root / "Agents" / "notes" / "_index_.md", root=self.root))
+        self.assertFalse(watchpolicy.should_ignore(
+            self.root / "Agents" / "notes" / "trigger.txt", root=self.root))
 
     def test_unknown_runtime_fails_closed(self) -> None:
         self.write_agent("bad-runtime", AGENT_DEFINITION.replace("runtime: none",
@@ -1622,6 +1623,103 @@ sys.stdout.flush()
         self.assertEqual(
             self.run_watch_loop("watch-fixture", ["notes/other.md", "notes/keep.md"]),
             [["notes/keep.md"]])
+
+
+class TestWatchPolicy(unittest.TestCase):
+    """The watcher rules, exercised without an event source."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def select(self, paths: list[str], **kwargs: object) -> list[str]:
+        return watchpolicy.select_batch(
+            [str(self.root / p) for p in paths], root=self.root, **kwargs)
+
+    def test_generated_and_hidden_paths_never_reach_an_agent(self) -> None:
+        self.assertEqual(
+            self.select([
+                "notes/keep.md", ".git/index", "notes/_index_.md",
+                "lib/__pycache__/x.pyc", "Agents/logs/note-index.log",
+            ]),
+            ["notes/keep.md"])
+
+    def test_ignore_entries_match_names_and_directory_prefixes(self) -> None:
+        self.assertEqual(
+            self.select(
+                ["notes/keep.md", "notes/skip.md", "Agents/data/state.json"],
+                watch_ignore=["skip.md", "Agents/data/"]),
+            ["notes/keep.md"])
+
+    def test_repeated_events_collapse_to_one_entry(self) -> None:
+        self.assertEqual(
+            self.select(["notes/keep.md", "notes/keep.md"]),
+            ["notes/keep.md"])
+
+    def test_file_targets_admit_their_own_name_and_directory_targets(self) -> None:
+        self.assertEqual(
+            self.select(
+                ["notes/keep.md", "notes/other.md", "watched/deep/new.md"],
+                target_filenames=frozenset({"keep.md"}),
+                dir_targets=[self.root / "watched"]),
+            ["notes/keep.md", "watched/deep/new.md"])
+
+    def test_paths_outside_the_repo_stay_absolute(self) -> None:
+        outside = "/elsewhere/file.md"
+        self.assertEqual(
+            watchpolicy.select_batch([outside], root=self.root), [outside])
+
+    def test_unchanged_files_are_dropped_inside_the_cascade_window(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["same.md", "edited.md"],
+            cached_hashes={"same.md": "aaa", "edited.md": "bbb"},
+            last_dispatch_at=1000.0, now=1001.0,
+            hasher=lambda f: {"same.md": "aaa", "edited.md": "ccc"}[f])
+        self.assertEqual(decision.dispatch, ["edited.md"])
+        self.assertEqual(decision.skipped, ["same.md"])
+        self.assertEqual(decision.hashes["edited.md"], "ccc")
+
+    def test_outside_the_window_an_unchanged_file_still_dispatches(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["same.md"], cached_hashes={"same.md": "aaa"},
+            last_dispatch_at=1000.0,
+            now=1000.0 + watchpolicy.CASCADE_WINDOW_SECS + 1,
+            hasher=lambda _f: "aaa")
+        self.assertEqual(decision.dispatch, ["same.md"])
+        self.assertEqual(decision.skipped, [])
+
+    def test_a_file_that_cannot_be_hashed_stays_in_the_batch(self) -> None:
+        decision = watchpolicy.apply_cascade_guard(
+            ["deleted.md"], cached_hashes={"deleted.md": "aaa"},
+            last_dispatch_at=1000.0, now=1001.0, hasher=lambda _f: None)
+        self.assertEqual(decision.dispatch, ["deleted.md"])
+        self.assertEqual(decision.hashes, {})
+
+    def test_breaker_trips_only_past_the_cap(self) -> None:
+        breaker = watchpolicy.FireRateBreaker(window_secs=60,
+                                              max_dispatches=3)
+        self.assertEqual(
+            [breaker.record(float(n)) for n in range(4)],
+            [False, False, False, True])
+
+    def test_breaker_forgets_dispatches_older_than_the_window(self) -> None:
+        breaker = watchpolicy.FireRateBreaker(window_secs=60,
+                                              max_dispatches=3)
+        for second in range(4):
+            breaker.record(float(second))
+        self.assertFalse(breaker.record(1000.0))
+        self.assertEqual(breaker.count, 1)
+
+    def test_debounce_merges_batches_and_restarts_the_window(self) -> None:
+        window = watchpolicy.DebounceWindow(10.0)
+        self.assertIsNone(window.remaining(0.0))
+        window.add(["a.md"], 0.0)
+        window.add(["a.md", "b.md"], 5.0)
+        self.assertEqual(window.remaining(5.0), 10.0)
+        self.assertEqual(window.take(), ["a.md", "b.md"])
+        self.assertEqual(window.take(), [])
+        self.assertIsNone(window.remaining(5.0))
 
 
 class TestAdapterRegistry(unittest.TestCase):
