@@ -20,6 +20,13 @@ off-box log shipment stay postponed until a consumer needs them; a future
 sidecar can translate the local schema instead.
 ([#105](https://github.com/johnshew/agents-live/issues/105))
 
+The same stream should also answer whether the agents are working, not
+just what they did. An agent that fails every run stays invisible today:
+status keeps showing a fresh error time, and the health beacon reports
+only infrastructure state. Escalating that from existing log data comes
+before any richer export.
+([#123](https://github.com/johnshew/agents-live/issues/123))
+
 ## Safer execution modes in practice
 
 `plan` and `pipeline` are documented as the safe defaults, but the
