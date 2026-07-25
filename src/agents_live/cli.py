@@ -47,6 +47,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from . import hostruntime
 from . import paths
 from . import preflight
 from . import update_check
@@ -217,6 +218,7 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    hostruntime.use_utf8_io()
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
 

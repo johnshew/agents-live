@@ -28,7 +28,6 @@ layer can use it without a dependency cycle.
 """
 from __future__ import annotations
 
-import glob
 import hashlib
 import json
 import os
@@ -469,18 +468,17 @@ def _validated_schedule(value: object, prompt: Path) -> str:
 
 
 def clean_path() -> str:
+    """The PATH an agent invocation runs with.
+
+    Built rather than inherited, so a run from a shell and a run from a
+    scheduler resolve the same tools. The host runtime decides what the
+    floor is: on POSIX the known install locations only, because cron
+    hands a job nothing; on Windows the inherited PATH as well, because
+    a scheduled task already runs with the owning user's environment
+    (:func:`hostruntime.inherits_path`).
+    """
     path_entries = [Path.home() / ".local" / "bin"]
-    node_path = shutil.which("node")
-    if not node_path:
-        # Cron/headless environments lack nvm; search nvm directories directly
-        candidates = sorted(
-            glob.glob(str(Path.home() / ".nvm/versions/node/*/bin/node")),
-            reverse=True,
-        )
-        for candidate in candidates:
-            if os.access(candidate, os.X_OK):
-                node_path = candidate
-                break
+    node_path = shutil.which("node") or hostruntime.find_tool("node")
     if node_path:
         path_entries.append(Path(node_path).resolve().parent)
     agency_path = shutil.which("agency")
@@ -491,7 +489,11 @@ def clean_path() -> str:
             agency_path = str(candidate)
     if agency_path:
         path_entries.insert(0, Path(agency_path).resolve().parent)
-    path_entries.extend(Path(part) for part in ("/usr/local/bin", "/usr/bin", "/bin"))
+    path_entries.extend(Path(part) for part in hostruntime.system_path_dirs())
+    if hostruntime.inherits_path():
+        path_entries.extend(
+            Path(part) for part in os.environ.get("PATH", "").split(os.pathsep)
+            if part)
     seen: set[str] = set()
     ordered: list[str] = []
     for entry in path_entries:
@@ -1417,7 +1419,19 @@ def _build_runtime_flags(runtime: str, mode: str, allow_tools: list[str] | None 
 
 
 def _runtime_binary(runtime: str) -> list[str]:
-    return list(_adapter(runtime).binary)
+    """The argv prefix that launches *runtime*, with argv[0] pinned.
+
+    Adapters register a bare command name. Pinning is the host
+    runtime's business: POSIX leaves the name for the child's own PATH
+    search, Windows resolves it to an executable up front and refuses
+    the shims that shadow agent CLIs there.
+    """
+    binary = list(_adapter(runtime).binary)
+    try:
+        binary[0] = hostruntime.pin_executable(binary[0], path=clean_path())
+    except hostruntime.ExecutableNotFound as exc:
+        raise AgentsLiveError(f"runtime '{runtime}': {exc}") from exc
+    return binary
 
 
 @lru_cache(maxsize=8)
@@ -1428,7 +1442,7 @@ def _runtime_supported_flags(runtime: str) -> frozenset[str]:
             capture_output=True,
             text=True,
             check=False,
-            env={"HOME": os.environ.get("HOME", str(Path.home())), "PATH": clean_path()},
+            env={**hostruntime.base_env(), "PATH": clean_path()},
             timeout=AGENT_HELP_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -1548,7 +1562,7 @@ def resolve_agent_command(name: str, prompt_text: str | None = None) -> str:
 
 
 def _build_agent_env(config: AgentConfig) -> dict[str, str]:
-    env = {"HOME": os.environ.get("HOME", str(Path.home())), "PATH": clean_path()}
+    env = {**hostruntime.base_env(), "PATH": clean_path()}
     env.update(_resolve_agent_config(config).env)
     return env
 
@@ -2113,7 +2127,7 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
     empty_count = 0
     while True:
         try:
-            if adapter.use_pty:
+            if adapter.use_pty and hostruntime.supports_pty():
                 raw_output, stderr_text = _run_copilot_with_pty(command, env, stream=stream, timeout=timeout)
             elif stream:
                 raw_output, stderr_text = _run_agent_streaming(command, env, config, timeout=timeout)
@@ -2124,6 +2138,8 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                     env=env,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                     check=False,
                 )
@@ -2336,6 +2352,8 @@ def _run_agent_streaming(command: list[str], env: dict[str, str], config: AgentC
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []
@@ -2433,22 +2451,10 @@ def _find_uv() -> str | None:
     """Locate the ``uv`` binary, searching common install paths if needed.
 
     ``shutil.which`` relies on the current process PATH which is minimal under
-    cron or file-watcher contexts.  Fall back to well-known locations so that
-    Python handlers can always be executed via ``uv run --with …``.
+    cron or file-watcher contexts.  The host runtime knows where else to
+    look, so that Python handlers can always be executed via ``uv run --with …``.
     """
-    found = shutil.which("uv")
-    if found:
-        return found
-    # Also search the directories included in clean_path() / common installs
-    candidates = [
-        Path.home() / ".local" / "bin" / "uv",
-        Path.home() / ".cargo" / "bin" / "uv",
-        Path("/usr/local/bin/uv"),
-    ]
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
+    return shutil.which("uv") or hostruntime.find_tool("uv")
 
 
 def _build_handler_command(handler_path: Path) -> list[str]:
@@ -2465,7 +2471,14 @@ def _build_handler_command(handler_path: Path) -> list[str]:
         return [sys.executable, str(handler_path)]
     if suffix in (".js", ".ts"):
         return ["node", str(handler_path)]
-    return ["bash", str(handler_path)]
+    # Everything else is handed to a shell, which not every host has.
+    shell = hostruntime.shell_interpreter()
+    if shell is None:
+        raise AgentsLiveError(
+            f"handler {handler_path.name} needs a shell to run, which this "
+            f"host does not provide; write the handler in Python (.py) or "
+            f"Node (.js)")
+    return [*shell, str(handler_path)]
 
 
 def _run_handler(config: AgentConfig, input_text: str | None, *, changed_files: list[str] | None = None) -> str:

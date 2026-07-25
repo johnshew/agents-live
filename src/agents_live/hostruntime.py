@@ -27,7 +27,9 @@ issue #126, not derived from the POSIX shape:
 """
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -57,6 +59,10 @@ class LockBusy(RuntimeError):
     """Another process holds the lock and the caller asked not to wait."""
 
 
+class ExecutableNotFound(RuntimeError):
+    """No executable this host can launch answers to that name."""
+
+
 def id() -> str:  # noqa: A001 - the seam member is named `id` by design
     """Return the runtime environment identifier for this process."""
     if sys.platform == "win32":
@@ -69,6 +75,188 @@ def id() -> str:  # noqa: A001 - the seam member is named `id` by design
     except OSError:
         pass
     return LINUX
+
+
+# ---------------------------------------------------------------------------
+# Environment, PATH, and executables
+# ---------------------------------------------------------------------------
+
+# Variables a Windows child needs in an explicitly built environment.
+# `SystemRoot` is not optional: a native CLI launched without it dies
+# with STATUS_STACK_BUFFER_OVERRUN (0xC0000409) inside the loader,
+# before it runs a line of its own code, and reports nothing on either
+# stream. The rest are what a program written for Windows expects to be
+# able to read - temp directories, the profile, and the processor and
+# shell facts anything it spawns will ask for.
+_WINDOWS_ENV_PASSTHROUGH = (
+    "SystemRoot", "SystemDrive", "windir", "COMSPEC", "PATHEXT",
+    "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles",
+    "ProgramFiles(x86)", "ProgramW6432", "PUBLIC",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+)
+
+# Suffixes a pinned executable may not have on Windows. A `.ps1` is not
+# executable at all: `CreateProcess` cannot launch one, and the ones
+# that shadow agent CLIs on an interactive PATH are installer
+# bootstrappers rather than the CLI. A `.bat` or `.cmd` is worse than
+# useless: Windows runs it through `cmd.exe`, which re-parses the
+# argument string, so a prompt body carrying `&` or `|` would run as a
+# command. Both fail closed rather than launching something whose
+# behavior is not the CLI's.
+_WINDOWS_REFUSED_SUFFIXES = {
+    ".ps1": "a PowerShell script, which Windows cannot launch directly",
+    ".psm1": "a PowerShell module, which Windows cannot launch directly",
+    ".bat": "a batch shim, which re-parses arguments through cmd.exe",
+    ".cmd": "a batch shim, which re-parses arguments through cmd.exe",
+}
+
+
+def base_env() -> dict[str, str]:
+    """The host variables an agent CLI needs, without the caller's.
+
+    Agent invocations build their environment rather than inheriting
+    one, so a run started from a shell and a run started from a
+    scheduler see the same thing. This is the platform floor such an
+    environment stands on; callers add PATH and the agent's own
+    variables on top.
+    """
+    if _IS_WINDOWS:
+        env = {key: os.environ[key] for key in _WINDOWS_ENV_PASSTHROUGH
+               if key in os.environ}
+        env.setdefault("HOME", os.environ.get("USERPROFILE", str(Path.home())))
+        return env
+    return {"HOME": os.environ.get("HOME", str(Path.home()))}
+
+
+def inherits_path() -> bool:
+    """Whether a constructed PATH should keep this process's PATH.
+
+    POSIX says no: cron hands an agent a near-empty environment, so the
+    PATH a run gets is built from known install locations and nothing
+    else. Windows says yes: Task Scheduler runs a task with the owning
+    user's environment block, so the inherited PATH is the same one an
+    interactive run sees, and dropping it would lose every per-user
+    install location (winget shims, npm's global bin, nvm4w) that a
+    Windows CLI is actually installed into.
+    """
+    return _IS_WINDOWS
+
+
+def system_path_dirs() -> list[str]:
+    """Directories that belong on any constructed PATH for this host."""
+    if _IS_WINDOWS:
+        root = os.environ.get("SystemRoot", r"C:\Windows")
+        system32 = Path(root) / "System32"
+        return [str(system32), root, str(system32 / "Wbem"),
+                str(system32 / "WindowsPowerShell" / "v1.0")]
+    return ["/usr/local/bin", "/usr/bin", "/bin"]
+
+
+def supports_pty() -> bool:
+    """Whether an agent CLI here has to be driven through a terminal.
+
+    The Linux Copilot CLI needs `script -qc` to produce output at all.
+    The Windows build writes to plain pipes in every launch context,
+    including a detached process with no console, so there is nothing
+    for a pseudo-terminal to fix and no ConPTY dependency to take on.
+    """
+    return not _IS_WINDOWS
+
+
+def find_tool(name: str) -> str | None:
+    """Locate *name* where this host installs tools a PATH may not reach.
+
+    The complement of :func:`inherits_path`. A POSIX process launched by
+    cron gets a PATH of almost nothing, so the well-known install
+    locations are searched directly, including the versioned layout nvm
+    gives node. Windows inherits the launching PATH, so `shutil.which`
+    has already looked everywhere this would, and there is nothing left
+    to find.
+    """
+    if _IS_WINDOWS:
+        return None
+    home = Path.home()
+    candidates = [home / ".local" / "bin" / name,
+                  home / ".cargo" / "bin" / name,
+                  Path("/usr/local/bin") / name]
+    if name == "node":
+        candidates.extend(
+            sorted((home / ".nvm" / "versions" / "node").glob(f"*/bin/{name}"),
+                   reverse=True))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def shell_interpreter() -> list[str] | None:
+    """The argv prefix that runs a shell script, or None if there is none.
+
+    POSIX has one by definition. Windows does not: `bash` there is an
+    optional Git for Windows install that a scheduled task has no reason
+    to see, and a handler that runs only where someone happened to
+    install one is worse than a handler that refuses to start.
+    """
+    if _IS_WINDOWS:
+        return None
+    return ["bash"]
+
+
+def use_utf8_io() -> None:
+    """Make this process and its children speak UTF-8 on every stream.
+
+    A Windows console defaults to a legacy code page, and Python's
+    standard streams follow it, so printing a box-drawing character or
+    an em dash out of a log line raises UnicodeEncodeError and takes the
+    command down. Three things are needed to fix that: reconfiguring
+    this process's streams, exporting `PYTHONUTF8` so the interpreters
+    this process launches start the same way (the CLI reaches its own
+    subcommands as subprocesses), and switching the console itself to
+    UTF-8 so the bytes are rendered rather than mangled. The console
+    code page belongs to the console, not to this process, so it is
+    restored on the way out.
+    """
+    os.environ["PYTHONUTF8"] = "1"
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # a stream that cannot be re-encoded
+            pass
+    if _IS_WINDOWS:
+        _use_utf8_console()
+
+
+def pin_executable(name: str, *, path: str | None = None) -> str:
+    """The argv[0] that launches *name* on this host.
+
+    POSIX returns the name unchanged: `execvp` searches the child's own
+    PATH, so handing the child a constructed PATH already pins what runs.
+    Windows resolves an executable name against the PATH of the process
+    doing the launching, not the environment handed to the child, so the
+    name alone pins nothing there and the absolute path is resolved up
+    front instead.
+
+    Raises :class:`ExecutableNotFound` when nothing on *path* answers to
+    the name, or when the only answer is a script or batch shim (see
+    ``_WINDOWS_REFUSED_SUFFIXES``).
+    """
+    if not _IS_WINDOWS:
+        return name
+    resolved = shutil.which(name, path=path)
+    if resolved is None:
+        raise ExecutableNotFound(
+            f"no executable named '{name}' on this host's PATH")
+    suffix = Path(resolved).suffix.lower()
+    reason = _WINDOWS_REFUSED_SUFFIXES.get(suffix)
+    if reason is not None:
+        raise ExecutableNotFound(
+            f"'{name}' resolves to {resolved}, {reason}; install the CLI "
+            f"itself, or point the runtime at its executable")
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +301,7 @@ if _IS_WINDOWS:
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_NO_WINDOW = 0x08000000
+    CP_UTF8 = 65001
 
     class _OVERLAPPED(ctypes.Structure):
         _fields_ = [
@@ -164,6 +353,10 @@ if _IS_WINDOWS:
     _kernel32.Process32NextW.argtypes = [wintypes.HANDLE,
                                          ctypes.POINTER(_PROCESSENTRY32W)]
     _kernel32.Process32NextW.restype = wintypes.BOOL
+    _kernel32.GetConsoleOutputCP.argtypes = []
+    _kernel32.GetConsoleOutputCP.restype = wintypes.UINT
+    _kernel32.SetConsoleOutputCP.argtypes = [wintypes.UINT]
+    _kernel32.SetConsoleOutputCP.restype = wintypes.BOOL
 
     def _overlapped() -> _OVERLAPPED:
         overlapped = _OVERLAPPED()
@@ -273,6 +466,15 @@ if _IS_WINDOWS:
     def _detached_popen_kwargs() -> dict:
         return {"creationflags": (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
                                   | CREATE_NO_WINDOW)}
+
+    def _use_utf8_console() -> None:
+        """Put the attached console into UTF-8 for the life of this run."""
+        current = _kernel32.GetConsoleOutputCP()
+        if current in (0, CP_UTF8):  # 0: no console attached
+            return
+        if not _kernel32.SetConsoleOutputCP(CP_UTF8):
+            return
+        atexit.register(_kernel32.SetConsoleOutputCP, current)
 
 else:
     import fcntl

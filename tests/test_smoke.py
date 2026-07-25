@@ -3096,6 +3096,109 @@ class TestHostRuntimeProcesses(unittest.TestCase):
         hostruntime.terminate(child.pid, grace_s=1)
 
 
+class TestHostRuntimeEnvironment(unittest.TestCase):
+    """The environment, PATH, and executable an agent run is launched with."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.windows = hostruntime.id() == hostruntime.WINDOWS
+
+    def test_base_env_carries_a_home_for_the_agent_cli(self) -> None:
+        self.assertTrue(hostruntime.base_env().get("HOME"))
+
+    def test_base_env_carries_what_the_host_cannot_start_without(self) -> None:
+        env = hostruntime.base_env()
+        if self.windows:
+            # Measured: a native CLI launched without SystemRoot dies in
+            # the loader with STATUS_STACK_BUFFER_OVERRUN (0xC0000409)
+            # and writes nothing to either stream.
+            self.assertIn("SystemRoot", env)
+        else:
+            self.assertEqual(set(env), {"HOME"})
+
+    def test_system_path_dirs_are_absolute(self) -> None:
+        dirs = hostruntime.system_path_dirs()
+        self.assertTrue(dirs)
+        for entry in dirs:
+            self.assertTrue(Path(entry).is_absolute(), entry)
+
+    def test_constructed_path_carries_the_system_directories(self) -> None:
+        entries = headless.clean_path().split(os.pathsep)
+        for entry in hostruntime.system_path_dirs():
+            self.assertIn(entry, entries)
+
+    def test_constructed_path_inherits_only_where_the_host_does(self) -> None:
+        marker = str(Path(self._tmp.name) / "marker-bin")
+        with mock.patch.dict(os.environ, {"PATH": marker}):
+            entries = headless.clean_path().split(os.pathsep)
+        self.assertEqual(marker in entries, hostruntime.inherits_path())
+
+    def test_agent_env_is_built_rather_than_inherited(self) -> None:
+        config = headless.AgentConfig(
+            name="probe", prompt_path=Path(self._tmp.name) / "probe.md",
+            resolved=True)
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_LEAK_PROBE": "1"}):
+            env = headless._build_agent_env(config)
+        self.assertNotIn("AGENTS_LIVE_LEAK_PROBE", env)
+        self.assertEqual(env["PATH"], headless.clean_path())
+
+    def test_find_tool_reports_nothing_for_an_unknown_name(self) -> None:
+        self.assertIsNone(hostruntime.find_tool("agents-live-no-such-tool"))
+
+    def test_pin_executable_resolves_what_this_host_has_to_resolve(self) -> None:
+        directory = str(Path(sys.executable).parent)
+        name = Path(sys.executable).stem
+        pinned = hostruntime.pin_executable(name, path=directory)
+        if self.windows:
+            self.assertTrue(Path(pinned).is_absolute())
+            self.assertTrue(Path(pinned).is_file())
+        else:
+            # execvp searches the child's own PATH, so the name is the pin.
+            self.assertEqual(pinned, name)
+
+    def test_pin_executable_refuses_a_shim_it_cannot_launch(self) -> None:
+        if not self.windows:
+            self.skipTest("only Windows resolves a name to a shim")
+        directory = Path(self._tmp.name)
+        (directory / "probe.bat").write_text("@echo off\n", encoding="utf-8")
+        with self.assertRaises(hostruntime.ExecutableNotFound):
+            hostruntime.pin_executable("probe", path=str(directory))
+
+    def test_pin_executable_refuses_a_name_nothing_answers_to(self) -> None:
+        if not self.windows:
+            self.assertEqual(
+                hostruntime.pin_executable("agents-live-no-such-tool"),
+                "agents-live-no-such-tool")
+            return
+        with self.assertRaises(hostruntime.ExecutableNotFound):
+            hostruntime.pin_executable("agents-live-no-such-tool",
+                                       path=self._tmp.name)
+
+    def test_shell_handler_runs_only_where_there_is_a_shell(self) -> None:
+        handler = Path(self._tmp.name) / "handler.sh"
+        handler.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shell = hostruntime.shell_interpreter()
+        if shell is None:
+            with self.assertRaises(headless.AgentsLiveError):
+                headless._build_handler_command(handler)
+        else:
+            self.assertEqual(headless._build_handler_command(handler),
+                             [*shell, str(handler)])
+
+    def test_node_handler_needs_no_shell_on_any_host(self) -> None:
+        handler = Path(self._tmp.name) / "handler.js"
+        handler.write_text("process.exit(0)\n", encoding="utf-8")
+        self.assertEqual(headless._build_handler_command(handler),
+                         ["node", str(handler)])
+
+    def test_utf8_io_reaches_the_interpreters_this_process_launches(self) -> None:
+        with mock.patch.dict(os.environ, {}):
+            os.environ.pop("PYTHONUTF8", None)
+            hostruntime.use_utf8_io()
+            self.assertEqual(os.environ["PYTHONUTF8"], "1")
+
+
 class TestWindowsHeartbeat(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

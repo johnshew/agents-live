@@ -6,6 +6,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: run an agent in the foreground on native Windows. (#126)
+  Agent invocations get the host environment a Windows process needs, the
+  executable is pinned before launch rather than resolved by name, the
+  terminal path is skipped where the CLI does not need one, handlers that
+  need a shell are refused where there is none, and console output no longer
+  fails on a legacy code page. Linux and WSL behavior is unchanged.
 - refactor: move locking, detached spawning, liveness, and termination onto
   the host-runtime seam. (#126)
   Locks are file locks on every platform, and stopping a process now stops the
