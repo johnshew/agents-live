@@ -5,9 +5,11 @@ ms.date: 2026-07-25
 ms.topic: concept
 ---
 
-Status: draft. Feasibility is settled; the open question is whether the
-work is worth doing. The design decisions recorded here stand unless
-implementation experience overturns them; see the decision log at the end.
+Status: draft. Feasibility is settled and the first work is the host-runtime
+seam, extracted on Linux and WSL before any Windows implementation begins;
+whether the Windows half is worth building stays open. The design decisions
+recorded here stand unless implementation experience overturns them; see the
+decision log at the end.
 
 Agents Live runs on Linux, with Ubuntu on WSL as the reference setup. The
 runtime itself is `uv` plus Python 3.12, which already runs on Windows.
@@ -129,6 +131,11 @@ vertical slice, not to a viability decision.
    one scheduled agent, then one watcher. Carry only the few identity and
    quoting checks that prevent acting on the wrong target, and add the rest of
    the lifecycle and failure tests once those paths are demonstrably viable.
+8. Refactor where a regression is visible. Structural change to shared code
+   lands on Linux and WSL under tests that pin current behavior, before any
+   Windows implementation exists to confuse the diagnosis. The exception is a
+   protocol member the two platforms define differently, which waits for a
+   throwaway spike on the platform that does not yet run.
 
 ## Security model
 
@@ -255,6 +262,49 @@ the POSIX side: `build_cron_lines` becomes an implementation detail of
 `PosixRuntime` instead of a shared concept, and
 [migrate.py](../src/agents_live/migrate.py) converges against the
 runtime's canonical form rather than against a string it builds itself.
+
+### Four tracks, not one change
+
+The protocol above is a destination, not a single refactor. It divides
+into four groups that touch different code and carry different risk:
+
+1. **Triggers.** `TriggerSpec` replaces the preformatted cron line as the
+   shared vocabulary. Largest conceptual change, and the one most
+   justified on Linux alone. `build_cron_lines` lives in
+   [activate.py](../src/agents_live/activate.py), the matchers live in
+   [headless.py](../src/agents_live/headless.py), and
+   [migrate.py](../src/agents_live/migrate.py) converges by comparing
+   line strings it rebuilds itself. The leak shows in the tests, which
+   patch `current_crontab_lines` separately on two modules because the
+   same function is imported into both namespaces.
+2. **Watcher policy.** Debounce, ignore rules, the content-hash cascade
+   guard, and the fire-rate breaker come out of `watch_loop` and become a
+   pure function over a batch. Today they interleave with non-blocking
+   reads inside one state machine, so none of them is testable without a
+   live `inotifywait`. Also worth doing on Linux alone, and it makes the
+   `watch_events` boundary observable rather than guessed.
+3. **Locking.** Three call sites, the smallest track.
+4. **Process identity and termination.** Deferred behind a Windows spike,
+   for the reason below.
+
+Tracks 1 and 2 stand on their own merits and land first. Tracks 3 and 4
+exist only to serve the second implementation, so their interfaces are
+written against what both platforms can honor rather than against what
+POSIX happens to offer.
+
+### Where the two platforms genuinely disagree
+
+Four places where a POSIX-derived interface would be wrong rather than
+merely incomplete. Each is settled by a throwaway Windows spike before
+the corresponding protocol member is written, the same way agent
+invocation was settled.
+
+| Member | POSIX shape | Why Windows cannot honor it as written |
+|---|---|---|
+| `exclusive_lock` | `fcntl.flock`: advisory, per-descriptor, released on close | A named mutex is mandatory, thread-owned, and defines abandoned-mutex semantics. A lease modeled on flock has nowhere to record that the previous holder died holding it |
+| `terminate` | `os.killpg` on a process group ([health_check.py](../src/agents_live/health_check.py)) | Windows has no process group. The real operation is "terminate a tree", which the protocol above does not model at all |
+| `watch_events` | `inotifywait` is a path stream with no failure vocabulary | `ReadDirectoryChangesW` adds buffer overflow, root invalidation, and `ERROR_NOTIFY_ENUM_DIR`. Writing those `WatchBatch` states from Linux alone means branches no test can reach |
+| `spawn_detached` | `start_new_session=True` | A Job Object, which is also where process-tree identity comes from |
 
 ## File change notification on Windows
 
@@ -464,47 +514,88 @@ changes.
 
 ## Recommended implementation order
 
-1. **Build one direct foreground run.** Make `agents-live run` execute one
-   approved agent from a Windows repository without scheduling or watching.
-   Resolve process creation, path spelling, handler selection, executable
-   pinning, and logs before adding persistence. Agent invocation is already
-   settled (see Invoking the Copilot CLI on Windows); this step is the
-   orchestration around it, including the failure paths that invocation
-   work did not cover.
-2. **Add the native Windows runtime ID.** Generate `windows:<uuid>` in the
-   Windows user state home and use it for Windows ownership matching. Leave
-   Linux and WSL hostname behavior unchanged.
-3. **Register one scheduled run.** Use a user-scoped Task Scheduler action with
-   a fully qualified executable, Windows-correct arguments, an explicit
-   working directory, and enough metadata to identify the task during removal.
-4. **Confirm schedule semantics.** Translate a real agent's cron expression
-   into native triggers, measure how much of the existing schedule
-   vocabulary maps exactly, and confirm DST, sleep, missed-start, and
-   restart behavior on a live task before generalizing activation and
-   status.
-5. **Build one watcher.** Compare `ReadDirectoryChangesW` and `watchdog` on a
-   native Windows repository. Prove cancellation, rename, overflow, root
-   deletion, and bounded rescan behavior before choosing the implementation.
-6. **Extract the host runtime.** Refactor only the abstractions proven by the
-   foreground, scheduler, and watcher prototypes. Keep existing Linux and WSL
-   behavior unchanged and avoid speculative interface methods.
-7. **Complete lifecycle commands.** Add `start`, `status`, `doctor`, `stop`,
-   `uninstall`, and `upgrade` parity. Verify task identity before replacement
-   or deletion and process identity before forced termination.
-8. **Harden failure paths.** Bound watcher queues and payloads, define
-   logged-off execution limits, and make interrupted task updates recoverable.
-   This is correctness hardening within the trusted-administrator model, not
-   sandboxing.
-9. **Add Windows CI and regression tests.** Cover argument quoting, task
-   identity and collisions, stale PID reuse, rejected path forms, watcher
-   overflow, interrupted upgrades, and uninstall cleanup after the
-   implementation exists to test.
+The seam is extracted on Linux and WSL first, and Windows implementation
+starts only once it is in place. Refactoring on the platform that works,
+where a regression is visible immediately, is worth more than deferring
+the extraction until Windows prototypes justify each method. The cost of
+that choice is the members where the two platforms genuinely disagree,
+which POSIX alone would shape wrongly, so those wait for a Windows spike
+rather than being written with the rest.
+
+On Linux and WSL, with no Windows work in progress:
+
+1. **Make the package importable on Windows.** `import fcntl` at module
+   scope in [headless.py](../src/agents_live/headless.py),
+   [repos.py](../src/agents_live/repos.py), and
+   [smoketest.py](../src/agents_live/smoketest.py) means even
+   `agents-live --help` cannot run there. Three lines, no design content,
+   and it unblocks every later spike.
+2. **Pin current behavior with tests.** The suite mocks
+   `current_crontab_lines` and `install_crontab` throughout and never
+   spawns `inotifywait`, so it would not catch a seam regression in
+   exactly the two areas the seam touches most. A refactor whose safety
+   net stubs the subsystem being refactored is not protected. These tests
+   are the prerequisite, not a follow-up.
+3. **Extract the trigger track.** `TriggerSpec` replaces the cron line as
+   the shared vocabulary; `build_cron_lines` and the matchers become
+   `PosixRuntime` internals; `plan_migration` converges on the canonical
+   form. Linux and WSL behavior unchanged.
+4. **Split watcher policy from watcher I/O.** Debounce, ignore rules,
+   cascade guard, and fire-rate breaker become testable without a live
+   `inotifywait`.
+5. **Consolidate runtime identity.** WSL detection is duplicated across
+   [doctor.py](../src/agents_live/doctor.py) and
+   [heartbeat.py](../src/agents_live/heartbeat.py); it becomes
+   `runtime.id`.
+
+Then on a native Windows host:
+
+6. **Spike locking and process-tree termination.** Throwaway code, no
+   integration: named mutex semantics including an abandoned mutex, and
+   Job Object teardown of a process tree. Write the `exclusive_lock`,
+   `spawn_detached`, `find_process`, `is_alive`, and `terminate` members
+   afterward, informed by both platforms.
+7. **Build one direct foreground run.** `agents-live run` executes one
+   approved agent from a Windows repository with no scheduling or
+   watching. Resolve process creation, path spelling, handler selection,
+   executable pinning, and logs. Agent invocation is already settled (see
+   Invoking the Copilot CLI on Windows); this step is the orchestration
+   around it, including the failure paths that invocation work left open.
+8. **Add the native Windows runtime ID.** Generate `windows:<uuid>` in
+   the Windows user state home and use it for Windows ownership matching.
+   Leave Linux and WSL hostname behavior unchanged.
+9. **Register one scheduled run.** A user-scoped Task Scheduler action
+   with a fully qualified executable, Windows-correct arguments, an
+   explicit working directory, and enough metadata to identify the task
+   during removal.
+10. **Confirm schedule semantics.** Translate a real agent's cron
+    expression into native triggers, measure how much of the existing
+    schedule vocabulary maps exactly, and confirm DST, sleep,
+    missed-start, and restart behavior on a live task before generalizing
+    activation and status.
+11. **Build one watcher.** Compare `ReadDirectoryChangesW` and
+    `watchdog` on a native Windows repository. Prove cancellation,
+    rename, overflow, root deletion, and bounded rescan behavior before
+    choosing the implementation, and let the observed failure states
+    finish the `watch_events` contract.
+12. **Complete lifecycle commands.** `start`, `status`, `doctor`, `stop`,
+    `uninstall`, and `upgrade` parity. Verify task identity before
+    replacement or deletion and process identity before forced
+    termination.
+13. **Harden failure paths.** Bound watcher queues and payloads, define
+    logged-off execution limits, and make interrupted task updates
+    recoverable. Correctness hardening within the trusted-administrator
+    model, not sandboxing.
+14. **Add Windows CI and regression tests.** Argument quoting, task
+    identity and collisions, stale PID reuse, rejected path forms,
+    watcher overflow, interrupted upgrades, and uninstall cleanup, once
+    the implementation exists to test.
 
 ## Testing on Windows without publishing
 
-Every step above needs a native Windows host, and none of them should
-require a PyPI release or disturb a WSL deployment running on the same
-machine. The separation this design already assumes makes that
+Every step from the spike onward needs a native Windows host, and none of
+them should require a PyPI release or disturb a WSL deployment running on
+the same machine. The separation this design already assumes makes that
 straightforward: the two runtimes have different state homes, different
 registries, and physically separate checkouts, so a Windows experiment and
 a live WSL deployment coexist on one machine without seeing each other.
@@ -596,15 +687,19 @@ in the security model.
 
 ## Size and blast radius
 
-Rough, and stated as a range because the prototypes come before the
-refactor that generalizes them:
+Rough, and stated as a range because the Windows prototypes still set the
+size of the second implementation:
 
 - Extraction of `HostRuntime` and the POSIX implementation: mostly moved
   code, close to zero net new lines, but it touches `activate.py`,
   `headless.py`, `health_check.py`, `status.py`, `stop.py`,
   `migrate.py`, `uninstall.py`, and `doctor.py`. This is the change that
   needs the most review attention and the one that carries regression
-  risk for the platform that already works.
+  risk for the platform that already works. Sequencing it first is what
+  makes that risk observable, and the behavior-pinning tests in step 2
+  are what make it recoverable.
+- Behavior-pinning tests for crontab convergence and the watcher loop:
+  new work that does not exist today, since the current suite mocks both.
 - Windows implementation: 700 to 1,000 new lines, concentrated in one
   or two modules. Task registration and enumeration around 250,
   `ReadDirectoryChangesW` around 250, process and lock primitives around
@@ -624,22 +719,27 @@ sprawl would come from if it is not designed deliberately.
 
 ## Phasing
 
-1. Vertical slice: foreground `run`, one scheduled agent, and one watched
-   agent on native Windows.
-2. Consolidation: extract the host runtime around the working slice and add
-   the Windows runtime UUID without changing Linux or WSL behavior.
+1. Seam: on Linux and WSL only, pin current behavior with tests, then
+   extract the trigger and watcher-policy tracks and consolidate runtime
+   identity. Behavior unchanged, and the platform-specific spikes for
+   locking and process termination are scoped from here.
+2. Vertical slice: foreground `run`, one scheduled agent, and one watched
+   agent on native Windows, plus the Windows runtime UUID.
 3. Productization: complete lifecycle commands, diagnostics, supported
    handlers, schedule semantics, and operator documentation.
 4. Hardening: add Windows CI, regression tests for the identity and quoting
    checks, bounded failure handling, and transactional upgrade and uninstall
    behavior.
 
-Each phase has an explicit stop decision. The nearest one belongs to the
-vertical slice: if foreground `run`, a registered task, or a watcher cannot
-be made to work on a native repository, the proposal narrows or ends there
-rather than after a broad refactor. Hardening beyond the checks listed in
-the security model follows a working vertical slice rather than attempting
-to design isolation that the trusted-administrator model cannot provide.
+Each phase has an explicit stop decision. The seam phase is self-justifying
+on Linux, so its stop decision is only whether each track pays for itself
+there; a track that does not is dropped rather than carried on Windows'
+behalf. The next decision belongs to the vertical slice: if foreground
+`run`, a registered task, or a watcher cannot be made to work on a native
+repository, the proposal narrows or ends there, and the seam work already
+done stays worthwhile regardless. Hardening beyond the checks listed in the
+security model follows a working vertical slice rather than attempting to
+design isolation that the trusted-administrator model cannot provide.
 
 ## Non-goals
 
@@ -662,11 +762,40 @@ to design isolation that the trusted-administrator model cannot provide.
 - How much of the real schedule vocabulary translates exactly, and how
   coarse the superset triggers have to be for the rest? Measured on the
   first registered task, not settled in the abstract.
+- What replaces process-group termination? `os.killpg` operates on a
+  group that Windows has no equivalent for, so `terminate` has to be
+  redefined over a process tree without regressing the Linux path.
+  Answered by the locking and termination spike.
 
 ## Decision log
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.
+
+### 2026-07-25: the seam is extracted on Linux before Windows begins
+
+An earlier draft placed "extract the host runtime" after the Windows
+foreground, scheduler, and watcher prototypes, so that the interface
+would generalize only what two implementations had proven. That order is
+withdrawn. Extraction now happens on Linux and WSL first, because a
+refactor that touches eight modules needs a platform where a regression
+is visible immediately, and because two of the four tracks pay for
+themselves there regardless of whether Windows ever ships: `TriggerSpec`
+removes a cron-line-string leak spanning `activate.py`, `headless.py`,
+and `migrate.py`, and splitting `watch_loop` makes debounce, the cascade
+guard, and the fire-rate breaker testable without a live `inotifywait`.
+
+Three conditions come with the reversal. The `fcntl` imports at module
+scope are moved first, since the package does not import on Windows at
+all today. Behavior-pinning tests for crontab convergence and the watcher
+loop are written before the extraction, because the current suite mocks
+`current_crontab_lines` and `install_crontab` and never spawns
+`inotifywait`, which means it stubs precisely the subsystems the seam
+replaces. And the two members whose semantics the platforms define
+differently, `exclusive_lock` and `terminate`, wait for a throwaway
+Windows spike rather than being derived from `fcntl.flock` and
+`os.killpg`; the original objection to speculative interfaces is correct
+for those, and only those.
 
 ### 2026-07-25: no PTY on Windows, and the executable is pinned
 
