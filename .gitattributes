@@ -1,0 +1,9 @@
+# Keep line endings stable across Linux, WSL, and native Windows checkouts.
+# Shell handlers, Python sources, and the packaged skill payload must stay LF
+# even when checked out on Windows: Git for Windows defaults to
+# core.autocrlf=true, and a CRLF checkout breaks bash scripts and would ship
+# CRLF files inside a wheel built from that tree.
+* text=auto eol=lf
+
+# Windows Script Host reads this one; keep it CRLF.
+*.vbs text eol=crlf
