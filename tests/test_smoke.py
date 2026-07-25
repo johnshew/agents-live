@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1368,6 +1369,257 @@ class TestMigratePlanning(_TempProject):
             mock.patch.object(doctor.subprocess, "run", return_value=completed),
         ):
             self.assertEqual(doctor._crontab_inconsistencies(), ([], []))
+
+
+class _FakeHostBinaries(_TempProject):
+    """Base for tests that drive the real POSIX dispatch mechanisms.
+
+    The rest of the suite patches ``current_crontab_lines``,
+    ``install_crontab``, and never starts ``inotifywait`` - exactly the
+    subsystems a host-runtime seam replaces. These tests instead put a
+    fake executable on PATH and assert on observable outcomes (the
+    resulting table, the dispatched batch), so they keep holding when
+    the mechanism behind them changes.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bin_dir = self.root / "fake-bin"
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
+        self._saved_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.bin_dir}{os.pathsep}{self._saved_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", self._saved_path)
+
+    def write_executable(self, name: str, body: str) -> Path:
+        path = self.bin_dir / name
+        path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+
+class TestCrontabConvergenceBehavior(_FakeHostBinaries):
+    """Install, converge, and remove against a real ``crontab`` process."""
+
+    USER_LINE = "MAILTO=nobody"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.table = self.root / "crontab.txt"
+        self.write_executable("crontab", f"""
+import sys
+from pathlib import Path
+
+table = Path({str(self.table)!r})
+flag = sys.argv[1] if len(sys.argv) > 1 else ""
+if flag == "-l":
+    if not table.exists():
+        sys.stderr.write("no crontab for tester\\n")
+        raise SystemExit(1)
+    sys.stdout.write(table.read_text(encoding="utf-8"))
+elif flag == "-":
+    table.write_text(sys.stdin.read(), encoding="utf-8")
+elif flag == "-r":
+    table.unlink(missing_ok=True)
+else:
+    sys.stderr.write(f"unsupported crontab flag: {{flag}}\\n")
+    raise SystemExit(2)
+""")
+        self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        (self.root / "Agents" / "handlers").mkdir(parents=True, exist_ok=True)
+        (self.root / "Agents" / "handlers" / "prep.py").write_text(
+            "print('{}')\n", encoding="utf-8")
+        self.foreign_line = (
+            f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && agents-live "
+            f"--repo {FOREIGN_REPO} run --name smoke-fixture --quiet 2>&1")
+
+    def installed_lines(self) -> list[str]:
+        if not self.table.exists():
+            return []
+        return [l for l in self.table.read_text(encoding="utf-8").splitlines() if l]
+
+    def seed(self, lines: list[str]) -> None:
+        self.table.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_repeated_installs_converge_on_one_entry(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        canonical = activate.build_cron_lines("smoke-fixture")
+
+        activate.install_cron_agent("smoke-fixture")
+        after_first = self.installed_lines()
+        activate.install_cron_agent("smoke-fixture")
+        after_second = self.installed_lines()
+
+        self.assertEqual(after_first, after_second)
+        self.assertEqual(
+            [l for l in after_second if l in canonical], canonical)
+        # Unrelated user content and another project's entry for the same
+        # agent name both survive an install here.
+        self.assertIn(self.USER_LINE, after_second)
+        self.assertIn(self.foreign_line, after_second)
+
+    def test_stale_entry_is_migrated_to_the_canonical_form(self) -> None:
+        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && /usr/bin/uv run "
+                 f"--script {self.root}/scripts/run.py --name smoke-fixture "
+                 "--quiet 2>&1")
+        self.seed([self.USER_LINE, stale, self.foreign_line])
+        canonical = activate.build_cron_lines("smoke-fixture")
+        self.assertNotIn(stale, canonical)
+
+        plan = migrate.plan_migration(self.installed_lines())
+        self.assertEqual(plan["schedule"]["smoke-fixture"], ([stale], canonical))
+
+        with (
+            mock.patch("sys.argv", ["agents-live migrate"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(migrate.main(), 0)
+
+        converged = self.installed_lines()
+        self.assertNotIn(stale, converged)
+        for line in canonical:
+            self.assertIn(line, converged)
+        self.assertIn(self.USER_LINE, converged)
+        self.assertIn(self.foreign_line, converged)
+
+        # Converged input is a no-op: the second pass plans nothing.
+        self.assertEqual(migrate.plan_migration(converged)["schedule"], {})
+
+    def test_removal_takes_only_this_repos_entries(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        activate.install_cron_agent("smoke-fixture")
+        headless.install_watcher_reboot_line("smoke-fixture")
+        self.assertTrue(headless.remove_cron_entries("smoke-fixture"))
+        self.assertTrue(headless.remove_watcher_reboot_line("smoke-fixture"))
+        self.assertEqual(
+            self.installed_lines(), [self.USER_LINE, self.foreign_line])
+
+    def test_unreadable_crontab_never_rewrites_the_table(self) -> None:
+        self.seed([self.USER_LINE, self.foreign_line])
+        self.write_executable("crontab", """
+import sys
+
+sys.stderr.write("crontab: not allowed here\\n")
+raise SystemExit(1)
+""")
+        with self.assertRaisesRegex(headless.AgentsLiveError, "not accessible"):
+            activate.install_cron_agent("smoke-fixture")
+        self.assertEqual(
+            self.installed_lines(), [self.USER_LINE, self.foreign_line])
+
+
+WATCHER_DEFINITION = """---
+description: Smoke fixture. Never delegate to this agent.
+disable-model-invocation: true
+runtime: none
+mode: plan
+watchPath: .
+watchIgnore:
+  - skip.md
+  - "Agents/data/"
+---
+Watcher smoke fixture body.
+"""
+
+
+class TestWatchLoopBehavior(_FakeHostBinaries):
+    """Drive ``watch_loop`` end to end against a scripted ``inotifywait``."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.events_file = self.root / "fake-events.txt"
+        self.write_executable("inotifywait", f"""
+import sys
+from pathlib import Path
+
+# Emit the scripted paths and exit: EOF on stdout is a supported watcher
+# state, so the loop drains what it has and returns.
+events = Path({str(self.events_file)!r})
+sys.stdout.write(events.read_text(encoding="utf-8"))
+sys.stdout.flush()
+""")
+        self._saved_handlers = {
+            sig: signal.getsignal(sig)
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+        }
+        self.addCleanup(self._restore_handlers)
+
+    def _restore_handlers(self) -> None:
+        for sig, handler in self._saved_handlers.items():
+            signal.signal(sig, handler)
+
+    def write_repo_file(self, relative: str, content: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def run_watch_loop(self, name: str, changed: list[str]) -> list[list[str]]:
+        """Feed *changed* to the loop; return the dispatched batches."""
+        self.events_file.write_text(
+            "".join(f"{self.root / c}\n" for c in changed), encoding="utf-8")
+        batches: list[list[str]] = []
+        with (
+            mock.patch.object(activate, "_dispatch_run_once",
+                              side_effect=lambda _n, files: batches.append(files)),
+            # watch_loop registers exit hooks for the watcher process; in
+            # a test they would fire against a deleted temp state home.
+            mock.patch("atexit.register"),
+        ):
+            self.assertEqual(activate.watch_loop(name), 0)
+        return batches
+
+    def test_dispatch_carries_repo_relative_paths_and_drops_ignored_ones(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION)
+        changed = [
+            "notes/keep.md",          # dispatched
+            "skip.md",                # watchIgnore entry
+            "Agents/data/state.json",  # watchIgnore directory prefix
+            "notes/_index_.md",       # generated index
+            ".hidden/secret.md",      # dotted path component
+            "notes/__pycache__/x.pyc",
+        ]
+        for relative in changed:
+            self.write_repo_file(relative, f"content of {relative}\n")
+
+        self.assertEqual(self.run_watch_loop("watch-fixture", changed),
+                         [["notes/keep.md"]])
+
+    def test_unchanged_content_is_filtered_inside_the_cascade_window(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION)
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [["notes/keep.md"]])
+
+        # Same content again: a cascade re-touch, not an edit.
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [])
+
+        self.write_repo_file("notes/keep.md", "second\n")
+        self.assertEqual(self.run_watch_loop("watch-fixture", ["notes/keep.md"]),
+                         [["notes/keep.md"]])
+
+    def test_debounced_batch_survives_watcher_exit(self) -> None:
+        self.write_agent(
+            "watch-fixture",
+            WATCHER_DEFINITION.replace("---\nWatcher", "debounce: 30\n---\nWatcher"))
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.write_repo_file("notes/other.md", "other\n")
+
+        # A 30s quiet window never elapses here; the pending batch must
+        # still dispatch once when the watcher process goes away.
+        self.assertEqual(
+            self.run_watch_loop("watch-fixture", ["notes/keep.md", "notes/other.md"]),
+            [["notes/keep.md", "notes/other.md"]])
+
+    def test_file_target_watch_filters_by_filename(self) -> None:
+        self.write_agent("watch-fixture", WATCHER_DEFINITION.replace(
+            "watchPath: .", "watchPath: notes/keep.md"))
+        self.write_repo_file("notes/keep.md", "first\n")
+        self.write_repo_file("notes/other.md", "other\n")
+
+        self.assertEqual(
+            self.run_watch_loop("watch-fixture", ["notes/other.md", "notes/keep.md"]),
+            [["notes/keep.md"]])
 
 
 class TestAdapterRegistry(unittest.TestCase):
