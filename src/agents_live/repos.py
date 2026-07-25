@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import importlib.util
 import json
 import os
@@ -128,6 +127,8 @@ def _registry_lock() -> Iterator[None]:
     Without it, two concurrent repository registrations each rewrite the file
     from their own snapshot and the last rename silently drops the other
     repo."""
+    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
+
     lock_path = config_path().parent / ".config.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock_file:

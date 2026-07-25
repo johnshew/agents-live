@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import signal
@@ -77,6 +76,8 @@ class SmokeInterrupted(RuntimeError):
 
 def _acquire_smoketest_lock(runtime: str, model: str) -> TextIO | None:
     """Acquire the process-lifetime lock, returning None when another run owns it."""
+    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
+
     SMOKETEST_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock_file = SMOKETEST_LOCK_PATH.open("a+", encoding="utf-8")
     try:
@@ -107,6 +108,8 @@ def _acquire_smoketest_lock(runtime: str, model: str) -> TextIO | None:
 
 
 def _release_smoketest_lock(lock_file: TextIO) -> None:
+    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
+
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     finally:

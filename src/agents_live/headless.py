@@ -28,7 +28,6 @@ layer can use it without a dependency cycle.
 """
 from __future__ import annotations
 
-import fcntl
 import glob
 import hashlib
 import json
@@ -2607,6 +2606,8 @@ def install_crontab(lines: list[str]) -> None:
 @contextmanager
 def crontab_lock() -> Iterator[None]:
     """Fail fast if another agents-live process is mutating the user crontab."""
+    import fcntl  # noqa: PLC0415 - POSIX-only; keep the package importable elsewhere
+
     from .heartbeat import state_dir  # noqa: PLC0415 - stdlib-only module
 
     # One resolver for the host state dir: heartbeat.state_dir() applies
