@@ -27,6 +27,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -2994,6 +2996,106 @@ class TestHostRuntimeIdentity(unittest.TestCase):
             self.assertEqual(hostruntime.id(), hostruntime.WINDOWS)
 
 
+class TestHostRuntimeLock(unittest.TestCase):
+    """The lock contract both platforms have to honour identically."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.lock_path = Path(self._tmp.name) / "nested" / "probe.lock"
+
+    def test_holder_excludes_a_second_acquisition(self) -> None:
+        with hostruntime.exclusive_lock(self.lock_path):
+            with self.assertRaises(hostruntime.LockBusy):
+                with hostruntime.exclusive_lock(self.lock_path):
+                    pass
+
+    def test_lock_is_free_again_after_the_block_exits(self) -> None:
+        with hostruntime.exclusive_lock(self.lock_path):
+            pass
+        with hostruntime.exclusive_lock(self.lock_path):
+            pass
+
+    def test_lock_is_released_when_the_block_raises(self) -> None:
+        with self.assertRaises(ZeroDivisionError):
+            with hostruntime.exclusive_lock(self.lock_path):
+                raise ZeroDivisionError
+        with hostruntime.exclusive_lock(self.lock_path):
+            pass
+
+    def test_blocking_acquisition_waits_for_the_holder(self) -> None:
+        def hold() -> None:
+            with hostruntime.exclusive_lock(self.lock_path):
+                time.sleep(0.3)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        self.addCleanup(holder.join)
+        time.sleep(0.05)
+        started = time.monotonic()
+        with hostruntime.exclusive_lock(self.lock_path, blocking=True):
+            waited = time.monotonic() - started
+        self.assertGreater(waited, 0.1)
+
+    def test_owner_metadata_in_the_lock_file_stays_readable(self) -> None:
+        """Windows locks are mandatory, so the locked byte lives past any content."""
+        with hostruntime.exclusive_lock(self.lock_path):
+            with self.lock_path.open("r+", encoding="utf-8") as handle:
+                handle.write("owner metadata\n")
+                handle.truncate()
+            self.assertEqual(self.lock_path.read_text(encoding="utf-8"),
+                             "owner metadata\n")
+
+
+class TestHostRuntimeProcesses(unittest.TestCase):
+    """Detached spawning, liveness, and termination of a whole tree."""
+
+    def _await_exit(self, pid: int, timeout_s: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and hostruntime.is_alive(pid):
+            time.sleep(0.05)
+
+    def test_spawned_child_is_alive_then_terminates(self) -> None:
+        child = hostruntime.spawn_detached(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertTrue(hostruntime.is_alive(child.pid))
+        hostruntime.terminate(child.pid, grace_s=5)
+        child.wait(timeout=15)
+        self.assertFalse(hostruntime.is_alive(child.pid))
+
+    def test_terminate_reaches_a_grandchild(self) -> None:
+        parent_source = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen("
+            "[sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        parent = hostruntime.spawn_detached(
+            [sys.executable, "-c", parent_source],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(parent.wait)
+        self.addCleanup(parent.kill)
+        self.addCleanup(parent.stdout.close)
+        grandchild_pid = int(parent.stdout.readline().strip())
+        self.assertTrue(hostruntime.is_alive(grandchild_pid))
+
+        hostruntime.terminate(parent.pid, grace_s=10)
+        parent.wait(timeout=15)
+        self._await_exit(grandchild_pid)
+        self.assertFalse(hostruntime.is_alive(grandchild_pid))
+
+    def test_is_alive_is_false_for_an_unused_pid(self) -> None:
+        self.assertFalse(hostruntime.is_alive(0x7FFFFFFE))
+
+    def test_terminating_a_dead_pid_is_quiet(self) -> None:
+        child = hostruntime.spawn_detached([sys.executable, "-c", "pass"])
+        child.wait(timeout=15)
+        hostruntime.terminate(child.pid, grace_s=1)
+
+
 class TestWindowsHeartbeat(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -3442,10 +3544,10 @@ class TestUpdateCheck(unittest.TestCase):
 
     def test_cache_timestamp_controls_network_launch(self) -> None:
         self.assertEqual(update_check.CACHE_INTERVAL, 60 * 60)
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+        with mock.patch.object(update_check.hostruntime, "spawn_detached") as spawn:
             update_check.launch_if_stale(now=100)
-        popen.assert_called_once()
-        self.assertEqual(popen.call_args.args[0][2], update_check.__name__)
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[0][2], update_check.__name__)
 
         update_check.refresh(
             now=100,
@@ -3453,17 +3555,17 @@ class TestUpdateCheck(unittest.TestCase):
                 "info": {"version": "1.2.3"},
             })),
         )
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+        with mock.patch.object(update_check.hostruntime, "spawn_detached") as spawn:
             update_check.launch_if_stale(now=101)
-        popen.assert_not_called()
+        spawn.assert_not_called()
 
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+        with mock.patch.object(update_check.hostruntime, "spawn_detached") as spawn:
             update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL - 1)
-        popen.assert_not_called()
+        spawn.assert_not_called()
 
-        with mock.patch.object(update_check.subprocess, "Popen") as popen:
+        with mock.patch.object(update_check.hostruntime, "spawn_detached") as spawn:
             update_check.launch_if_stale(now=100 + update_check.CACHE_INTERVAL)
-        popen.assert_called_once()
+        spawn.assert_called_once()
 
     def test_legacy_opt_outs_do_not_suppress_check(self) -> None:
         config = Path(os.environ["XDG_CONFIG_HOME"]) / "agents-live" / "config.toml"
@@ -3471,10 +3573,10 @@ class TestUpdateCheck(unittest.TestCase):
         config.write_text("update_check = false\n", encoding="utf-8")
         with (
             mock.patch.dict(os.environ, {"AGENTS_LIVE_NO_UPDATE_CHECK": "1"}),
-            mock.patch.object(update_check.subprocess, "Popen") as popen,
+            mock.patch.object(update_check.hostruntime, "spawn_detached") as spawn,
         ):
             update_check.launch_if_stale(now=100)
-        popen.assert_called_once()
+        spawn.assert_called_once()
 
     def test_offline_and_malformed_metadata_are_cached_failures(self) -> None:
         offline = update_check.refresh(

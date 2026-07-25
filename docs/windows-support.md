@@ -1,13 +1,14 @@
 ---
 title: Native Windows Support Proposal
 description: What it would take to run agents-live directly on Windows, using Task Scheduler and Windows file-change notification instead of cron and inotifywait
-ms.date: 2026-07-25
+ms.date: 2026-07-26
 ms.topic: concept
 ---
 
-Status: draft. Feasibility is settled and the host-runtime seam has landed
+Status: draft. Feasibility is settled, the host-runtime seam has landed
 on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
-so the next work is the vertical slice on a native Windows host
+and its locking and process members are now written and measured on a
+native Windows host. What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
@@ -95,9 +96,9 @@ vertical slice, not to a viability decision.
 | `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows) |
 | `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW`, or .NET `FileSystemWatcher` |
 | `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | PID files plus `OpenProcess`, or WMI `Win32_Process` |
-| `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | Protected stop IPC and a Job Object, then termination of an identity-verified process tree |
-| `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | A per-user named mutex with an explicit DACL; overlapped I/O or a reader thread |
-| `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | A Job Object and an explicit process group or control channel; detached/no-console flags cannot assume `CTRL_BREAK_EVENT` remains available |
+| `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | `OpenProcess` for liveness and `TerminateProcess` over a snapshot-derived process tree; identity verification before forced termination |
+| `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex; overlapped I/O or a reader thread |
+| `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `DETACHED_PROCESS` with a new process group; termination walks the tree, since detached/no-console flags cannot assume `CTRL_BREAK_EVENT` remains available |
 | `sh -c "cd X && PATH=Y agents-live ..."` cron lines | [activate.py](../src/agents_live/activate.py) | A Task Scheduler executable path, one Windows-quoted argument string, and a working directory; Task Scheduler does not store an argument vector |
 | `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | Not needed. The Windows CLI writes clean text to a redirected stdout with no console, so plain pipes suffice (see Invoking the Copilot CLI on Windows) |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `.sh` requires Git Bash and is otherwise refused (see Handlers on Windows) |
@@ -318,6 +319,13 @@ invocation was settled.
 | `terminate` | `os.killpg` on a process group ([health_check.py](../src/agents_live/health_check.py)) | Windows has no process group. The real operation is "terminate a tree", which the protocol above does not model at all |
 | `watch_events` | `inotifywait` is a path stream with no failure vocabulary | `ReadDirectoryChangesW` adds buffer overflow, root invalidation, and `ERROR_NOTIFY_ENUM_DIR`. Writing those `WatchBatch` states from Linux alone means branches no test can reach |
 | `spawn_detached` | `start_new_session=True` | A Job Object, which is also where process-tree identity comes from |
+
+The step 6 spike settled the first, second, and fourth rows, and
+contradicted two of the three predictions in them: the lock is a file
+lock rather than a mutex, and a job object cannot supply process-tree
+identity after its creator exits. See the decision log entry "locking is
+a file lock and termination is a tree walk". Only `watch_events` is
+still open, and it waits on step 11.
 
 ## File change notification on Windows
 
@@ -566,8 +574,9 @@ Then on a native Windows host:
 6. **Spike locking and process-tree termination.** Throwaway code, no
    integration: named mutex semantics including an abandoned mutex, and
    Job Object teardown of a process tree. Write the `exclusive_lock`,
-   `spawn_detached`, `find_process`, `is_alive`, and `terminate` members
-   afterward, informed by both platforms.
+   `spawn_detached`, `is_alive`, and `terminate` members afterward,
+   informed by both platforms. `find_process` waits for step 12, where
+   the lookup a Windows implementation would use actually exists.
 7. **Build one direct foreground run.** `agents-live run` executes one
    approved agent from a Windows repository with no scheduling or
    watching. Resolve process creation, path spelling, handler selection,
@@ -775,15 +784,47 @@ design isolation that the trusted-administrator model cannot provide.
 - How much of the real schedule vocabulary translates exactly, and how
   coarse the superset triggers have to be for the rest? Measured on the
   first registered task, not settled in the abstract.
-- What replaces process-group termination? `os.killpg` operates on a
-  group that Windows has no equivalent for, so `terminate` has to be
-  redefined over a process tree without regressing the Linux path.
-  Answered by the locking and termination spike.
 
 ## Decision log
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.
+
+### 2026-07-26: locking is a file lock and termination is a tree walk
+
+The step 6 spike measured named mutexes, `LockFileEx`, job objects, and
+Toolhelp32 snapshots on a native Windows host as a standard
+non-elevated user. Two predictions in this document did not survive it.
+
+A named mutex is the wrong lock. `Local\` names resolve per logon
+session, so an interactive process and a session 0 process would each
+believe they held it; the mutex is thread-owned, so a lock cannot be
+released by a different thread than took it; and a holder that dies
+leaves `WAIT_ABANDONED` for the next waiter to interpret rather than
+simply releasing. `LockFileEx` has none of those properties and matches
+`flock` closely enough that one contract covers both platforms: a
+crashed holder leaves no lock, a second handle in the same process is
+excluded, and there is no thread affinity. Windows file locks are
+mandatory, so `exclusive_lock` locks a single byte at offset 2**62,
+which excludes other holders while leaving the file's owner metadata
+readable by the process that lost the race.
+
+A job object cannot carry process-tree identity. Reopening one by name
+after its creator exits fails with `ERROR_FILE_NOT_FOUND` while the
+whole tree is still running, so `terminate` cannot be "reopen the job
+and terminate it". Termination instead enumerates descendants from a
+Toolhelp32 snapshot before terminating the root, since terminating the
+root first orphans its children and loses the parent links that identify
+them. A snapshot walk costs about 16 ms, against roughly 1.9 s for the
+`Win32_Process` query that would supply command lines, so identity
+verification for step 12 has to come from something cheaper than a
+command-line match.
+
+`find_process` is deliberately not written yet. POSIX finds a watcher by
+scanning argv, and Windows cannot afford that scan, so the two platforms
+disagree about what the lookup even takes as input. Writing it now would
+encode a guess; it waits for step 12, where the PID record and identity
+check it needs exist.
 
 ### 2026-07-25: the seam is extracted on Linux before Windows begins
 

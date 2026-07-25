@@ -39,9 +39,7 @@ import contextlib
 import hashlib
 import io
 import json
-import os
 import shlex
-import signal
 import subprocess
 import sys
 import time
@@ -641,20 +639,15 @@ def _run_smoketest(root: Path, runtime: str) -> dict:
     result_path = paths.repo_state_dir(root) / "logs" / \
         "smoketest-framework-result.json"
     try:
-        process = subprocess.Popen(
+        process = hostruntime.spawn_detached(
             _self_argv("smoketest", "--runtime", runtime, root=root),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True,
         )
         try:
             stdout, stderr = process.communicate(timeout=SMOKETEST_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.communicate(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+            hostruntime.terminate(process.pid, grace_s=15)
+            process.communicate()
             return {"status": "fail",
                     "duration_s": round(time.time() - started, 1),
                     "runtime": runtime,

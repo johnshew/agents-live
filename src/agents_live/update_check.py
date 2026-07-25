@@ -4,14 +4,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__, paths
+from . import __version__, hostruntime, paths
 
 CACHE_INTERVAL = 60 * 60  # Check hourly so available releases are reported promptly.
 NETWORK_TIMEOUT = 1.0
@@ -109,13 +108,7 @@ def launch_if_stale(*, now: float | None = None) -> None:
     if _is_fresh(_read_cache(), current):
         return
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", __name__],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        hostruntime.spawn_detached([sys.executable, "-m", __name__])
     except OSError:
         pass
 
