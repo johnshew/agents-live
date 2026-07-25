@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import os
 import json
@@ -672,6 +673,12 @@ def watch_loop(name: str) -> int:
     finally:
         sys.stderr = _orig_stderr
         process.terminate()
+        # Close the pipes we own: a watcher that returns without this
+        # leaks both descriptors until the process itself exits.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
     return 0
 
 
