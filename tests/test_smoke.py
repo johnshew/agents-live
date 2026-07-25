@@ -3285,8 +3285,10 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_compatibility_wrapper_executes_automatic_migration(self) -> None:
         wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
         invocation = self.root / "invocation"
+        # as_posix() so the redirect target is a path the shell understands
+        # on a Windows host too, rather than a literal file name in its cwd.
         self.shim.write_text(
-            f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {invocation}\n",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{invocation.as_posix()}'\n",
             encoding="utf-8")
         completed = subprocess.run(
             ["bash", str(wrapper), "/ignored/legacy/repo"],
