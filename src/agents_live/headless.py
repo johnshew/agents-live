@@ -2748,12 +2748,28 @@ def _watcher_argv_belongs_to_repo(args: list[str]) -> bool:
     the loop script's path inside the repo. An argv pinned to another
     root never matches, so same-named watchers in different projects are
     never cross-reported or cross-killed.
+
+    Containment is decided with :class:`Path`, not string prefixes, so
+    the separator an argument happens to use does not change the answer:
+    Windows accepts ``C:/repo/scripts/x.py`` and ``C:\\repo\\scripts\\x.py``
+    for the same file, and compares the two case-insensitively.
     """
-    root = str(repo_root())
+    root = repo_root()
     for first, second in zip(args, args[1:]):
         if first == "--repo":
-            return second == root
-    return any(arg == root or arg.startswith(root + os.sep) for arg in args)
+            return _same_path(second, root)
+    return any(_same_path(arg, root) or _within_path(arg, root)
+               for arg in args)
+
+
+def _same_path(candidate: str, root: Path) -> bool:
+    """Whether *candidate* names *root* itself, however it is spelled."""
+    return bool(candidate) and Path(candidate) == root
+
+
+def _within_path(candidate: str, root: Path) -> bool:
+    """Whether *candidate* names something under *root*."""
+    return bool(candidate) and root in Path(candidate).parents
 
 
 def _is_watcher_cmdline(args: list[str], name: str) -> bool:

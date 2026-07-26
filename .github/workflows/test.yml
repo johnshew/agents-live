@@ -10,9 +10,18 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      # Both hosts report: a Windows-only break is the whole point of
+      # running it, so it must not be hidden by cancelling the matrix.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv run --script tools/pre-release-audit.py
+      # The audit reads the tree, not the host, so one run is the whole
+      # check - and this is the host a release is cut on.
+      - if: runner.os == 'Linux'
+        run: uv run --script tools/pre-release-audit.py
       - run: uv run --with-editable . python -m unittest tests.test_smoke

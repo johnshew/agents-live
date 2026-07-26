@@ -407,7 +407,12 @@ def validated_agent_directories(root: Path, values: object) -> list[Path]:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("agent_directories entries must be non-empty strings")
         relative = Path(value)
-        if relative.is_absolute():
+        # Not is_absolute(): on Windows that is False for a rooted path
+        # with no drive ("/tmp/agents", "\\evil") and for a
+        # drive-relative one ("C:agents"), both of which are anchored
+        # somewhere other than this repository. anchor covers all three
+        # spellings on both platforms.
+        if relative.anchor:
             raise ValueError(f"agent_directories entry must be repo-relative: {value}")
         resolved = (base / relative).resolve()
         try:

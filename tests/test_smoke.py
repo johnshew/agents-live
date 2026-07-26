@@ -99,6 +99,67 @@ def watcher_reboot_line(name: str) -> str:
     return triggers.render(headless.watcher_spec(name))[0]
 
 
+def cron_root(root: Path | str) -> str:
+    """*root* as a crontab line spells it.
+
+    A crontab line is shell text: the renderer writes paths through
+    shlex.quote and the matchers read them back through shlex.split. A
+    bare interpolation round-trips only while the path has no shell
+    metacharacters - which a Windows root, full of backslashes, does
+    not. Fixtures that hand-write lines quote them the same way.
+    """
+    return shlex.quote(str(root))
+
+
+@contextlib.contextmanager
+def _cwd_restored_before_cleanup(saved: Path):
+    """Return to *saved* on the way out, ahead of any enclosing cleanup.
+
+    A test that chdirs into a temporary directory has to leave it before
+    the directory is removed: Windows refuses to delete a directory that
+    is some process's current directory, so restoring the cwd in a later
+    finally block is too late.
+    """
+    try:
+        yield
+    finally:
+        os.chdir(saved)
+
+
+def link_directory(link: Path, target: Path) -> None:
+    """Point *link* at *target* with whatever alias the platform allows.
+
+    Windows refuses directory symlinks to an unprivileged account, but
+    lets anyone create a junction - and a junction is the reparse point
+    a real checkout is likely to contain, so it is the alias worth
+    testing there.
+    """
+    if sys.platform != "win32":
+        link.symlink_to(target, target_is_directory=True)
+        return
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    if completed.returncode != 0:
+        raise OSError(
+            f"could not create a junction at {link}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}")
+
+
+def unlink_directory(link: Path) -> None:
+    """Remove an alias made by :func:`link_directory`.
+
+    A junction is a directory entry and comes off with rmdir; a POSIX
+    symlink to a directory is still a link and comes off with unlink.
+    Neither touches what the alias pointed at.
+    """
+    if sys.platform == "win32":
+        link.rmdir()
+    else:
+        link.unlink()
+
+
 class _TempProject(unittest.TestCase):
     """A temp project selected via the env var, restored on stop."""
 
@@ -530,13 +591,21 @@ class TestRepositoryRegistry(_TempProject):
         self.assertTrue(by_name["ok"]["ok"])
 
     def test_agent_directories_cannot_escape_repository(self) -> None:
-        with self.assertRaisesRegex(ValueError, "repo-relative"):
-            paths.validated_agent_directories(self.root, ["/tmp/agents"])
+        anchored = ["/tmp/agents", str(Path(tempfile.gettempdir()) / "agents")]
+        if sys.platform == "win32":
+            # Neither spelling is is_absolute() on Windows - one is
+            # rooted but driveless, the other drive-relative - so only
+            # an anchor check catches them. On POSIX they are ordinary
+            # relative names that stay inside the repository.
+            anchored += ["\\tmp\\agents", "C:agents"]
+        for spelling in anchored:
+            with self.assertRaisesRegex(ValueError, "repo-relative"):
+                paths.validated_agent_directories(self.root, [spelling])
         with self.assertRaisesRegex(ValueError, "escapes"):
             paths.validated_agent_directories(self.root, ["../agents"])
         with tempfile.TemporaryDirectory() as outside:
             link = self.root / "linked-agents"
-            link.symlink_to(outside, target_is_directory=True)
+            link_directory(link, Path(outside))
             with self.assertRaisesRegex(ValueError, "escapes"):
                 paths.validated_agent_directories(self.root, ["linked-agents"])
 
@@ -1087,13 +1156,13 @@ class TestInvocationForms(_TempProject):
         self.assertTrue(headless.cron_line_matches(lines[0], str(prompt)))
 
     def test_run_invocation_carries_name_token(self) -> None:
-        line = f"{TEST_CRON_SCHEDULE} cd {self.root} && " + " ".join(
-            headless.run_invocation("t"))
+        line = f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && " + (
+            shlex.join(headless.run_invocation("t")))
         self.assertTrue(headless.cron_line_matches(line, "t"))
 
     def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
-        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
-                "--name shared --quiet")
+        cron = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
+                "agents-live run --name shared --quiet")
         watcher = watcher_reboot_line("shared")
         self.assertTrue(headless.cron_line_matches(cron, "shared"))
         self.assertFalse(headless.cron_line_matches(
@@ -1113,8 +1182,8 @@ class TestInvocationForms(_TempProject):
                         self.fail("contended lock was acquired")
 
     def test_removal_preserves_foreign_same_named_entries(self) -> None:
-        cron = (f"{TEST_CRON_SCHEDULE} cd {self.root} && agents-live run "
-                "--name shared --quiet")
+        cron = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
+                "agents-live run --name shared --quiet")
         watcher = watcher_reboot_line("shared")
         foreign_cron = cron.replace(str(self.root), FOREIGN_REPO)
         foreign_watcher = watcher.replace(str(self.root), FOREIGN_REPO)
@@ -1173,6 +1242,8 @@ class TestInvocationForms(_TempProject):
                    "internal", "watch-loop", "shared"]
         flat = ["uv", "run", "--script",
                 f"{self.root}/scripts/activate.py", "watch-loop", "shared"]
+        # The forward slash is deliberate: Windows accepts it, and the
+        # repo-containment check must not care which separator it sees.
         self.assertTrue(headless._is_watcher_cmdline(packaged, "shared"))
         self.assertTrue(headless._is_watcher_cmdline(flat, "shared"))
         self.assertFalse(headless._is_watcher_cmdline(foreign, "shared"))
@@ -1181,12 +1252,14 @@ class TestInvocationForms(_TempProject):
         self.assertIsNone(headless._watcher_cmdline_agent_name(foreign))
 
     def test_packaged_cron_lines_are_enumerable(self) -> None:
-        packaged = (f"{TEST_CRON_SCHEDULE} cd {self.root} && "
-                    f"/home/u/.local/bin/agents-live --repo {self.root} "
+        root = cron_root(self.root)
+        packaged = (f"{TEST_CRON_SCHEDULE} cd {root} && "
+                    f"/home/u/.local/bin/agents-live --repo {root} "
                     "run --name foo --quiet 2>&1")
-        flat = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script "
-                f"{self.root}/scripts/run.py --name bar --quiet 2>&1")
-        unrelated = f"{TEST_CRON_SCHEDULE} cd {self.root} && /usr/bin/backup"
+        flat = (f"{TEST_CRON_SCHEDULE} cd {root} && uv run --script "
+                f"{cron_root(self.root / 'scripts' / 'run.py')} "
+                "--name bar --quiet 2>&1")
+        unrelated = f"{TEST_CRON_SCHEDULE} cd {root} && /usr/bin/backup"
         self.assertEqual(headless._cron_line_agent_name(packaged), "foo")
         self.assertEqual(headless._cron_line_agent_name(flat), "bar")
         self.assertIsNone(headless._cron_line_agent_name(unrelated))
@@ -1231,7 +1304,8 @@ class TestInvocationForms(_TempProject):
     def test_doctor_flags_lines_from_missing_project_roots(self) -> None:
         gone = f"{self.root}-deleted"
         crontab = "\n".join([
-            f"{TEST_CRON_SCHEDULE} cd {gone} && agents-live --repo {gone} "
+            f"{TEST_CRON_SCHEDULE} cd {cron_root(gone)} && "
+            f"agents-live --repo {cron_root(gone)} "
             "run --name lost --quiet 2>&1",
             f"{TEST_CRON_SCHEDULE} cd {FOREIGN_REPO} && /usr/bin/backup",
         ])
@@ -1327,16 +1401,18 @@ class TestMigratePlanning(_TempProject):
 
     def test_stale_line_planned_for_rewrite(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
-        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && "
+        stale = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
                  f"/usr/bin/uv run --script "
-                 f"{self.root}/old/run.py --name smoke-fixture --quiet 2>&1")
+                 f"{cron_root(self.root / 'old' / 'run.py')} "
+                 "--name smoke-fixture --quiet 2>&1")
         plan = migrate.plan_migration([stale])
         self.assertIn("smoke-fixture", plan["schedule"])
 
     def test_legacy_watcher_line_is_planned_for_internal_rewrite(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
+        root = cron_root(self.root)
         stale = (
-            f"@reboot cd {self.root} && agents-live --repo {self.root} "
+            f"@reboot cd {root} && agents-live --repo {root} "
             "start --ensure-watcher smoke-fixture 2>&1"
         )
         plan = migrate.plan_migration([stale])
@@ -1345,8 +1421,8 @@ class TestMigratePlanning(_TempProject):
         self.assertIn("internal ensure-watcher smoke-fixture", new[0])
 
     def test_undefined_agent_is_reported_not_planned(self) -> None:
-        line = (f"{TEST_CRON_SCHEDULE} cd {self.root} && uv run --script x.py "
-                f"--name ghost-agent --quiet 2>&1")
+        line = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
+                "uv run --script x.py --name ghost-agent --quiet 2>&1")
         plan = migrate.plan_migration([line])
         self.assertEqual(plan["schedule"], {})
         self.assertIn("ghost-agent", plan["missing"])
@@ -1368,18 +1444,19 @@ class TestMigratePlanning(_TempProject):
             ),
         )
         old_root = self.root / "moved-project"
+        old = cron_root(old_root)
         old_schedule = (
-            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
-            f"--repo {old_root} run --name smoke-fixture --quiet 2>&1")
+            f"{TEST_CRON_SCHEDULE} cd {old} && agents-live "
+            f"--repo {old} run --name smoke-fixture --quiet 2>&1")
         old_watcher = (
-            f"@reboot cd {old_root} && agents-live --repo {old_root} "
+            f"@reboot cd {old} && agents-live --repo {old} "
             "internal ensure-watcher smoke-fixture 2>&1")
         undefined = (
-            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
-            f"--repo {old_root} run --name missing-agent --quiet 2>&1")
+            f"{TEST_CRON_SCHEDULE} cd {old} && agents-live "
+            f"--repo {old} run --name missing-agent --quiet 2>&1")
         near_match = old_schedule.replace(str(old_root), f"{old_root}-other")
         mixed_live = old_schedule.replace(
-            f"--repo {old_root}", f"--repo {self.root}")
+            f"--repo {old}", f"--repo {cron_root(self.root)}")
         live_entry = schedule_lines("smoke-fixture")[0]
         lines = [
             old_schedule, old_watcher, undefined, near_match, mixed_live,
@@ -1403,8 +1480,9 @@ class TestMigratePlanning(_TempProject):
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         old_root = self.root / "moved-project"
         old_line = (
-            f"{TEST_CRON_SCHEDULE} cd {old_root} && agents-live "
-            f"--repo {old_root} run --name smoke-fixture --quiet 2>&1")
+            f"{TEST_CRON_SCHEDULE} cd {cron_root(old_root)} && agents-live "
+            f"--repo {cron_root(old_root)} run "
+            "--name smoke-fixture --quiet 2>&1")
         with (
             mock.patch.object(
                 headless, "current_crontab_lines", return_value=[old_line]),
@@ -1447,9 +1525,11 @@ class TestMigratePlanning(_TempProject):
         Path(foreign_repo).mkdir()
         self.addCleanup(shutil.rmtree, foreign_repo, ignore_errors=True)
         crontab = "\n".join([
-            f"@reboot cd {foreign_repo} && agents-live --repo {foreign_repo} "
+            f"@reboot cd {cron_root(foreign_repo)} && "
+            f"agents-live --repo {cron_root(foreign_repo)} "
             "start --ensure-watcher missing",
-            f"@reboot cd {self.root} && agents-live --repo {self.root} "
+            f"@reboot cd {cron_root(self.root)} && "
+            f"agents-live --repo {cron_root(self.root)} "
             "internal ensure-watcher smoke-fixture",
         ])
         completed = subprocess.CompletedProcess(
@@ -1487,6 +1567,12 @@ class _FakeHostBinaries(_TempProject):
         return path
 
 
+@unittest.skipIf(
+    sys.platform == "win32",
+    "drives a real crontab process, and Windows has none: a shebang "
+    "script is not something CreateProcess will run. The Task Scheduler "
+    "branch this host actually dispatches through is covered by "
+    "TestWindowsScheduling.")
 class TestCrontabConvergenceBehavior(_FakeHostBinaries):
     """Install, converge, and remove against a real ``crontab`` process."""
 
@@ -1548,9 +1634,10 @@ else:
         self.assertIn(self.foreign_line, after_second)
 
     def test_stale_entry_is_migrated_to_the_canonical_form(self) -> None:
-        stale = (f"{TEST_CRON_SCHEDULE} cd {self.root} && /usr/bin/uv run "
-                 f"--script {self.root}/scripts/run.py --name smoke-fixture "
-                 "--quiet 2>&1")
+        stale = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
+                 f"/usr/bin/uv run --script "
+                 f"{cron_root(self.root / 'scripts' / 'run.py')} "
+                 "--name smoke-fixture --quiet 2>&1")
         self.seed([self.USER_LINE, stale, self.foreign_line])
         canonical = schedule_lines("smoke-fixture")
         self.assertNotIn(stale, canonical)
@@ -1611,25 +1698,47 @@ Watcher smoke fixture body.
 """
 
 
+class _ScriptedEventSource:
+    """One batch of absolute paths, then the end of the watch.
+
+    The loop treats ``WatchFailed`` as "the watch ended": it drains
+    whatever it has and returns. That is exactly what a scripted
+    ``inotifywait`` that exits used to produce, minus the dependency on
+    a platform's watch mechanism - Windows never runs ``inotifywait``,
+    so a fake one there left the loop blocked on a real directory.
+    """
+
+    def __init__(self, paths) -> None:
+        self._paths = list(paths)
+
+    def start(self) -> None:
+        return None
+
+    def poll(self, timeout: float | None) -> list[str]:
+        if not self._paths:
+            raise watchsource.WatchFailed("watch ended")
+        batch, self._paths = self._paths, []
+        return batch
+
+    def stop(self) -> None:
+        return None
+
+
 class TestWatchLoopBehavior(_FakeHostBinaries):
-    """Drive ``watch_loop`` end to end against a scripted ``inotifywait``."""
+    """Drive ``watch_loop`` end to end against a scripted event source."""
 
     def setUp(self) -> None:
         super().setUp()
-        self.events_file = self.root / "fake-events.txt"
-        self.write_executable("inotifywait", f"""
-import sys
-from pathlib import Path
-
-# Emit the scripted paths and exit: EOF on stdout is a supported watcher
-# state, so the loop drains what it has and returns.
-events = Path({str(self.events_file)!r})
-sys.stdout.write(events.read_text(encoding="utf-8"))
-sys.stdout.flush()
-""")
+        # Only to satisfy the Linux prerequisite check; events come from
+        # the scripted source, not from this program.
+        self.write_executable("inotifywait", "pass\n")
+        # The loop installs handlers for whichever of these the host
+        # has; SIGHUP has no Windows spelling.
         self._saved_handlers = {
             sig: signal.getsignal(sig)
-            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+            for sig in (getattr(signal, name, None)
+                        for name in ("SIGTERM", "SIGINT", "SIGHUP"))
+            if sig is not None
         }
         self.addCleanup(self._restore_handlers)
 
@@ -1645,10 +1754,12 @@ sys.stdout.flush()
 
     def run_watch_loop(self, name: str, changed: list[str]) -> list[list[str]]:
         """Feed *changed* to the loop; return the dispatched batches."""
-        self.events_file.write_text(
-            "".join(f"{self.root / c}\n" for c in changed), encoding="utf-8")
+        events = [str(self.root / relative) for relative in changed]
         batches: list[list[str]] = []
         with (
+            mock.patch.object(
+                watchsource, "open_source",
+                side_effect=lambda directories, *, cwd: _ScriptedEventSource(events)),
             mock.patch.object(activate, "_dispatch_run_once",
                               side_effect=lambda _n, files: batches.append(files)),
             # watch_loop registers exit hooks for the watcher process; in
@@ -1974,9 +2085,13 @@ class TestTriggerSpecs(unittest.TestCase):
             command=command, path="/usr/bin")
 
     def test_one_line_per_schedule_carries_root_and_path(self) -> None:
-        lines = triggers.render(self.spec(schedules=("@reboot", "0 * * * *")))
+        spec = self.spec(schedules=("@reboot", "0 * * * *"))
+        lines = triggers.render(spec)
         self.assertEqual(len(lines), 2)
-        self.assertTrue(lines[0].startswith("@reboot cd /repo && PATH=/usr/bin "))
+        # cron_root, not the literal "/repo": the assertion is about the
+        # shape of the line, and the host decides how a root is spelled.
+        prefix = f"@reboot cd {cron_root(spec.root)} && PATH=/usr/bin "
+        self.assertTrue(lines[0].startswith(prefix))
         self.assertTrue(all(line.endswith("2>&1") for line in lines))
 
     def test_a_spec_matches_the_lines_it_renders(self) -> None:
@@ -2300,7 +2415,8 @@ class TestCliContract(_TempProject):
     def test_required_root_commands_emit_no_project_envelope(self) -> None:
         saved_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as outside:
+            with tempfile.TemporaryDirectory() as outside, \
+                    _cwd_restored_before_cleanup(saved_cwd):
                 os.chdir(outside)
                 environ = {
                     key: value for key, value in os.environ.items()
@@ -2725,7 +2841,8 @@ class TestCliContract(_TempProject):
         selected_root = os.environ.pop(paths.ENV_VAR, None)
         paths.clear_cache()
         try:
-            with tempfile.TemporaryDirectory() as outside:
+            with tempfile.TemporaryDirectory() as outside, \
+                    _cwd_restored_before_cleanup(saved):
                 os.chdir(outside)
                 with (
                     mock.patch.object(paths, "resolve_root") as resolve_root,
@@ -3355,6 +3472,105 @@ class TestHostRuntimeProcesses(unittest.TestCase):
         code_page, console_window = child.stdout.readline().split()
         self.assertNotEqual(code_page, "0")
         self.assertEqual(console_window, "0")
+
+
+class TestStaleIdentityAndPathAliases(_TempProject):
+    """Two ways a lifecycle operation ends up aimed at the wrong thing.
+
+    A pid outlives nothing on a desktop that stays up for weeks: the
+    number is handed back out, and a stop that trusts a remembered pid
+    signals whatever now holds it. A path is no safer - a junction
+    reaches one repository under a second name, and a second name is a
+    second set of triggers unless it resolves to the first. Neither is
+    exotic on a developer's own machine, which is the only kind this
+    tool runs on.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._other = tempfile.TemporaryDirectory()
+        self.addCleanup(self._other.cleanup)
+        self.outside = Path(self._other.name).resolve()
+
+    def watcher_command(self, name: str, root: Path | None = None) -> str:
+        """A packaged watch loop's command line, joined as its host joins."""
+        argv = ["agents-live", "--repo", str(root or self.root),
+                "internal", "watch-loop", name]
+        if sys.platform == "win32":
+            return subprocess.list2cmdline(argv)
+        return " ".join(argv)
+
+    def test_a_live_pid_running_something_else_is_not_our_watcher(self) -> None:
+        # The pid is real and alive, which is all a remembered pid can
+        # ever prove. What the process runs is what decides.
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        table = [(child.pid, "some-other-tool --repo "
+                             f"{self.root} internal watch-loop todo")]
+        with mock.patch.object(hostruntime, "process_command_lines",
+                               return_value=table):
+            self.assertEqual(headless._find_watcher_pids_table("todo"), [])
+        self.assertTrue(hostruntime.is_alive(child.pid))
+
+    def test_a_watcher_is_found_by_what_it_runs_not_by_a_pid(self) -> None:
+        # Nothing is remembered between runs, so any pid the host is
+        # using answers - including one that used to be a watcher's.
+        command = self.watcher_command("todo")
+        for pid in (4321, 9876):
+            with mock.patch.object(hostruntime, "process_command_lines",
+                                   return_value=[(pid, command)]):
+                self.assertEqual(
+                    headless._find_watcher_pids_table("todo"), [pid])
+
+    def test_a_same_named_watcher_in_another_project_is_never_ours(self) -> None:
+        with mock.patch.object(
+                hostruntime, "process_command_lines",
+                return_value=[(4321,
+                               self.watcher_command("todo", self.outside))]):
+            self.assertEqual(headless._find_watcher_pids_table("todo"), [])
+
+    def test_a_repository_path_with_a_space_survives_the_round_trip(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("only Windows reads command lines back with quoting")
+        spaced = self.root / "a project"
+        (spaced / "Agents" / "data").mkdir(parents=True)
+        (spaced / ".agents-live.toml").write_text("", encoding="utf-8")
+        os.environ[paths.ENV_VAR] = str(spaced)
+        paths.clear_cache()
+        with mock.patch.object(
+                hostruntime, "process_command_lines",
+                return_value=[(4321, self.watcher_command("todo", spaced))]):
+            self.assertEqual(headless._find_watcher_pids_table("todo"), [4321])
+
+    def test_a_project_opened_through_a_junction_is_one_project(self) -> None:
+        # Two spellings, one root: otherwise the same project registers
+        # two sets of triggers and each is invisible to the other.
+        alias = self.outside / "alias"
+        link_directory(alias, self.root)
+        self.assertEqual(paths.resolve_root(alias), self.root)
+
+    def test_a_junction_inside_the_repository_is_an_agent_directory(self) -> None:
+        real = self.root / "real-agents"
+        real.mkdir()
+        link_directory(self.root / "linked", real)
+        self.assertEqual(
+            paths.validated_agent_directories(self.root, ["linked"]), [real])
+
+    def test_a_junction_retargeted_outside_stops_being_accepted(self) -> None:
+        # The reparse point is re-read every time, so a directory that
+        # was inside the repository yesterday is refused today.
+        real = self.root / "real-agents"
+        real.mkdir()
+        link = self.root / "linked"
+        link_directory(link, real)
+        paths.validated_agent_directories(self.root, ["linked"])
+
+        unlink_directory(link)
+        link_directory(link, self.outside)
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            paths.validated_agent_directories(self.root, ["linked"])
 
 
 class TestHostRuntimeEnvironment(unittest.TestCase):
@@ -4270,6 +4486,10 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.shim.chmod(0o755)
         self.env = mock.patch.dict(os.environ, {
             "HOME": str(self.home),
+            # USERPROFILE too: Path.home() reads HOME on POSIX and
+            # USERPROFILE on Windows, and this fixture has to redirect
+            # the home directory on whichever host is running it.
+            "USERPROFILE": str(self.home),
             "XDG_STATE_HOME": str(self.state),
             "WSL_DISTRO_NAME": "Ubuntu",
         })
@@ -4626,8 +4846,11 @@ class TestTimeline(_TempProject):
 
         xdg = self.root / "xdg-config"
         (xdg / "agents-live").mkdir(parents=True)
+        # json.dumps, not an f-string: a Windows path is full of
+        # backslashes, and TOML reads those as escape sequences.
         (xdg / "agents-live" / "config.toml").write_text(
-            f'default_repo = "proj"\n\n[repos]\nproj = "{self.root}"\n',
+            'default_repo = "proj"\n\n[repos]\n'
+            f'proj = {json.dumps(str(self.root))}\n',
             encoding="utf-8")
 
         env = {k: v for k, v in os.environ.items() if k != paths.ENV_VAR}
@@ -4655,7 +4878,8 @@ class TestTimeline(_TempProject):
         xdg = self.root / "isolated-config"
         (xdg / "agents-live").mkdir(parents=True)
         (xdg / "agents-live" / "config.toml").write_text(
-            f'default_repo = "proj"\n\n[repos]\nproj = "{self.root}"\n',
+            'default_repo = "proj"\n\n[repos]\n'
+            f'proj = {json.dumps(str(self.root))}\n',
             encoding="utf-8")
         env = {key: value for key, value in os.environ.items()
                if key != paths.ENV_VAR}
@@ -5372,7 +5596,12 @@ class TestInstallSkill(_TempProject):
                     check=True, capture_output=True, text=True)
                 with mock.patch.object(plugins, "converge", return_value=False):
                     self.assertEqual(upgrade._upgrade_runtime(), 0)
-                tool_python = root / "tools" / "agents-live" / "bin" / "python"
+                # A virtualenv puts its interpreter in Scripts on Windows
+                # and bin everywhere else.
+                venv = root / "tools" / "agents-live"
+                tool_python = (venv / "Scripts" / "python.exe"
+                               if sys.platform == "win32"
+                               else venv / "bin" / "python")
                 installed = subprocess.run(
                     [
                         str(tool_python), "-c",
@@ -5485,9 +5714,12 @@ class TestInstallSkill(_TempProject):
 
     def test_installed_cli_refreshes_completions_before_skills(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0)
+        # str(shim), not the literal: the command carries the path the
+        # host spells, and Windows spells this one with backslashes.
+        shim = Path("/bin/agents-live")
         with (
             mock.patch.object(
-                headless, "cli_shim_path", return_value=Path("/bin/agents-live")),
+                headless, "cli_shim_path", return_value=shim),
             mock.patch.object(
                 subprocess, "run", return_value=completed) as run,
         ):
@@ -5495,9 +5727,9 @@ class TestInstallSkill(_TempProject):
                 upgrade._refresh_with_installed_cli(refresh_skills=True), 0)
         self.assertEqual(run.call_args_list, [
             mock.call(
-                ["/bin/agents-live", "completions", "--update"], check=False),
+                [str(shim), "completions", "--update"], check=False),
             mock.call(
-                ["/bin/agents-live", "upgrade", "--skills-only"], check=False),
+                [str(shim), "upgrade", "--skills-only"], check=False),
         ])
 
     def test_completion_refresh_failure_does_not_block_skill_refresh(self) -> None:
@@ -5558,7 +5790,7 @@ class TestInstallSkill(_TempProject):
             refresh.call_args_list,
             [mock.call(broken), mock.call(healthy)],
         )
-        self.assertIn("broken (/repos/broken): denied", stderr.getvalue())
+        self.assertIn(f"broken ({broken}): denied", stderr.getvalue())
 
     def test_skills_only_fails_before_refresh_when_trigger_migration_fails(
             self) -> None:
@@ -5702,9 +5934,16 @@ class TestHealthCheckLoop(_TempProject):
         prompt = self.root / "my-agent.md"
         prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
         states: dict[str, dict] = {}
-        with mock.patch.object(
+        with (
+            # An empty table, not the host's own: reading the developer's
+            # crontab makes the result depend on their machine, and on a
+            # host without the command at all it is an outright crash.
+            mock.patch.object(
+                headless, "current_crontab_lines", return_value=[]),
+            mock.patch.object(
                 schedules, "watcher_respawn_names",
-                return_value=[str(prompt)]):
+                return_value=[str(prompt)]),
+        ):
             health_check._add_persisted_agent_states(states)
         self.assertIn(str(prompt), states)
         self.assertEqual(states[str(prompt)]["name"], "my-agent")
@@ -6050,6 +6289,8 @@ class TestHealthCheckLoop(_TempProject):
         # degrade the sweep, never kill the loop.
         with (
             mock.patch.object(
+                headless, "current_crontab_lines", return_value=[]),
+            mock.patch.object(
                 health_check.ownership, "load_owners",
                 side_effect=health_check.ownership.OwnershipUnavailableError(
                     "no backend")),
@@ -6072,6 +6313,8 @@ class TestHealthCheckLoop(_TempProject):
             return ["legacy-agent"]
 
         with (
+            mock.patch.object(
+                headless, "current_crontab_lines", return_value=[]),
             mock.patch.object(activate, "prune_orphans", noisy_prune),
             mock.patch.object(health_check, "_converge_triggers",
                               return_value=True),

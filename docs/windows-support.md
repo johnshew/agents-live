@@ -14,11 +14,13 @@ Scheduler now fires a scheduled agent on a Windows host unattended, a
 watcher agent now dispatches on file changes there through
 `ReadDirectoryChangesW`, the lifecycle commands around them,
 `doctor`, `upgrade`, `migrate`, and `uninstall`, now speak to the store
-the host actually keeps, and the failure paths under all of it are
+the host actually keeps, the failure paths under all of it are
 bounded and self-announcing
-([#136](https://github.com/johnshew/agents-live/issues/136)). What
-remains is Windows CI and the regression tests
-([#119](https://github.com/johnshew/agents-live/issues/119)); whether the
+([#136](https://github.com/johnshew/agents-live/issues/136)), and the
+suite runs green on a native Windows host under CI
+([#119](https://github.com/johnshew/agents-live/issues/119)). What
+remains is replacing the VBScript heartbeat launcher
+([#137](https://github.com/johnshew/agents-live/issues/137)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
 decision log at the end.
@@ -870,6 +872,56 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-27: the suite was written by a POSIX host, and it showed
+
+Running the suite natively on Windows for the first time produced 40
+failures out of 352 tests. Almost none of them were Windows defects in
+the product. They were assumptions the suite had never had to state,
+because the only host that had ever run it agreed with them.
+
+Four of them were worth fixing in the product rather than the tests:
+
+- A repo-relative path came back from `select_batch` spelled with
+  backslashes. That path is an identifier, not something handed to the
+  filesystem: it keys the content-hash cache, names files in the log,
+  and is read by the agent. `should_ignore` already compared it with
+  `as_posix()`, so the two halves of one module disagreed. Forward
+  slashes everywhere.
+- `Path("/tmp/agents").is_absolute()` is `False` on Windows, and so is
+  `Path("C:agents")`. The repo-relative guard on `agent_directories`
+  used `is_absolute()`, so both spellings walked straight past it.
+  `anchor` catches all three forms on both platforms.
+- A watcher's argv was matched against its repository with a string
+  prefix and `os.sep`. Windows accepts either separator for the same
+  file and compares them case-insensitively, so a loop launched with
+  forward slashes was not recognised as belonging to the repository
+  that started it. `Path` containment answers the question the check
+  was actually asking.
+- Two health-check tests read the developer's real crontab. On Windows
+  there is no such command and the sweep crashed; on Linux the result
+  quietly depended on whose machine ran it.
+
+The rest were the suite's own POSIX habits: crontab lines built by
+interpolating a root that `shlex.split` then ate the backslashes out of,
+`Path.home()` redirected by setting `HOME` but not `USERPROFILE`, a
+virtualenv interpreter looked for in `bin` rather than `Scripts`, and a
+test that chdir'd into a temporary directory and only left it after the
+directory had been deleted - which POSIX permits and Windows does not.
+
+Two things stay skipped on Windows, and deliberately.
+`TestCrontabConvergenceBehavior` drives a real `crontab` process from a
+shebang script, which `CreateProcess` cannot run and which no Windows
+host would dispatch through anyway; the Task Scheduler branch it would
+otherwise cover has its own tests. The command-line round-trip test for
+a repository path containing a space is Windows-only because only
+Windows reads a command line back through a quoting parser.
+
+The lesson is narrower than "test on both platforms". It is that a
+fixture which hand-builds a string the product elsewhere builds with a
+quoting function has silently forked the format, and the fork stays
+invisible until a host turns up whose paths contain characters the
+format has to escape.
 
 ### 2026-07-25: a detached child is the one thing a spawn must not be
 

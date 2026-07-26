@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- test: the suite runs on native Windows, and CI keeps it that way. (#119)
+  Every push and pull request now runs the tests on Windows as well as
+  Linux. Getting there fixed four defects the Windows host exposed: a
+  repo-relative path came back spelled with backslashes, which broke the
+  cache key it doubles as; the guard that keeps an agent directory inside
+  the repository let through `/tmp/agents` and `C:agents`, neither of which
+  Windows counts as absolute; a running watcher was not recognised as
+  belonging to its own repository when its command line used forward
+  slashes; and a health sweep read the host's real crontab, which does not
+  exist there. New tests cover the two ways a lifecycle operation ends up
+  aimed at the wrong thing - a reused process id, and one repository
+  reached under a second name through a junction.
 - fix: a console window no longer flashes on every spawn under native
   Windows. (#139)
   Starting a watcher, a cron loop, or the maintenance loop opened a window
