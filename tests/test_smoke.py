@@ -3247,6 +3247,90 @@ with tempfile.TemporaryDirectory() as temp:
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_dashboard_rows_describe_an_agent_owned_by_another_runtime(self) -> None:
+        """The Claim and Activate tips name the runtime to claim onto.
+
+        Both tips are only reached when an agent is owned elsewhere, which
+        is every agent immediately after an upgrade that changes the
+        ownership format - exactly when the dashboard is needed to claim
+        them back.
+        """
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        code = f'''
+import importlib.util
+import sys
+import types
+from unittest import mock
+
+nicegui = types.ModuleType("nicegui")
+nicegui.app = mock.MagicMock()
+nicegui.ui = mock.MagicMock()
+nicegui.run = mock.MagicMock()
+sys.modules["nicegui"] = nicegui
+
+sys.argv = ["dashboard.py", "--all-repos"]
+spec = importlib.util.spec_from_file_location(
+    "agents_live._dashboard_rows_test", {str(dashboard)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+module.collect_agents = lambda: [
+    {{"name": "alpha", "state": "active", "runtime": "claude",
+     "owner": "otherhost/ubuntu/uuid-b", "isOwner": False}},
+    {{"name": "beta", "state": "active", "runtime": "claude",
+     "owner": "thishost/ubuntu/uuid-a", "isOwner": True}},
+]
+module.last_runs = lambda name: ("-", "-", "")
+module.agent_cost = lambda name: ("-", "-")
+module.ownership.current_label = lambda: "thishost/ubuntu"
+module.ownership.display_owner = lambda value: value
+module.ownership.owns = lambda value: value.startswith("thishost/")
+
+rows = {{row["name"]: row for row in module.agent_rows()}}
+
+foreign = rows["alpha"]
+assert foreign["can_claim"] is True, foreign
+assert not foreign["local"], foreign
+assert "thishost/ubuntu" in foreign["claim_tip"], foreign["claim_tip"]
+assert "thishost/ubuntu" in foreign["activate_tip"], foreign["activate_tip"]
+
+local = rows["beta"]
+assert local["can_claim"] is False, local
+assert local["claim_tip"] == "Already local", local["claim_tip"]
+'''
+        result = subprocess.run(
+            ["uv", "run", "--with", "duckdb", "--with", "nicegui",
+             "--with-editable", ".", "python", "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_package_has_no_undefined_names(self) -> None:
+        """No module-level reference to a name that only exists elsewhere.
+
+        A name defined inside one function and read from another raises
+        NameError only when that branch runs, so a rarely taken path ships
+        broken. Only undefined names are treated as failures; style
+        findings would make the check noisy enough to be ignored.
+        """
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["uv", "run", "--with", "pyflakes", "python", "-m", "pyflakes",
+             str(root / "src" / "agents_live"), str(root / "tools")],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0 and not result.stdout:
+            self.skipTest(f"pyflakes unavailable: {result.stderr.strip()}")
+        undefined = [
+            line for line in result.stdout.splitlines()
+            if "undefined name" in line
+        ]
+        self.assertEqual(undefined, [], "\n".join(undefined))
+
     def test_rootless_all_repos_dashboard_has_no_relative_paths(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
         code = f"""

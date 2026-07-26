@@ -630,6 +630,7 @@ async def pause_all(names: list[str]) -> None:
 def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
     rows: list[dict] = []
+    host = ownership.current_label()
     for agent in collect_agents():
         name = agent["name"]
         # Drop the "(pid NNNN)" suffix headless adds for watcher agents; the
