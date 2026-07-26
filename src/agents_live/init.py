@@ -38,7 +38,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from . import completions, health_check, paths, plugins, preflight, repos
+from . import (
+    completions, health_check, heartbeat, paths, plugins, preflight, repos)
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -287,6 +288,11 @@ def main() -> int:
     except (OSError, ValueError, health_check.AgentsLiveError) as exc:
         preflight.emit_failure("init", f"automatic maintenance setup failed: {exc}")
         return 1
+
+    # On WSL, scheduled work only fires while the distro is alive, so the
+    # heartbeat is part of initializing host support rather than a step
+    # the operator is expected to remember separately.
+    heartbeat.install_best_effort("init")
 
     print(
         "\nNext steps:\n"
