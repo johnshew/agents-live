@@ -39,26 +39,19 @@ permissive one.
 ## Platform coverage
 
 Linux is the primary platform, with Ubuntu on WSL as the reference setup.
-Windows support is partial and macOS is untested. Broadening either is
-direction rather than committed work; file an issue before starting.
+macOS is untested; broadening it is direction rather than committed work,
+so file an issue before starting.
 
-A draft proposal for a native Windows runtime, replacing cron and
-inotifywait with Task Scheduler and Windows change notification behind a
-small host-runtime interface, is in
-[windows-support.md](windows-support.md). Agent invocation is settled: the
-Windows Copilot CLI runs headlessly with plain pipes, no ConPTY. The seam
-landed first on Linux and WSL, and the two tracks that were meant to pay
-for themselves regardless of Windows did: the trigger vocabulary no longer
-leaks cron-line strings across modules, and watcher policy is now testable
-without a live inotifywait. Locking and process-tree termination stayed out,
-because a POSIX-derived shape would be wrong for them rather than merely
-incomplete. Whether the Windows half is worth building stays open, and the
-vertical slice on a native Windows host carries that stop decision: if a
-foreground `run`, a registered task, or a watcher cannot be made to work
-there, the proposal narrows or ends. Windows CI and adversarial lifecycle
-coverage follows a working vertical slice.
-([#126](https://github.com/johnshew/agents-live/issues/126),
-[#119](https://github.com/johnshew/agents-live/issues/119))
+A native Windows runtime, replacing cron and inotifywait with Task
+Scheduler and Windows change notification behind a small host-runtime
+seam, is implemented and covered by CI on `windows-latest`.
+[windows-support.md](windows-support.md) is the architecture guide: what
+the seam is, why it is functions rather than a protocol object, and what
+the spikes contradicted. The one piece still carrying its original shape
+is the WSL heartbeat's VBScript launcher
+([#137](https://github.com/johnshew/agents-live/issues/137)). Whether the
+Windows half earns its keep in the long run stays an open product
+question; the engineering question is settled.
 
 ## Maintaining this file
 

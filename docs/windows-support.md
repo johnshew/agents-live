@@ -1,49 +1,58 @@
 ---
-title: Native Windows Support Proposal
-description: What it would take to run agents-live directly on Windows, using Task Scheduler and Windows file-change notification instead of cron and inotifywait
-ms.date: 2026-07-26
+title: Native Windows Support
+description: How agents-live runs natively on Windows - Task Scheduler instead of cron, ReadDirectoryChangesW instead of inotifywait, and the seam that keeps the two implementations from leaking into each other
+ms.date: 2026-07-27
 ms.topic: concept
 ---
 
-Status: draft. Feasibility is settled, the host-runtime seam has landed
-on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
-its locking and process members are written and measured on a native
-Windows host, a foreground `agents-live run` now executes an agent end
-to end there, that runtime has an ownership identity of its own, Task
-Scheduler now fires a scheduled agent on a Windows host unattended, a
-watcher agent now dispatches on file changes there through
-`ReadDirectoryChangesW`, the lifecycle commands around them,
-`doctor`, `upgrade`, `migrate`, and `uninstall`, now speak to the store
-the host actually keeps, the failure paths under all of it are
-bounded and self-announcing
-([#136](https://github.com/johnshew/agents-live/issues/136)), and the
-suite runs green on a native Windows host under CI
-([#119](https://github.com/johnshew/agents-live/issues/119)). What
-remains is replacing the VBScript heartbeat launcher
-([#137](https://github.com/johnshew/agents-live/issues/137)); whether the
-Windows half is worth building stays open. The design decisions recorded
-here stand unless implementation experience overturns them; see the
-decision log at the end.
+Agents Live runs on three hosts: Linux, Ubuntu on WSL, and native
+Windows. This document describes how the Windows half works and why it
+is built the way it is. It is an architecture guide, not a plan; the
+decision log at the end records what was tried, what was measured, and
+what was rejected.
 
-Agents Live runs on Linux, with Ubuntu on WSL as the reference setup. The
-runtime itself is `uv` plus Python 3.12, which already runs on Windows.
-The parts that do not are the two dispatch mechanisms (`crontab` and
-`inotifywait`), the process and locking primitives around them, and the
-shell idioms embedded in the generated cron lines.
+The runtime itself, `uv` plus Python 3.12, was portable from the start.
+What was not is everything around it: the two dispatch mechanisms
+(`crontab` and `inotifywait`), the process and locking primitives, and
+the shell idioms embedded in generated cron lines. Native Windows
+support replaces each of those with a host equivalent behind a single
+seam, so that scheduling policy, watcher policy, ownership, dispatch,
+and logging remain one implementation.
 
-This document asks what a native Windows host would take: what changes,
-what stays, how much new code it adds, and where it can be isolated.
-
-## The question in one paragraph
-
-Today a WSL deployment needs a Windows scheduled task whose only job is
-to keep the distro alive so cron and the watchers keep running
-([heartbeat.py](../src/agents_live/heartbeat.py)). If the runtime ran on
-Windows directly, that whole bridge disappears for repositories that
-live on `C:`, and file watching becomes reliable for them. The cost is a
+The payoff is direct. A WSL deployment needs a Windows scheduled task
+whose only job is to keep the distro alive so cron and the watchers keep
+running ([heartbeat.py](../src/agents_live/heartbeat.py)). For a
+repository that lives on a Windows volume, the native runtime removes
+that bridge entirely and makes file watching reliable. The cost is a
 second implementation of dispatch, process state, and locking, plus an
 ownership model that can say which of the two runtimes on one physical
 machine owns an agent.
+
+Status: implemented and covered by CI on `windows-latest` alongside
+`ubuntu-latest`. The one piece still carrying its original shape is the
+WSL heartbeat's launcher, which goes through VBScript
+([#137](https://github.com/johnshew/agents-live/issues/137)). Whether
+the Windows half earns its keep in the long run stays an open product
+question; the engineering question is settled.
+
+## Where the code lives
+
+| Concern | Module | Shape |
+|---|---|---|
+| Host identity, processes, locking, spawning | [hostruntime.py](../src/agents_live/hostruntime.py) | One module, branching internally |
+| Schedule language and canonical form | [triggers.py](../src/agents_live/triggers.py) | Shared. `TriggerSpec`, cron parsing, crontab rendering and matching |
+| Choice of dispatch mechanism | [schedules.py](../src/agents_live/schedules.py) | Shared. The only place that decides crontab or Task Scheduler |
+| Task Scheduler registration | [wintasks.py](../src/agents_live/wintasks.py) | Windows only |
+| File-change event source | [watchsource.py](../src/agents_live/watchsource.py) | Seam. `start`, `poll`, `stop` |
+| `ReadDirectoryChangesW` | [winwatch.py](../src/agents_live/winwatch.py) | Windows only |
+| Debounce, ignores, cascade guard, fire-rate breaker | [watchpolicy.py](../src/agents_live/watchpolicy.py) | Shared, pure over a batch |
+| Windowless task action | [hidden.py](../src/agents_live/hidden.py) | Windows only |
+| Ownership | [ownership.py](../src/agents_live/ownership.py) | Shared, asks the seam for identity |
+
+Nothing outside `hostruntime.py`, `wintasks.py`, `winwatch.py`, and
+`hidden.py` names a platform. `activate`, `stop`, `status`, `doctor`,
+`migrate`, `uninstall`, and `smoketest` ask `schedules.py` or the host
+runtime and get an answer.
 
 ## Invoking the Copilot CLI on Windows
 
@@ -60,7 +69,7 @@ presents, so the runtime spawns the CLI the same way in every context:
 That is the plan-mode form; write and pipeline modes differ only in the
 flags [agent_adapters.py](../src/agents_live/agent_adapters.py) already
 builds. Five rules follow from how the CLI behaves, and each one is a bug
-the Windows path would otherwise ship:
+this path would otherwise ship:
 
 1. **Pin a fully qualified `copilot.exe`; never resolve by name.** The
    `copilot` on an interactive PATH can be a PowerShell bootstrapper
@@ -85,38 +94,36 @@ the Windows path would otherwise ship:
    markers.
 5. **Expect LF, not CRLF.** No `\r` stripping is required.
 
-Failure paths are not yet characterized: cancellation and timeout partway
-through a run, streaming for long outputs, an expired credential in a
-non-interactive context, and logged-off sessions. These belong to the
-vertical slice, not to a viability decision.
+## The platform boundary
 
-## What is already portable
+What crosses the boundary unchanged:
 
 | Area | State |
 |---|---|
 | CLI, config parsing, agent discovery | Portable. TOML, JSON, YAML frontmatter, `pathlib` throughout |
-| `run` / `headless` orchestration, modes, pipeline MCP | Portable. Process creation, environment construction, executable pinning, and handler selection go through the host runtime, and a foreground run completes on Windows; the Copilot CLI itself needs no PTY there |
+| `run` / `headless` orchestration, modes, pipeline MCP | Portable. Process creation, environment construction, executable pinning, and handler selection go through the host runtime; the Copilot CLI itself needs no PTY on Windows |
 | Structured logging, `logs`, `timeline`, `dashboard`, `qlog` | Portable |
-| Repo-relative path model | Directionally portable, but Windows needs rooted-path rejection, reparse-point handling, and handle-based identity checks beyond the current resolved-path containment check ([headless.py](../src/agents_live/headless.py)) |
-| Changed-file payload | Repo-relative today, but `str(Path)` emits Windows separators; the shared layer must call `as_posix()` explicitly |
+| Repo-relative path model | Portable, with rooted-path rejection by `anchor` rather than `is_absolute` and reparse points resolved before containment is decided ([paths.py](../src/agents_live/paths.py)) |
+| Changed-file payload | Repo-relative POSIX on every host: `as_posix()`, because the string is an identifier and a cache key, not a filesystem argument ([watchpolicy.py](../src/agents_live/watchpolicy.py)) |
 
-## What is not portable
+What does not, and what replaces it:
 
 | Dependency | Where | Windows equivalent |
 |---|---|---|
 | `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows) |
-| `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW`, or .NET `FileSystemWatcher` |
-| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | PID files plus `OpenProcess`, or WMI `Win32_Process` |
+| `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW` through `ctypes`, behind the `EventSource` seam in [watchsource.py](../src/agents_live/watchsource.py) |
+| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | A `Win32_Process` snapshot of pid and command line, so a watcher is still found by what it runs rather than by a remembered pid |
 | `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | `OpenProcess` for liveness and `TerminateProcess` over a snapshot-derived process tree; identity verification before forced termination |
-| `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex; overlapped I/O or a reader thread |
-| `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `DETACHED_PROCESS` with a new process group; termination walks the tree, since detached/no-console flags cannot assume `CTRL_BREAK_EVENT` remains available |
+| `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex |
+| `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `CREATE_NEW_PROCESS_GROUP` plus `CREATE_NO_WINDOW`, and never `DETACHED_PROCESS`: a detached child allocates a console of its own, which the desktop then draws (see the decision log). Termination walks the tree |
 | `sh -c "cd X && PATH=Y agents-live ..."` cron lines | [activate.py](../src/agents_live/activate.py) | A Task Scheduler executable path, one Windows-quoted argument string, and a working directory; Task Scheduler does not store an argument vector |
 | `script -qc` PTY for the Copilot CLI | [headless.py](../src/agents_live/headless.py) | Not needed. The Windows CLI writes clean text to a redirected stdout with no console, so plain pipes suffice, and `supports_pty` selects the plain path (see Invoking the Copilot CLI on Windows) |
 | `env -i` plus `HOME` and `PATH` as the whole agent environment | [headless.py](../src/agents_live/headless.py) | A Windows child needs `SystemRoot` to load at all, plus the profile, temp, and processor variables; `base_env` supplies that floor, and PATH is inherited rather than constructed (see the decision log) |
 | Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
 | ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
-| `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | `socket.gethostname()` fallback already exists |
+| `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | A generated `windows:<uuid>`, because one machine hosts two runtimes and a hostname names both |
+| `os.fchmod` when writing state atomically | [paths.py](../src/agents_live/paths.py) | `os.chmod` on the temporary file: Windows grew `os.fchmod` only in Python 3.13, and has no POSIX mode bits to narrow in any version |
 
 ## Design principles
 
@@ -144,15 +151,15 @@ vertical slice, not to a viability decision.
    is what launches it.
 6. Preserve the Linux and WSL security posture. Native Windows support adds
    platform mechanics, not a sandbox, policy engine, or new approval system.
-7. Deliver a narrow working path before hardening it: Copilot CLI process I/O,
-   one scheduled agent, then one watcher. Carry only the few identity and
-   quoting checks that prevent acting on the wrong target, and add the rest of
-   the lifecycle and failure tests once those paths are demonstrably viable.
+7. A check earns its place by preventing a bug class, not by covering a
+   threat model the trust model does not have. Identity and quoting
+   checks that stop the tool acting on the wrong target are built in;
+   everything else is deferred with a stated condition for revisiting.
 8. Refactor where a regression is visible. Structural change to shared code
-   lands on Linux and WSL under tests that pin current behavior, before any
-   Windows implementation exists to confuse the diagnosis. The exception is a
-   protocol member the two platforms define differently, which waits for a
-   throwaway spike on the platform that does not yet run.
+   lands on Linux and WSL under tests that pin current behavior, before the
+   Windows implementation can confuse the diagnosis. The exception is a
+   boundary the two platforms define differently, which is written after a
+   throwaway spike on the platform that does not yet run - never before.
 
 ## Security model
 
@@ -167,12 +174,11 @@ So the thing worth engineering against is not an attacker; it is this tool's
 own bugs acting with that authority on the wrong target: deleting a task it
 does not own, terminating a recycled PID, mis-splitting an argument string,
 or leaving persistence behind after uninstall. A check earns its place when it
-prevents a bug class that would otherwise ship, costs almost nothing, and does
-not delay the first working agent. Anything that only defends the developer
-from the developer is theater here, and is deferred by default.
+prevents a bug class that would otherwise ship and costs almost nothing.
+Anything that only defends the developer from the developer is theater here,
+and is deferred by default.
 
-Built in from the start, because each is cheap and each prevents a real
-failure:
+Built in, because each is cheap and each prevents a real failure:
 
 1. **Verify argument quoting by round trip.** Task Scheduler stores one
    argument string, so a repository path containing a space or a quote
@@ -217,170 +223,120 @@ Deliberately deferred, with the condition that would bring each back:
 
 ## The seam
 
-A single module, `hostruntime.py`, with a protocol and two
-implementations. Everything platform-specific moves behind it; nothing
-else in the tree imports `fcntl`, `signal`, `subprocess` for `crontab`,
-or `/proc`.
+The seam is three modules, not one, and it is a set of functions rather
+than a protocol with two classes. That is the first thing the
+implementation changed about the design.
+
+[hostruntime.py](../src/agents_live/hostruntime.py) answers questions
+about the host: which runtime this is, where user state lives, whether
+the hostname identifies the runtime, which scheduler is native, what a
+child process's environment floor has to contain, whether a PTY is
+available, how an executable is pinned, how an exclusive lock is taken,
+and how a process is spawned, found, checked, and terminated. Nothing
+else in the tree imports `fcntl`, `signal`, `/proc`, or `ctypes.wintypes`.
+
+[schedules.py](../src/agents_live/schedules.py) is the only place that
+chooses between crontab and Task Scheduler. `activate`, `stop`,
+`status`, `doctor`, `migrate`, and `smoketest` call `install`, `remove`,
+`is_active`, `installed_names`, and their watcher and maintenance
+counterparts, and never name a mechanism.
+
+[watchsource.py](../src/agents_live/watchsource.py) is the one place
+that is a protocol, because it is the one place with genuine per-host
+state:
 
 ```python
-class HostRuntime(Protocol):
-    id: str                      # "linux" | "wsl" | "windows"
-
-    # trigger persistence (replaces crontab reads and writes)
-    def install_triggers(self, desired: TriggerSpec) -> TriggerIdentity: ...
-    def remove_triggers(self, name: str) -> None: ...
-    def installed_agent_names(self, root: Path) -> list[str] | None: ...
-    def trigger_state(self, name: str) -> TriggerIdentity | None: ...
-
-    # watchers
-    def spawn_detached(
-        self, argv: list[str], cwd: Path
-    ) -> ProcessIdentity: ...
-    def watch_events(self, dirs: list[Path]) -> Iterator[WatchBatch]: ...
-
-    # process state
-    def find_process(
-        self, name: str, kind: str
-    ) -> ProcessIdentity | None: ...
-    def is_alive(self, ref: ProcessIdentity) -> bool: ...
-    def terminate(
-        self, ref: ProcessIdentity, *, force: bool = False
-    ) -> None: ...
-
-    # coordination
-    def exclusive_lock(
-        self, key: str
-    ) -> AbstractContextManager[LockLease]: ...
+class EventSource(Protocol):
+    def start(self) -> None: ...
+    def poll(self, timeout: float | None) -> list[str]: ...
+    def stop(self) -> None: ...
 ```
 
-The interface stays small, but its results cannot erase provenance or failure
-states. `TriggerSpec` is the desired state: the parsed schedule expressions,
-watch paths, and repository identity. `TriggerIdentity` is what is actually
-registered: the task path, principal, action, working directory, settings, and
-ownership marker. `ProcessIdentity` is PID, creation time, and canonical
-executable, which together answer whether this is still the process that was
-started. `WatchBatch` distinguishes changes, overflow, root invalidation,
-degraded rescan, and fatal error. `LockLease` identifies the held kernel
-object. Registration and deletion verify ownership rather than blindly
-replacing a matching name.
+`PosixEventSource` runs `inotifywait` and reads its stdout;
+[winwatch.py](../src/agents_live/winwatch.py) drives
+`ReadDirectoryChangesW`. `open_source` picks one. A watch loop never
+learns which it got.
 
-`installed_agent_names` returns `None` for "state
-is unreadable here", which the existing sandbox handling in
-[status.py](../src/agents_live/status.py) already models. `watch_events`
-yields typed batches. The shared loop normalizes accepted changed paths to
-repo-relative POSIX strings, bounds each batch, and responds to overflow or
-root invalidation before applying debounce, ignore rules, the content-hash
-cascade guard, and the fire-rate breaker in
-[activate.py](../src/agents_live/activate.py).
+### Why functions rather than a protocol object
 
-`TriggerSpec` carries the parsed schedule expressions and watch paths
-rather than a preformatted cron line. That is the important change on
-the POSIX side: `build_cron_lines` becomes an implementation detail of
-`PosixRuntime` instead of a shared concept, and
-[migrate.py](../src/agents_live/migrate.py) converges against the
-runtime's canonical form rather than against a string it builds itself.
+The original design was a `HostRuntime` protocol with `PosixRuntime` and
+`WindowsRuntime` implementations, carrying `TriggerIdentity`,
+`ProcessIdentity`, `WatchBatch`, and `LockLease` value types. Building
+it showed the object was paying for nothing. Almost every member is a
+pure function of the host, called once, with no instance state to hold;
+the parts that do carry state are the event source, which became the
+protocol, and the task store, which is Windows-only and lives in
+`wintasks.py`. A single dispatching object would have added a
+constructor, an injection point, and a second name for every operation,
+in exchange for a polymorphism that only one member needed.
 
-### Four tracks, not one change
+What did survive intact is the vocabulary. `TriggerSpec` in
+[triggers.py](../src/agents_live/triggers.py) is the desired state: the
+parsed schedule expressions, watch paths, and repository identity. It
+replaced the preformatted cron line as the shared currency, which is the
+change that made a second dispatch mechanism possible at all. Rendering
+and matching crontab lines became implementation detail alongside it,
+and [migrate.py](../src/agents_live/migrate.py) converges against a spec
+rather than against a string it rebuilds itself.
 
-The protocol above is a destination, not a single refactor. It divides
-into four groups that touch different code and carry different risk:
-
-1. **Triggers.** `TriggerSpec` replaces the preformatted cron line as the
-   shared vocabulary. Largest conceptual change, and the one most
-   justified on Linux alone. `build_cron_lines` lives in
-   [activate.py](../src/agents_live/activate.py), the matchers live in
-   [headless.py](../src/agents_live/headless.py), and
-   [migrate.py](../src/agents_live/migrate.py) converges by comparing
-   line strings it rebuilds itself. The leak shows in the tests, which
-   patch `current_crontab_lines` separately on two modules because the
-   same function is imported into both namespaces.
-2. **Watcher policy.** Debounce, ignore rules, the content-hash cascade
-   guard, and the fire-rate breaker come out of `watch_loop` and become a
-   pure function over a batch. Today they interleave with non-blocking
-   reads inside one state machine, so none of them is testable without a
-   live `inotifywait`. Also worth doing on Linux alone, and it makes the
-   `watch_events` boundary observable rather than guessed.
-3. **Locking.** Three call sites, the smallest track.
-4. **Process identity and termination.** Deferred behind a Windows spike,
-   for the reason below.
-
-Tracks 1 and 2 stand on their own merits and land first. Tracks 3 and 4
-exist only to serve the second implementation, so their interfaces are
-written against what both platforms can honor rather than against what
-POSIX happens to offer.
-
-Track 1 and track 2 have landed as far as Linux alone justifies.
-`TriggerSpec` and the crontab rendering and matchers now live in
-[triggers.py](../src/agents_live/triggers.py), and
-[migrate.py](../src/agents_live/migrate.py) converges against a spec
-rather than a rebuilt string. The watcher rules live in
-[watchpolicy.py](../src/agents_live/watchpolicy.py), reachable without
-an event source. Runtime identity answers once, in
-[hostruntime.py](../src/agents_live/hostruntime.py). What remains is the
-`PosixRuntime` class those pieces become internals of, which waits on
-the Windows spike that settles the disagreements below.
+Watcher policy came out of the loop the same way. Debounce, ignore
+rules, the content-hash cascade guard, and the fire-rate breaker are a
+pure function over a batch in
+[watchpolicy.py](../src/agents_live/watchpolicy.py), reachable in tests
+without an event source of any kind.
 
 ### Where the two platforms genuinely disagree
 
-Four places where a POSIX-derived interface would be wrong rather than
-merely incomplete. Each is settled by a throwaway Windows spike before
-the corresponding protocol member is written, the same way agent
-invocation was settled.
+Four places where a POSIX-derived interface would have been wrong rather
+than merely incomplete. Each was settled by a throwaway Windows spike
+before the corresponding code was written, and two of the four
+predictions turned out to be wrong.
 
-| Member | POSIX shape | Why Windows cannot honor it as written |
+| Concern | POSIX shape | What Windows actually needed |
 |---|---|---|
-| `exclusive_lock` | `fcntl.flock`: advisory, per-descriptor, released on close | A named mutex is mandatory, thread-owned, and defines abandoned-mutex semantics. A lease modeled on flock has nowhere to record that the previous holder died holding it |
-| `terminate` | `os.killpg` on a process group ([health_check.py](../src/agents_live/health_check.py)) | Windows has no process group. The real operation is "terminate a tree", which the protocol above does not model at all |
-| `watch_events` | `inotifywait` is a path stream with no failure vocabulary | `ReadDirectoryChangesW` adds buffer overflow, root invalidation, and `ERROR_NOTIFY_ENUM_DIR`. Writing those `WatchBatch` states from Linux alone means branches no test can reach |
-| `spawn_detached` | `start_new_session=True` | A Job Object, which is also where process-tree identity comes from |
+| Exclusive lock | `fcntl.flock`: advisory, per-descriptor, released on close | Predicted a named mutex, with its thread affinity and abandoned-mutex semantics. It is `LockFileEx` on a byte past any content, which behaves like `flock` |
+| Terminate | `os.killpg` on a process group | Windows has no process group. Predicted a Job Object for tree identity; a job cannot supply it after its creator exits, so termination walks a `Win32_Process` snapshot |
+| Watch events | `inotifywait` is a path stream with no failure vocabulary | Buffer overflow, root invalidation, and `ERROR_NOTIFY_ENUM_DIR` are real states. They degrade to one bounded rescan rather than becoming caller-visible variants |
+| Detached spawn | `start_new_session=True` | Not `DETACHED_PROCESS`. A detached child allocates its own console, which the desktop draws; `CREATE_NO_WINDOW` alone is what makes a spawn invisible |
 
-The step 6 spike settled the first, second, and fourth rows, and
-contradicted two of the three predictions in them: the lock is a file
-lock rather than a mutex, and a job object cannot supply process-tree
-identity after its creator exits. See the decision log entry "locking is
-a file lock and termination is a tree walk". Only `watch_events` is
-still open, and it waits on step 11.
+The lesson those four share is that the interface had to be written
+after the spike, not before it. Every prediction made from the POSIX
+side that was not checked against a running Windows host was either
+wrong or more complicated than it needed to be.
 
 ## File change notification on Windows
 
-Three options.
-
-**A. `ReadDirectoryChangesW` through `ctypes`.** The direct analogue of
+[winwatch.py](../src/agents_live/winwatch.py) calls
+`ReadDirectoryChangesW` through `ctypes`. It is the direct analogue of
 inotify: one handle per watched directory, recursive, delivering change
 records whose paths are already relative to the watched directory. No
-new dependency, cancellable from another thread with `CancelIoEx`, and
-it fits a typed `watch_events` contract. The implementation must validate
-record offsets and UTF-16 lengths, pair rename records, handle root deletion,
-reparse points, cancellation, and `ERROR_NOTIFY_ENUM_DIR`, and report buffer
-overflow as a degraded state. Overflow recovery uses a bounded rescan with
-backoff rather than an unbounded immediate retry.
+new dependency, and cancellable from another thread with `CancelIoEx`.
+The cost is that the implementation owns the details: validating record
+offsets and UTF-16 lengths, pairing rename records, handling root
+deletion, reparse points, cancellation, and `ERROR_NOTIFY_ENUM_DIR`, and
+treating buffer overflow as a degraded state rather than an error.
 
-**B. The `watchdog` package.** Removes the ctypes work and is
-well-tested, at the cost of a runtime dependency and an event model that
-is more abstract than the one the current loop expects. Tempting to then
-use it on Linux too; that would replace a battle-tested inotifywait path
-for no benefit and should not be part of this work.
+Two alternatives were weighed and not built.
 
-**C. A PowerShell child process wrapping .NET `FileSystemWatcher`.**
-Smallest diff, because the current loop already reads newline-delimited
-paths from a child process stdout. Costs a PowerShell start per watcher,
-inherits execution-policy and quoting hazards, and adds a script to the
-package payload.
+The `watchdog` package would have removed the `ctypes` work at the cost
+of a runtime dependency and a more abstract event model than the loop
+expects. It was also a standing temptation to adopt on Linux, which
+would replace a battle-tested `inotifywait` path for no benefit. The
+spike showed the direct call was small enough that the dependency bought
+nothing.
 
-Step 11 chose A, on measurement rather than preference; the decision log
-records what the spike showed and why B was not needed.
-[winwatch.py](../src/agents_live/winwatch.py) is the implementation and
-[watchsource.py](../src/agents_live/watchsource.py) is the seam that
-picks it: one `EventSource` protocol, `start`, `poll`, `stop`, with
-`inotifywait` behind the same three methods on Linux and WSL. C trades a
-well-understood in-process failure mode for an interop and quoting
-boundary and was not built.
+A PowerShell child process wrapping .NET `FileSystemWatcher` would have
+been the smallest diff, since the loop already reads newline-delimited
+paths from a child's stdout. It trades a well-understood in-process
+failure mode for an interop and quoting boundary, costs a PowerShell
+start per watcher, and adds a script to the package payload.
 
-Event storms need explicit limits on queued paths, batch bytes, debounce
-memory, file size hashed, rescan frequency, and total rescan work. Step 11
-bounds the rescan; the rest belongs to step 13. A batch of changed files
-goes to a file in the state directory rather than onto the command line,
-which is length-limited.
+Every failure the API can report degrades to the same response: one
+bounded rescan. Overflow, a dropped event, and a full internal queue all
+mean "the truth is on disk, go look", and the rescan is capped so that a
+storm cannot turn into unbounded work. A batch of changed files goes to
+a file in the state directory rather than onto the command line, which
+is length-limited.
 
 ## Scheduling on Windows
 
@@ -437,19 +393,15 @@ and it contradicts the principle that the host's native mechanisms
 dispatch.
 
 Task Scheduler stores an executable path, one argument string, and a
-working directory. Build the argument string with Windows
-`CommandLineToArgvW`-compatible quoting and verify it by round trip. Pin
-a fully qualified executable rather than a PATH-resolved name, then read
-back and compare the registered task definition.
+working directory. The argument string is built with Windows
+`CommandLineToArgvW`-compatible quoting and verified by round trip, the
+executable is fully qualified rather than PATH-resolved, and the
+registered definition is read back and compared after registration.
 
-### What registration looks like today
+### What registration looks like
 
-Steps 9 and 10 landed this design.
 [wintasks.py](../src/agents_live/wintasks.py) builds and registers task
-definitions; [schedules.py](../src/agents_live/schedules.py) is the one
-place that chooses between crontab and Task Scheduler, so `activate`,
-`stop`, `status`, and `smoketest` no longer name a mechanism; and
-reading a cron expression lives in
+definitions, and reading a cron expression lives in
 [triggers.py](../src/agents_live/triggers.py), with the schedule
 language rather than with either dispatch mechanism.
 
@@ -492,14 +444,13 @@ and a repetition interval runs
 when the watcher is alive and respawns it when it is not. That one task
 replaces both the `@reboot` respawn line and the health-check restart.
 
-Step 11 landed it as a third task kind. A task name carries a suffix
+A task name carries a suffix
 naming what it is for, empty for a clock task, `.boot` for a startup run
 of the agent, and `.watch` for the respawn of its watcher, so the three
 cannot collide and enumeration, ownership, and removal read all of them.
 The choice between that task and the crontab `@reboot` line belongs to
 [schedules.py](../src/agents_live/schedules.py), like every other
 mechanism choice.
-
 The watcher stays resident because Windows publishes no native trigger
 for "this directory changed". Task Scheduler event triggers read the
 Windows event log, and file-system changes are not written there. The
@@ -510,33 +461,30 @@ endpoint protection flags on sight; it is rejected. So the native
 mechanism's job is to start the watcher and keep it started, which is
 what the ensure-watcher task does.
 
-## Ownership generalization
+## Ownership
 
-Owner values today are `"*"` or a short hostname
+An owner value is `"*"` or a short hostname
 ([ownership.py](../src/agents_live/ownership.py)). One physical machine
-can now host two runtime environments, so hostname alone is ambiguous.
-
+can host two runtime environments, so a hostname alone is ambiguous.
 The value stays a single string and its grammar is extended.
 
 | Value | Meaning |
 |---|---|
-| `*` | Keep the existing meaning: run in every environment that has activated that repository |
-| `<host>` | Keep the existing Linux and WSL owner value and matching behavior |
+| `*` | Run in every environment that has activated that repository |
+| `<host>` | The existing Linux and WSL owner value and matching behavior |
 | `windows:<uuid>` | One native Windows runtime registration; status also shows its hostname as a display label |
 
 Native Windows initialization generates a UUID once and stores it in the
 user's `%LOCALAPPDATA%\agents-live` state. `current_owner_id()` returns
-`windows:<uuid>` on Windows and retains the current hostname behavior on Linux
-and WSL. The UUID is stable across repository moves and package upgrades but
-is regenerated for a new Windows user profile. The hostname remains a display
-label rather than part of Windows matching.
+`windows:<uuid>` on Windows and the hostname on Linux and WSL. The UUID
+is stable across repository moves and package upgrades but is
+regenerated for a new Windows user profile.
 
-This landed in step 8. `current_host` is now the display label and
-`current_owner_id` is what every ownership decision compares against;
-the seam answers whether the machine name identifies the runtime, so
-neither ownership nor the callers name a platform. An identity file that
-exists but does not hold a UUID raises `OwnershipUnavailableError`, the
-same abstention an unreadable registry produces: a runtime that cannot
+`current_host` is the display label and `current_owner_id` is what every
+ownership decision compares against; the seam answers whether the
+machine name identifies the runtime, so neither ownership nor its
+callers name a platform. An identity file that exists but does not hold
+a UUID raises `OwnershipUnavailableError`, the same abstention an unreadable registry produces: a runtime that cannot
 say who it is cannot claim an agent.
 
 This change does not migrate existing WSL registrations or alter their
@@ -558,15 +506,24 @@ checkout and require no cross-runtime lease or ownership migration.
 - Windows path hazards that need explicit handling include case-insensitive
    ignore matching, long-path support across every child executable, reserved
    device names, alternate data streams, trailing-dot and trailing-space
-   aliases, UNC and device namespaces, and drive-relative paths. Reject
-   unsupported forms explicitly.
-- `watchPath: /` is rooted on both POSIX and Windows. Use `.` for the
-   repository root and reject all rooted watch paths.
+   aliases, UNC and device namespaces, and drive-relative paths. Unsupported
+   forms are rejected explicitly.
+- A repo-relative path is tested for escape with `Path.anchor`, not
+   `Path.is_absolute()`. On Windows `is_absolute()` is false for a rooted
+   but driveless path (`/tmp/agents`) and for a drive-relative one
+   (`C:agents`), so an `is_absolute` guard lets both through.
+- `watchPath: /` is rooted on both POSIX and Windows. `.` means the
+   repository root, and every rooted watch path is rejected.
 - `Path.resolve()` plus ancestry comparison is a lexical check, not a complete
    Windows containment boundary, and it is the proportionate one here: the
-   watcher and the watched files belong to the same account. Reject
-   unsupported path forms and unexpected reparse points explicitly, and treat
-   root invalidation as a watcher state rather than something to prevent.
+   watcher and the watched files belong to the same account. Resolution runs
+   every time, so a junction retargeted outside the repository stops being
+   accepted the moment it is retargeted, and root invalidation is a watcher
+   state rather than something to prevent.
+- Repo-containment of a running process's command line is decided with
+   `Path`, not string prefixes. Windows accepts either separator for the
+   same file and compares the two case-insensitively, so a watcher
+   launched with forward slashes is still recognised as its own.
 
 ## Handlers on Windows
 
@@ -578,15 +535,14 @@ currently passed to `node` directly, which only works when the installed
 Node.js runtime supports that file's syntax. The shell fallback is where
 Windows stops: `shell_interpreter` reports that the host has none, so a
 `.sh` handler and any unrecognized extension are refused with an error
-naming the two extensions that do run. That is the allowlist an earlier
-draft asked for, expressed as a host capability rather than a platform
-test.
+naming the two extensions that do run. That is an allowlist expressed as
+a host capability rather than a platform test.
 
-Decision: fail closed, and say so at three layers, reusing the existing
-capability-probe contract in [preflight.py](../src/agents_live/preflight.py)
-with a new capability name (`handler_interpreter`) and the existing
-`dependency_missing` code. The refusal at dispatch is the last of the
-three; the two ahead of it are still to build.
+The refusal fails closed, and says so at three layers, reusing the
+capability-probe contract in
+[preflight.py](../src/agents_live/preflight.py) with the capability name
+`handler_interpreter` and the existing `dependency_missing` code. The
+refusal at dispatch is the last of the three:
 
 1. **Activation refuses.** `start` probes the interpreter each agent's
    handler needs and refuses the agent when it is unavailable. Nothing
@@ -614,92 +570,12 @@ that explains why.
 On Linux the probe always succeeds, so nothing about current behavior
 changes.
 
-## Recommended implementation order
+## Working on a Windows host
 
-The seam is extracted on Linux and WSL first, and Windows implementation
-starts only once it is in place. Refactoring on the platform that works,
-where a regression is visible immediately, is worth more than deferring
-the extraction until Windows prototypes justify each method. The cost of
-that choice is the members where the two platforms genuinely disagree,
-which POSIX alone would shape wrongly, so those wait for a Windows spike
-rather than being written with the rest.
-
-On Linux and WSL, with no Windows work in progress:
-
-1. **Make the package importable on Windows.** `import fcntl` at module
-   scope in [headless.py](../src/agents_live/headless.py),
-   [repos.py](../src/agents_live/repos.py), and
-   [smoketest.py](../src/agents_live/smoketest.py) means even
-   `agents-live --help` cannot run there. Three lines, no design content,
-   and it unblocks every later spike.
-2. **Pin current behavior with tests.** The suite mocks
-   `current_crontab_lines` and `install_crontab` throughout and never
-   spawns `inotifywait`, so it would not catch a seam regression in
-   exactly the two areas the seam touches most. A refactor whose safety
-   net stubs the subsystem being refactored is not protected. These tests
-   are the prerequisite, not a follow-up.
-3. **Extract the trigger track.** `TriggerSpec` replaces the cron line as
-   the shared vocabulary; `build_cron_lines` and the matchers become
-   `PosixRuntime` internals; `plan_migration` converges on the canonical
-   form. Linux and WSL behavior unchanged.
-4. **Split watcher policy from watcher I/O.** Debounce, ignore rules,
-   cascade guard, and fire-rate breaker become testable without a live
-   `inotifywait`.
-5. **Consolidate runtime identity.** WSL detection is duplicated across
-   [doctor.py](../src/agents_live/doctor.py) and
-   [heartbeat.py](../src/agents_live/heartbeat.py); it becomes
-   `runtime.id`.
-
-Then on a native Windows host:
-
-6. **Spike locking and process-tree termination.** Throwaway code, no
-   integration: named mutex semantics including an abandoned mutex, and
-   Job Object teardown of a process tree. Write the `exclusive_lock`,
-   `spawn_detached`, `is_alive`, and `terminate` members afterward,
-   informed by both platforms. `find_process` waits for step 12, where
-   the lookup a Windows implementation would use actually exists.
-7. **Build one direct foreground run.** `agents-live run` executes one
-   approved agent from a Windows repository with no scheduling or
-   watching. Resolve process creation, path spelling, handler selection,
-   executable pinning, and logs. Agent invocation is already settled (see
-   Invoking the Copilot CLI on Windows); this step is the orchestration
-   around it, including the failure paths that invocation work left open.
-8. **Add the native Windows runtime ID.** Generate `windows:<uuid>` in
-   the Windows user state home and use it for Windows ownership matching.
-   Leave Linux and WSL hostname behavior unchanged.
-9. **Register one scheduled run.** A user-scoped Task Scheduler action
-   with a fully qualified executable, Windows-correct arguments, an
-   explicit working directory, and enough metadata to identify the task
-   during removal.
-10. **Confirm schedule semantics.** Translate a real agent's cron
-    expression into native triggers, measure how much of the existing
-    schedule vocabulary maps exactly, and confirm DST, sleep,
-    missed-start, and restart behavior on a live task before generalizing
-    activation and status.
-11. **Build one watcher.** Compare `ReadDirectoryChangesW` and
-    `watchdog` on a native Windows repository. Prove cancellation,
-    rename, overflow, root deletion, and bounded rescan behavior before
-    choosing the implementation, and let the observed failure states
-    finish the `watch_events` contract.
-12. **Complete lifecycle commands.** `start`, `status`, `doctor`, `stop`,
-    `uninstall`, and `upgrade` parity. Verify task identity before
-    replacement or deletion and process identity before forced
-    termination.
-13. **Harden failure paths.** Bound watcher queues and payloads, define
-    logged-off execution limits, and make interrupted task updates
-    recoverable. Correctness hardening within the trusted-administrator
-    model, not sandboxing.
-14. **Add Windows CI and regression tests.** Argument quoting, task
-    identity and collisions, stale PID reuse, rejected path forms,
-    watcher overflow, interrupted upgrades, and uninstall cleanup, once
-    the implementation exists to test.
-
-## Testing on Windows without publishing
-
-Every step from the spike onward needs a native Windows host, and none of
-them should require a PyPI release or disturb a WSL deployment running on
-the same machine. The separation this design already assumes makes that
-straightforward: the two runtimes have different state homes, different
+Work on this needs a native Windows host, and none of it should require
+a PyPI release or disturb a WSL deployment running on the same machine.
+The separation the design already assumes makes that straightforward:
+the two runtimes have different state homes, different
 registries, and physically separate checkouts, so a Windows experiment and
 a live WSL deployment coexist on one machine without seeing each other.
 
@@ -755,8 +631,7 @@ Checking that the Copilot CLI still behaves as Invoking the Copilot CLI on
 Windows describes takes a PowerShell session on a Windows host with no
 agents-live installed, plus a throwaway scheduled task that is unregistered
 afterward. It is the cheapest way to re-confirm the foundation after a CLI
-upgrade. Everything else in this section applies from the foreground run
-onward.
+upgrade.
 
 ### Cleaning up is the part Linux does not teach
 
@@ -780,69 +655,25 @@ run time and last result, and the Task Scheduler operational log in Event
 Viewer explains why a trigger did not fire. Read those first, then
 `agents-live logs`.
 
-### Where the smoke suite fits
+### The suite and CI
 
-[test_smoke.py](../tests/test_smoke.py) runs against temporary projects, so
-it should run unchanged on Windows once the host runtime exists. Until
-then it exercises POSIX mechanics and is not a Windows gate. The Windows CI
-job in the hardening phase runs it alongside the regression checks named
-in the security model.
+[test_smoke.py](../tests/test_smoke.py) runs against temporary projects
+and runs on Windows unchanged. CI runs it on `windows-latest` and
+`ubuntu-latest`, with `fail-fast` off so a Windows-only break still
+reports; the pre-release audit runs on Linux only, because it reads the
+tree rather than the host.
 
-## Size and blast radius
-
-Rough, and stated as a range because the Windows prototypes still set the
-size of the second implementation:
-
-- Extraction of `HostRuntime` and the POSIX implementation: mostly moved
-  code, close to zero net new lines, but it touches `activate.py`,
-  `headless.py`, `health_check.py`, `status.py`, `stop.py`,
-  `migrate.py`, `uninstall.py`, and `doctor.py`. This is the change that
-  needs the most review attention and the one that carries regression
-  risk for the platform that already works. Sequencing it first is what
-  makes that risk observable, and the behavior-pinning tests in step 2
-  are what make it recoverable.
-- Behavior-pinning tests for crontab convergence and the watcher loop:
-  new work that does not exist today, since the current suite mocks both.
-- Windows implementation: 700 to 1,000 new lines, concentrated in one
-  or two modules. Task registration and enumeration around 250,
-  `ReadDirectoryChangesW` around 250, process and lock primitives around
-  150, cron-to-trigger translation and the due predicate around 200.
-- Ownership grammar: under 100 lines plus migration.
-- Doctor, preflight, and status parity: a few hundred lines spread
-  across existing modules, mostly branching on `runtime.id` for
-  diagnostics text.
-- Tests and CI: comparable in size to the Windows implementation itself.
-
-So the answer to "how much would it bloat the codebase" is that the
-platform-specific part is genuinely isolable and roughly one module's
-worth of new code. The part that cannot be isolated is the diagnostic
-and operator-facing surface, where every check that names `crontab` or
-`inotifywait` has to learn a second vocabulary. That is where the
-sprawl would come from if it is not designed deliberately.
-
-## Phasing
-
-1. Seam: on Linux and WSL only, pin current behavior with tests, then
-   extract the trigger and watcher-policy tracks and consolidate runtime
-   identity. Behavior unchanged, and the platform-specific spikes for
-   locking and process termination are scoped from here.
-2. Vertical slice: foreground `run`, one scheduled agent, and one watched
-   agent on native Windows, plus the Windows runtime UUID.
-3. Productization: complete lifecycle commands, diagnostics, supported
-   handlers, schedule semantics, and operator documentation.
-4. Hardening: add Windows CI, regression tests for the identity and quoting
-   checks, bounded failure handling, and transactional upgrade and uninstall
-   behavior.
-
-Each phase has an explicit stop decision. The seam phase is self-justifying
-on Linux, so its stop decision is only whether each track pays for itself
-there; a track that does not is dropped rather than carried on Windows'
-behalf. The next decision belongs to the vertical slice: if foreground
-`run`, a registered task, or a watcher cannot be made to work on a native
-repository, the proposal narrows or ends there, and the seam work already
-done stays worthwhile regardless. Hardening beyond the checks listed in the
-security model follows a working vertical slice rather than attempting to
-design isolation that the trusted-administrator model cannot provide.
+A handful of tests skip on Windows, each for a stated reason rather than
+convenience. `TestCrontabConvergenceBehavior` drives a real `crontab`
+process from a shebang script, which `CreateProcess` cannot run and
+which no Windows host dispatches through. Three more run something under
+`bash`: the WSL compatibility wrapper, which is a POSIX script a WSL
+crontab executes inside the distro, and the generated bash completion. A
+bare `bash` on a Windows PATH is as likely to be the WSL launcher as a
+shell, so what those measure there is the host, not the artifact. One
+test runs only on Windows: the command-line round trip for a repository
+path containing a space, because only Windows reads a command line back
+through a quoting parser.
 
 ## Non-goals
 
@@ -857,21 +688,51 @@ design isolation that the trusted-administrator model cannot provide.
 
 ## Open questions
 
-- How does the Copilot CLI behave on its failure paths in a
-  non-interactive context: cancellation and timeout partway through a
-  run, streaming for long outputs, an expired credential, and a
-  logged-off session? Answered by the foreground run, not in the
-  abstract.
-- How much of the real schedule vocabulary translates exactly, and how
-  coarse the superset triggers have to be for the rest? Measured on the
-  first registered task, not settled in the abstract.
-- What does an installed Copilot CLI look like on Windows, now that
-  pinning refuses batch shims? If the npm package's global bin entry is
+- **The WSL heartbeat still launches through VBScript.** `wscript.exe`
+  running `run-hidden.vbs` can only ask for `SW_HIDE`, which allocates a
+  console and then hides it, and VBScript is a Feature on Demand slated
+  for removal. The native side already solved this with `pythonw` and
+  `CREATE_NO_WINDOW`; the heartbeat is registered from inside WSL and so
+  cannot assume a Windows Python is present.
+  ([#137](https://github.com/johnshew/agents-live/issues/137))
+- **Logged-off execution.** Tasks run with an interactive token, so
+  nothing fires while nobody is signed in. `doctor` says so. Stored
+  credentials, S4U, mapped drives, and network repositories are separate
+  work if that limit ever needs lifting.
+- **What an installed Copilot CLI looks like on Windows**, now that
+  pinning refuses batch shims. If the npm package's global bin entry is
   a `.cmd` rather than an executable, the runtime has to pin the
   interpreter and entry script instead, and the adapter's `binary` grows
   a Windows spelling.
 
 ## Decision log
+
+The log is this document's history. Entries are newest first, and each
+records what was decided, what it replaced, and what measurement or
+failure settled it. Superseded planning content - the implementation
+order, phasing, and sizing estimates this document carried while the
+work was in progress - was removed once complete; it remains in git
+history.
+
+### 2026-07-27: this document became an architecture guide
+
+While the work was in progress, this was a proposal: what native Windows
+support would take, in what order, at what cost. Every step in that order
+is now implemented and under CI, which made the plan sections a record of
+a road already travelled rather than a description of the system.
+
+They were removed rather than marked complete. A reader arriving at this
+document wants to know how Windows support works and why it is shaped
+the way it is; a fourteen-step order, a phasing table, and a line-count
+estimate answer none of that, and each one costs the reader a paragraph
+of orientation before they learn anything. Their content is not lost:
+git history holds every revision, and the decision log below holds the
+reasoning that outlived them.
+
+What stayed is what still describes the system: the platform boundary,
+the seam and why it is functions rather than an object, the two dispatch
+mechanisms, the ownership grammar, the path rules, and the security
+model. Those are architecture. The plan was scaffolding.
 
 ### 2026-07-27: the suite was written by a POSIX host, and it showed
 
