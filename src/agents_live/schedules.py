@@ -26,7 +26,7 @@ from . import adminlog, headless, hostruntime, paths, triggers, wintasks
 def install(spec: triggers.TriggerSpec) -> str:
     """Persist *spec* and return the trigger it wrote, for display."""
     written = _install(spec)
-    adminlog.record("schedule-install", agent=spec.name, root=str(_root()),
+    adminlog.record("schedule-install", agent=spec.name, root=str(spec.root),
                     scheduler=hostruntime.native_scheduler(), trigger=written)
     return written
 
@@ -59,9 +59,22 @@ def remove(name: str) -> bool:
     else:
         removed = headless.remove_cron_entries(name)
     if removed:
-        adminlog.record("schedule-remove", agent=name, root=str(_root()),
+        adminlog.record("schedule-remove", agent=name, root=_logged_root(),
                         scheduler=hostruntime.native_scheduler())
     return removed
+
+
+def _logged_root() -> str | None:
+    """The project root as an audit field, or None when there is none.
+
+    A removal on the crontab branch never needs the root to do its work,
+    so resolving one for the record must not be able to fail the removal;
+    a host with no selected project simply records no root.
+    """
+    try:
+        return str(_root())
+    except Exception:
+        return None
 
 
 def is_active(name: str) -> bool | None:
@@ -95,7 +108,7 @@ def install_watcher_respawn(name: str) -> str:
         written = _windows(lambda: wintasks.install(headless.watcher_spec(name)))
     else:
         written = headless.install_watcher_reboot_line(name)
-    adminlog.record("watcher-respawn-install", agent=name, root=str(_root()),
+    adminlog.record("watcher-respawn-install", agent=name, root=_logged_root(),
                     scheduler=hostruntime.native_scheduler(), trigger=written)
     return written
 
@@ -109,7 +122,7 @@ def remove_watcher_respawn(name: str) -> bool:
         removed = headless.remove_watcher_reboot_line(name)
     if removed:
         adminlog.record("watcher-respawn-remove", agent=name,
-                        root=str(_root()),
+                        root=_logged_root(),
                         scheduler=hostruntime.native_scheduler())
     return removed
 

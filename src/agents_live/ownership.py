@@ -435,12 +435,10 @@ def _recorded_owner(name: str) -> str | None:
 
     Read without a pull: the caller is about to write, so the local
     document is the state it is writing over, and an audit field must
-    never add a network round trip to a mutation.
+    never add a network round trip to a mutation. Nor may it stop one:
+    a read that fails costs the record a field, not the write.
     """
-    try:
-        return load_owners(rate_limit_secs=10**9).get(name)
-    except OwnershipUnavailableError:
-        return None
+    return _safely(lambda: load_owners(rate_limit_secs=10**9).get(name))
 
 
 __all__ = [

@@ -1354,6 +1354,36 @@ class TestAdminLog(_TempProject):
         (removed,) = self.only("schedule-remove")
         self.assertEqual(removed["agent"], "alpha")
 
+    def test_an_audit_field_never_fails_the_operation_it_records(self) -> None:
+        # A crontab removal needs no project root to do its work, so
+        # resolving one for the record must not be able to fail it.
+        with (
+            mock.patch.object(
+                schedules, "_root",
+                side_effect=ValueError("no project root found")),
+            mock.patch.object(
+                headless, "remove_cron_entries", return_value=True),
+        ):
+            self.assertTrue(schedules.remove("alpha"))
+        (removed,) = self.only("schedule-remove")
+        self.assertEqual(removed["agent"], "alpha")
+        self.assertNotIn("root", removed)
+
+        # Same rule for the owner an ownership write is about to replace.
+        backend = mock.Mock(
+            load_owners=mock.Mock(
+                side_effect=ownership.OwnershipUnavailableError("no registry")),
+            set_owner=mock.Mock(),
+        )
+        with (
+            mock.patch.object(ownership, "mode", return_value="registry"),
+            mock.patch.object(ownership, "_require_backend", return_value=backend),
+        ):
+            ownership.set_owner("alpha", "new-host/wsl/" + "b" * 32)
+        backend.set_owner.assert_called_once()
+        (moved,) = self.only("ownership-set")
+        self.assertNotIn("owner_from", moved)
+
     def test_ownership_transfer_records_who_moved_what(self) -> None:
         backend = mock.Mock(
             load_owners=mock.Mock(return_value={"alpha": "old-host/wsl/" + "a" * 32}),
