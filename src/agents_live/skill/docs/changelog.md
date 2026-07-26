@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.1.0 - 2026-07-26
+
 - feat: `repos add` registers a repository from the CLI. (#159)
   The subcommand and its implementation shipped in every release so far,
   but the command spec listed only `list`, `default`, and `remove`, so the
