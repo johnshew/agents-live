@@ -111,9 +111,15 @@ def format_table(agents: list[dict[str, Any]]) -> str:
         last_ok, last_err = run_times[agent["name"]]
         owner_val = agent.get("owner") or "-"
         is_owner = agent.get("isOwner")
-        owner_cell = ownership.display_owner(owner_val)
-        if is_owner and owner_val not in ("-", "*"):
-            owner_cell = f"{owner_cell} *"
+        if agent.get("ownershipUnavailable"):
+            # Not "-": an unreadable registry is not an unowned agent,
+            # and a table that renders them alike invites the reader to
+            # conclude nothing is claimed.
+            owner_cell = "unavailable"
+        else:
+            owner_cell = ownership.display_owner(owner_val)
+            if is_owner and owner_val not in ("-", "*"):
+                owner_cell = f"{owner_cell} *"
         first_row = True
         for ttype, tvalue in _trigger_lines(agent):
             tstate = trigger_states.get(ttype, agent["state"])

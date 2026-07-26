@@ -39,7 +39,7 @@ init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
-repos        ::= "repos" ( "list" | "default" REPO | "remove" REPO )
+repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
 completions  ::= "completions" ( "bash" | "zsh" | "--update" )
 dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
 ```
@@ -64,6 +64,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |
+| repos add | in-process | none |  |  |  |  |  | Register a repository. |
 | repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
 | completions | in-process | none |  |  |  |  | --update | Generate shell completion scripts. |
@@ -745,11 +746,17 @@ The user registry is
 `$XDG_CONFIG_HOME/agents-live/config.toml`; when `XDG_CONFIG_HOME` is unset,
 the platform-neutral fallback is `~/.config/agents-live/config.toml`.
 `init --repo` stores an initialized repository's normalized absolute path under
-the directory's name. `repos default` accepts either a registered name or an
+the directory's name. `repos add` registers an existing repository without
+initializing it. `repos default` accepts either a registered name or an
 existing path, registering that path first when needed. `repos remove` accepts
 either the registered path or name. Duplicate registrations,
 malformed configuration, unavailable paths, and removing the current default
 fail with an actionable error.
+
+Every registration path converges the plugins the repository declares, so a
+repository is connected to its backends as soon as it is registered. A plugin
+that cannot be installed warns without unwinding the registration; `doctor`
+reports it with the fix.
 
 Explicit agent-file paths bypass workspace lookup. Name-based targets resolve
 in this order:

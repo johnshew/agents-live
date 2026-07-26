@@ -249,6 +249,14 @@ COMMANDS = (
             Cmd("list", "List registered repositories.", "repos", "in-process",
                 root="none"),
             Cmd(
+                "add", "Register a repository.", "repos", "in-process",
+                root="none",
+                args=(Arg(("path",),
+                          "Repository root (registered under its directory "
+                          "name).",
+                          kind="positional", required=True),),
+            ),
+            Cmd(
                 "default", "Set the fallback repository.", "repos",
                 "in-process", root="none",
                 args=(Arg(("repo",), "Repository path or alias.",

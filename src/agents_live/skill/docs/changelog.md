@@ -6,6 +6,25 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: `repos add` registers a repository from the CLI. (#159)
+  The subcommand and its implementation shipped in every release so far,
+  but the command spec listed only `list`, `default`, and `remove`, so the
+  front end rejected the name a user reaches for first and answered with
+  alternatives that did not obviously include registration. Registration
+  was still reachable through `init --repo` and through `repos default`,
+  which registers a path it does not recognize.
+
+- fix: registering a repository installs the plugins it declares. (#160)
+  `init --repo` has always registered and converged in one step, while
+  `repos add` and `repos default` stopped after writing the registry
+  entry. A registry-mode repository registered that way had no ownership
+  backend, and `status` did not say so: it rendered every agent's owner as
+  `-`, which reads as "nobody owns this" rather than "this host cannot
+  tell". On a newly set-up host that is the reading that invites claiming
+  agents another machine already owns. Registration now converges, and
+  `status` reports ownership as unavailable when the declared registry has
+  no backend.
+
 ## 5.0.1 - 2026-07-26
 
 - fix: the dashboard no longer crashes on an agent owned elsewhere. (#157)
