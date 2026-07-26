@@ -25,7 +25,7 @@ running ([heartbeat.py](../src/agents_live/heartbeat.py)). For a
 repository that lives on a Windows volume, the native runtime removes
 that bridge entirely and makes file watching reliable. The cost is a
 second implementation of dispatch, process state, and locking, plus an
-ownership model that can say which of the two runtimes on one physical
+ownership model that can say which of the runtimes on one physical
 machine owns an agent.
 
 Status: implemented and covered by CI on `windows-latest` alongside
@@ -119,7 +119,7 @@ What does not, and what replaces it:
 | Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
 | ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
-| `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | A generated `windows:<uuid>`, because one machine hosts two runtimes and a hostname names both |
+| `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | Nothing platform-specific. Every runtime, Windows and POSIX alike, owns under a generated `hostname/runtime/uuid` identity, because one machine hosts several runtimes and a hostname names all of them |
 | `os.fchmod` when writing state atomically | [paths.py](../src/agents_live/paths.py) | `os.chmod` on the temporary file: Windows grew `os.fchmod` only in Python 3.13, and has no POSIX mode bits to narrow in any version |
 
 ## Design principles
@@ -225,8 +225,8 @@ than a protocol with two classes. That is the first thing the
 implementation changed about the design.
 
 [hostruntime.py](../src/agents_live/hostruntime.py) answers questions
-about the host: which runtime this is, where user state lives, whether
-the hostname identifies the runtime, which scheduler is native, what a
+about the host: which runtime this is, where user state lives, what to
+call this runtime in an owner value, which scheduler is native, what a
 child process's environment floor has to contain, whether a PTY is
 available, how an executable is pinned, how an exclusive lock is taken,
 and how a process is spawned, found, checked, and terminated. Nothing
@@ -460,34 +460,54 @@ what the ensure-watcher task does.
 
 ## Ownership
 
-An owner value is `"*"` or a short hostname
+An owner value is `"*"` or a `hostname/runtime/uuid` identity
 ([ownership.py](../src/agents_live/ownership.py)). One physical machine
-can host two runtime environments, so a hostname alone is ambiguous.
-The value stays a single string and its grammar is extended.
+can host several runtime environments, so a hostname alone is ambiguous.
+The value stays a single string, which the registry backend requires,
+and its grammar carries the three parts.
 
 | Value | Meaning |
 |---|---|
 | `*` | Run in every environment that has activated that repository |
-| `<host>` | The existing Linux and WSL owner value and matching behavior |
-| `windows:<uuid>` | One native Windows runtime registration; status also shows its hostname as a display label |
+| `<host>/<runtime>/<uuid>` | One runtime registration: the host and runtime are the display label, the uuid is the match |
+| anything else | Not this runtime's. It does not run here and is not cleaned up here |
 
-Native Windows initialization generates a UUID once and stores it in the
-user's `%LOCALAPPDATA%\agents-live` state. `current_owner_id()` returns
-`windows:<uuid>` on Windows and the hostname on Linux and WSL. The UUID
-is stable across repository moves and package upgrades but is
-regenerated for a new Windows user profile.
+The runtime part is `windows` on native Windows and the distro name on
+WSL. WSL is the case that needs a name of its own: a distro's hostname
+defaults to the Windows computer name, so two distros on one machine are
+indistinguishable by hostname, and only the distro name tells a reader
+which row belongs to which.
 
-`current_host` is the display label and `current_owner_id` is what every
-ownership decision compares against; the seam answers whether the
-machine name identifies the runtime, so neither ownership nor its
-callers name a platform. An identity file that exists but does not hold
-a UUID raises `OwnershipUnavailableError`, the same abstention an unreadable registry produces: a runtime that cannot
-say who it is cannot claim an agent.
+Each runtime generates a UUID once into its user state home. The UUID is
+stable across repository moves, machine renames, and package upgrades,
+but is regenerated for a new user profile. `owns()` compares only that
+UUID, so renaming a host or a distro changes how a row reads and never
+who owns it; `display_owner()` reads only the host and runtime, so a
+table never shows a 32-character hex string.
 
-This change does not migrate existing WSL registrations or alter their
-security posture. Windows repositories and WSL repositories are physically
-separate by deployment rule, so their registries do not describe the same
-checkout and require no cross-runtime lease or ownership migration.
+Splitting match from display is also what makes the model durable
+against a damaged registry. Corruption, a hand edit, a truncated write,
+a bad merge, and a restored backup all arrive as the same thing: a value
+the matcher cannot reduce to a UUID. Rather than guess, this runtime
+treats every one of them as someone else's, which is the safe direction
+- the agent goes inert here and its entry survives for the machine that
+can prove the claim. Recovering is one deliberate
+`start --name <agent> --transfer-here`. That is why there is no
+migration path and no legacy value: "unmatchable" is a permanent runtime
+category, not a transition state.
+
+The one value that is not unmatchable is an *absent* one. An agent with
+no registry entry is unclaimed, not foreign, and it runs here. Local
+mode depends on that: `load_owners()` returns an empty mapping and every
+agent is absent.
+
+An identity file that exists but does not hold a UUID raises
+`OwnershipUnavailableError`, the same abstention an unreadable registry
+produces: a runtime that cannot say who it is cannot claim an agent.
+
+Windows repositories and WSL repositories are physically separate by
+deployment rule, so their registries do not describe the same checkout
+and require no cross-runtime lease.
 
 ## Paths and repository identity
 
@@ -703,6 +723,59 @@ failure settled it. Superseded planning content - the implementation
 order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
+
+### 2026-07-28: an owner value names a runtime three ways, and matches on one
+
+The generated identity of 2026-07-26 fixed Windows and left WSL broken in
+exactly the way it described. `hostname_identifies_runtime()` answered
+"yes" for every POSIX runtime, so a WSL distro owned agents under its
+hostname - and a distro's hostname defaults to the Windows computer
+name, which is not something the distro chose or a user typically
+overrides. Two distros on one machine therefore computed the same owner
+value and would each answer to the other's agents. The seam had asked
+the right question and gotten a wrong answer for the one platform the
+whole document is about.
+
+The fix separates the two jobs an owner value was doing at once. It is
+now `hostname/runtime/uuid`: the hostname and the runtime are read only
+for display, the uuid is read only for matching. Neither half can spoil
+the other, so a machine rename or a distro rename changes how a row
+reads and never who owns it, and a table never has to show 32
+characters of hex to be exact. The runtime part is `windows` or the
+distro name, which is what finally distinguishes two WSL rows for a
+human.
+
+A single delimited string rather than a nested object, because the
+registry backend validates owner values as `str` and raises
+`OwnershipUnavailableError` on anything else - and that error is
+fleet-wide abstention, so one dict-valued record would take the registry
+offline for every machine, not just the one that wrote it.
+
+The consequence was the interesting part. Every existing bare-hostname
+entry stops matching, and the temptation was to write a migration that
+recognizes and upgrades them. That was rejected for something with a
+longer life: matching cannot produce a uuid from a bare hostname, and it
+cannot produce one from a truncated write, a bad merge, a hand edit, or
+a restored backup either. All of those are one category, and the rule
+covers all of them at once - **if a value cannot be reduced to a uuid,
+it is not this runtime's.** The agent goes inert here, its entry is left
+for the machine that can prove the claim, and one deliberate
+`start --name <agent> --transfer-here` fixes it. Bare hostnames are not
+legacy values awaiting migration; they are the first instance of a
+permanent state, and the code is smaller for treating them that way.
+
+The one value that had to stay outside the rule is an absent one.
+Absent means unclaimed and still runs here, which local mode depends on
+entirely: `load_owners()` returns `{}` and every agent is absent. That
+boundary - absent versus present-but-unmatchable - is the only place the
+model is subtle, so it is asserted directly in the enforcement tests.
+
+`--transfer-to` kept its meaning and gained `--transfer-here` beside it.
+The old flag now needs a full triple, which is only obtainable by
+copying it out of `agent-owners.json`; that is fine for the rare case of
+assigning an agent to a machine you are not on, and unusable for the
+common one. `--transfer-here` fills in the identity a runtime can always
+name.
 
 ### 2026-07-28: WSL already ships the windowless launcher
 

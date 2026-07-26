@@ -27,7 +27,7 @@ pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | heartbeat | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--boot" ] [ "--quiet" ]
-start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--prune-orphans" ]
+start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--transfer-here" ] [ "--prune-orphans" ]
 stop         ::= "stop" ( NAME | "--name" NAME )
 status       ::= "status" [ NAME ] [ "--all-repos" ]
 logs         ::= "logs" ( logs_query | "timeline" timeline_args )
@@ -49,7 +49,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, --boot, --quiet | Execute an agent once. |
-| start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
+| start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --transfer-here, --prune-orphans | Activate cron and watcher triggers. |
 | stop | in-process | required | schedule | yes |  | yes | --name | Deactivate triggers and keep configuration. |
 | status | in-process | required |  | yes | yes |  | --all-repos | List agents and runtime state. |
 | logs | subprocess | required |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
@@ -714,7 +714,8 @@ agents-live start --all --dry-run    # preview what would activate (no mutations
 agents-live stop my-agent            # remove triggers, keep agent definition
 
 # Multi-machine ownership
-agents-live start my-agent --transfer-to laptop  # transfer to laptop (does NOT activate locally)
+agents-live start my-agent --transfer-here       # claim for this runtime (does NOT activate)
+agents-live start my-agent --transfer-to host/distro/uuid  # hand to another runtime
 agents-live start my-agent --yes                 # take over from another host (no prompt)
 
 # Info
@@ -818,12 +819,31 @@ local mode.
 
 Setting `ownership = "registry"` (with a backend installed) enables
 `Agents/data/agent-owners.json`.
-Registry values are `"*"` (run everywhere), a hostname matching
-`hostname -s`, or `<runtime>:<uuid>` for a runtime whose machine name
-does not identify it (native Windows, which shares a machine name with
-the WSL distro beside it; the identity is generated once into the user
-state home). `status` shortens that form to its first eight hex digits
-and prints the whole value under `--json`. Optional `owner:` frontmatter
+Registry values are `"*"` (run everywhere) or a `hostname/runtime/uuid`
+identity. The three parts split the job a single value could not do:
+the hostname and the runtime are what a table shows, and the uuid is
+what a match reads. The runtime is `windows` on native Windows and the
+distro name on WSL, which is the case a hostname alone could not
+express - a WSL distro inherits the Windows computer name, so two
+distros on one machine look identical until the distro name separates
+them. The uuid is generated once into the user state home and is stable
+across repository moves and machine renames, so renaming a host or a
+distro changes only how a row reads, never who owns it.
+
+Matching reads the uuid and nothing else, and that makes the rule for a
+damaged value simple: **if a value cannot be reduced to a uuid, it is
+not this runtime's.** A hostname on its own, a truncated write, a bad
+merge, a hand edit - all of them are someone else's as far as this
+machine is concerned, so the agent does not run here and its registry
+entry is not cleaned up here. Recovering is one deliberate command,
+`start --name <agent> --transfer-here`, on the machine that should own
+it. An *absent* entry is a different state entirely: it means unclaimed,
+and it still runs here.
+
+`status` and the dashboard show the readable half, `hostname/runtime`,
+and print the whole value under `--json`. A value missing its runtime
+shows as `hostname/`, which is what tells a reader at a glance that the
+row is not matchable. Optional `owner:` frontmatter
 seeds a missing entry during
 activation. An agent with no registry entry AND no frontmatter `owner:` is
 claimed for the current host only by a targeted `activate --name` -
@@ -834,10 +854,13 @@ the "ownership never changes implicitly" contract below).
 - `activate --all` is safe on every machine: each host activates only
    the agents it owns and silently skips the rest.
 - An explicit start on a non-owning host refuses and prints the
-   `--transfer-to` command. Ownership never changes implicitly.
-- `--transfer-to <host>` changes the registry owner without activating
-   locally. Transferring to the current host and starting are separate
-   operations.
+   `--transfer-here` command. Ownership never changes implicitly.
+- `--transfer-here` claims the agent for this runtime, and
+  `--transfer-to <identity>` names another one. Both change the registry
+  owner without activating locally; transferring and starting are
+  separate operations. Prefer `--transfer-here`: an identity is a full
+  triple, so spelling another runtime's out means copying it from
+  `agent-owners.json`.
 - Before each dispatch, the runner calls `ownership.load_owners()`,
   which refreshes the registry through the installed backend (the
   git-backed backend pulls from origin, rate-limited 60s, non-blocking

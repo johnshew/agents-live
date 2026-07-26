@@ -522,7 +522,10 @@ def _resolve_activation_ownership(
     ``activate`` only ever registers triggers on the host it runs on. To move
     an agent to another machine, set ownership with ``--transfer-to``
     (registry-only, no local registration) and then run ``activate`` on that
-    machine.
+    machine. ``--transfer-here`` is the same operation with this runtime's
+    identity filled in, which is the form an operator almost always wants:
+    the identity is a ``hostname/runtime/uuid`` triple, so spelling out
+    another machine's means copying it out of ``agent-owners.json``.
 
     When ``dry_run`` is set, NOTHING is mutated - no registry writes
     (``set_owner``), no project-config writes (``initialize`` /
@@ -533,9 +536,10 @@ def _resolve_activation_ownership(
 
     Behaviour (per proposal-multi-machine-ownership.md):
 
-    * ``--transfer-to <host>`` only rewrites ``agent-owners.json`` and never
-      registers locally, even when ``<host>`` is this machine. Registration
-      always happens on the owning machine via a plain ``activate``.
+    * ``--transfer-to <identity>`` only rewrites ``agent-owners.json`` and
+      never registers locally, even when ``<identity>`` is this runtime.
+      Registration always happens on the owning machine via a plain
+      ``activate``.
     * Otherwise seed the registry from the frontmatter ``owner:`` (else this
       host) when unset, then activate when the owner is ``*`` or this host.
     EXCEPT in batch mode: ``--all`` never claims - an unregistered agent
@@ -645,7 +649,7 @@ def _resolve_activation_ownership(
         else:
             ownership.set_owner(name, owner)
 
-    if owner == ownership.WILDCARD or owner == host:
+    if ownership.owns(owner):
         return True
 
     # Owned by a different host: take over only with per-invocation consent.
@@ -656,8 +660,8 @@ def _resolve_activation_ownership(
     if (not batch_mode and not take_over and sys.stdin.isatty()
             and sys.stdout.isatty() and not preflight.json_mode()):
         answer = input(
-            f"{name} is owned by {owner}; take ownership and activate here? "
-            "[y/N] ")
+            f"{name} is owned by {ownership.display_owner(owner)}; take "
+            "ownership and activate here? [y/N] ")
         take_over = answer.strip().lower() in {"y", "yes"}
     if not batch_mode and take_over:
         if dry_run:
@@ -671,8 +675,9 @@ def _resolve_activation_ownership(
         return True
     if not batch_mode:
         print(
-            f"'{name}' is owned by '{owner}'; not activating on '{host}'. "
-            f"Run `activate.py --name {name} --transfer-to {host}` here to take "
+            f"'{name}' is owned by '{ownership.display_owner(owner)}'; not "
+            f"activating on '{ownership.display_owner(host)}'. "
+            f"Run `activate.py --name {name} --transfer-here` to take "
             f"ownership, then activate.",
             file=sys.stderr,
         )
@@ -795,10 +800,20 @@ def main() -> int:
     parser.add_argument(
         "--transfer-to",
         dest="transfer_to",
-        help="Transfer ownership of --name to the given host (registry-only): "
-             "updates Agents/data/agent-owners.json without registering any "
-             "triggers, even when the host is this machine. Registration "
-             "happens on the owning machine via a plain `activate --name`.",
+        help="Transfer ownership of --name to the given identity "
+             "(registry-only): updates Agents/data/agent-owners.json without "
+             "registering any triggers, even when the identity is this "
+             "runtime. Takes a full 'hostname/runtime/uuid' value, which is "
+             "what agent-owners.json already records for every claimed "
+             "agent. Registration happens on the owning machine via a plain "
+             "`activate --name`.",
+    )
+    parser.add_argument(
+        "--transfer-here",
+        dest="transfer_here",
+        action="store_true",
+        help="Claim ownership of --name for this runtime (registry-only), "
+             "without needing to spell out its identity.",
     )
     parser.add_argument(
         "--dry-run", "-n", dest="dry_run", action="store_true",
@@ -818,6 +833,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.yes and (args.all or not args.name):
         parser.error("--yes requires a targeted --name and cannot be used with --all")
+    if args.transfer_here and args.transfer_to:
+        parser.error("--transfer-here and --transfer-to are alternatives; "
+                     "--transfer-here names this runtime for you")
+    if args.transfer_here:
+        # The claim is just a transfer whose destination this runtime can
+        # name for itself, so it joins the existing path rather than
+        # opening a second one.
+        args.transfer_to = ownership.current_owner_id()
 
     try:
         if getattr(args, "internal_command", None) == "list-reboot-watchers":

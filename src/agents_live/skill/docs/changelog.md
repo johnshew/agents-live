@@ -6,6 +6,33 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix!: two WSL distros on one machine are no longer the same owner. (#148)
+  A distro's hostname defaults to the Windows computer name, so ownership
+  gave both distros the same value and each would answer to the other's
+  agents. An owner is now `hostname/runtime/uuid`, where the runtime is
+  `windows` or the distro name. Matching reads only the uuid and display
+  reads only the hostname and runtime, so a machine or distro rename
+  changes how a row reads and never who owns it, and `status` and the
+  dashboard show `hostname/runtime` instead of a 32-character hex string.
+  `doctor` scopes its agent-CLI warnings through the same matcher, so it
+  still checks only the tools this runtime's own agents need.
+  BREAKING CHANGE: an owner value that cannot be reduced to a uuid is
+  treated as another runtime's, which is what makes the model durable
+  against a truncated write, a bad merge, or a hand edit - but it also
+  covers every entry written before this release. Those agents stop
+  running and shed their local cron and watcher triggers at the next
+  health sweep until they are claimed. Claim each one on the machine that
+  should own it with `agents-live start <agent> --transfer-here`. An agent
+  with no registry entry at all is unclaimed rather than foreign and keeps
+  running, so local-mode repositories are unaffected.
+- feat: `start --transfer-here` claims an agent for this runtime. (#148)
+  `--transfer-to` needs a full `hostname/runtime/uuid` identity, which is
+  only obtainable by copying it out of `agent-owners.json`. That is
+  reasonable for assigning an agent to a machine you are not on, and
+  unusable for the common case of claiming one where you are standing.
+  Both flags change the registry only; activation stays a separate step on
+  the owning machine.
+
 ## 4.0.0 - 2026-07-25
 
 - fix!: the WSL heartbeat no longer runs on VBScript. (#137)

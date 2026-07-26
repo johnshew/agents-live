@@ -206,18 +206,16 @@ def main() -> int:
                       file=sys.stderr)
             return 1
         owner_value = owners.get(config.name)
-        if (
-            owner_value is not None
-            and owner_value != ownership.WILDCARD
-            and owner_value.lower() != host
-        ):
+        if owner_value is not None and not ownership.owns(owner_value):
             for stream in (tlog, slog):
                 stream.event(level="info", phase="ownership-skip",
                              status="skipped", owner=owner_value, host=host,
                              trigger=trigger)
             if not args.quiet:
                 print(
-                    f"Skipped: '{config.name}' is owned by '{owner_value}', not this host ('{host}')."
+                    f"Skipped: '{config.name}' is owned by "
+                    f"'{ownership.display_owner(owner_value)}', not this host "
+                    f"('{ownership.display_owner(host)}')."
                 )
             return 0
 
