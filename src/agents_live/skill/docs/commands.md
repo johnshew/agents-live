@@ -970,7 +970,7 @@ Each JSONL log entry is a flat JSON object. Key fields:
 | `run_id` | string | All events emitted during one `run.py` execution; absent on historical and lifecycle-only rows |
 | `event_id` | string | Every schema-v4-and-later event -- unique physical JSONL row identifier |
 | `agent_name` | string | Always -- Agents Live agent name |
-| `phase` | string | Always -- `start`, `pre-processor`, `agent`, `post-processor`, `done`, `output` |
+| `phase` | string | Always -- `start`, `pre-processor`, `agent`, `post-processor`, `done`, `output`; `admin` on administrative events |
 | `level` | string | Always -- `info`, `warning`, `error` |
 | `status` | string | On `phase: done` -- `ok`, `error`, `skipped` |
 | `message` | string | Most entries -- human-readable description |
@@ -987,7 +987,32 @@ Each JSONL log entry is a flat JSON object. Key fields:
 | `structured_output` | object \| null | On agent phase -- parsed JSON when `extract_first_json_value()` succeeds |
 | `duration_s` | float | On `phase: done` -- total run duration in seconds |
 | `trigger` | string | On `phase: start` -- `cron`, `file-change`, `manual` |
+| `scope` | string | On administrative events -- always `host` |
+| `operation` | string | On administrative events -- the verb, e.g. `plugin-converge`, `upgrade-runtime`, `repo-register`, `ownership-set`, `schedule-install` |
+| `command` | string | On administrative events -- the invoking argv |
+| `interactive` | bool | On administrative events -- whether a terminal was attached |
 | `log_schema` | int | Always -- schema version (current: 5) |
+
+### Administrative events
+
+Agent runs are logged per repository. Operations that change the host
+rather than run an agent are logged host-wide to
+`$XDG_STATE_HOME/agents-live/logs/admin.log`, which `agents-live logs
+--all` and `agents-live logs timeline` already union in.
+
+Administrative events are not agents: they carry `scope: "host"` and the
+pseudo-agent name `admin`, so readers that group by `agent_name` keep
+working while a query can still separate administration from agent
+activity. They share the phase `admin`, which keeps administration a
+single legible track in `logs timeline`, and the `operation` names the
+verb. The fields beyond the common set depend on the operation --
+`plugin-converge` records its `trigger`, `version_before`, and
+`version_after`; `ownership-set` records `agent`, `owner_from`, and
+`owner_to`. See [diagnostics.md](diagnostics.md) "Administrative events"
+for query recipes.
+
+Writing is best-effort: an unwritable state directory never fails the
+operation being recorded.
 
 ### Schema evolution
 

@@ -20,11 +20,18 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from . import headless, hostruntime, paths, triggers, wintasks
+from . import adminlog, headless, hostruntime, paths, triggers, wintasks
 
 
 def install(spec: triggers.TriggerSpec) -> str:
     """Persist *spec* and return the trigger it wrote, for display."""
+    written = _install(spec)
+    adminlog.record("schedule-install", agent=spec.name, root=str(_root()),
+                    scheduler=hostruntime.native_scheduler(), trigger=written)
+    return written
+
+
+def _install(spec: triggers.TriggerSpec) -> str:
     if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
         return _windows(lambda: wintasks.install(spec))
     lines = triggers.render(spec)
@@ -48,8 +55,13 @@ def install(spec: triggers.TriggerSpec) -> str:
 def remove(name: str) -> bool:
     """Remove *name*'s schedule from this host. True if one was there."""
     if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
-        return _windows(lambda: wintasks.remove(_root(), name))
-    return headless.remove_cron_entries(name)
+        removed = _windows(lambda: wintasks.remove(_root(), name))
+    else:
+        removed = headless.remove_cron_entries(name)
+    if removed:
+        adminlog.record("schedule-remove", agent=name, root=str(_root()),
+                        scheduler=hostruntime.native_scheduler())
+    return removed
 
 
 def is_active(name: str) -> bool | None:
@@ -80,16 +92,26 @@ def install_watcher_respawn(name: str) -> str:
     module answers for schedules, so it is answered in the same place.
     """
     if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
-        return _windows(lambda: wintasks.install(headless.watcher_spec(name)))
-    return headless.install_watcher_reboot_line(name)
+        written = _windows(lambda: wintasks.install(headless.watcher_spec(name)))
+    else:
+        written = headless.install_watcher_reboot_line(name)
+    adminlog.record("watcher-respawn-install", agent=name, root=str(_root()),
+                    scheduler=hostruntime.native_scheduler(), trigger=written)
+    return written
 
 
 def remove_watcher_respawn(name: str) -> bool:
     """Withdraw that intent. True if there was one to withdraw."""
     if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
-        return _windows(
+        removed = _windows(
             lambda: wintasks.delete(_root(), name, kind=wintasks.WATCH))
-    return headless.remove_watcher_reboot_line(name)
+    else:
+        removed = headless.remove_watcher_reboot_line(name)
+    if removed:
+        adminlog.record("watcher-respawn-remove", agent=name,
+                        root=str(_root()),
+                        scheduler=hostruntime.native_scheduler())
+    return removed
 
 
 def watcher_respawn_names() -> list[str]:

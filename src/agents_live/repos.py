@@ -31,6 +31,14 @@ def _paths_module():
         import paths
     return paths
 
+def _adminlog():
+    """The adminlog module under either layout (see ``_paths_module``)."""
+    try:
+        from . import adminlog
+    except ImportError:
+        import adminlog
+    return adminlog
+
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _COLLECT_WORKERS = 4
 SKIP_UPDATE_CHECK_ENV = "AGENTS_LIVE_SKIP_UPDATE_CHECK"
@@ -171,7 +179,9 @@ def _add(value: str) -> Path:
         registry = load()
         name = _register_path(registry, value)
         _write(registry)
-    return Path(registry["repos"][name])
+    root = registry["repos"][name]
+    _adminlog().record("repo-register", repo=name, root=root)
+    return Path(root)
 
 
 def ensure_registered(value: str | Path) -> bool:
@@ -181,9 +191,10 @@ def ensure_registered(value: str | Path) -> bool:
         registry = load()
         if path in registry["repos"].values():
             return False
-        _register_path(registry, path)
+        name = _register_path(registry, path)
         _write(registry)
-        return True
+    _adminlog().record("repo-register", repo=name, root=path)
+    return True
 
 
 def ensure_default(value: str | Path) -> bool:
@@ -196,13 +207,17 @@ def ensure_default(value: str | Path) -> bool:
              if registered == path),
             None,
         )
+        registered = name is None
         if name is None:
             name = _register_path(registry, path)
         if registry["default_repo"] == name:
             return False
         registry["default_repo"] = name
         _write(registry)
-        return True
+    if registered:
+        _adminlog().record("repo-register", repo=name, root=path)
+    _adminlog().record("repo-default", repo=name, root=path)
+    return True
 
 
 def _resolve_ref(registry: dict, ref: str) -> str:
@@ -219,6 +234,7 @@ def _resolve_ref(registry: dict, ref: str) -> str:
 
 
 def _set_default(ref: str) -> Path:
+    registered = False
     with _registry_lock():
         registry = load()
         try:
@@ -227,10 +243,15 @@ def _set_default(ref: str) -> Path:
             if not Path(ref).expanduser().resolve().is_dir():
                 raise exc
             name = _register_path(registry, ref)
+            registered = True
         _validated_path(registry["repos"][name], name)
         registry["default_repo"] = name
         _write(registry)
-    return Path(registry["repos"][name])
+    root = registry["repos"][name]
+    if registered:
+        _adminlog().record("repo-register", repo=name, root=root)
+    _adminlog().record("repo-default", repo=name, root=root)
+    return Path(root)
 
 
 def _remove(ref: str) -> None:
@@ -247,8 +268,10 @@ def _remove(ref: str) -> None:
                 raise ValueError(
                     f"repo {name!r} is the default; choose another default first")
             registry["default_repo"] = None
+        root = registry["repos"][name]
         del registry["repos"][name]
         _write(registry)
+    _adminlog().record("repo-remove", repo=name, root=root)
 
 
 def _cli_base() -> list[str]:
@@ -372,7 +395,7 @@ def _converge_registered(root: Path) -> None:
     """
     from . import plugins  # noqa: PLC0415
     try:
-        if plugins.converge([root]):
+        if plugins.converge([root], trigger="repos-register"):
             print("Converged declared plugins in the agents-live tool "
                   "environment")
     except (OSError, ValueError, plugins.PluginError) as exc:

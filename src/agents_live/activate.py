@@ -867,7 +867,7 @@ def main() -> int:
 
         if not args.dry_run:
             try:
-                plugins.converge([repo_root()])
+                plugins.converge([repo_root()], trigger="activate")
             except (OSError, ValueError, plugins.PluginError) as exc:
                 raise AgentsLiveError(f"plugin convergence failed: {exc}") from exc
 

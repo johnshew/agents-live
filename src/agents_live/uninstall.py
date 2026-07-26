@@ -7,7 +7,8 @@ import shlex
 import subprocess
 import sys
 
-from . import completions, health_check, heartbeat, hostruntime, preflight
+from . import (adminlog, completions, health_check, heartbeat, hostruntime,
+               preflight)
 from .spawn import find_uv
 
 
@@ -16,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--distro")
     parser.add_argument("--retain-state", action="store_true")
     args = parser.parse_args(argv)
+    adminlog.record("uninstall", status="start",
+                    retain_state=args.retain_state)
     if hostruntime.id() == hostruntime.WSL:
         try:
             heartbeat.uninstall(args.distro, retain_state=args.retain_state)
@@ -57,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
             "uv, then run `uv tool uninstall agents-live`")
         return 1
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)
+    adminlog.record("uninstall",
+                    status="ok" if not completed.returncode else "error",
+                    level=None if not completed.returncode else "error",
+                    exit_code=completed.returncode)
     return completed.returncode
 
 

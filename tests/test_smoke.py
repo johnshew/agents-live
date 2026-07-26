@@ -41,11 +41,11 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, agent_adapters, cli, completions, headless, health_check,
-        heartbeat, hidden, hostruntime, init, migrate, ownership, paths,
-        plugins, preflight, doctor, repos, run, schedules, spawn, status,
-        uninstall, update_check, upgrade, triggers, watchpolicy, watchsource,
-        winwatch, wintasks,
+        activate, adminlog, agent_adapters, cli, completions, headless,
+        health_check, heartbeat, hidden, hostruntime, init, migrate, ownership,
+        paths, plugins, preflight, doctor, repos, run, schedules, spawn,
+        status, uninstall, update_check, upgrade, triggers, watchpolicy,
+        watchsource, winwatch, wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -55,6 +55,7 @@ except ImportError:  # flat checkout layout
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import activate
+    import adminlog
     import agent_adapters
     import cli
     import completions
@@ -1053,7 +1054,8 @@ class TestProjectPlugins(_TempProject):
             mock.patch("sys.stdout", new_callable=io.StringIO) as init_stdout,
         ):
             self.assertEqual(init.main(), 0)
-        converge.assert_called_once_with([paths.global_root(), self.root])
+        converge.assert_called_once_with(
+            [paths.global_root(), self.root], trigger="init")
         update.assert_called_once_with("init")
         beat.assert_called_once_with("init")
         self.assertEqual(repos.default_root(), self.root)
@@ -1069,7 +1071,7 @@ class TestProjectPlugins(_TempProject):
             mock.patch("sys.argv", ["agents-live start", "--name", "smoke-fixture"]),
         ):
             self.assertEqual(activate.main(), 0)
-        converge.assert_called_once_with([self.root])
+        converge.assert_called_once_with([self.root], trigger="activate")
 
         with (
             mock.patch.object(plugins, "converge") as converge,
@@ -1255,6 +1257,226 @@ class TestProjectPlugins(_TempProject):
             self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
         ):
             plugins.converge([self.root])
+
+
+class TestAdminLog(_TempProject):
+    """Host-scoped records of the operations that change this host."""
+
+    def events(self) -> list[dict]:
+        path = adminlog.log_path()
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in
+                path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def only(self, operation: str) -> list[dict]:
+        return [e for e in self.events() if e.get("operation") == operation]
+
+    def test_record_carries_the_host_scope_and_invoking_command(self) -> None:
+        with mock.patch.object(sys, "argv", ["/usr/bin/agents-live", "repos", "add"]):
+            adminlog.record("repo-register", repo="alpha")
+        (event,) = self.events()
+        self.assertEqual(event["scope"], "host")
+        self.assertEqual(event["agent_name"], "admin")
+        self.assertEqual(event["operation"], "repo-register")
+        self.assertEqual(event["command"], "agents-live repos add")
+        self.assertEqual(event["repo"], "alpha")
+        self.assertEqual(event["log_schema"], 5)
+        self.assertIn("interactive", event)
+        # `timeline` renders by phase and message: one shared phase keeps
+        # administration a single legible track, the operation names the verb.
+        self.assertEqual(event["phase"], "admin")
+        self.assertEqual(event["message"], "repo-register")
+        # Host-scoped, so the readers that union the host log directory
+        # pick it up with no reader change.
+        self.assertEqual(adminlog.log_path().parent, paths.host_logs_dir())
+
+    def test_record_never_raises_when_the_log_cannot_be_written(self) -> None:
+        with mock.patch.object(
+                adminlog, "log_path",
+                side_effect=OSError("state home is gone")):
+            adminlog.record("repo-register", repo="alpha")  # must not raise
+
+    def test_operation_pairs_start_and_end_and_records_failure(self) -> None:
+        with adminlog.operation("upgrade-runtime", version_before="1.0") as end:
+            end["version_after"] = "1.1"
+        start, done = self.only("upgrade-runtime")
+        self.assertEqual(start["status"], "start")
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["version_after"], "1.1")
+        self.assertIsInstance(done["duration_s"], float)
+
+        with self.assertRaises(ValueError):
+            with adminlog.operation("init"):
+                raise ValueError("boom")
+        failed = self.only("init")[-1]
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["level"], "error")
+        self.assertEqual(failed["error_category"], "ValueError")
+        self.assertEqual(failed["message"], "boom")
+
+    def test_repository_registration_and_removal_are_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp).resolve()
+            repos.ensure_default(other)
+            (registered,) = self.only("repo-register")
+            self.assertEqual(registered["repo"], other.name)
+            self.assertEqual(registered["root"], str(other))
+            (default,) = self.only("repo-default")
+            self.assertEqual(default["repo"], other.name)
+            repos._remove(other.name)
+            (removed,) = self.only("repo-remove")
+            self.assertEqual(removed["repo"], other.name)
+            self.assertEqual(removed["root"], str(other))
+
+    def test_schedule_install_and_removal_are_recorded(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="alpha", kind=triggers.SCHEDULE, root=self.root,
+            schedules=("0 * * * *",), command=("echo", "alpha"),
+            path="/usr/bin")
+        with (
+            mock.patch.object(headless, "crontab_lock", contextlib.nullcontext),
+            mock.patch.object(headless, "current_crontab_lines", return_value=[]),
+            mock.patch.object(headless, "install_crontab"),
+        ):
+            schedules.install(spec)
+        (installed,) = self.only("schedule-install")
+        self.assertEqual(installed["agent"], "alpha")
+        self.assertEqual(installed["scheduler"], hostruntime.CRONTAB)
+
+        with mock.patch.object(
+                headless, "remove_cron_entries", return_value=False):
+            schedules.remove("alpha")
+        self.assertEqual(self.only("schedule-remove"), [])
+        with mock.patch.object(
+                headless, "remove_cron_entries", return_value=True):
+            schedules.remove("alpha")
+        (removed,) = self.only("schedule-remove")
+        self.assertEqual(removed["agent"], "alpha")
+
+    def test_ownership_transfer_records_who_moved_what(self) -> None:
+        backend = mock.Mock(
+            load_owners=mock.Mock(return_value={"alpha": "old-host/wsl/" + "a" * 32}),
+            set_owner=mock.Mock(),
+            remove_owner=mock.Mock(return_value=True),
+        )
+        with (
+            mock.patch.object(ownership, "mode", return_value="registry"),
+            mock.patch.object(ownership, "_require_backend", return_value=backend),
+        ):
+            ownership.set_owner("alpha", "new-host/wsl/" + "b" * 32)
+            (moved,) = self.only("ownership-set")
+            self.assertEqual(moved["agent"], "alpha")
+            self.assertEqual(moved["owner_from"], "old-host/wsl/" + "a" * 32)
+            self.assertEqual(moved["owner_to"], "new-host/wsl/" + "b" * 32)
+            self.assertFalse(moved["claimed"])
+
+            # An unchanged assignment is not a transfer and is not recorded.
+            ownership.set_owner("alpha", "old-host/wsl/" + "a" * 32)
+            self.assertEqual(len(self.only("ownership-set")), 1)
+
+            ownership.remove_owner("alpha")
+            (removed,) = self.only("ownership-remove")
+            self.assertEqual(removed["agent"], "alpha")
+            self.assertEqual(removed["owner_from"], "old-host/wsl/" + "a" * 32)
+
+    def test_convergence_records_its_trigger_and_versions(self) -> None:
+        wheel = self.root / "example.whl"
+        wheel.write_bytes(b"example")
+        plugin = plugins.Plugin("example-plugin", wheel, None, "1.0")
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(
+                plugins, "union", return_value={"example-plugin": plugin}),
+            mock.patch.object(
+                plugins, "_installed_state", return_value=(False, "missing")),
+            mock.patch.object(plugins, "_integrity_error", return_value=None),
+            mock.patch.object(
+                plugins, "_receipt_requirements",
+                return_value=(
+                    plugins.ReceiptRequirement("agents-live==9.9.9"), {})),
+            mock.patch.object(plugins, "find_uv", return_value="/usr/bin/uv"),
+            mock.patch.object(plugins, "installed_version", return_value="9.9.9"),
+            mock.patch.object(plugins.subprocess, "run", return_value=completed),
+        ):
+            self.assertTrue(plugins.converge([self.root], trigger="repos-register"))
+        start, done = self.only("plugin-converge")
+        self.assertEqual(start["trigger"], "repos-register")
+        self.assertEqual(start["primary"], "agents-live==9.9.9")
+        self.assertEqual(start["plugins"], ["example-plugin==1.0"])
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["version_after"], "9.9.9")
+
+    def test_convergence_failure_is_recorded_as_an_error(self) -> None:
+        wheel = self.root / "example.whl"
+        wheel.write_bytes(b"example")
+        plugin = plugins.Plugin("example-plugin", wheel, None, "1.0")
+        completed = subprocess.CompletedProcess(args=[], returncode=2)
+        with (
+            mock.patch.object(
+                plugins, "union", return_value={"example-plugin": plugin}),
+            mock.patch.object(
+                plugins, "_installed_state", return_value=(False, "missing")),
+            mock.patch.object(plugins, "_integrity_error", return_value=None),
+            mock.patch.object(
+                plugins, "_receipt_requirements",
+                return_value=(
+                    plugins.ReceiptRequirement("agents-live==9.9.9"), {})),
+            mock.patch.object(plugins, "find_uv", return_value="/usr/bin/uv"),
+            mock.patch.object(plugins.subprocess, "run", return_value=completed),
+            self.assertRaises(plugins.PluginError),
+        ):
+            plugins.converge([self.root], trigger="init")
+        failed = self.only("plugin-converge")[-1]
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["error_category"], "PluginError")
+
+
+class TestConvergencePinsTheKernel(_TempProject):
+    """Convergence changes plugins; only `upgrade` changes versions."""
+
+    def receipt(self, requirements: list[dict]) -> Path:
+        path = self.root / "uv-receipt.toml"
+        lines = ["[tool]", "requirements = ["]
+        lines.extend(
+            "    { " + ", ".join(
+                f'{key} = {json.dumps(value)}' for key, value in entry.items()
+            ) + " },"
+            for entry in requirements)
+        lines.append("]")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def resolve(self, requirements: list[dict], **kwargs):
+        receipt = self.receipt(requirements)
+        with mock.patch.object(plugins, "_receipt_path", return_value=receipt):
+            return plugins._receipt_requirements(**kwargs)
+
+    def test_a_bare_primary_is_pinned_to_the_running_version(self) -> None:
+        primary, _ = self.resolve([{"name": "agents-live"}])
+        self.assertEqual(
+            primary.value, f"agents-live=={plugins.__version__}")
+
+    def test_upgrade_opts_out_so_it_can_still_move_the_version(self) -> None:
+        primary, _ = self.resolve(
+            [{"name": "agents-live"}], pin_primary=False)
+        self.assertEqual(primary.value, "agents-live")
+
+    def test_an_explicit_source_or_specifier_is_left_alone(self) -> None:
+        primary, _ = self.resolve(
+            [{"name": "agents-live", "specifier": "==4.0.0"}])
+        self.assertEqual(primary.value, "agents-live==4.0.0")
+        primary, _ = self.resolve(
+            [{"name": "agents-live", "path": "/checkout", "editable": True}])
+        self.assertEqual(primary.value, "/checkout")
+        self.assertTrue(primary.editable)
+
+    def test_declared_plugins_are_never_pinned_by_this_rule(self) -> None:
+        _, extras = self.resolve([
+            {"name": "agents-live"},
+            {"name": "example-plugin", "path": "/wheels/example.whl"},
+        ])
+        self.assertEqual(extras["example-plugin"].value, "/wheels/example.whl")
 
 
 class TestAgentParsing(_TempProject):
@@ -6053,7 +6275,8 @@ class TestInstallSkill(_TempProject):
             ["/usr/bin/uv", "tool", "upgrade", "agents-live"],
             check=False,
         )
-        converge.assert_called_once_with([])
+        converge.assert_called_once_with(
+            [], trigger="upgrade", pin_primary=False)
 
     def test_runtime_upgrade_keeps_coinstalled_wheel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
