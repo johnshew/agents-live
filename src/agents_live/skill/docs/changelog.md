@@ -18,6 +18,13 @@ history is retained in the source repository.
   exist there. New tests cover the two ways a lifecycle operation ends up
   aimed at the wrong thing - a reused process id, and one repository
   reached under a second name through a junction.
+- fix: writing a config file no longer fails under native Windows on
+  Python 3.12. (#119)
+  Every write that restricts the file's permissions went through a call
+  Windows only grew in 3.13, so registering a repository, or anything else
+  that touches the config, raised an `AttributeError` there - and the
+  cleanup behind it left the half-written temporary file in place, because
+  Windows will not remove a file that is still open.
 - fix: a console window no longer flashes on every spawn under native
   Windows. (#139)
   Starting a watcher, a cron loop, or the maintenance loop opened a window

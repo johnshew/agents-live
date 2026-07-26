@@ -381,15 +381,34 @@ def atomic_write_text(path: Path, content: str, *,
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent, text=True)
+    handle = None
     try:
         if mode is not None:
-            os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+            # By descriptor where the host has it, so the file being
+            # narrowed is certainly the one just created. Windows grew
+            # os.fchmod only in 3.13, and has no POSIX mode bits to
+            # narrow in any version: chmod there sets the read-only
+            # flag and nothing else, which is all it can promise.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+            else:
+                os.chmod(temporary, mode)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        handle = None
         os.replace(temporary, path)
     except BaseException:
+        # Close before unlinking: Windows refuses to remove a file that
+        # anything still holds open, and a failure before fdopen leaves
+        # the descriptor from mkstemp with no owner to close it.
+        if handle is not None:
+            handle.close()
+        elif fd >= 0:
+            os.close(fd)
         try:
             os.unlink(temporary)
         except OSError:

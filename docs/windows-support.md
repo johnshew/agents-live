@@ -902,6 +902,17 @@ Four of them were worth fixing in the product rather than the tests:
   there is no such command and the sweep crashed; on Linux the result
   quietly depended on whose machine ran it.
 
+A fifth arrived only once CI ran, because the local host was on Python
+3.13 and the runner resolved the package's minimum, 3.12. `os.fchmod`
+does not exist on Windows before 3.13, so every atomic write that asked
+for a mode raised `AttributeError` there - and the cleanup path then
+failed too, because it unlinked a temporary file whose descriptor from
+`mkstemp` nobody had closed, which Windows refuses. The permission is
+now set by descriptor where the host has one and by path otherwise, and
+the cleanup closes before it unlinks. The lesson is that the matrix has
+two axes: the host that exposed the first four, and the interpreter
+version that exposed this one.
+
 The rest were the suite's own POSIX habits: crontab lines built by
 interpolating a root that `shlex.split` then ate the backslashes out of,
 `Path.home()` redirected by setting `HOME` but not `USERPROFILE`, a

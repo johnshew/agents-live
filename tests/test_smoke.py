@@ -4664,6 +4664,11 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("requires migration", note)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "the wrapper is a POSIX script a WSL crontab runs inside the "
+        "distro. Executing it through whatever bash a Windows PATH "
+        "happens to offer tests that bash, not this wrapper.")
     def test_compatibility_wrapper_executes_automatic_migration(self) -> None:
         wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
         invocation = self.root / "invocation"
@@ -4682,6 +4687,11 @@ class TestWindowsHeartbeat(unittest.TestCase):
             invocation.read_text(encoding="utf-8"),
             "heartbeat install --distro Ubuntu\n")
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "the wrapper is a POSIX script a WSL crontab runs inside the "
+        "distro. Executing it through whatever bash a Windows PATH "
+        "happens to offer tests that bash, not this wrapper.")
     def test_compatibility_wrapper_fails_clearly_without_stable_shim(self) -> None:
         wrapper = Path(heartbeat.__file__).with_name("windows-heartbeat.sh")
         self.shim.unlink()
