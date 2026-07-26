@@ -32,6 +32,12 @@ history is retained in the source repository.
   unusable for the common case of claiming one where you are standing.
   Both flags change the registry only; activation stays a separate step on
   the owning machine.
+- docs: the project now carries an explicit MIT license. (#147)
+  The repository had no `LICENSE` file and the package declared no license
+  metadata, which left a published tool defaulting to all rights reserved.
+  The wheel and sdist now carry the license expression and the license
+  file. The README install instructions are also split per platform, so
+  Windows and WSL no longer read as footnotes to an apt line.
 
 ## 4.0.0 - 2026-07-25
 

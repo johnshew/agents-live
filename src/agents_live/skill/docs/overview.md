@@ -172,10 +172,12 @@ everything it does is also a CLI command.
 **Honest limits.** The runtime is light: just cron, inotify, and `uv`. But the
 implementation is not tiny, at 15K+ lines of code and docs that support
 debounce layers, cascade protection, log archiving, multi-host ownership, and
-integrated smoketests. It is Linux-first: Ubuntu on WSL is the reference, Windows
-support is partial, and macOS is untested. `uv` is a hard dependency
-(PEP 723 scripts, no shared venv). And agents inherit your local
-account's privileges unless you configure stricter CLI or OS isolation
+integrated smoketests. It is Linux-first, and WSL is the reference setup: a
+distro additionally gets a heartbeat that `init` installs to keep it running,
+since scheduled agents otherwise fire only while a session is open (see
+[windows-heartbeat.md](windows-heartbeat.md)). macOS is untested. `uv` is a
+hard dependency (PEP 723 scripts, no shared venv). And agents inherit your
+local account's privileges unless you configure stricter CLI or OS isolation
 - the plan/pipeline/write ladder is tool policy, not a sandbox.
 
 ## 2. Core design principles
