@@ -25,6 +25,11 @@ from pathlib import Path
 # told apart by the token pair they carry.
 SCHEDULE = "schedule"
 WATCHER = "watcher"
+# The third is not an agent's at all: the check-and-repair loop this
+# tool runs for itself. It is host-scoped rather than repo-scoped, so it
+# names no repository, but it persists in the same store as the rest and
+# is installed and removed through the same dispatch point.
+MAINTENANCE = "maintenance"
 
 # The token that names the agent, per kind. Legacy flag-form watcher
 # lines stay recognisable so migrate can replace them.
@@ -145,7 +150,17 @@ def render(spec: TriggerSpec) -> list[str]:
     carries its own PATH, so nothing at fire time depends on ambient
     state and no shared ``PATH=`` line - which the user or another
     project may own - ever has to be touched.
+
+    The maintenance loop is the exception, and for the same reason: it
+    is host-scoped and resolves registered repositories itself, so it
+    names no repository and carries no ``cd``.
     """
+    if spec.kind == MAINTENANCE:
+        return [
+            f"{schedule} PATH={shlex.quote(spec.path)} "
+            f"{shlex.join(spec.command)} 2>&1"
+            for schedule in spec.schedules
+        ]
     return [
         f"{schedule} cd {shlex.quote(str(spec.root))} && "
         f"PATH={shlex.quote(spec.path)} {shlex.join(spec.command)} 2>&1"
@@ -153,7 +168,25 @@ def render(spec: TriggerSpec) -> list[str]:
     ]
 
 
-def _tokens(line: str) -> list[str]:
+def is_maintenance_line(line: str) -> bool:
+    """True when *line* invokes this tool's own check-and-repair loop.
+
+    Matches both the internal maintenance command and legacy
+    health-check entries so convergence removes the retired public
+    invocation.
+    """
+    parts = tokens(line)
+    is_maintenance = (
+        "health-check" in parts
+        or any(parts[index:index + 2] == ["internal", "maintain"]
+               for index in range(len(parts) - 1))
+    )
+    return is_maintenance and any(
+        Path(token).name == "agents-live" for token in parts)
+
+
+def tokens(line: str) -> list[str]:
+    """The shell tokens of a persisted line, falling back on whitespace."""
     try:
         return shlex.split(line)
     except ValueError:
@@ -167,10 +200,10 @@ def belongs_to_root(line: str, root: Path | str) -> bool:
     touching another project's entries.
     """
     wanted = str(root)
-    tokens = _tokens(line)
+    parts = tokens(line)
     return any(
         first in {"cd", "--repo"} and second == wanted
-        for first, second in zip(tokens, tokens[1:])
+        for first, second in zip(parts, parts[1:])
     )
 
 
@@ -183,11 +216,11 @@ def matches(line: str, *, root: Path | str, name: str, kind: str) -> bool:
     """
     if not belongs_to_root(line, root):
         return False
-    tokens = _tokens(line)
+    parts = tokens(line)
     wanted = _NAME_TOKENS[kind]
     return any(
         first in wanted and second == name
-        for first, second in zip(tokens, tokens[1:])
+        for first, second in zip(parts, parts[1:])
     )
 
 
@@ -199,15 +232,15 @@ def agent_name(line: str, *, root: Path | str, kind: str) -> str | None:
     """
     if not belongs_to_root(line, root):
         return None
-    tokens = _tokens(line)
+    parts = tokens(line)
     if kind == SCHEDULE and not any(
         "run.py" in token or Path(token).name == "agents-live"
-        for token in tokens
+        for token in parts
     ):
         # An unrelated crontab entry that happens to sit in this repo.
         return None
     wanted = _NAME_TOKENS[kind]
-    for first, second in zip(tokens, tokens[1:]):
+    for first, second in zip(parts, parts[1:]):
         if first in wanted:
             return second
     return None

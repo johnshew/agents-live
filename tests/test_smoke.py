@@ -41,10 +41,10 @@ from unittest import mock
 try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, health_check,
-        heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
-        preflight, doctor, repos, run, schedules, spawn, status, uninstall,
-        update_check, upgrade, triggers, watchpolicy, watchsource, winwatch,
-        wintasks,
+        heartbeat, hidden, hostruntime, init, migrate, ownership, paths,
+        plugins, preflight, doctor, repos, run, schedules, spawn, status,
+        uninstall, update_check, upgrade, triggers, watchpolicy, watchsource,
+        winwatch, wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -60,6 +60,7 @@ except ImportError:  # flat checkout layout
     import headless
     import health_check
     import heartbeat
+    import hidden
     import hostruntime
     import init
     import migrate
@@ -2786,6 +2787,10 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=True),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=True),
+            # The dispatch mechanisms are probed where every command
+            # probes them, so a host that has them is one preflight
+            # finds nothing wrong with.
+            mock.patch.object(doctor.preflight, "check", return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
@@ -2807,6 +2812,9 @@ class TestCliContract(_TempProject):
             mock.patch.object(doctor, "REPO", None),
             mock.patch.object(doctor, "_has", return_value=False),
             mock.patch.object(doctor, "_python_312_resolvable", return_value=False),
+            # The dispatch mechanisms are probed where every command
+            # probes them, so an empty host is one that has neither.
+            mock.patch.object(preflight.shutil, "which", return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.LINUX),
             mock.patch.object(doctor, "_hostname", return_value="test-host"),
@@ -3555,6 +3563,64 @@ class TestWindowsScheduling(unittest.TestCase):
     def test_a_definition_that_is_not_a_task_is_not_ours(self) -> None:
         self.assertFalse(wintasks._is_ours("not xml at all", self.ROOT))
 
+    def test_an_action_names_a_program_with_no_window_to_show(self) -> None:
+        # A console program named directly in a task opens a console
+        # window in the developer's session on every fire.
+        host = "C:\\env\\Scripts\\pythonw.exe"
+        with mock.patch.object(wintasks, "hidden_host",
+                               return_value=Path(host)):
+            command, arguments = wintasks.action_form(
+                "C:\\tools\\agents-live.exe", ["run", "--name", "todo"])
+        self.assertEqual(command, host)
+        parsed = wintasks.parse_command_line(f'"prog" {arguments}')[1:]
+        self.assertEqual(parsed, ["-P", "-m", "agents_live.hidden",
+                                  "C:\\tools\\agents-live.exe",
+                                  "run", "--name", "todo"])
+        # Without an interpreter to hide behind, a visible window is
+        # better than an agent that does not run.
+        with mock.patch.object(wintasks, "hidden_host", return_value=None):
+            self.assertEqual(
+                wintasks.action_form("C:\\tools\\agents-live.exe", ["run"]),
+                ("C:\\tools\\agents-live.exe", "run"))
+
+    def test_ownership_looks_through_the_wrapper_to_what_runs(self) -> None:
+        host = "C:\\env\\Scripts\\pythonw.exe"
+        with mock.patch.object(wintasks, "hidden_host",
+                               return_value=Path(host)):
+            command, arguments = wintasks.action_form(
+                "C:\\tools\\agents-live.exe",
+                ["--repo", str(self.ROOT), "run", "--name", "todo"])
+        document = wintasks.build_task_xml(
+            command=command, arguments=arguments,
+            working_dir=str(self.ROOT), schedules=("*/5 * * * *",),
+            description="", uri=wintasks.task_path(self.ROOT, "todo"),
+            user_id="EXAMPLE\\dev")
+        self.assertTrue(wintasks._is_ours(document, self.ROOT))
+        # The same interpreter running something else is not ours, and
+        # neither is one running nothing at all.
+        for foreign in (f'-P -m agents_live.hidden "C:\\evil.exe" run',
+                        "-P -m other.module C:\\tools\\agents-live.exe",
+                        "-P -m agents_live.hidden"):
+            other = wintasks.build_task_xml(
+                command=host, arguments=foreign,
+                working_dir=str(self.ROOT), schedules=("*/5 * * * *",),
+                description="", uri=wintasks.task_path(self.ROOT, "todo"),
+                user_id="EXAMPLE\\dev")
+            self.assertFalse(wintasks._is_ours(other, self.ROOT), foreign)
+
+    def test_a_hidden_launch_reports_what_it_launched(self) -> None:
+        # The scheduler reads an exit code, and there is no console to
+        # explain anything on, so the status has to be the child's.
+        with mock.patch.object(hidden.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess(["x"], 3)
+            self.assertEqual(hidden.main(["x", "--flag"]), 3)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["x", "--flag"])
+        self.assertEqual(hidden.main([]), 2)
+        with mock.patch.object(hidden.subprocess, "run",
+                               side_effect=OSError("no such program")):
+            self.assertEqual(hidden.main(["missing"]), 127)
+
     def test_a_watcher_respawn_registers_as_a_startup_task(self) -> None:
         spec = triggers.TriggerSpec(
             name="todo", kind=triggers.WATCHER, root=self.ROOT,
@@ -3642,6 +3708,274 @@ class TestWindowsScheduling(unittest.TestCase):
         for name in (clock, boot, watch):
             self.assertEqual(wintasks.agent_of_task_name(name, self.ROOT),
                              "todo")
+
+    def test_what_a_task_fires_on_survives_the_round_trip(self) -> None:
+        # Convergence compares what a task fires on, and the only copy
+        # of that is the registered document. If it cannot be read back
+        # the same, every comparison reports a change that is not one.
+        for schedules_ in (("*/5 * * * *",), ("30 9 * * *",),
+                           ("0 6 * * 1",), ("0 3 15 * *",),
+                           ("@reboot", "0 * * * *")):
+            document = wintasks.build_task_xml(
+                command="C:\\tools\\agents-live.exe", arguments="run",
+                working_dir=str(self.ROOT), schedules=schedules_,
+                description="", uri="\\AgentsLive\\todo",
+                user_id="EXAMPLE\\dev",
+                now=datetime(2026, 7, 25, 17, 33, 12))
+            self.assertEqual(wintasks._definition_signature(document),
+                             wintasks.trigger_signature(schedules_),
+                             schedules_)
+
+    def test_a_normalized_duration_reads_back_as_the_same_interval(self) -> None:
+        # The store rewrites the duration it is given: PT60M is read
+        # back as PT1H. Matched only as minutes, an hourly repetition
+        # reads as a task that lost it, and convergence then rewrites
+        # the task on every pass, forever.
+        self.assertEqual(wintasks._interval_minutes("PT1H"), 60)
+        self.assertEqual(wintasks._interval_minutes("PT60M"), 60)
+        self.assertEqual(wintasks._interval_minutes("PT1H30M"), 90)
+        self.assertEqual(wintasks._interval_minutes("P1DT"), 1440)
+        self.assertIsNone(wintasks._interval_minutes("PT0M"))
+        self.assertIsNone(wintasks._interval_minutes("every hour"))
+        document = wintasks.build_task_xml(
+            command="C:\\tools\\agents-live.exe", arguments="run",
+            working_dir=str(self.ROOT), schedules=("0 * * * *",),
+            description="", uri="\\AgentsLive\\todo",
+            user_id="EXAMPLE\\dev", now=datetime(2026, 7, 25, 17, 33, 12))
+        self.assertEqual(
+            wintasks._definition_signature(document.replace("PT60M", "PT1H")),
+            wintasks.trigger_signature(("0 * * * *",)))
+
+    def test_the_loop_registers_a_task_that_belongs_to_no_agent(self) -> None:
+        # The loop prunes tasks whose agent file is gone, and nothing in
+        # a project defines the loop. Registered as an agent's task, it
+        # would delete itself on its own first pass.
+        name = wintasks.task_name(self.ROOT, "maintenance",
+                                  kind=wintasks.HOST)
+        self.assertIsNone(wintasks.agent_of_task_name(name, self.ROOT))
+        spec = self._maintenance_spec()
+        self.assertEqual(wintasks.kinds(spec), (wintasks.HOST,))
+        # And its root is the tool's state directory, not a project the
+        # host loop should sweep.
+        with mock.patch.object(
+                schedules.hostruntime, "native_scheduler",
+                return_value=schedules.hostruntime.TASK_SCHEDULER), \
+            mock.patch.object(
+                wintasks, "registered_tasks",
+                return_value=[{"name": name, "command": "agents-live.exe",
+                               "arguments": "internal maintain",
+                               "working_dir": str(self.ROOT)}]):
+            self.assertEqual(schedules.persisted_roots(), [])
+
+    def test_the_maintenance_loop_is_one_task_that_never_says_boot(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="maintenance", kind=triggers.MAINTENANCE, root=self.ROOT,
+            schedules=("@reboot", "0 * * * *"),
+            command=("C:\\tools\\agents-live.exe", "internal", "maintain",
+                     "--quiet"),
+            path="C:\\Windows\\System32")
+        registered: dict[str, object] = {}
+        with (
+            mock.patch.object(wintasks, "read_definition",
+                              side_effect=[None, "<Task/>"]),
+            mock.patch.object(wintasks, "current_user_id",
+                              return_value="EXAMPLE\\dev"),
+            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
+            mock.patch.object(
+                wintasks, "build_task_xml",
+                side_effect=lambda **kwargs: registered.update(kwargs) or "<Task/>"),
+        ):
+            wintasks.install(spec)
+        # The loop does the same work at startup and on the hour, so one
+        # task carries both triggers and no --boot tells them apart.
+        self.assertEqual(list(registered["schedules"]),
+                         ["@reboot", "0 * * * *"])
+        self.assertNotIn("--boot", str(registered["arguments"]))
+        self.assertFalse(str(registered["uri"]).endswith(wintasks.BOOT))
+        # Host-scoped: it names no repository to work on.
+        self.assertNotIn("--repo", str(registered["arguments"]))
+
+    def _maintenance_spec(self) -> triggers.TriggerSpec:
+        return triggers.TriggerSpec(
+            name="maintenance", kind=triggers.MAINTENANCE, root=self.ROOT,
+            schedules=("@reboot", "0 * * * *"),
+            command=("C:\\tools\\agents-live.exe", "internal", "maintain",
+                     "--quiet"),
+            path="C:\\Windows\\System32")
+
+    def test_the_loop_installs_where_the_host_keeps_schedules(self) -> None:
+        spec = self._maintenance_spec()
+        store: dict[str, object] = {"host": None}
+
+        def registered_form(root, name, *, kind):
+            return store["host"] if kind == wintasks.HOST else None
+
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "install", return_value="task") as install,
+            mock.patch.object(wintasks, "registered_form", registered_form),
+        ):
+            # Not installed and not opting in: never adds the loop.
+            self.assertFalse(
+                schedules.install_maintenance(spec, install=False))
+            install.assert_not_called()
+            # Opting in registers it; once registered, nothing changes.
+            self.assertTrue(schedules.install_maintenance(spec))
+            install.assert_called_once_with(spec)
+            store["host"] = wintasks.desired_form(spec, kind=wintasks.HOST)
+            self.assertFalse(schedules.install_maintenance(spec))
+
+    def test_the_loop_is_withdrawn_from_the_store_that_holds_it(self) -> None:
+        spec = self._maintenance_spec()
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "delete", return_value=True) as delete,
+        ):
+            self.assertTrue(schedules.remove_maintenance(spec))
+        delete.assert_called_once_with(self.ROOT, "maintenance",
+                                       kind=wintasks.HOST)
+
+    def test_convergence_compares_what_the_store_would_run(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("*/5 * * * *",),
+            command=("C:\\tools\\agents-live.exe", "--repo", str(self.ROOT),
+                     "run", "--name", "todo", "--quiet"),
+            path="")
+        stale = ("C:\\old\\agents-live.exe", "run --name todo",
+                 wintasks.trigger_signature(("*/5 * * * *",)))
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "registered_form",
+                              side_effect=[stale, None, None]),
+        ):
+            old, new = schedules.current_form(spec)
+        self.assertEqual(len(old), 1)
+        self.assertEqual(len(new), 1)
+        self.assertNotEqual(old, new)
+        self.assertIn("C:\\old\\agents-live.exe", old[0])
+        self.assertIn("C:\\tools\\agents-live.exe", new[0])
+
+    def test_a_schedule_that_changed_is_a_change_to_converge(self) -> None:
+        # The action is identical; only the firing times moved. A
+        # comparison that looked at the command alone would miss it.
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("0 9 * * *",),
+            command=("C:\\tools\\agents-live.exe", "run"), path="")
+        registered = ("C:\\tools\\agents-live.exe", "run",
+                      wintasks.trigger_signature(("0 10 * * *",)))
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "registered_form",
+                              side_effect=[registered, None, None]),
+        ):
+            old, new = schedules.current_form(spec)
+        self.assertNotEqual(old, new)
+
+    def test_the_store_names_every_repository_it_still_runs(self) -> None:
+        tasks = [
+            {"name": "todo@abc", "command": "C:\\tools\\agents-live.exe",
+             "arguments": "run", "working_dir": str(self.ROOT)},
+            {"name": "gone@def", "command": "C:\\tools\\agents-live.exe",
+             "arguments": "run", "working_dir": "C:\\repo\\gone"},
+        ]
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "registered_tasks", return_value=tasks),
+            mock.patch.object(Path, "is_dir", return_value=True),
+        ):
+            roots = schedules.persisted_roots()
+        self.assertEqual([str(root) for root in roots],
+                         [str(self.ROOT), "C:\\repo\\gone"])
+
+    def test_doctor_names_the_mechanism_this_host_dispatches_with(self) -> None:
+        # The capability is the same question on both hosts; only the
+        # program that answers it differs, and an apt line helps nobody
+        # on Windows.
+        with (
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(doctor.preflight, "check", return_value=None),
+        ):
+            schedule = doctor._mechanism_check("schedule")
+            watch = doctor._mechanism_check("watch")
+        self.assertEqual(schedule[0], "Task Scheduler")
+        self.assertEqual(watch[0], "directory change notification")
+        self.assertNotIn("apt", schedule[3])
+        self.assertNotIn("apt", watch[3])
+        with (
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.LINUX),
+            mock.patch.object(doctor.preflight, "check", return_value=None),
+        ):
+            self.assertEqual(doctor._mechanism_check("schedule")[0], "crontab")
+            self.assertEqual(doctor._mechanism_check("watch")[0], "inotifywait")
+
+    def test_doctor_reports_tasks_no_run_of_this_tool_can_reach(self) -> None:
+        gone = "C:\\repo\\deleted"
+        tasks = [
+            {"name": wintasks.task_name(self.ROOT, "lost"),
+             "command": "C:\\tools\\agents-live.exe", "arguments": "run",
+             "working_dir": str(self.ROOT)},
+            {"name": "orphan@deadbeef",
+             "command": "C:\\tools\\agents-live.exe", "arguments": "run",
+             "working_dir": gone},
+        ]
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(doctor, "REPO", self.ROOT),
+            mock.patch.object(wintasks, "registered_tasks", return_value=tasks),
+            mock.patch.object(headless, "list_agents", return_value=[]),
+        ):
+            orphans, stale = doctor._trigger_inconsistencies()
+        # A task for this project whose agent file is gone is an orphan;
+        # a task pinned to a root that no longer exists can never be
+        # matched by name again, so it surfaces here or nowhere.
+        self.assertEqual(orphans, ["lost"])
+        self.assertEqual(stale, [f"{gone} (project root moved or deleted)"])
+
+    def test_convergence_reads_the_store_the_host_writes(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("*/5 * * * *",),
+            command=("C:\\tools\\agents-live.exe", "run"), path="")
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(schedules, "installed_names",
+                              return_value=["todo", "deleted"]),
+            mock.patch.object(schedules, "watcher_respawn_names",
+                              return_value=[]),
+            mock.patch.object(migrate, "agent_file_exists",
+                              side_effect=lambda name: name == "todo"),
+            mock.patch.object(migrate, "schedule_spec", return_value=spec),
+            mock.patch.object(schedules, "current_form",
+                              return_value=(["old"], ["new"])),
+        ):
+            plan = migrate.plan_task_migration()
+        self.assertEqual(plan["schedule"], {"todo": (["old"], ["new"])})
+        self.assertEqual(plan["missing"], ["deleted"])
+
+    def test_adoption_is_refused_where_a_name_carries_its_root(self) -> None:
+        # A task is found by a name digesting its root, so entries from
+        # a root that no longer exists cannot be looked up at all.
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(sys, "argv",
+                              ["agents-live internal migrate",
+                               "--adopt", "C:\\repo\\gone"]),
+        ):
+            with self.assertRaises(headless.AgentsLiveError) as raised:
+                migrate.main()
+        self.assertIn("--adopt is not available", str(raised.exception))
 
 
 class TestScheduleLanguage(unittest.TestCase):
@@ -5173,7 +5507,7 @@ class TestHealthCheckLoop(_TempProject):
         prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
         states: dict[str, dict] = {}
         with mock.patch.object(
-                health_check, "list_reboot_watcher_agent_names",
+                schedules, "watcher_respawn_names",
                 return_value=[str(prompt)]):
             health_check._add_persisted_agent_states(states)
         self.assertIn(str(prompt), states)
@@ -5184,7 +5518,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=canonical),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[]),
@@ -5197,7 +5531,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=[]),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[]),
@@ -5230,7 +5564,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -5270,7 +5604,7 @@ class TestHealthCheckLoop(_TempProject):
             mock.patch.object(health_check.ownership, "load_owners",
                               return_value={}),
             mock.patch.object(
-                health_check, "list_reboot_watcher_agent_names",
+                schedules, "watcher_respawn_names",
                 return_value=[]),
             mock.patch.object(health_check, "_git_head", return_value="abc"),
             mock.patch.object(health_check.subprocess, "run",
@@ -5294,7 +5628,7 @@ class TestHealthCheckLoop(_TempProject):
                 mock.patch.object(health_check.ownership, "current_host",
                                   return_value="this-host"),
                 mock.patch.object(
-                    health_check, "list_reboot_watcher_agent_names",
+                    schedules, "watcher_respawn_names",
                     return_value=[]),
                 mock.patch.object(health_check, "_git_head", return_value="head"),
                 mock.patch.object(health_check.subprocess, "run",
@@ -5331,7 +5665,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("global", self.root)]),
@@ -5358,7 +5692,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -5399,7 +5733,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -5444,7 +5778,7 @@ class TestHealthCheckLoop(_TempProject):
             mock.patch.object(health_check.ownership, "current_host",
                               return_value="this-host"),
             mock.patch.object(
-                health_check, "list_reboot_watcher_agent_names",
+                schedules, "watcher_respawn_names",
                 return_value=["remote", "watched"]),
             mock.patch.object(health_check, "_git_head", return_value=None),
             mock.patch.object(health_check.subprocess, "run",
@@ -5473,9 +5807,9 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=[foreign]),
-            mock.patch.object(health_check, "install_crontab", fake_install),
+            mock.patch.object(headless, "install_crontab", fake_install),
         ):
             # Not installed + install=False: never adds maintenance.
             self.assertFalse(
@@ -5489,9 +5823,9 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=[stale, foreign]),
-            mock.patch.object(health_check, "install_crontab", fake_install),
+            mock.patch.object(headless, "install_crontab", fake_install),
         ):
             # Present but stale: converged even with install=False (an
             # upgrade re-homes the pinned shim path).
@@ -5504,14 +5838,14 @@ class TestHealthCheckLoop(_TempProject):
         installed: dict[str, list[str]] = {}
         foreign = "0 1 * * * /usr/bin/foreign-job 2>&1"
         with (
-            mock.patch.object(health_check, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=[foreign] + self._canonical_lines()),
-            mock.patch.object(health_check, "install_crontab",
+            mock.patch.object(headless, "install_crontab",
                               lambda lines: installed.update(lines=list(lines))),
         ):
             self.assertTrue(health_check.remove_health_cron_lines())
             self.assertEqual(installed["lines"], [foreign])
-        with mock.patch.object(health_check, "current_crontab_lines",
+        with mock.patch.object(headless, "current_crontab_lines",
                                return_value=[foreign]):
             self.assertFalse(health_check.remove_health_cron_lines())
 
@@ -5523,7 +5857,7 @@ class TestHealthCheckLoop(_TempProject):
                 health_check.ownership, "load_owners",
                 side_effect=health_check.ownership.OwnershipUnavailableError(
                     "no backend")),
-            mock.patch.object(health_check, "_converge_crontab",
+            mock.patch.object(health_check, "_converge_triggers",
                               return_value=True),
             mock.patch.object(health_check, "_origin_main_synced",
                               return_value=False),
@@ -5543,7 +5877,7 @@ class TestHealthCheckLoop(_TempProject):
 
         with (
             mock.patch.object(activate, "prune_orphans", noisy_prune),
-            mock.patch.object(health_check, "_converge_crontab",
+            mock.patch.object(health_check, "_converge_triggers",
                               return_value=True),
             mock.patch.object(health_check, "_origin_main_synced",
                               return_value=False),

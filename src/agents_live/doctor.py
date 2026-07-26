@@ -14,11 +14,14 @@ required check passes, 1 otherwise. `--json` emits a machine-readable
 summary for callers such as the dashboard Health check button, which
 runs this as a gate before `activate.py --all`.
 
-Required checks gate activation/runtime (uv, Python 3.12, crontab,
-inotifywait, the agent directories). Agent CLIs (node/npm/claude/copilot/
-agency) and jq are reported as optional: their absence does not break
-activation - a cron/watcher still installs - but an agent will fail at run
-time if its runtime CLI is missing, and shell
+Required checks gate activation/runtime (uv, Python 3.12, the two
+dispatch mechanisms, the agent directories). The mechanisms are named by
+what they do rather than by the tool that does them, because the tool
+differs by host: a crontab and inotifywait on POSIX, Task Scheduler and
+Windows directory-change notification on Windows. Agent CLIs
+(node/npm/claude/copilot/agency) and jq are reported as optional: their
+absence does not break activation - a cron/watcher still installs - but
+an agent will fail at run time if its runtime CLI is missing, and shell
 handlers that parse JSON with jq need jq installed.
 """
 from __future__ import annotations
@@ -53,6 +56,48 @@ def _project_checks_enabled() -> bool:
 
 def _has(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+def _fix(posix: str, windows: str) -> str:
+    """The remedy for this host. An apt line helps nobody on Windows."""
+    return windows if hostruntime.id() == hostruntime.WINDOWS else posix
+
+
+# What each host dispatches with, named by the tool the developer would
+# go looking for. Doctor reports the mechanism, not the Linux tool: the
+# capability is the same question on both hosts and only the answer to
+# "which program" differs.
+_MECHANISMS = {
+    "schedule": {
+        "posix": ("crontab", "sudo apt install cron", ""),
+        "windows": ("Task Scheduler", "no install needed; the task store "
+                    "ships with Windows, so a failure here is a permission "
+                    "or policy problem",
+                    "agents-live registers one task per agent under "
+                    "\\AgentsLive"),
+    },
+    "watch": {
+        "posix": ("inotifywait", "sudo apt install inotify-tools",
+                  "required for file-watcher agents "
+                  "(note-index, todo-index, ...)"),
+        "windows": ("directory change notification",
+                    "no install needed; the notifications come from the "
+                    "Windows kernel",
+                    "required for file-watcher agents "
+                    "(note-index, todo-index, ...)"),
+    },
+}
+
+
+def _mechanism_check(capability: str) -> tuple[str, bool, bool, str, str]:
+    """A required check for one dispatch mechanism on this host."""
+    entry = _MECHANISMS[capability]
+    name, fix, note = entry["windows" if hostruntime.id() == hostruntime.WINDOWS
+                            else "posix"]
+    failure = preflight.check("doctor", {capability})
+    if failure is not None and failure.detail:
+        note = f"{note}; {failure.detail}" if note else failure.detail
+    return name, failure is None, True, fix, note
 
 
 def _agent_cli_needed_by_host(host: str) -> dict[str, dict[str, list[str]]]:
@@ -139,10 +184,17 @@ def _node_is_wsl_native() -> bool:
 
 
 def _python_312_resolvable() -> bool:
-    """True when `uv run python3` resolves to >= 3.12 (scripts need 3.12)."""
+    """True when `uv run` resolves an interpreter >= 3.12 (scripts need 3.12).
+
+    The interpreter is asked for by the name the host uses. ``python3`` is
+    the POSIX spelling and does not exist on Windows, where asking for it
+    reaches the Microsoft Store alias instead of an interpreter.
+    """
+    interpreter = ("python" if hostruntime.id() == hostruntime.WINDOWS
+                   else "python3")
     try:
         result = subprocess.run(
-            ["uv", "run", "python3", "-c",
+            ["uv", "run", interpreter, "-c",
              "import sys; print(1 if sys.version_info >= (3, 12) else 0)"],
             cwd=REPO, capture_output=True, text=True, timeout=120,
         )
@@ -231,6 +283,63 @@ def _config_state() -> tuple[bool, str]:
     if missing:
         return False, f"declared agent directories missing: {', '.join(missing)}"
     return True, f"config: {source.name}"
+
+
+def _trigger_inconsistencies() -> tuple[list[str], list[str]] | None:
+    """(orphaned agent names, stale entries) from what this host has
+    registered, or None when the store is unreadable (check skipped).
+
+    Whichever store the host uses, the two questions are the same:
+    which registered triggers name an agent that no longer has a
+    definition file, and which name something on disk that is no longer
+    there - a script that was deleted, or a project root that moved.
+    Repo-scoped matching can never tear down an entry pinned to a root
+    that no longer exists, so doctor is the only place those surface.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _task_inconsistencies()
+    return _crontab_inconsistencies()
+
+
+def _task_inconsistencies() -> tuple[list[str], list[str]] | None:
+    """The registered-task form of :func:`_trigger_inconsistencies`."""
+    if REPO is None:
+        return None
+    from . import wintasks  # noqa: PLC0415
+
+    try:
+        tasks = wintasks.registered_tasks()
+    except Exception:
+        return None
+    referenced: set[str] = set()
+    missing_roots: set[str] = set()
+    for task in tasks:
+        working_dir = task["working_dir"]
+        if not working_dir:
+            continue
+        name = wintasks.agent_of_task_name(task["name"], REPO)
+        if name is not None:
+            referenced.add(name)
+            continue
+        # Another project's task is that project's business - unless the
+        # project it was registered for is gone, in which case no run of
+        # this tool anywhere can ever match it by name again.
+        if not Path(working_dir).is_dir():
+            missing_roots.add(working_dir)
+    orphans: list[str] = []
+    if referenced:
+        try:
+            from .headless import list_agents  # noqa: PLC0415
+            existing = set(list_agents())
+        except Exception:
+            existing = None  # discovery unavailable: skip orphan half
+        if existing is not None:
+            orphans = sorted(
+                name for name in referenced
+                if name not in existing and not name.startswith("_"))
+    stale = [f"{root} (project root moved or deleted)"
+             for root in sorted(missing_roots)]
+    return orphans, stale
 
 
 def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
@@ -509,12 +618,11 @@ def collect() -> list[dict]:
         "curl -LsSf https://astral.sh/uv/install.sh | sh")
     add("python3.12 (via uv)", _python_312_resolvable(), True,
         "uv python install 3.12  (ensure repo-root .python-version pins 3.12)")
-    add("crontab", _has("crontab"), True, "sudo apt install cron")
-    add("jq", _has("jq"), False, "sudo apt install jq",
+    add(*_mechanism_check("schedule"))
+    add("jq", _has("jq"), False, _fix("sudo apt install jq",
+                                      "winget install jqlang.jq"),
         note="only needed by shell handlers that parse JSON (write-files.sh)")
-    add("inotifywait", _has("inotifywait"), True,
-        "sudo apt install inotify-tools",
-        note="required for file-watcher agents (note-index, todo-index, ...)")
+    add(*_mechanism_check("watch"))
     add_host_runtime_checks()
 
     if not project_checks:
@@ -577,20 +685,27 @@ def collect() -> list[dict]:
             "run `agents-live upgrade` to converge declared plugins",
             note=registry_note,
         )
-    consistency = _crontab_inconsistencies()
+    consistency = _trigger_inconsistencies()
     if consistency is not None:
+        store = ("the task store"
+                 if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER
+                 else "crontab")
         orphans, stale = consistency
         note = ""
         if orphans:
-            note = f"crontab references deleted agent(s): {', '.join(orphans)}"
+            note = f"{store} references deleted agent(s): {', '.join(orphans)}"
         if stale:
             joined = ", ".join(stale)
             note = f"{note}; " if note else ""
-            note += f"crontab references missing script(s): {joined}"
-        add("crontab entries match agent files", not orphans and not stale, False,
+            note += f"{store} references missing script(s): {joined}"
+        add(f"{store} entries match agent files",
+            not orphans and not stale, False,
             "run `agents-live doctor --repair` to converge stale script paths "
-            "and orphaned triggers; edit with `crontab -e` for entries from "
-            "a moved or deleted project root",
+            "and orphaned triggers; " + _fix(
+                "edit with `crontab -e` for entries from a moved or deleted "
+                "project root",
+                "remove tasks from a moved or deleted project root by hand "
+                "in Task Scheduler"),
             note=note or "no orphaned or stale entries")
 
     # Watcher self-heal coverage (commands.md check 13): a running watcher
@@ -598,22 +713,23 @@ def collect() -> list[dict]:
     # and the health check's restart loop - the line IS the durable intent
     # registry (see the health-check agent doc).
     try:
+        from . import schedules  # noqa: PLC0415
         from .headless import (  # noqa: PLC0415
-            _list_active_watcher_agent_names, list_reboot_watcher_agent_names)
+            _list_active_watcher_agent_names)
         running = set(_list_active_watcher_agent_names())
-        intended = set(list_reboot_watcher_agent_names())
+        intended = set(schedules.watcher_respawn_names())
         uncovered = sorted(running - intended)
         dead = sorted(intended - running)
     except Exception:
         uncovered = None  # enumeration unavailable: skip
         dead = None
     if uncovered is not None:
-        add("active watchers have @reboot respawn lines", not uncovered, False,
+        add("active watchers have respawn entries", not uncovered, False,
             "cycle the watcher: `stop <name>` then `start <name>` "
-            "(start reinstalls the line)",
+            "(start reinstalls the entry)",
             note=(f"unhealable watcher(s): {', '.join(uncovered)}" if uncovered
                   else "all running watchers are self-heal covered"))
-    # The inverse gap (commands.md check 14): an @reboot line marks a watcher
+    # The inverse gap (commands.md check 14): a respawn entry marks a watcher
     # as intended on this host, but its process may have died. The hourly
     # health check restarts these; doctor is the out-of-band detector for
     # the state where that loop itself is not firing. Without this check the
@@ -622,35 +738,26 @@ def collect() -> list[dict]:
         add("intended watchers are running", not dead, False,
             "run `start <name>` to relaunch, or run "
             "`agents-live doctor --repair`",
-            note=(f"dead watcher(s) with @reboot intent: {', '.join(dead)}"
+            note=(f"dead watcher(s) with respawn intent: {', '.join(dead)}"
                   if dead else "all intended watchers have live processes"))
 
-    # The built-in check-and-repair loop must be installed: its @reboot +
-    # hourly crontab entries are what keep everything above converged.
-    # The loop self-installs its entries on every run, so the repair is
-    # simply to run it once.
+    # The built-in check-and-repair loop must be installed: its startup +
+    # hourly entries are what keep everything above converged. The loop
+    # self-installs its entries on every run, so the repair is simply to
+    # run it once.
     try:
         from . import health_check  # noqa: PLC0415
-        completed = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True, timeout=10)
-        if completed.returncode != 0 and "no crontab for" not in (
-                completed.stderr or ""):
-            installed = None  # unreadable: skip, don't vouch
-        else:
-            lines = (completed.stdout.splitlines()
-                     if completed.returncode == 0 else [])
-            installed = any(health_check.health_cron_line_matches(line)
-                            for line in lines)
+        installed = health_check.health_entries_installed()
     except Exception:
-        installed = None
+        installed = None  # unreadable store: skip, don't vouch
     if installed is not None:
         add("automatic maintenance installed", installed, False,
             "run `agents-live doctor --repair`",
-            note=("@reboot + hourly entries present" if installed
+            note=("startup + hourly entries present" if installed
                   else "no automatic maintenance entries on this host"))
 
     # Liveness of the check-and-repair loop itself. The health check (boot +
-    # hourly) converges the crontab and restarts dead watchers; when its own
+    # hourly) converges the triggers and restarts dead watchers; when its own
     # entry is broken nothing runs and nothing logs, so a stale beacon is the
     # one signal left. doctor is the out-of-band detector for that state.
     beacon = paths.health_beacon_path()

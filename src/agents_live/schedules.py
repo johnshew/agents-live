@@ -100,6 +100,156 @@ def watcher_respawn_names() -> list[str]:
     return headless.list_reboot_watcher_agent_names()
 
 
+def current_form(spec: triggers.TriggerSpec) -> tuple[list[str], list[str]]:
+    """(what is registered for *spec* here, what *spec* asks for).
+
+    Convergence needs both halves in a shape it can compare and print,
+    without knowing which store holds them: crontab lines on POSIX, one
+    line per task on Windows. Equal halves mean nothing to migrate.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        def read() -> tuple[list[str], list[str]]:
+            old: list[str] = []
+            new: list[str] = []
+            for kind in wintasks.kinds(spec):
+                registered = wintasks.registered_form(
+                    spec.root, spec.name, kind=kind)
+                desired = wintasks.desired_form(spec, kind=kind)
+                if registered is not None:
+                    old.append(_task_line(spec, kind, registered))
+                if desired is not None:
+                    new.append(_task_line(spec, kind, desired))
+            return old, new
+        return _windows(read)
+    lines = headless.current_crontab_lines() or []
+    if spec.kind == triggers.WATCHER:
+        old = [line for line in lines
+               if headless._reboot_watcher_line_agent_name(line) == spec.name]
+    else:
+        old = [line for line in lines
+               if headless.cron_line_matches(line, spec.name)]
+    return old, triggers.render(spec)
+
+
+def _task_line(spec: triggers.TriggerSpec, kind: str,
+               form: tuple[str, str, list[tuple]]) -> str:
+    command, arguments, signature = form
+    fires = " ".join(":".join(str(part) for part in entry)
+                     for entry in signature)
+    path = wintasks.task_path(spec.root, spec.name, kind=kind)
+    return f"{path} [{fires}]: {command} {arguments}".rstrip()
+
+
+def install_maintenance(spec: triggers.TriggerSpec, *,
+                        install: bool = True) -> bool:
+    """Persist this tool's own check-and-repair loop. True when changed.
+
+    ``install=False`` converges an existing installation after an upgrade
+    re-homes the pinned shim path, but never adds the loop to a host that
+    has not asked for it.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        def register() -> bool:
+            current, desired = current_form(spec)
+            if current == desired or (not current and not install):
+                return False
+            wintasks.install(spec)
+            return True
+        return _windows(register)
+    desired = triggers.render(spec)
+    with headless.crontab_lock():
+        lines = headless.current_crontab_lines()
+        if lines is None:
+            raise headless.AgentsLiveError("crontab is not accessible")
+        kept = [line for line in lines if not triggers.is_maintenance_line(line)]
+        current = [line for line in lines if triggers.is_maintenance_line(line)]
+        if current == desired or (not current and not install):
+            return False
+        headless.install_crontab(kept + desired)
+        return True
+
+
+def remove_maintenance(spec: triggers.TriggerSpec) -> bool:
+    """Withdraw the loop from this host. True when there was one."""
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _windows(lambda: wintasks.delete(
+            spec.root, spec.name, kind=wintasks.HOST))
+    with headless.crontab_lock():
+        lines = headless.current_crontab_lines()
+        if lines is None:
+            raise headless.AgentsLiveError("crontab is not accessible")
+        kept = [line for line in lines if not triggers.is_maintenance_line(line)]
+        if len(kept) == len(lines):
+            return False
+        headless.install_crontab(kept)
+        return True
+
+
+def maintenance_installed(spec: triggers.TriggerSpec) -> bool | None:
+    """Whether the loop is registered here; None if that cannot be read."""
+    change = maintenance_change(spec)
+    return None if change is None else bool(change[0])
+
+
+def maintenance_change(spec: triggers.TriggerSpec
+                       ) -> tuple[list[str], list[str]] | None:
+    """(what is registered for the loop, what should be), or None when
+    the store cannot be read.
+
+    Both halves are display strings for the same reason the install
+    functions return one: a repair plan has to show the developer the
+    thing that will change, and what that thing looks like is the
+    store's business.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return current_form(spec)
+    lines = headless.current_crontab_lines()
+    if lines is None:
+        return None
+    return ([line for line in lines if triggers.is_maintenance_line(line)],
+            triggers.render(spec))
+
+
+def persisted_roots() -> list[Path]:
+    """Every existing repository this host has a trigger registered for.
+
+    The host loop maintains what the host actually runs, so it asks the
+    store rather than a registry: an entry pinned to a repository is
+    that repository asking to be maintained.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        def read() -> list[Path]:
+            roots: list[Path] = []
+            for task in wintasks.registered_tasks():
+                # The loop's own task is pinned to the tool's state
+                # directory, which is not a project and has nothing to
+                # sweep. On a crontab host it names no repository at
+                # all; here the kind is what says the same thing.
+                if wintasks.kind_of_task_name(task["name"]) == wintasks.HOST:
+                    continue
+                directory = task["working_dir"]
+                if not directory:
+                    continue
+                root = Path(directory).expanduser()
+                if root.is_dir() and root not in roots:
+                    roots.append(root)
+            return roots
+        return _windows(read)
+    roots: list[Path] = []
+    for line in headless.current_crontab_lines() or []:
+        tokens = triggers.tokens(line)
+        if not any(Path(token).name == "agents-live" for token in tokens):
+            continue
+        for first, second in zip(tokens, tokens[1:]):
+            if first != "--repo":
+                continue
+            root = Path(second).expanduser().resolve()
+            if root.is_dir() and root not in roots:
+                roots.append(root)
+            break
+    return roots
+
+
 def _root() -> Path:
     return headless.repo_root()
 
