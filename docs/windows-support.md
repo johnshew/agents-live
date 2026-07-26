@@ -8,8 +8,9 @@ ms.topic: concept
 Status: draft. Feasibility is settled, the host-runtime seam has landed
 on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
 its locking and process members are written and measured on a native
-Windows host, and a foreground `agents-live run` now executes an agent
-end to end there. What remains is the rest of the vertical slice
+Windows host, a foreground `agents-live run` now executes an agent end
+to end there, and that runtime has an ownership identity of its own.
+What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
@@ -452,7 +453,7 @@ Owner values today are `"*"` or a short hostname
 ([ownership.py](../src/agents_live/ownership.py)). One physical machine
 can now host two runtime environments, so hostname alone is ambiguous.
 
-Proposal: keep the value a single string and extend its grammar.
+The value stays a single string and its grammar is extended.
 
 | Value | Meaning |
 |---|---|
@@ -467,6 +468,14 @@ and WSL. The UUID is stable across repository moves and package upgrades but
 is regenerated for a new Windows user profile. The hostname remains a display
 label rather than part of Windows matching.
 
+This landed in step 8. `current_host` is now the display label and
+`current_owner_id` is what every ownership decision compares against;
+the seam answers whether the machine name identifies the runtime, so
+neither ownership nor the callers name a platform. An identity file that
+exists but does not hold a UUID raises `OwnershipUnavailableError`, the
+same abstention an unreadable registry produces: a runtime that cannot
+say who it is cannot claim an agent.
+
 This change does not migrate existing WSL registrations or alter their
 security posture. Windows repositories and WSL repositories are physically
 separate by deployment rule, so their registries do not describe the same
@@ -479,8 +488,10 @@ checkout and require no cross-runtime lease or ownership migration.
    physically distinct, so separate state keys and logs are expected. The
    dashboard does not need to correlate two spellings of one checkout.
 - The user state home has to resolve somewhere sane on Windows. XDG
-  variables are honored first today; `%LOCALAPPDATA%\agents-live` is the
-  native answer when they are absent.
+  variables are honored first, then the host's own per-user state
+  directory: `~/.local/state` on POSIX and `%LOCALAPPDATA%` on Windows,
+  where a roaming profile would otherwise carry machine-local runtime
+  state to another machine.
 - Windows path hazards that need explicit handling include case-insensitive
    ignore matching, long-path support across every child executable, reserved
    device names, alternate data streams, trailing-dot and trailing-space
@@ -801,6 +812,38 @@ design isolation that the trusted-administrator model cannot provide.
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.
+
+### 2026-07-26: a Windows runtime is named by what it generated, not by the machine
+
+Step 8 gave the Windows runtime an identity. Ownership matching had one
+vocabulary, the hostname, which works while a machine hosts one runtime
+and stops working the moment it hosts two: a Windows installation and
+the WSL distro beside it report related names and would answer to each
+other's. So `current_host` became what it always was in the log payloads
+and beacons, a display label, and `current_owner_id` became the value
+every ownership decision compares against.
+
+The split is worth more than the Windows case. Five call sites -
+activation, dispatch, two health-check sweeps, and the dashboard - each
+read "the host" and each meant "the thing an owner value names". They now
+say so, and the two concepts can differ on a host where they must.
+
+The seam answers the question rather than the platform: nothing outside
+`hostruntime` asks whether this is Windows, only whether the machine
+name identifies the runtime. Where it does not, the identity is
+`<runtime>:<uuid>`, generated once into the user state home with an
+exclusive create so two commands racing on first use settle on one
+identity. A file that exists but holds something else raises
+`OwnershipUnavailableError` rather than regenerating: a new identity
+would silently unclaim every agent the old one owned.
+
+The state home moved on Windows in the same step, from the XDG spelling
+to `%LOCALAPPDATA%`, because that is where the identity lives and
+because a roaming profile would otherwise carry one machine's runtime
+state to another. An explicit `XDG_STATE_HOME` still wins everywhere,
+which is what lets a test point the whole tree at a temp directory.
+This was a clean break, taken while the only Windows state was a scratch
+project's logs.
 
 ### 2026-07-26: a Windows run builds its environment and inherits its PATH
 

@@ -819,8 +819,13 @@ local mode.
 
 Setting `ownership = "registry"` (with a backend installed) enables
 `Agents/data/agent-owners.json`.
-Registry values are `"*"` (run everywhere) or a hostname matching
-`hostname -s`; optional `owner:` frontmatter seeds a missing entry during
+Registry values are `"*"` (run everywhere), a hostname matching
+`hostname -s`, or `<runtime>:<uuid>` for a runtime whose machine name
+does not identify it (native Windows, which shares a machine name with
+the WSL distro beside it; the identity is generated once into the user
+state home). `status` shortens that form to its first eight hex digits
+and prints the whole value under `--json`. Optional `owner:` frontmatter
+seeds a missing entry during
 activation. An agent with no registry entry AND no frontmatter `owner:` is
 claimed for the current host only by a targeted `activate --name` -
 `--all` skips it with a note (2026-07-14: a dashboard health sweep

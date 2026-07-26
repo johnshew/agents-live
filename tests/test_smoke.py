@@ -535,6 +535,66 @@ class TestOwnershipKernel(_TempProject):
             ownership.load_owners(rate_limit_secs=10**9)
 
 
+class TestRuntimeIdentity(_TempProject):
+    """Who this runtime says it is when an owner value is matched."""
+
+    def _as_unnamed_runtime(self):
+        """Pretend the host's name does not identify its runtime."""
+        return (
+            mock.patch.object(hostruntime, "hostname_identifies_runtime",
+                              return_value=False),
+            mock.patch.object(hostruntime, "id", return_value="windows"),
+        )
+
+    def test_a_named_host_owns_agents_under_its_own_name(self) -> None:
+        with mock.patch.object(hostruntime, "hostname_identifies_runtime",
+                               return_value=True):
+            self.assertEqual(ownership.current_owner_id(),
+                             ownership.current_host())
+
+    def test_an_unnamed_runtime_owns_agents_under_a_generated_identity(self) -> None:
+        named, runtime_id = self._as_unnamed_runtime()
+        with named, runtime_id:
+            owner = ownership.current_owner_id()
+        prefix, _, identity = owner.partition(":")
+        self.assertEqual(prefix, "windows")
+        self.assertRegex(identity, r"^[0-9a-f]{32}$")
+
+    def test_the_generated_identity_survives_the_command_that_made_it(self) -> None:
+        named, runtime_id = self._as_unnamed_runtime()
+        with named, runtime_id:
+            first = ownership.current_owner_id()
+            second = ownership.current_owner_id()
+        self.assertEqual(first, second)
+        stored = (paths.state_home() / ownership.RUNTIME_ID_FILE).read_text(
+            encoding="utf-8")
+        self.assertEqual(first, f"windows:{stored}")
+
+    def test_an_unreadable_identity_abstains_rather_than_guesses(self) -> None:
+        state = paths.state_home()
+        state.mkdir(parents=True, exist_ok=True)
+        (state / ownership.RUNTIME_ID_FILE).write_text(
+            "not-a-uuid", encoding="utf-8")
+        named, runtime_id = self._as_unnamed_runtime()
+        with named, runtime_id:
+            with self.assertRaises(ownership.OwnershipUnavailableError):
+                ownership.current_owner_id()
+
+    def test_state_lands_where_the_host_keeps_per_user_state(self) -> None:
+        base = hostruntime.user_state_base()
+        self.assertTrue(base.is_absolute())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XDG_STATE_HOME", None)
+            self.assertEqual(paths.state_home(), base / "agents-live")
+
+    def test_a_generated_identity_is_shortened_for_display(self) -> None:
+        self.assertEqual(
+            ownership.display_owner("windows:" + "ab" * 16),
+            "windows:abababab")
+        self.assertEqual(ownership.display_owner("some-host"), "some-host")
+        self.assertEqual(ownership.display_owner("*"), "*")
+
+
 class TestStartOwnership(_TempProject):
     def setUp(self) -> None:
         super().setUp()
@@ -544,7 +604,7 @@ class TestStartOwnership(_TempProject):
     def _ownership_context(self):
         return (
             mock.patch.object(ownership, "local_only", return_value=False),
-            mock.patch.object(ownership, "current_host",
+            mock.patch.object(ownership, "current_owner_id",
                               return_value="current-host"),
             mock.patch.object(ownership, "load_owners",
                               return_value={"smoke-fixture": "owning-host"}),

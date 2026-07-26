@@ -20,6 +20,7 @@ from .headless import (
 from . import paths
 from . import repos
 from . import preflight
+from . import ownership
 
 
 def _last_run_times(name: str, log_dir: Path) -> tuple[str, str]:
@@ -110,9 +111,9 @@ def format_table(agents: list[dict[str, Any]]) -> str:
         last_ok, last_err = run_times[agent["name"]]
         owner_val = agent.get("owner") or "-"
         is_owner = agent.get("isOwner")
-        owner_cell = owner_val if is_owner is None else (
-            f"{owner_val} *" if is_owner and owner_val not in ("-", "*") else owner_val
-        )
+        owner_cell = ownership.display_owner(owner_val)
+        if is_owner and owner_val not in ("-", "*"):
+            owner_cell = f"{owner_cell} *"
         first_row = True
         for ttype, tvalue in _trigger_lines(agent):
             tstate = trigger_states.get(ttype, agent["state"])

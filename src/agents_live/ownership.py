@@ -9,8 +9,10 @@ Mode is declared by the ``ownership`` key in the project config
 ``pyproject.toml`` - see ``paths.load_config``): ``"registry"`` enables
 multi-host ownership; no config or no key means ``"local"`` by
 definition (every agent owned by this host, transfers unavailable).
-Registry owner values are ``"*"`` (run everywhere) or a short hostname
-matching ``hostname -s``.
+Registry owner values are ``"*"`` (run everywhere), a short hostname
+matching ``hostname -s``, or ``<runtime>:<uuid>`` for a runtime whose
+machine name does not identify it (native Windows, which shares a
+machine name with the WSL distro beside it).
 
 The REGISTRY IMPLEMENTATION is not part of the public kernel (proposal
 §3.9: the public default is local-only). Registry operations dispatch to
@@ -35,7 +37,11 @@ Public API (see ``__all__``):
 * ``mode()`` / ``local_only()`` - declared mode ("registry" | "local").
 * ``registry_available()`` - whether a registry backend is installed
   (gate multi-host bootstrap on this before declaring registry mode).
-* ``current_host()`` - ``hostname -s``, lowercased.
+* ``current_host()`` - ``hostname -s``, lowercased; a display label.
+* ``current_owner_id()`` - the value owner entries are matched against
+  here: the hostname on Linux and WSL, ``<runtime>:<uuid>`` where the
+  machine name does not identify the runtime (see
+  ``docs/windows-support.md``, Ownership generalization).
 * ``load_owners(rate_limit_secs=60)`` - registry mode: the backend's
     pulled, strictly validated ``{agent_name: owner}`` mapping; local
   mode: ``{}`` (nothing is owned elsewhere by definition; no file read,
@@ -58,13 +64,21 @@ Deliberately no dependency on ``headless.py`` so any layer can import it.
 """
 from __future__ import annotations
 
+import re
 import socket
 import subprocess
+import uuid
 
-from . import paths
+from . import hostruntime, paths
 
 
 WILDCARD = "*"
+
+# Where a runtime whose machine name does not identify it keeps the UUID
+# it generated for itself, under the user state home.
+RUNTIME_ID_FILE = "runtime-id"
+
+_RUNTIME_UUID_RE = re.compile(r"[0-9a-f]{32}")
 
 _OWNERSHIP_ENTRY_POINT_GROUP = "agents_live.ownership"
 _BACKEND_MODULE = "ownership_registry"
@@ -191,7 +205,12 @@ def registry_file_exists() -> bool:
 # ---------------------------------------------------------------------------
 
 def current_host() -> str:
-    """This machine's identifier (``hostname -s``, lowercased)."""
+    """This machine's name (``hostname -s``, lowercased).
+
+    A display label. What an owner value is matched against is
+    :func:`current_owner_id`, which is the same string on Linux and WSL
+    and is not on a host where the name does not identify the runtime.
+    """
     try:
         out = subprocess.run(
             ["hostname", "-s"], capture_output=True, text=True, check=True, timeout=2,
@@ -201,6 +220,77 @@ def current_host() -> str:
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return socket.gethostname().split(".", 1)[0].lower()
+
+
+def display_owner(value: str) -> str:
+    """An owner value shortened enough for a table cell.
+
+    A ``<runtime>:<uuid>`` identity is 40 characters and would widen
+    every row of ``status`` to hold one of them. The runtime and the
+    first eight hex digits identify it among the handful of runtimes a
+    developer owns; the whole value stays in ``--json`` output, which is
+    where anything that needs to match it reads it from.
+    """
+    runtime, separator, identity = value.partition(":")
+    if separator and _RUNTIME_UUID_RE.fullmatch(identity):
+        return f"{runtime}:{identity[:8]}"
+    return value
+
+
+def current_owner_id() -> str:
+    """The value registry owner entries are matched against here.
+
+    On Linux and WSL this is the hostname, unchanged: those runtimes
+    have always been named that way, and a distro's name is its own.
+    Where the machine name does not identify the runtime - a Windows
+    installation and the WSL distro beside it are two runtimes on one
+    named machine - the identity is ``<runtime>:<uuid>`` instead,
+    generated once into this user's state home and stable from then on
+    across repository moves and package upgrades.
+
+    Raises :class:`OwnershipUnavailableError` when an identity file
+    exists but does not hold one. An identity that cannot be read is
+    abstention, exactly like an unreadable registry: a runtime that
+    cannot say who it is cannot claim an agent.
+    """
+    if hostruntime.hostname_identifies_runtime():
+        return current_host()
+    return f"{hostruntime.id()}:{_runtime_uuid()}"
+
+
+def _runtime_uuid() -> str:
+    """Read this runtime's installation UUID, generating it once.
+
+    The file is created exclusively, so two commands racing on first use
+    settle on whichever one wins rather than on two identities.
+    """
+    path = paths.state_home() / RUNTIME_ID_FILE
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        existing = ""
+    except OSError as exc:
+        raise OwnershipUnavailableError(
+            f"runtime identity unreadable: {path}: {exc}") from exc
+    if existing:
+        if not _RUNTIME_UUID_RE.fullmatch(existing):
+            raise OwnershipUnavailableError(
+                f"runtime identity malformed: {path}: {existing!r} "
+                f"(expected a 32-character hex UUID; delete the file to "
+                f"generate a new identity, which unclaims agents owned by "
+                f"the old one)")
+        return existing
+    generated = uuid.uuid4().hex
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(generated)
+    except FileExistsError:
+        return _runtime_uuid()
+    except OSError as exc:
+        raise OwnershipUnavailableError(
+            f"runtime identity not writable: {path}: {exc}") from exc
+    return generated
 
 
 # ---------------------------------------------------------------------------

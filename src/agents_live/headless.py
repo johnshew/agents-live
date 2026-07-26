@@ -2987,10 +2987,11 @@ def agent_details(config: AgentConfig) -> dict[str, Any]:
         # Pass a large rate_limit so status display never triggers a
         # git pull on its own; the dispatcher's load_owners() refreshes.
         owners = _ownership.load_owners(rate_limit_secs=10**9)
-        host = _ownership.current_host()
+        host = _ownership.current_owner_id()
         owner = owners.get(config.name)
         details["owner"] = owner
         details["host"] = host
+        details["hostLabel"] = _ownership.current_host()
         details["isOwner"] = (
             owner is None
             or owner == _ownership.WILDCARD

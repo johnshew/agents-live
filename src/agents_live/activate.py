@@ -633,7 +633,7 @@ def _resolve_activation_ownership(
         * An agent owned by a different host is skipped: ``--all`` skips silently; a
       targeted ``activate`` prints guidance to transfer ownership first.
     """
-    host = ownership.current_host()
+    host = ownership.current_owner_id()
     name = config.name
 
     # Local-only mode (no ownership registry - the public-kernel default,
