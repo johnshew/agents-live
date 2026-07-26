@@ -235,9 +235,16 @@ def _remove(ref: str) -> None:
     with _registry_lock():
         registry = load()
         name = _resolve_ref(registry, ref)
+        # A default only means something when there is a choice to make.
+        # Guard the removal while another entry could inherit the role;
+        # when this is the last one, clear the default and let the
+        # registry go empty, which is the only way back out of the state
+        # a first `init --repo` creates.
         if registry["default_repo"] == name:
-            raise ValueError(
-                f"repo {name!r} is the default; choose another default first")
+            if len(registry["repos"]) > 1:
+                raise ValueError(
+                    f"repo {name!r} is the default; choose another default first")
+            registry["default_repo"] = None
         del registry["repos"][name]
         _write(registry)
 
