@@ -6,6 +6,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the dashboard no longer crashes on an agent owned elsewhere. (#157)
+  Building the agent table read a `host` name that only existed inside the
+  page builder, so every launch raised `NameError` as soon as one agent was
+  owned by another runtime. Ownership became a `hostname/runtime/uuid`
+  triple in 5.0.0 and no pre-5.0.0 owner value matches, which makes every
+  agent foreign until it is claimed: the dashboard failed for exactly the
+  upgrade it is needed to recover from. The Claim and Activate tips are
+  the only readers of that name, and both are reached only on the branch
+  no test covered. `pyflakes` reports an undefined name in milliseconds,
+  so the suite now fails on one anywhere in the package.
+
 - docs: release notes carry one reconciled list instead of two. (#155)
   The body concatenated a curated list built from the changelog with
   GitHub's generated pull-request list, so most changes were stated twice,
