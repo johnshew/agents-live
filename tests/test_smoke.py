@@ -625,49 +625,59 @@ class TestOwnershipKernel(_TempProject):
 
 
 class TestRuntimeIdentity(_TempProject):
-    """Who this runtime says it is when an owner value is matched."""
+    """Who this runtime says it is, and which owner values it matches."""
 
-    def _as_unnamed_runtime(self):
-        """Pretend the host's name does not identify its runtime."""
+    def _as_runtime(self, host: str, runtime: str):
+        """Pretend this runtime is ``host``/``runtime``."""
         return (
-            mock.patch.object(hostruntime, "hostname_identifies_runtime",
-                              return_value=False),
-            mock.patch.object(hostruntime, "id", return_value="windows"),
+            mock.patch.object(ownership, "current_host", return_value=host),
+            mock.patch.object(hostruntime, "runtime_name",
+                              return_value=runtime),
         )
 
-    def test_a_named_host_owns_agents_under_its_own_name(self) -> None:
-        with mock.patch.object(hostruntime, "hostname_identifies_runtime",
-                               return_value=True):
-            self.assertEqual(ownership.current_owner_id(),
-                             ownership.current_host())
-
-    def test_an_unnamed_runtime_owns_agents_under_a_generated_identity(self) -> None:
-        named, runtime_id = self._as_unnamed_runtime()
-        with named, runtime_id:
+    def test_an_identity_names_the_host_the_runtime_and_a_uuid(self) -> None:
+        named, runtime = self._as_runtime("some-host", "ubuntu")
+        with named, runtime:
             owner = ownership.current_owner_id()
-        prefix, _, identity = owner.partition(":")
-        self.assertEqual(prefix, "windows")
+        host, _, rest = owner.partition("/")
+        runtime_part, _, identity = rest.partition("/")
+        self.assertEqual(host, "some-host")
+        self.assertEqual(runtime_part, "ubuntu")
         self.assertRegex(identity, r"^[0-9a-f]{32}$")
 
     def test_the_generated_identity_survives_the_command_that_made_it(self) -> None:
-        named, runtime_id = self._as_unnamed_runtime()
-        with named, runtime_id:
+        named, runtime = self._as_runtime("some-host", "ubuntu")
+        with named, runtime:
             first = ownership.current_owner_id()
             second = ownership.current_owner_id()
         self.assertEqual(first, second)
         stored = (paths.state_home() / ownership.RUNTIME_ID_FILE).read_text(
             encoding="utf-8")
-        self.assertEqual(first, f"windows:{stored}")
+        self.assertEqual(first, f"some-host/ubuntu/{stored}")
+
+    def test_two_distros_on_one_machine_are_distinct_owners(self) -> None:
+        # The case a bare hostname could not express: a WSL distro's
+        # hostname defaults to the Windows computer name, so the distro
+        # name is what separates the rows and the uuid is what separates
+        # the claims.
+        named, runtime = self._as_runtime("shared-name", "ubuntu")
+        with named, runtime:
+            first = ownership.current_owner_id()
+        (paths.state_home() / ownership.RUNTIME_ID_FILE).unlink()
+        named, runtime = self._as_runtime("shared-name", "debian")
+        with named, runtime:
+            second = ownership.current_owner_id()
+            self.assertTrue(ownership.owns(second))
+            self.assertFalse(ownership.owns(first))
+        self.assertNotEqual(first, second)
 
     def test_an_unreadable_identity_abstains_rather_than_guesses(self) -> None:
         state = paths.state_home()
         state.mkdir(parents=True, exist_ok=True)
         (state / ownership.RUNTIME_ID_FILE).write_text(
             "not-a-uuid", encoding="utf-8")
-        named, runtime_id = self._as_unnamed_runtime()
-        with named, runtime_id:
-            with self.assertRaises(ownership.OwnershipUnavailableError):
-                ownership.current_owner_id()
+        with self.assertRaises(ownership.OwnershipUnavailableError):
+            ownership.current_owner_id()
 
     def test_state_lands_where_the_host_keeps_per_user_state(self) -> None:
         base = hostruntime.user_state_base()
@@ -676,12 +686,41 @@ class TestRuntimeIdentity(_TempProject):
             os.environ.pop("XDG_STATE_HOME", None)
             self.assertEqual(paths.state_home(), base / "agents-live")
 
-    def test_a_generated_identity_is_shortened_for_display(self) -> None:
+    def test_display_keeps_the_readable_half_and_drops_the_uuid(self) -> None:
         self.assertEqual(
-            ownership.display_owner("windows:" + "ab" * 16),
-            "windows:abababab")
-        self.assertEqual(ownership.display_owner("some-host"), "some-host")
+            ownership.display_owner("some-host/ubuntu/" + "ab" * 16),
+            "some-host/ubuntu")
         self.assertEqual(ownership.display_owner("*"), "*")
+
+    def test_display_shows_an_incomplete_identity_as_it_is(self) -> None:
+        # A value that predates the triple, or one a hand-edit truncated,
+        # still names a host. Showing "some-host/" rather than inventing a
+        # runtime is what tells the reader the row is not matchable.
+        self.assertEqual(ownership.display_owner("some-host"), "some-host/")
+
+    def test_only_an_exact_uuid_or_the_wildcard_owns(self) -> None:
+        owner = ownership.current_owner_id()
+        self.assertTrue(ownership.owns(owner))
+        self.assertTrue(ownership.owns(ownership.WILDCARD))
+        for stranger in (
+            "some-host",                          # no runtime, no uuid
+            "some-host/ubuntu",                   # no uuid
+            "some-host/ubuntu/" + "ab" * 16,      # someone else's uuid
+            "some-host/ubuntu/not-a-uuid",        # unreadable uuid
+            "some-host/ubuntu/extra/" + "ab" * 16,  # more parts than parsed
+            "",
+        ):
+            self.assertFalse(ownership.owns(stranger), stranger)
+
+    def test_a_value_that_cannot_be_matched_is_not_ours(self) -> None:
+        # The durability rule, stated as one assertion: anything the
+        # matcher cannot reduce to a uuid belongs to someone else, so it
+        # neither runs here nor gets cleaned up here.
+        self.assertEqual(ownership.owner_uuid("some-host"), "")
+        self.assertEqual(ownership.owner_uuid("some-host/ubuntu"), "")
+        self.assertEqual(
+            ownership.owner_uuid("some-host/ubuntu/" + "AB" * 16),
+            "ab" * 16)
 
 
 class TestStartOwnership(_TempProject):
@@ -714,7 +753,7 @@ class TestStartOwnership(_TempProject):
             self.assertTrue(activate._resolve_activation_ownership(
                 self.config, batch_mode=False, transfer_to=None))
         prompt.assert_called_once_with(
-            "smoke-fixture is owned by owning-host; "
+            "smoke-fixture is owned by owning-host/; "
             "take ownership and activate here? [y/N] ")
         set_owner_mock.assert_called_once_with("smoke-fixture", "current-host")
 
@@ -762,6 +801,85 @@ class TestStartOwnership(_TempProject):
         ):
             activate.main()
         self.assertEqual(raised.exception.code, 2)
+
+    def test_transfer_here_claims_without_spelling_the_identity(self) -> None:
+        # --transfer-to needs a full hostname/runtime/uuid triple, which
+        # is only obtainable by copying it out of agent-owners.json.
+        # --transfer-here is the same operation for the one identity a
+        # runtime can always name: its own.
+        with (
+            mock.patch("sys.argv",
+                       ["agents-live start", "--name", "smoke-fixture",
+                        "--transfer-here"]),
+            mock.patch.object(ownership, "local_only", return_value=False),
+            mock.patch.object(ownership, "load_owners",
+                              return_value={"smoke-fixture": "elsewhere"}),
+            mock.patch.object(ownership, "set_owner") as set_owner,
+            mock.patch.object(activate, "log_event"),
+        ):
+            activate.main()
+        set_owner.assert_called_once_with(
+            "smoke-fixture", ownership.current_owner_id())
+
+    def test_transfer_here_and_transfer_to_are_alternatives(self) -> None:
+        with (
+            mock.patch("sys.argv",
+                       ["agents-live start", "--name", "smoke-fixture",
+                        "--transfer-here", "--transfer-to", "a/b/c"]),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            activate.main()
+        self.assertEqual(raised.exception.code, 2)
+
+
+class TestOwnershipEnforcement(_TempProject):
+    """What the health sweep does with each kind of owner value."""
+
+    def _sweep(self, owner: str | None) -> tuple[list[str], bool]:
+        owners = {} if owner is None else {"smoke-fixture": owner}
+        states = {"smoke-fixture": {"state": "active"}}
+        with (
+            mock.patch.object(ownership, "load_owners", return_value=owners),
+            mock.patch.object(health_check, "_lifecycle", return_value=True),
+            mock.patch.object(health_check, "_err"),
+        ):
+            return health_check._enforce_ownership(states, [])
+
+    def test_an_unclaimed_agent_keeps_running_here(self) -> None:
+        # Absent is not "someone else's" - it is the state every agent is
+        # in before the first claim, and the state all of them are in when
+        # the repository runs without a registry at all.
+        self.assertEqual(self._sweep(None), ([], False))
+
+    def test_this_runtime_keeps_the_agents_it_owns(self) -> None:
+        self.assertEqual(
+            self._sweep(ownership.current_owner_id()), ([], False))
+        self.assertEqual(self._sweep(ownership.WILDCARD), ([], False))
+
+    def test_another_runtimes_agent_is_deactivated_here(self) -> None:
+        self.assertEqual(
+            self._sweep("some-host/ubuntu/" + "ab" * 16),
+            (["smoke-fixture"], False))
+
+    def test_an_unmatchable_value_is_treated_as_someone_elses(self) -> None:
+        # A value the matcher cannot reduce to a uuid - truncated, hand
+        # edited, restored from a stale backup - stops the agent here
+        # rather than letting an unverifiable claim run. Recovering is a
+        # deliberate `start --name <agent> --transfer-here`.
+        self.assertEqual(self._sweep("some-host"),
+                         (["smoke-fixture"], False))
+
+    def test_unreadable_ownership_abstains_and_flags_degraded(self) -> None:
+        with (
+            mock.patch.object(
+                ownership, "load_owners",
+                side_effect=ownership.OwnershipUnavailableError("down")),
+            mock.patch.object(health_check, "_err"),
+        ):
+            self.assertEqual(
+                health_check._enforce_ownership(
+                    {"smoke-fixture": {"state": "active"}}, []),
+                ([], True))
 
 
 class TestProjectPlugins(_TempProject):

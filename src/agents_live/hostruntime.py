@@ -77,17 +77,25 @@ def id() -> str:  # noqa: A001 - the seam member is named `id` by design
     return LINUX
 
 
-def hostname_identifies_runtime() -> bool:
-    """Whether this host's name is enough to name this runtime.
+def runtime_name() -> str:
+    """The runtime part of an ownership identity.
 
-    A Linux or WSL hostname answers "which runtime environment is this"
-    on its own, and agent ownership has always been recorded that way. A
-    Windows machine and the WSL distro on it are two runtimes that
-    report related names and would answer to each other's, so ownership
-    there needs an identity of its own (see ``ownership`` and the
-    Ownership generalization section of docs/windows-support.md).
+    ``windows`` on native Windows, the distro name on WSL, and the
+    runtime identifier elsewhere. WSL is the case that needs a name of
+    its own: a distro's hostname defaults to the Windows computer name,
+    so two distros on one machine are indistinguishable by hostname, and
+    only the distro name tells a reader which row belongs to which.
+
+    Display only. Whether a runtime owns an agent is decided by the uuid
+    part of the identity (``ownership.owns``), so renaming a distro does
+    not move its agents.
     """
-    return not _IS_WINDOWS
+    runtime = id()
+    if runtime == WSL:
+        distro = os.environ.get("WSL_DISTRO_NAME", "").strip()
+        if distro:
+            return distro.lower()
+    return runtime
 
 
 def user_state_base() -> Path:

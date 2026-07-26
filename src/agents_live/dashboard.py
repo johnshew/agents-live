@@ -331,11 +331,13 @@ def _ago(ts: str | None, now: datetime) -> str:
     return f"{hours // 24}d"
 
 
-def _is_local(agent: dict, host: str) -> bool:
-    """True when this host already owns (or shares) the agent."""
-    owner = agent.get("owner") or "-"
+def _is_local(agent: dict) -> bool:
+    """True when this runtime already owns (or shares) the agent."""
+    owner = agent.get("owner")
     is_owner = agent.get("isOwner")
-    return is_owner is None or owner in ("*",) or owner.lower() == host
+    if is_owner is None or owner is None:
+        return True
+    return ownership.owns(owner)
 
 
 def trigger_summary(agent: dict) -> str:
@@ -421,7 +423,7 @@ def _log_action(label: str, script: str, args: list[str], code: int,
         script=script,
         args=args,
         agent_name=agent_name,
-        host=ownership.current_host(),
+        host=ownership.current_label(),
         exit_code=code,
         status="ok" if code == 0 else "error",
         output=out,
@@ -627,17 +629,18 @@ async def pause_all(names: list[str]) -> None:
 
 def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
-    host = ownership.current_owner_id()
     rows: list[dict] = []
     for agent in collect_agents():
         name = agent["name"]
         # Drop the "(pid NNNN)" suffix headless adds for watcher agents; the
         # dashboard only needs the state word, not the process id.
         state = re.sub(r"\s*\(pid \d+\)", "", agent.get("state", "?"))
-        owner = agent.get("owner") or "-"
+        owner_value = agent.get("owner")
+        owner = (ownership.display_owner(owner_value)
+                 if owner_value else "-")
         ok_ago, err_ago, last_status = last_runs(name)
         unhealthy = last_status == "error" and state != "inactive"
-        local = _is_local(agent, host)
+        local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
         cost_day, cost_week = (agent_cost(name) if runtime != "none" else ("-", "-"))
@@ -782,7 +785,7 @@ async def _pause_row(event) -> None:
 async def _claim_row(event) -> None:
     name = event.args["name"]
     await do_action("Activate", "activate.py",
-                    ["--name", name, "--transfer-to", ownership.current_owner_id()],
+                    ["--name", name, "--transfer-here"],
                     agent_name=name)
 
 
@@ -975,7 +978,7 @@ def build_page() -> None:
         ".agent-table-scroll{min-height:0}"
         ".agent-filters .q-field{min-width:8rem}"
     )
-    host = ownership.current_host()
+    host = ownership.current_label()
 
     with ui.row().classes("w-full items-center justify-between gap-x-4 gap-y-2"):
         with ui.row().classes("items-center gap-4 no-wrap"):

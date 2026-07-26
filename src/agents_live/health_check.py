@@ -330,19 +330,26 @@ def _enforce_ownership(
     """
     try:
         owners = ownership.load_owners(rate_limit_secs=10**9)
+        # Resolved here, inside the guard: a runtime that cannot read its
+        # own identity must abstain exactly like one that cannot read the
+        # registry, rather than enforce against an identity it is unsure
+        # of or fail the whole sweep.
+        host = ownership.current_owner_id()
     except ownership.OwnershipUnavailableError as exc:
-        msg = f"ownership registry unavailable; enforcement abstained: {exc}"
+        msg = f"ownership unavailable; enforcement abstained: {exc}"
         _err(f"WARNING: {msg}")
         events.append({"level": "warning", "phase": "ownership-deactivate",
                        "message": msg})
         return [], True
     if not owners:
         return [], False
-    host = ownership.current_owner_id()
     deactivated: list[str] = []
     for name in sorted(states):
         owner = owners.get(name)
-        if owner is None or owner == "*" or owner.lower() == host:
+        # Absent means unclaimed and stays runnable here; an owner value
+        # that exists but cannot be matched is someone else's, exactly
+        # like one naming another machine.
+        if owner is None or ownership.owns(owner):
             continue
         agent = states[name]
         state = str(agent.get("state", ""))
@@ -355,7 +362,9 @@ def _enforce_ownership(
             continue
         if _lifecycle("stop", name):
             deactivated.append(name)
-            msg = f"deactivated '{name}': ownership assigned to {owner}"
+            msg = (f"deactivated '{name}': owned by "
+                   f"{ownership.display_owner(owner)}, not this runtime "
+                   f"({ownership.display_owner(host)})")
             _err(msg)
             events.append({"level": "info", "phase": "ownership-deactivate",
                            "agent_name": name, "message": msg})
@@ -363,7 +372,8 @@ def _enforce_ownership(
             events.append({"level": "warning", "phase": "ownership-deactivate",
                            "agent_name": name,
                            "message": f"failed to deactivate '{name}' "
-                                      f"(owned by {owner})"})
+                                      f"(owned by "
+                                      f"{ownership.display_owner(owner)})"})
     return deactivated, False
 
 
@@ -478,9 +488,13 @@ def plan_sweep() -> list[dict]:
     owners: dict[str, str] = {}
     try:
         owners = ownership.load_owners(rate_limit_secs=10**9)
+        # Both halves of an ownership decision must be readable before
+        # this preview can name one. Resolving the identity here keeps a
+        # malformed identity file out of the loop below, where it would
+        # surface as a crash rather than as "nothing to enforce".
+        ownership.current_owner_id()
     except ownership.OwnershipUnavailableError:
-        pass
-    host = ownership.current_owner_id()
+        owners = {}
     ownership_deactivated: set[str] = set()
     for name, agent in sorted(states.items()):
         owner = owners.get(name)
@@ -490,7 +504,7 @@ def plan_sweep() -> list[dict]:
             or any("active" in str(value).lower()
                    for value in trigger_states.values())
         )
-        if owner and owner != "*" and owner.lower() != host and active_here:
+        if owner is not None and not ownership.owns(owner) and active_here:
             ownership_deactivated.add(name)
             actions.append({
                 "action": "deactivate-for-ownership",
@@ -873,7 +887,7 @@ def run_host_loop(quiet: bool) -> int:
         payload = {
             "status": beacon_status,
             "ts": _now_iso(),
-            "host": ownership.current_host(),
+            "host": ownership.current_label(),
             "watchers": watcher_total,
             "cron": cron_total,
             "ownership": "unavailable" if ownership_degraded else "ok",

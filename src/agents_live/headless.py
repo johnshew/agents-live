@@ -3007,12 +3007,8 @@ def agent_details(config: AgentConfig) -> dict[str, Any]:
         owner = owners.get(config.name)
         details["owner"] = owner
         details["host"] = host
-        details["hostLabel"] = _ownership.current_host()
-        details["isOwner"] = (
-            owner is None
-            or owner == _ownership.WILDCARD
-            or owner.lower() == host
-        )
+        details["hostLabel"] = _ownership.display_owner(host)
+        details["isOwner"] = owner is None or _ownership.owns(owner)
     except Exception:  # noqa: BLE001 - status must never fail on this
         pass
     return details

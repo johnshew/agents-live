@@ -9,10 +9,11 @@ Mode is declared by the ``ownership`` key in the project config
 ``pyproject.toml`` - see ``paths.load_config``): ``"registry"`` enables
 multi-host ownership; no config or no key means ``"local"`` by
 definition (every agent owned by this host, transfers unavailable).
-Registry owner values are ``"*"`` (run everywhere), a short hostname
-matching ``hostname -s``, or ``<runtime>:<uuid>`` for a runtime whose
-machine name does not identify it (native Windows, which shares a
-machine name with the WSL distro beside it).
+Registry owner values are ``"*"`` (run everywhere) or a
+``hostname/runtime/uuid`` identity. The hostname and runtime are what a
+table shows; the uuid is what a match reads. An owner value that yields
+no uuid belongs to nobody here, which is how an incomplete or corrupted
+entry stays safe without a repair path (see :func:`owns`).
 
 The REGISTRY IMPLEMENTATION is not part of the public kernel (proposal
 §3.9: the public default is local-only). Registry operations dispatch to
@@ -37,11 +38,15 @@ Public API (see ``__all__``):
 * ``mode()`` / ``local_only()`` - declared mode ("registry" | "local").
 * ``registry_available()`` - whether a registry backend is installed
   (gate multi-host bootstrap on this before declaring registry mode).
-* ``current_host()`` - ``hostname -s``, lowercased; a display label.
-* ``current_owner_id()`` - the value owner entries are matched against
-  here: the hostname on Linux and WSL, ``<runtime>:<uuid>`` where the
-  machine name does not identify the runtime (see
-  ``docs/windows-support.md``, Ownership generalization).
+* ``current_host()`` - ``hostname -s``, lowercased; the first part of
+  this runtime's identity.
+* ``current_owner_id()`` - this runtime's identity,
+  ``hostname/runtime/uuid`` (see ``docs/windows-support.md``, Ownership
+  generalization).
+* ``owns(value)`` - whether an EXISTING owner value pins an agent here;
+  an unmatchable value is never ours.
+* ``owner_uuid(value)`` / ``display_owner(value)`` - the matching part
+  and the readable part of an owner value.
 * ``load_owners(rate_limit_secs=60)`` - registry mode: the backend's
     pulled, strictly validated ``{agent_name: owner}`` mapping; local
   mode: ``{}`` (nothing is owned elsewhere by definition; no file read,
@@ -74,8 +79,12 @@ from . import hostruntime, paths
 
 WILDCARD = "*"
 
-# Where a runtime whose machine name does not identify it keeps the UUID
-# it generated for itself, under the user state home.
+# Separates the three parts of an ownership identity,
+# ``hostname/runtime/uuid``.
+SEPARATOR = "/"
+
+# Where a runtime keeps the UUID it generated for itself, under the user
+# state home.
 RUNTIME_ID_FILE = "runtime-id"
 
 _RUNTIME_UUID_RE = re.compile(r"[0-9a-f]{32}")
@@ -207,9 +216,10 @@ def registry_file_exists() -> bool:
 def current_host() -> str:
     """This machine's name (``hostname -s``, lowercased).
 
-    A display label. What an owner value is matched against is
-    :func:`current_owner_id`, which is the same string on Linux and WSL
-    and is not on a host where the name does not identify the runtime.
+    The first part of this runtime's identity, and one of the two parts
+    a table shows. It is not what an owner value is matched against:
+    that is the uuid part, because a hostname does not distinguish the
+    WSL distros on one machine, which default to sharing it.
     """
     try:
         out = subprocess.run(
@@ -223,39 +233,96 @@ def current_host() -> str:
 
 
 def display_owner(value: str) -> str:
-    """An owner value shortened enough for a table cell.
+    """An owner value as a person reads it: ``hostname/runtime``.
 
-    A ``<runtime>:<uuid>`` identity is 40 characters and would widen
-    every row of ``status`` to hold one of them. The runtime and the
-    first eight hex digits identify it among the handful of runtimes a
-    developer owns; the whole value stays in ``--json`` output, which is
-    where anything that needs to match it reads it from.
+    The uuid part is never shown. It answers "is this mine", which no
+    reader can evaluate by eye, and showing it would spend the width of
+    a 32-character hex string on the one part of the identity that
+    carries no meaning for a human. A value with no runtime part still
+    renders its separator (``hostname/``), so an incomplete entry reads
+    as incomplete rather than as a machine named after the whole string.
     """
-    runtime, separator, identity = value.partition(":")
-    if separator and _RUNTIME_UUID_RE.fullmatch(identity):
-        return f"{runtime}:{identity[:8]}"
-    return value
+    if value == WILDCARD:
+        return value
+    hostname, _, rest = value.partition(SEPARATOR)
+    runtime = rest.partition(SEPARATOR)[0]
+    return f"{hostname}{SEPARATOR}{runtime}"
+
+
+def owner_uuid(value: str) -> str:
+    """The uuid part of an owner value, or ``""`` when it has none.
+
+    Anything that is not a well-formed triple ending in a 32-character
+    hex uuid returns ``""``: a bare hostname, a truncated write, a
+    hand-edit, a badly merged value. None of those are a shape to
+    repair - see :func:`owns`.
+    """
+    parts = value.split(SEPARATOR)
+    if len(parts) != 3:
+        return ""
+    candidate = parts[2].strip().lower()
+    return candidate if _RUNTIME_UUID_RE.fullmatch(candidate) else ""
+
+
+def owns(value: str) -> bool:
+    """Whether this runtime owns an agent pinned to ``value``.
+
+    Matching reads the uuid part and nothing else, so two WSL distros on
+    one machine - which default to the same hostname - are separate
+    owners, and a renamed machine keeps its agents.
+
+    An owner value that yields no uuid is NOT ours. That single rule is
+    what makes an incomplete, hand-edited, truncated, or corrupted entry
+    safe: it reads exactly like an agent owned by another machine, so
+    this host neither runs it nor prunes its registry entry, and an
+    operator resolves it by claiming the agent (``--transfer-here``).
+    There is no repair path to maintain because nothing is repaired.
+
+    Note that this is about a value that EXISTS. An agent absent from
+    the registry is unclaimed, which is a different state that callers
+    handle themselves; conflating the two would stop every agent in a
+    local-mode project, where nothing is registered by definition.
+    """
+    if value == WILDCARD:
+        return True
+    identity = owner_uuid(value)
+    return bool(identity) and identity == _runtime_uuid()
+
+
+def current_label() -> str:
+    """This runtime's readable label, ``hostname/runtime``.
+
+    The display half of :func:`current_owner_id`, built without reading
+    the identity file, so a dashboard header or a log line never fails
+    on an unreadable uuid. Never use it to decide ownership: two WSL
+    distros on one machine can produce the same label only if one is
+    renamed to the other, but a label was never the thing that made an
+    identity exact.
+    """
+    return (f"{current_host().replace(SEPARATOR, '-')}{SEPARATOR}"
+            f"{hostruntime.runtime_name().replace(SEPARATOR, '-')}")
 
 
 def current_owner_id() -> str:
-    """The value registry owner entries are matched against here.
+    """This runtime's ownership identity, ``hostname/runtime/uuid``.
 
-    On Linux and WSL this is the hostname, unchanged: those runtimes
-    have always been named that way, and a distro's name is its own.
-    Where the machine name does not identify the runtime - a Windows
-    installation and the WSL distro beside it are two runtimes on one
-    named machine - the identity is ``<runtime>:<uuid>`` instead,
-    generated once into this user's state home and stable from then on
-    across repository moves and package upgrades.
+    Each part has exactly one job: the hostname and the runtime are what
+    a table shows (:func:`display_owner`), and the uuid is what a match
+    reads (:func:`owns`). Splitting them that way is what lets the
+    identity be both readable and exact, which no single value managed -
+    a hostname is not unique across the WSL distros on one machine, and
+    a uuid on its own names nothing a person recognises.
+
+    The uuid is generated once into this user's state home and is stable
+    from then on across repository moves, machine renames, and package
+    upgrades.
 
     Raises :class:`OwnershipUnavailableError` when an identity file
-    exists but does not hold one. An identity that cannot be read is
+    exists but does not hold a uuid. An identity that cannot be read is
     abstention, exactly like an unreadable registry: a runtime that
     cannot say who it is cannot claim an agent.
     """
-    if hostruntime.hostname_identifies_runtime():
-        return current_host()
-    return f"{hostruntime.id()}:{_runtime_uuid()}"
+    return f"{current_label()}{SEPARATOR}{_runtime_uuid()}"
 
 
 def _runtime_uuid() -> str:
@@ -336,12 +403,18 @@ def remove_owner(name: str) -> bool:
 
 __all__ = [
     "WILDCARD",
+    "SEPARATOR",
     "OwnershipUnavailableError",
     "mode",
     "local_only",
     "registry_available",
     "registry_file_exists",
     "current_host",
+    "current_label",
+    "current_owner_id",
+    "display_owner",
+    "owner_uuid",
+    "owns",
     "load_owners",
     "set_owner",
     "remove_owner",
