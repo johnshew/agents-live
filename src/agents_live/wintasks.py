@@ -40,6 +40,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from hashlib import sha256
+from math import gcd
 from pathlib import Path, PureWindowsPath
 
 from . import triggers
@@ -47,6 +48,10 @@ from . import triggers
 # Every registration this tool makes lives here, so the enumeration a
 # developer runs to confirm teardown is one command with one answer.
 TASK_FOLDER = "\\AgentsLive"
+
+# The suffix that marks an agent's startup task, kept apart from its
+# clock task because the two answer the dueness question differently.
+BOOT_SUFFIX = ".boot"
 
 _NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _TASK_VERSION = "1.4"
@@ -56,6 +61,13 @@ _TASK_VERSION = "1.4"
 _SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 _INTERVAL_MINUTE = re.compile(r"\*/(\d{1,4})")
+
+# Task Scheduler names calendar units with elements, not numbers.
+_WEEKDAY_ELEMENTS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+                     "Friday", "Saturday")
+_MONTH_ELEMENTS = ("January", "February", "March", "April", "May", "June",
+                   "July", "August", "September", "October", "November",
+                   "December")
 
 # argv[0] is parsed by rules of its own, so round-trip verification
 # prepends a token that cannot be confused with the arguments under test.
@@ -222,29 +234,36 @@ def _path_key(value: Path | str) -> str:
     return PureWindowsPath(str(value)).as_posix().rstrip("/").casefold()
 
 
-def task_name(root: Path | str, agent: str) -> str:
+def task_name(root: Path | str, agent: str, *, boot: bool = False) -> str:
     """The task name for *agent* in the repository at *root*.
 
     Deterministic and repository-scoped: the same agent in two checkouts
     registers two tasks, and neither can replace or delete the other.
     The digest carries the root because a task name is one flat string
     with no room for a path.
+
+    An agent's ``@reboot`` schedules register as a second, ``.boot``
+    task. One task carries one action, and a startup fire has to be
+    distinguishable from a clock fire: a startup fire is always due,
+    while a clock fire has to be checked against the expression.
     """
     if not _SAFE_AGENT_NAME.fullmatch(agent):
         raise TaskError(
             f"agent name '{agent}' cannot be part of a task name; use "
             "letters, digits, dot, dash, and underscore")
     digest = sha256(_path_key(root).encode("utf-8")).hexdigest()
-    return f"{agent}@{digest[:8]}"
+    return f"{agent}@{digest[:8]}{BOOT_SUFFIX if boot else ''}"
 
 
-def task_path(root: Path | str, agent: str) -> str:
+def task_path(root: Path | str, agent: str, *, boot: bool = False) -> str:
     """The full task-store path for *agent*, inside the tool's folder."""
-    return f"{TASK_FOLDER}\\{task_name(root, agent)}"
+    return f"{TASK_FOLDER}\\{task_name(root, agent, boot=boot)}"
 
 
 def agent_of_task_name(name: str, root: Path | str) -> str | None:
     """The agent *name* schedules for *root*, or None if it is not ours."""
+    if name.endswith(BOOT_SUFFIX):
+        name = name[:-len(BOOT_SUFFIX)]
     prefix, _, digest = name.rpartition("@")
     if not prefix or not digest:
         return None
@@ -257,40 +276,63 @@ def agent_of_task_name(name: str, root: Path | str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def translate(schedule: str) -> list[dict[str, object]]:
-    """The native triggers that fire exactly when *schedule* says.
+    """Native triggers that fire at least whenever *schedule* says.
 
-    Step 9 translates only what maps exactly, because the dispatcher
-    that makes a coarse superset safe - the dueness predicate - is the
-    next step (docs/windows-support.md, Scheduling on Windows). Until it
-    exists, a schedule with no exact trigger is refused at activation,
-    where the developer can see it, rather than turned into a task that
-    runs an agent more often than it asked for.
+    Exact wherever cron maps cleanly onto a trigger. Everywhere else the
+    trigger is a superset - a repetition on a minute step that covers
+    every minute the expression can name - and the dueness check in
+    :func:`agents_live.schedules.claim_due_minute` declines the fires
+    that are not real firing times. Guaranteeing a superset is much
+    easier than guaranteeing exactness, which is why no valid
+    expression is refused (docs/windows-support.md, Scheduling on
+    Windows).
     """
     text = schedule.strip()
-    if text == "@reboot":
+    if text == triggers.BOOT:
         return [{"kind": "boot"}]
-    fields = text.split()
-    if len(fields) == 5:
-        minute, hour, day_of_month, month, day_of_week = fields
-        if (day_of_month, month, day_of_week) == ("*", "*", "*"):
-            step = _INTERVAL_MINUTE.fullmatch(minute)
-            if step and hour == "*" and 60 % int(step.group(1)) == 0:
-                # A repetition only lands on cron's minutes if the step
-                # divides the hour; */7 restarts each hour under cron and
-                # would drift under a repetition.
-                return [{"kind": "interval", "minutes": int(step.group(1)),
-                         "anchor_minute": 0}]
-            if minute.isdigit() and 0 <= int(minute) <= 59:
-                if hour == "*":
-                    return [{"kind": "interval", "minutes": 60,
-                             "anchor_minute": int(minute)}]
-                if hour.isdigit() and 0 <= int(hour) <= 23:
-                    return [{"kind": "daily", "hour": int(hour),
-                             "minute": int(minute)}]
-    raise ScheduleNotTranslatable(
-        f"schedule '{schedule}' has no exact Task Scheduler trigger yet; "
-        "coarse triggers and the dueness check that makes them safe are the "
-        "next step (docs/windows-support.md, Scheduling on Windows)")
+    try:
+        minutes, _hours, days, _months, weekdays = triggers.schedule_fields(text)
+    except triggers.ScheduleSyntaxError as exc:
+        raise ScheduleNotTranslatable(str(exc)) from exc
+    minute, hour, day_of_month, month, day_of_week = text.split()
+
+    exact_time = (len(minutes) == 1 and hour.isdigit()
+                  and month == "*")
+    if exact_time:
+        clock = {"hour": int(hour), "minute": next(iter(minutes))}
+        if (day_of_month, day_of_week) == ("*", "*"):
+            return [{"kind": "daily", **clock}]
+        if day_of_month == "*" and len(weekdays) == 1:
+            return [{"kind": "weekly", "weekday": next(iter(weekdays)), **clock}]
+        if day_of_week == "*" and len(days) == 1:
+            return [{"kind": "monthly", "day": next(iter(days)), **clock}]
+
+    if (day_of_month, month, day_of_week) == ("*", "*", "*"):
+        step = _INTERVAL_MINUTE.fullmatch(minute)
+        if step and hour == "*" and 60 % int(step.group(1)) == 0:
+            return [{"kind": "interval", "minutes": int(step.group(1)),
+                     "anchor_minute": 0}]
+        if len(minutes) == 1 and hour == "*":
+            return [{"kind": "interval", "minutes": 60,
+                     "anchor_minute": next(iter(minutes))}]
+
+    return [_covering_interval(minutes)]
+
+
+def _covering_interval(minutes: set[int]) -> dict[str, object]:
+    """A repetition whose fires include every minute in *minutes*.
+
+    The step is the largest one that still lands on all of them: the
+    greatest common divisor of their offsets from the earliest, folded
+    against the hour so the repetition keeps its phase across hours.
+    A wider expression costs more declined fires, never a missed one.
+    """
+    anchor = min(minutes)
+    step = 60
+    for value in minutes:
+        step = gcd(step, value - anchor)
+    return {"kind": "interval", "minutes": step, "anchor_minute": anchor % step}
+
 
 
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
@@ -301,7 +343,7 @@ def _boundary(trigger: dict[str, object], now: datetime) -> str:
     a past anchor would run the agent once the moment it is registered.
     """
     start = now.replace(second=0, microsecond=0)
-    if trigger["kind"] == "daily":
+    if trigger["kind"] in ("daily", "weekly", "monthly"):
         start = start.replace(hour=int(trigger["hour"]),
                               minute=int(trigger["minute"]))
         if start <= now:
@@ -327,10 +369,15 @@ def _child(parent: ET.Element, tag: str, text: str | None = None) -> ET.Element:
 
 
 def _append_trigger(parent: ET.Element, trigger: dict[str, object],
-                    now: datetime) -> None:
+                    now: datetime, user_id: str) -> None:
     if trigger["kind"] == "boot":
-        element = _child(parent, "BootTrigger")
+        # A BootTrigger needs elevation to register, which a user-scoped
+        # tool does not have and should not ask for. Logon is the closer
+        # match anyway: the task runs with an interactive token, so a
+        # session is what it actually needs (docs/windows-support.md).
+        element = _child(parent, "LogonTrigger")
         _child(element, "Enabled", "true")
+        _child(element, "UserId", user_id)
         return
     if trigger["kind"] == "daily":
         element = _child(parent, "CalendarTrigger")
@@ -338,6 +385,26 @@ def _append_trigger(parent: ET.Element, trigger: dict[str, object],
         _child(element, "Enabled", "true")
         schedule = _child(element, "ScheduleByDay")
         _child(schedule, "DaysInterval", "1")
+        return
+    if trigger["kind"] == "weekly":
+        element = _child(parent, "CalendarTrigger")
+        _child(element, "StartBoundary", _boundary(trigger, now))
+        _child(element, "Enabled", "true")
+        schedule = _child(element, "ScheduleByWeek")
+        days = _child(schedule, "DaysOfWeek")
+        _child(days, _WEEKDAY_ELEMENTS[int(trigger["weekday"])])
+        _child(schedule, "WeeksInterval", "1")
+        return
+    if trigger["kind"] == "monthly":
+        element = _child(parent, "CalendarTrigger")
+        _child(element, "StartBoundary", _boundary(trigger, now))
+        _child(element, "Enabled", "true")
+        schedule = _child(element, "ScheduleByMonth")
+        days = _child(schedule, "DaysOfMonth")
+        _child(days, "Day", str(int(trigger["day"])))
+        months = _child(schedule, "Months")
+        for name in _MONTH_ELEMENTS:
+            _child(months, name)
         return
     element = _child(parent, "TimeTrigger")
     _child(element, "StartBoundary", _boundary(trigger, now))
@@ -367,7 +434,7 @@ def build_task_xml(*, command: str, arguments: str, working_dir: str,
     trigger_parent = _child(task, "Triggers")
     for schedule in schedules:
         for trigger in translate(schedule):
-            _append_trigger(trigger_parent, trigger, now)
+            _append_trigger(trigger_parent, trigger, now, user_id)
 
     principals = _child(task, "Principals")
     principal = ET.SubElement(principals, f"{{{_NS}}}Principal", {"id": "Author"})
@@ -510,11 +577,14 @@ def _is_ours(document: str, root: Path | str) -> bool:
 
 
 def install(spec: triggers.TriggerSpec) -> str:
-    """Register *spec* as this host's task for one agent.
+    """Register *spec* as this host's tasks for one agent.
 
     Returns a one-line description of what was registered, for the same
     reason the crontab path returns the line it wrote: the developer
-    should see the thing that will run.
+    should see the thing that will run. An agent with both clock and
+    ``@reboot`` schedules gets two tasks; one that loses a kind of
+    schedule loses the matching task in the same call, so the store
+    never keeps a trigger the agent no longer declares.
     """
     if spec.kind != triggers.SCHEDULE:
         raise TaskError(f"cannot register a {spec.kind} trigger as a task")
@@ -522,9 +592,23 @@ def install(spec: triggers.TriggerSpec) -> str:
     if not Path(command).is_absolute():
         raise TaskError(
             f"a task must name a fully qualified executable, not '{command}'")
-    arguments = argument_string(spec.command[1:])
-    path = task_path(spec.root, spec.name)
+    boot = [s for s in spec.schedules if s.strip() == triggers.BOOT]
+    clock = [s for s in spec.schedules if s.strip() != triggers.BOOT]
+    lines = []
+    for schedules, is_boot in ((clock, False), (boot, True)):
+        if not schedules:
+            _delete(spec.root, spec.name, boot=is_boot)
+            continue
+        arguments = argument_string(
+            list(spec.command[1:]) + (["--boot"] if is_boot else []))
+        lines.append(_register(spec, command, arguments, schedules,
+                               boot=is_boot))
+    return "; ".join(lines)
 
+
+def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
+              schedules: Sequence[str], *, boot: bool) -> str:
+    path = task_path(spec.root, spec.name, boot=boot)
     existing = read_definition(path)
     if existing is not None and not _is_ours(existing, spec.root):
         raise TaskNotOurs(
@@ -533,7 +617,7 @@ def install(spec: triggers.TriggerSpec) -> str:
 
     document = build_task_xml(
         command=command, arguments=arguments, working_dir=str(spec.root),
-        schedules=spec.schedules,
+        schedules=schedules,
         description=f"Agents Live: run agent '{spec.name}' in {spec.root}",
         uri=path, user_id=current_user_id())
     handle, xml_file = tempfile.mkstemp(suffix=".xml", prefix="agents-live-task-")
@@ -552,9 +636,8 @@ def install(spec: triggers.TriggerSpec) -> str:
     return f"{path}: {command} {arguments}".rstrip()
 
 
-def remove(root: Path | str, agent: str) -> bool:
-    """Delete *agent*'s task, if one this tool owns is registered."""
-    path = task_path(root, agent)
+def _delete(root: Path | str, agent: str, *, boot: bool) -> bool:
+    path = task_path(root, agent, boot=boot)
     existing = read_definition(path)
     if existing is None:
         return False
@@ -568,15 +651,26 @@ def remove(root: Path | str, agent: str) -> bool:
     return True
 
 
+def remove(root: Path | str, agent: str) -> bool:
+    """Delete *agent*'s tasks, clock and startup alike."""
+    removed = _delete(root, agent, boot=False)
+    return _delete(root, agent, boot=True) or removed
+
+
 def is_active(root: Path | str, agent: str) -> bool | None:
-    """True if *agent*'s task is registered, None if nothing can be read."""
-    try:
-        existing = read_definition(task_path(root, agent))
-    except TaskSchedulerUnavailable:
-        return None
-    if existing is None:
-        return False
-    return _is_ours(existing, root)
+    """True if *agent* has a task registered, None if nothing reads.
+
+    Either task counts: an agent scheduled only for startup is as
+    active as one scheduled by the clock.
+    """
+    answers = []
+    for boot in (False, True):
+        try:
+            existing = read_definition(task_path(root, agent, boot=boot))
+        except TaskSchedulerUnavailable:
+            return None
+        answers.append(existing is not None and _is_ours(existing, root))
+    return any(answers)
 
 
 def installed_names(root: Path | str) -> list[str]:
@@ -596,6 +690,7 @@ def installed_names(root: Path | str) -> list[str]:
             continue
         leaf = row[0].rsplit("\\", 1)[-1]
         agent = agent_of_task_name(leaf, root)
-        if agent:
+        # An agent with both a clock and a startup task is one agent.
+        if agent and agent not in names:
             names.append(agent)
     return names

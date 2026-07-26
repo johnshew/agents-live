@@ -16,9 +16,11 @@ activation's.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
-from . import headless, hostruntime, triggers, wintasks
+from . import headless, hostruntime, paths, triggers, wintasks
 
 
 def install(spec: triggers.TriggerSpec) -> str:
@@ -71,6 +73,49 @@ def installed_names() -> list[str]:
 
 def _root() -> Path:
     return headless.repo_root()
+
+
+def claim_due_minute(name: str, schedules: Sequence[str],
+                     *, moment: datetime | None = None) -> bool:
+    """Whether this wake of *name* is a real firing time, claiming it.
+
+    Cron fires only at firing times, so on POSIX the answer is always
+    yes. A native trigger is allowed to be coarser than the expression
+    it came from, so on Windows this is the predicate that makes the
+    coarseness safe: it asks whether any of the agent's expressions
+    names this minute, and it claims the minute so a repetition that
+    fires twice inside one matching minute still runs the agent once.
+
+    A predicate, not a scheduler: one question about one moment. Missed
+    starts, catch-up after sleep, and daylight-saving folds stay with
+    Task Scheduler, which is the only component that knows about them.
+    """
+    if hostruntime.native_scheduler() != hostruntime.TASK_SCHEDULER:
+        return True
+    moment = (moment or datetime.now()).replace(second=0, microsecond=0)
+    if not any(triggers.schedule_matches(expression, moment)
+               for expression in schedules
+               if expression.strip() != triggers.BOOT):
+        return False
+    stamp = moment.strftime("%Y-%m-%dT%H:%M")
+    marker = _due_marker(name)
+    try:
+        if marker.read_text(encoding="utf-8").strip() == stamp:
+            return False
+    except OSError:
+        pass
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(stamp, encoding="utf-8")
+    except OSError:
+        # A run that cannot record itself still ran; the only thing lost
+        # is the guard against a second fire inside the same minute.
+        pass
+    return True
+
+
+def _due_marker(name: str) -> Path:
+    return paths.repo_state_dir(_root()) / "last-fired" / f"{name}.txt"
 
 
 def _windows(action):

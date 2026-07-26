@@ -431,11 +431,14 @@ back and compare the registered task definition.
 
 ### What registration looks like today
 
-Step 9 landed the registration half of this design.
+Steps 9 and 10 landed this design.
 [wintasks.py](../src/agents_live/wintasks.py) builds and registers task
 definitions; [schedules.py](../src/agents_live/schedules.py) is the one
 place that chooses between crontab and Task Scheduler, so `activate`,
-`stop`, `status`, and `smoketest` no longer name a mechanism.
+`stop`, `status`, and `smoketest` no longer name a mechanism; and
+reading a cron expression lives in
+[triggers.py](../src/agents_live/triggers.py), with the schedule
+language rather than with either dispatch mechanism.
 
 A task is named `<agent>@<digest>`, where the digest covers the
 repository root, and lives in the `\AgentsLive` folder of the task
@@ -446,11 +449,17 @@ checked: the action has to be an `agents-live` command whose working
 directory is that repository, and a definition that does not decode or
 does not parse fails the check rather than passing it.
 
-Translation is exact-only so far. `*/N * * * *` where N divides 60,
-`M * * * *`, `M H * * *`, and `@reboot` register native triggers;
-everything else is refused with a message naming the step that will
-accept it. Refusing is honest while the dueness predicate that makes
-coarse triggers safe does not exist; step 10 removes the refusal.
+Calendar schedules register as calendar triggers, daily, weekly, or
+monthly. Everything else registers as a repetition whose step covers
+every minute the expression can name, and `claim_due_minute` declines
+the fires that are not firing times. No valid expression is refused;
+an unreadable one is.
+
+An agent's `@reboot` schedules register as a second task with a `.boot`
+suffix. One task carries one action, and its action carries `--boot`,
+which is how a startup fire is told apart from a clock fire: the first
+is exact and asks nothing, the second has to be checked.
+
 
 ### Watchers are started by Task Scheduler, not scheduled by it
 
@@ -833,6 +842,69 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-26: the coarse trigger is a repetition on a divisor of the hour
+
+The superset rule turned out to be one line. Take the minutes of the
+hour an expression can name, take the greatest common divisor of their
+offsets from the earliest, fold it against 60 so the repetition keeps
+its phase from hour to hour, and repeat on that step. Every minute the
+expression names is covered, the step is the widest one that covers
+them, and nothing about the other four fields has to be modelled at all
+because the dueness predicate reads the whole expression anyway.
+
+`*/7` is the honest illustration: seven does not divide sixty, cron
+restarts the step every hour, so the covering step is one minute. That
+schedule costs sixty process starts an hour to run at most nine times,
+which is the price of coarseness and an argument for keeping supersets
+tight, not for refusing the expression.
+
+Reading cron expressions moved into `triggers.py`, next to the schedule
+vocabulary rather than beside either dispatch mechanism. The predicate
+is not a Windows concept; it is what a crontab already does for us on
+the other host.
+
+### 2026-07-26: dueness claims the minute, and claims nothing else
+
+`claim_due_minute` answers one question about one moment and writes one
+file: the minute it just allowed, per agent, under the repository state
+directory. A repetition that fires twice inside a matching minute
+therefore runs the agent once.
+
+What it deliberately does not do is anything a scheduler does. There is
+no run queue, no catch-up policy, no drift compensation, and no memory
+beyond the last allowed minute. Missed starts after sleep,
+daylight-saving folds and gaps, and restart behavior stay with Task
+Scheduler, which is the only component that knows about them. A run
+that cannot write its marker still runs; the only thing lost is the
+same-minute guard, which is a smaller failure than declining a real
+firing time.
+
+On a crontab host the predicate returns true without looking at
+anything. Cron fires only at firing times, and asking again would be a
+way to disagree with it rather than a safeguard.
+
+### 2026-07-26: `@reboot` is a logon trigger in a task of its own
+
+Two findings, one from the design and one from the machine.
+
+A task carries one action, and the dueness check has to treat a startup
+fire differently from a clock fire: the startup trigger is exact, while
+the repetition is not. Rather than infer which trigger fired, an
+agent's `@reboot` schedules register as a separate task whose action
+carries `--boot`. The task name gets a `.boot` suffix, and enumeration,
+ownership, and removal read through it, so one agent stays one agent
+everywhere above the task store.
+
+Then registration failed with "Access is denied". A `BootTrigger`
+requires elevation, which a user-scoped tool does not have and should
+not ask for. A `LogonTrigger` for the owning user registers without it,
+and it is the closer match regardless: the task runs with an
+interactive token, so what it actually needs is a session, not a boot.
+The observable difference is that an agent resumes when the developer
+logs on rather than when the machine powers up, which for a tool that
+runs a developer's agents in a developer's session is the behavior
+`@reboot` was standing in for.
 
 ### 2026-07-26: scheduling dispatches through one module, not a runtime object
 

@@ -54,6 +54,7 @@ from .headless import (
 
 from . import ownership
 from . import preflight
+from . import schedules
 
 
 def _parse_put_fences(prompt_path: Path) -> list[tuple[str, object]]:
@@ -134,6 +135,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
     parser.add_argument("--changed-files", help="JSON array of changed file paths")
+    parser.add_argument("--boot", action="store_true",
+                        help="this run came from a startup trigger")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -161,6 +164,18 @@ def main() -> int:
         ensure_logs_dir()
         trigger = "file-change" if changed_files else "cron" if config.schedule else "manual"
         os.environ["AGENTS_LIVE_TRIGGER"] = trigger
+
+        # --- Dueness ----------------------------------------------------------
+        # A native trigger may be coarser than the expression it came
+        # from, so a clock fire has to be checked before it becomes a run
+        # (docs/windows-support.md, Scheduling on Windows). A startup
+        # fire is exact and asks nothing. On a crontab host this is
+        # always true, and nothing about the POSIX path changes.
+        if (trigger == "cron" and not args.boot
+                and not schedules.claim_due_minute(config.name, config.schedule)):
+            slog.event(level="info", phase="skip", status="not-due",
+                       trigger=trigger)
+            return 0
 
         # --- Pre-dispatch ownership check -------------------------------------
         # Local-only mode (no registry, proposal §3.9): everything runs here.

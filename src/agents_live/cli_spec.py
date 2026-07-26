@@ -63,6 +63,7 @@ COMMANDS = (
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
+            Arg(("--boot",), "This run came from a startup trigger."),
             Arg(("--quiet",), "Suppress progress output."),
         ),
     ),

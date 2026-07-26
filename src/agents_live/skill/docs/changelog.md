@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: accept every schedule on native Windows, and run agents only when
+  they are due. (#126)
+  Schedules that do not map exactly onto a Task Scheduler trigger now
+  register as a repetition that covers every minute they can name, and each
+  fire is checked against the expression before it becomes a run, so an
+  agent runs when its schedule says and no more often. Calendar schedules
+  register as daily, weekly, or monthly triggers. `@reboot` registers as a
+  logon trigger in a task of its own, since a startup trigger needs
+  elevation. Linux and WSL behavior is unchanged.
 - feat: schedule an agent with Task Scheduler on native Windows. (#126)
   Activation registers one task per agent, named for the agent and its
   repository so two checkouts never collide, and verifies the task it wrote
