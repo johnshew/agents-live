@@ -6251,7 +6251,8 @@ class TestReleaseTool(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._fixture(module, Path(tmp))
             expected = "\n".join(
-                str(path.relative_to(module.ROOT)) for path in module.RELEASE_FILES)
+                path.relative_to(module.ROOT).as_posix()
+                for path in module.RELEASE_FILES)
 
             def git_result(*args):
                 values = {

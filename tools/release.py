@@ -486,7 +486,7 @@ def _check_publish_state(version: str) -> bool:
         raise ReleaseError(f"annotated tag {tag} is missing") from exc
     if tag_commit != head:
         raise ReleaseError(f"tag {tag} must point to HEAD")
-    expected = {str(path.relative_to(ROOT)) for path in RELEASE_FILES}
+    expected = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
     changed = set(_git("diff", "--name-only", "HEAD^..HEAD").splitlines())
     if changed != expected:
         raise ReleaseError(
@@ -498,7 +498,7 @@ def _check_publish_state(version: str) -> bool:
 
 def _check_release_diff() -> None:
     changed = set(_git("diff", "--name-only").splitlines())
-    expected = {str(path.relative_to(ROOT)) for path in RELEASE_FILES}
+    expected = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
     if changed != expected:
         raise ReleaseError(
             "version bump changed an unexpected file set: "
