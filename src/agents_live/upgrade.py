@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, init, paths, plugins, preflight, repos
+from . import __version__, adminlog, init, paths, plugins, preflight, repos
 from .spawn import find_uv
 
 
@@ -69,19 +69,28 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     except FileNotFoundError as exc:
         preflight.emit_failure("upgrade", str(exc))
         return 1
-    # The upgrade rewrites this tool's own executables, and on Windows
-    # one of them is the running process.
-    with plugins.replaceable_entrypoints():
-        status = subprocess.run(
-            [uv, "tool", "upgrade", "agents-live"], check=False,
-        ).returncode
-    if status != 0:
-        return status
-    try:
-        plugins.converge(roots or [])
-    except (OSError, ValueError, plugins.PluginError) as exc:
-        preflight.emit_failure("upgrade", str(exc))
-        return 1
+    with adminlog.operation("upgrade-runtime",
+                            version_before=__version__) as end:
+        # The upgrade rewrites this tool's own executables, and on
+        # Windows one of them is the running process.
+        with plugins.replaceable_entrypoints():
+            status = subprocess.run(
+                [uv, "tool", "upgrade", "agents-live"], check=False,
+            ).returncode
+        if status != 0:
+            end["status"] = "error"
+            end["level"] = "error"
+            end["message"] = f"uv tool upgrade exited {status}"
+            return status
+        try:
+            plugins.converge(roots or [], trigger="upgrade", pin_primary=False)
+        except (OSError, ValueError, plugins.PluginError) as exc:
+            end["status"] = "error"
+            end["level"] = "error"
+            end["message"] = str(exc)
+            preflight.emit_failure("upgrade", str(exc))
+            return 1
+        end["version_after"] = plugins.installed_version()
     return 0
 
 

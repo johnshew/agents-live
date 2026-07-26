@@ -818,7 +818,8 @@ def run_host_loop(quiet: bool) -> int:
     # co-installed plugins, and with ownership = "registry" a missing
     # backend degrades every sweep, so this hourly pass is the safety net.
     try:
-        if plugins.converge([root for _, root in targets]):
+        if plugins.converge([root for _, root in targets],
+                            trigger="health-check"):
             msg = "converged declared plugin wheel(s) into the tool environment"
             _err(msg)
             events.append({"level": "info", "phase": "ensure-framework",

@@ -38,6 +38,30 @@ history is retained in the source repository.
   from 32s to 2.2s and the dashboard from never finishing to interactive
   in 2.3s.
 
+- feat: administrative operations are logged, not just agent runs. (#164)
+  Logging recorded what agents did and nothing about how the host was
+  changed, so a plugin install, an ownership transfer, a schedule teardown,
+  or a version move left no trace anywhere and `agents-live logs` had
+  nothing to show. Every module that mutates host state now writes to a
+  host-scoped `admin.log` next to the health-check loop's own log, which
+  `logs` and `logs timeline` already union in. Administrative events are
+  not agents: they carry `scope: "host"` and the pseudo-agent name `admin`,
+  so readers that group by `agent_name` keep working while a query can
+  still separate administration from agent activity. Each event records the
+  invoking command and whether a terminal was attached, so an operation
+  traces back to a cron entry, a CLI invocation, or an agent. Writing is
+  best-effort and never fails the operation it records.
+
+- fix: plugin convergence no longer upgrades the tool as a side effect.
+  (#163) The uv receipt records `agents-live` as a bare name, so the
+  `uv tool install --force` that convergence runs resolved to whatever was
+  newest on PyPI. Since registration converges, `repos add` and
+  `repos default` could move a host to a new version as a side effect of
+  registering a directory, silently and with nothing recorded. Convergence
+  now pins the primary requirement to the running version; `upgrade`, which
+  resolves a new release on purpose, is the only caller that opts out and
+  so remains the way to change versions.
+
 ## 5.1.0 - 2026-07-26
 
 - feat: `repos add` registers a repository from the CLI. (#159)

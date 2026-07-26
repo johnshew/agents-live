@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
-from . import paths
+from . import __version__, adminlog, paths
 from .spawn import find_uv
 
 # Kernel extension points a declared distribution must provide.
@@ -250,7 +250,26 @@ def _receipt_requirement(requirement: dict) -> str:
     return name
 
 
-def _receipt_requirements() -> tuple[
+def _pinned_primary(
+        requirement: dict, parsed: ReceiptRequirement) -> ReceiptRequirement:
+    """Pin an unconstrained ``agents-live`` requirement to the running version.
+
+    The uv receipt records the tool as a bare name, so ``uv tool install
+    --force agents-live`` resolves to whatever is newest on PyPI: convergence
+    would silently upgrade the kernel as a side effect of installing a plugin.
+    Convergence changes plugins; `agents-live upgrade` changes versions.
+    A requirement that already names a source or a specifier is left alone.
+    """
+    if parsed.editable or any(
+            field in requirement
+            for field in ("path", "directory", "url", "git")):
+        return parsed
+    if requirement.get("specifier") or requirement.get("marker"):
+        return parsed
+    return replace(parsed, value=f"{parsed.value}=={__version__}")
+
+
+def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
         ReceiptRequirement, dict[str, ReceiptRequirement]]:
     receipt = _receipt_path()
     if receipt is None:
@@ -276,7 +295,8 @@ def _receipt_requirements() -> tuple[
             editable=bool(requirement.get("editable", False)),
         )
         if _canonical(name) == "agents-live":
-            primary = parsed
+            primary = (
+                _pinned_primary(requirement, parsed) if pin_primary else parsed)
         else:
             result[_canonical(name)] = parsed
     if primary is None:
@@ -423,10 +443,15 @@ def _restore(moved: list[tuple[Path, Path]]) -> None:
             continue
 
 
-def converge(roots: list[Path]) -> bool:
+def converge(roots: list[Path], *, trigger: str = "unspecified",
+             pin_primary: bool = True) -> bool:
     """Converge the host-global uv tool environment.
 
     Return True when plugins were installed and False when already converged.
+
+    ``pin_primary`` keeps convergence from moving the agents-live version;
+    only ``upgrade``, which has just resolved a new release on purpose, passes
+    False.
     """
     declarations = union(roots, require_exists=False)
     # Pending detection deliberately skips artifact hashing: when every
@@ -452,7 +477,7 @@ def converge(roots: list[Path]) -> bool:
         integrity_error = _integrity_error(plugin)
         if integrity_error:
             raise PluginError(integrity_error)
-    primary, requirements = _receipt_requirements()
+    primary, requirements = _receipt_requirements(pin_primary=pin_primary)
     requirements.update({
         key: ReceiptRequirement(str(plugin.path))
         for key, plugin in declarations.items()
@@ -470,10 +495,35 @@ def converge(roots: list[Path]) -> bool:
         # --with-editable option used for co-installed requirements.
         flag = "--with-editable" if requirement.editable else "--with"
         command.extend([flag, requirement.value])
-    with replaceable_entrypoints():
-        completed = subprocess.run(command, check=False)
-    if completed.returncode:
-        raise PluginError(
-            f"plugin convergence failed with exit code {completed.returncode}; "
-            "run `agents-live upgrade` to retry")
+    with adminlog.operation(
+            "plugin-converge",
+            trigger=trigger,
+            version_before=__version__,
+            primary=primary.value,
+            plugins=sorted(
+                f"{plugin.name}=={plugin.version}" if plugin.version
+                else plugin.name for plugin in declarations.values()),
+            pending=sorted(plugin.name for plugin in pending.values()),
+    ) as end:
+        with replaceable_entrypoints():
+            completed = subprocess.run(command, check=False)
+        if completed.returncode:
+            raise PluginError(
+                f"plugin convergence failed with exit code {completed.returncode}; "
+                "run `agents-live upgrade` to retry")
+        end["version_after"] = installed_version()
     return True
+
+
+def installed_version() -> str:
+    """The agents-live version present in the tool environment right now.
+
+    Read back from installed metadata rather than assumed: after a
+    convergence or upgrade the running process still holds the old code, so
+    ``__version__`` reports the version that started the command, not the one
+    left behind on disk.
+    """
+    try:
+        return importlib.metadata.version("agents-live")
+    except importlib.metadata.PackageNotFoundError:
+        return __version__

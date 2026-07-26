@@ -34,6 +34,39 @@ the host-level logs.
 |-----|------|-------------------|
 | `logs/agents-live.log` | runtime | **Every** agent's lifecycle: `watcher` debounce batches, `activate`, `start`, `done` with `status`, `duration_s`, `trigger`, `changed_files`. The join point for all diagnostics. |
 | `~/.local/state/agents-live/logs/health-check.log` | host-level | The built-in check-and-repair loop: per-repo sweep results, smoketest gating, beacon writes. |
+| `~/.local/state/agents-live/logs/admin.log` | host-level | Administrative operations: what changed this host and when. See "Administrative events" below. |
+
+### Administrative events
+
+The logs above record what agents *do*. `admin.log` records how the system
+was *changed*: plugin convergence, tool upgrade, repository registration and
+removal, ownership claims and transfers, schedule and watcher registration
+and teardown, `init`, trigger migration, and `uninstall`. These are the
+changes that later explain surprising behavior, so start here when an agent
+stopped firing, started firing twice, or the tool is not the version you
+expected.
+
+Administrative events are not agents. Each one carries `scope: "host"`, the
+pseudo-agent name `admin`, the phase `admin`, an `operation` naming the verb,
+the invoking `command`, and `interactive` (whether a terminal was attached).
+Read them with `--all`, which unions the host log directory:
+
+```bash
+# Everything that changed this host in the last day
+agents-live logs --all --since 1d \
+  --sql "select ts, operation, status, command from logs \
+         where scope = 'host' order by ts"
+
+# Who moved an agent between hosts, and from where
+agents-live logs --all \
+  --sql "select ts, agent, owner_from, owner_to, runtime from logs \
+         where operation = 'ownership-set' order by ts"
+
+# Version changes, including any convergence that caused one
+agents-live logs --all \
+  --sql "select ts, operation, trigger, version_before, version_after \
+         from logs where version_after is not null order by ts"
+```
 
 ### Per-agent logs (domain work)
 
@@ -169,7 +202,9 @@ stale `_smoketest-*` resources before setup.
   identical atomic-write.
 - `agents-live.log` has **multiple agents interleaved**. Filter by
   `--agent` or `"agent_name":"<name>"`.
-- **Every log entry has an `agent_name` field.**
+- **Every log entry has an `agent_name` field.** Administrative events use
+  the pseudo-agent `admin` and carry `scope: "host"`; filter on `scope` to
+  separate host administration from agent activity.
 - **Schema version.** Entries carry `log_schema: <int>` (current: 5).
   If a query reports a type mismatch across log generations, fix the data
   rather than weakening the query. See [commands.md](commands.md) "Schema

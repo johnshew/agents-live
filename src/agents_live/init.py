@@ -39,7 +39,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from . import (
-    completions, health_check, heartbeat, paths, plugins, preflight, repos)
+    adminlog, completions, health_check, heartbeat, paths, plugins, preflight,
+    repos)
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -262,11 +263,13 @@ def main() -> int:
         print(f"Initialized {paths.CONFIG_DOTFILE} (project root: {root})")
     else:
         print(f"{paths.config_source(root)} already up to date")
+    adminlog.record("init", root=str(root), created=created,
+                    global_created=global_created)
     try:
         plugin_roots = [global_root]
         plugin_roots.extend(
             Path(value) for _, value, error in repos.entries() if error is None)
-        if plugins.converge(list(dict.fromkeys(plugin_roots))):
+        if plugins.converge(list(dict.fromkeys(plugin_roots)), trigger="init"):
             print("Converged declared plugins in the agents-live tool environment")
     except (OSError, ValueError, plugins.PluginError) as exc:
         preflight.emit_failure("init", f"plugin convergence failed: {exc}")
