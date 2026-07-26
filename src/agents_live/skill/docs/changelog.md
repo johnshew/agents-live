@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.0.1 - 2026-07-26
+
 - fix: the dashboard no longer crashes on an agent owned elsewhere. (#157)
   Building the agent table read a `host` name that only existed inside the
   page builder, so every launch raised `NameError` as soon as one agent was
