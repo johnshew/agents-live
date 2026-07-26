@@ -371,6 +371,13 @@ def watch_loop(name: str) -> int:
                 changed_files.extend(_accept(raw_events))
 
             relative_files = list(dict.fromkeys(changed_files))
+            relative_files, omitted = watchpolicy.bound_batch(relative_files)
+            if omitted:
+                log_event(config.agent_log, level="warning", phase="watcher",
+                          message=(f"batch capped at "
+                                   f"{watchpolicy.BATCH_FILE_LIMIT} files; "
+                                   f"{omitted} further changed files are "
+                                   f"not named in this dispatch"))
             # Content-hash cascade guard: drop individual files whose
             # content hasn't changed since the last dispatch for this agent.
             cached = _load_watch_hashes(name)

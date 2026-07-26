@@ -301,6 +301,37 @@ def _trigger_inconsistencies() -> tuple[list[str], list[str]] | None:
     return _crontab_inconsistencies()
 
 
+def _task_session_requirement() -> tuple[bool, str] | None:
+    """Whether every registered task still needs a signed-in session.
+
+    A task store runs an agent in the owner's session and only while
+    that owner is signed in. That is a real limit on when agents run, so
+    the check states it whether or not anything is wrong, and fails when
+    a task has been given a different logon type by hand - which changes
+    what the task may do and what credentials it does it with.
+
+    Only the logon type is compared. The store rewrites the user it was
+    given as a SID, so the name this tool wrote and the name it reads
+    back are never the same string even when they are the same person.
+    """
+    if hostruntime.native_scheduler() != hostruntime.TASK_SCHEDULER:
+        return None
+    from . import wintasks  # noqa: PLC0415
+
+    try:
+        tasks = wintasks.registered_tasks()
+    except Exception:
+        return None
+    wrong = sorted(task["name"] for task in tasks
+                   if task.get("principal") is not None
+                   and task["principal"][1] != wintasks.LOGON_TYPE)
+    if wrong:
+        return False, ("registered with another logon type: "
+                       + ", ".join(wrong))
+    return True, (f"{len(tasks)} task(s) run with an interactive token; "
+                  "nothing scheduled runs while nobody is signed in")
+
+
 def _task_inconsistencies() -> tuple[list[str], list[str]] | None:
     """The registered-task form of :func:`_trigger_inconsistencies`."""
     if REPO is None:
@@ -707,6 +738,14 @@ def collect() -> list[dict]:
                 "remove tasks from a moved or deleted project root by hand "
                 "in Task Scheduler"),
             note=note or "no orphaned or stale entries")
+
+    session = _task_session_requirement()
+    if session is not None:
+        ok, session_note = session
+        add("scheduled tasks need a signed-in session", ok, False,
+            "re-register with `agents-live start --name <agent>`; a task "
+            "given another logon type by hand no longer runs as you",
+            note=session_note)
 
     # Watcher self-heal coverage (commands.md check 13): a running watcher
     # without its @reboot respawn line is invisible to both reboot restore

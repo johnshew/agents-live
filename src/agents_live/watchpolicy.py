@@ -42,6 +42,14 @@ CASCADE_WINDOW_SECS = 120
 FIRE_RATE_WINDOW_SECS = 600
 FIRE_RATE_MAX_DISPATCHES = 40
 
+# How many paths one dispatch may carry. A rescan after an overflow can
+# select two thousand files, and a prompt that lists them all is a
+# prompt no agent reads and a command line some hosts refuse. The cap
+# is far above any batch a person produces, so ordinary editing never
+# meets it; a storm gets a readable prefix and a count of the rest
+# rather than a payload that fails to send.
+BATCH_FILE_LIMIT = 500
+
 
 def should_ignore(changed_file: str | Path, *, root: Path,
                   watch_ignore: Sequence[str] | None = None) -> bool:
@@ -115,6 +123,19 @@ def select_batch(raw_paths: Iterable[str], *, root: Path,
         except ValueError:
             selected.append(raw)
     return list(dict.fromkeys(selected))
+
+
+def bound_batch(paths: Sequence[str],
+                limit: int = BATCH_FILE_LIMIT) -> tuple[list[str], int]:
+    """The paths a dispatch may carry, and how many were left out.
+
+    Truncating with a count is the honest form: the agent is handed a
+    list it can act on, and the caller has a number to log. Silently
+    dropping the tail would leave neither.
+    """
+    if len(paths) <= limit:
+        return list(paths), 0
+    return list(paths[:limit]), len(paths) - limit
 
 
 @dataclass(frozen=True)

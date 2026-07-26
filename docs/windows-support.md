@@ -12,10 +12,13 @@ Windows host, a foreground `agents-live run` now executes an agent end
 to end there, that runtime has an ownership identity of its own, Task
 Scheduler now fires a scheduled agent on a Windows host unattended, a
 watcher agent now dispatches on file changes there through
-`ReadDirectoryChangesW`, and the lifecycle commands around them,
+`ReadDirectoryChangesW`, the lifecycle commands around them,
 `doctor`, `upgrade`, `migrate`, and `uninstall`, now speak to the store
-the host actually keeps. What remains is the rest of the vertical slice
-([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
+the host actually keeps, and the failure paths under all of it are
+bounded and self-announcing
+([#136](https://github.com/johnshew/agents-live/issues/136)). What
+remains is Windows CI and the regression tests
+([#119](https://github.com/johnshew/agents-live/issues/119)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
 decision log at the end.
@@ -867,6 +870,65 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-25: a queue that cannot grow, and a batch that cannot either
+
+The watcher had two unbounded places between the kernel and an agent.
+The queue the reader threads write to had no maximum, so a storm large
+enough to outrun the loop grew it until the machine ran out of memory;
+and a batch selected by policy had no maximum either, so a rescan could
+hand an agent two thousand file names in one prompt.
+
+Both are bounded now, and both bounds degrade to something already in
+the design rather than to a new behavior. A queue that is full drops the
+event and records the drop, which the source then treats exactly as it
+treats a kernel buffer overflow: one bounded rescan of the watched
+directories, a superset of what was lost. A batch past its limit is cut
+and the number left out is logged.
+
+The reader never blocks waiting for room. Blocking looks like the safer
+choice and is the worse one: a reader parked on a full queue has stopped
+calling `ReadDirectoryChangesW`, and records that arrive with no read
+pending are dropped by the kernel anyway. Blocking would lose the same
+events and hide the loss.
+
+### 2026-07-25: registration verifies what the store kept, not that it kept something
+
+Registering a task wrote a definition and read it back to prove the
+write landed. That proved a task exists, not that it is the right one.
+The read-back now has to match the action that was asked for and fire on
+the schedule that was asked for.
+
+This is where an update interrupted partway through becomes visible, and
+it is also where the class of bug that produced the `PT60M` loop gets
+caught: a schedule this tool can write but cannot read back as the same
+thing used to look like a clean registration that every later
+maintenance pass rewrote, forever. Failing at the moment of writing
+costs one loud error instead of an invisible rewrite every fifteen
+minutes.
+
+Installation also registers before it removes. An agent whose set of
+schedules changes needs both a write and a delete, and an interruption
+between them leaves the store holding one side. Registering first means
+the surviving state is an extra task, which is visible and converges on
+the next pass; deleting first means the surviving state is an agent with
+no trigger at all, which is silence.
+
+### 2026-07-25: a scheduled run needs somebody signed in, and says so
+
+Tasks are registered with an interactive token, which is what makes a
+scheduled agent behave like a cron job the developer started: their
+environment, their credentials, their agent CLI logins. The price is
+that nothing runs while the machine sits at the sign-in screen. Running
+logged off means stored credentials or S4U, a different security posture
+than the one in the security model above, and still not this one.
+
+The limit is now stated by `doctor` rather than left to be discovered
+from a run that never happened, and the same check fails when a task has
+been given a different logon type by hand. It compares only the logon
+type: the store rewrites the user it was given as a SID, so the name
+written and the name read back are never the same string even when they
+name the same person.
 
 ### 2026-07-26: a task action names a program that has no window
 

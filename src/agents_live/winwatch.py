@@ -63,6 +63,15 @@ _BUFFER_BYTES = 64 * 1024
 # unbounded directory walk would make things worse.
 RESCAN_FILE_LIMIT = 2000
 
+# How many events may wait to be read. The reader threads produce as
+# fast as the kernel reports; the loop consumes only between debounce
+# windows and agent runs. An unbounded queue turns that gap into
+# unbounded memory, and a watcher that survives a storm by exhausting
+# the machine has not survived it. Past the bound, events are dropped
+# and the drop is recorded, which degrades to the same bounded rescan
+# a kernel buffer overflow does.
+QUEUE_LIMIT = 4096
+
 
 class WatchFailed(RuntimeError):
     """The watch cannot continue: the root went away, or a read failed."""
@@ -103,6 +112,10 @@ class DirectoryWatch:
 
     def __init__(self, directory: Path, sink: queue.Queue) -> None:
         self.directory = directory
+        #: Set when the sink was full and an event was dropped. Read and
+        #: cleared by the source, which then treats this watch as having
+        #: overflowed.
+        self.dropped = threading.Event()
         self._sink = sink
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -148,10 +161,10 @@ class DirectoryWatch:
                 if returned.value == 0:
                     # The kernel had more changes than the buffer could
                     # hold. What they were is unrecoverable; say so.
-                    self._sink.put(("overflow", str(self.directory)))
+                    self._offer("overflow", str(self.directory))
                     continue
                 for name in _records(buffer):
-                    self._sink.put(("path", str(self.directory / name)))
+                    self._offer("path", str(self.directory / name))
         finally:
             k32.CloseHandle(event)
             k32.CloseHandle(handle)
@@ -173,8 +186,25 @@ class DirectoryWatch:
                 k32.WaitForSingleObject(event, 1000)
                 return False
 
+    def _offer(self, kind: str, value: str) -> None:
+        """Queue an event, or record that the queue could not take it.
+
+        Never blocks. A blocked reader stops calling
+        ``ReadDirectoryChangesW``, and records that arrive while no read
+        is pending are lost in the kernel - the same loss the bound
+        exists to survive, arrived at by stalling instead. Dropping and
+        remembering is honest and recovers the same way.
+        """
+        try:
+            self._sink.put_nowait((kind, value))
+        except queue.Full:
+            self.dropped.set()
+
     def _fail(self, k32, message: str) -> None:
         code = ctypes.get_last_error()
+        # Blocking, unlike an ordinary event: a terminal failure the loop
+        # never hears about is a watch that has silently stopped
+        # working. The thread is a daemon and is leaving either way.
         self._sink.put(("failed", f"{message} ({self.directory}): error {code}"))
 
     def _open(self, k32):
@@ -239,8 +269,9 @@ class WindowsEventSource:
     def __init__(self, directories) -> None:
         #: What the directory threads put their findings on, as
         #: ``(kind, value)``: a path, an overflowed directory, a
-        #: terminal failure, or the sentinel that ends a wait.
-        self.events: queue.Queue = queue.Queue()
+        #: terminal failure, or the sentinel that ends a wait. Bounded:
+        #: see ``QUEUE_LIMIT``.
+        self.events: queue.Queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self._watches = [DirectoryWatch(Path(d), self.events)
                          for d in directories]
         self._overflowed: set[str] = set()
@@ -260,12 +291,20 @@ class WindowsEventSource:
         try:
             paths.append(self._take(self.events.get(timeout=timeout)))
         except queue.Empty:
-            return []
-        while True:
-            try:
-                paths.append(self._take(self.events.get_nowait()))
-            except queue.Empty:
-                break
+            pass
+        else:
+            while True:
+                try:
+                    paths.append(self._take(self.events.get_nowait()))
+                except queue.Empty:
+                    break
+        # Checked even when nothing was waiting: a drop recorded just
+        # after the last drain would otherwise sit unanswered until some
+        # unrelated change happened to arrive.
+        for watch in self._watches:
+            if watch.dropped.is_set():
+                watch.dropped.clear()
+                self._overflowed.add(str(watch.directory))
         if self._overflowed:
             paths.extend(rescan(sorted(self._overflowed)))
             self._overflowed.clear()
@@ -286,7 +325,12 @@ class WindowsEventSource:
         for watch in self._watches:
             watch.stop()
         # A poll with no debounce window pending waits without a
-        # timeout; the sentinel is what lets a stop reach it.
-        self.events.put(("stopped", ""))
+        # timeout; the sentinel is what lets a stop reach it. A full
+        # queue needs no sentinel - the poll it would wake is already
+        # returning events - and waiting for room would hang the stop.
+        try:
+            self.events.put_nowait(("stopped", ""))
+        except queue.Full:
+            pass
         for watch in self._watches:
             watch.join(2)
