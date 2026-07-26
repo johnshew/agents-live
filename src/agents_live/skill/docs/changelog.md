@@ -6,6 +6,21 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- docs: release notes carry one reconciled list instead of two. (#155)
+  The body concatenated a curated list built from the changelog with
+  GitHub's generated pull-request list, so most changes were stated twice,
+  once by issue and once by pull request, and neither list was a superset:
+  a pull request that landed without a changelog entry appeared only in
+  the generated half. The notes are now built in full from the changelog
+  entries joined to the pull requests merged since the previous tag, and
+  `--generate-notes` is no longer used. A `BREAKING CHANGE:` paragraph is
+  lifted into an `Action required` section ahead of the list rather than
+  left a link away, which is the part of a major release a reader most
+  needs. Rows are annotated `(PR #N fixes #M)`, because GitHub autolinks
+  issues and pull requests identically and a bare number cannot be told
+  apart. `--notes <tag>` previews the rebuilt body for a release that is
+  already published and applies it with `--yes`.
+
 ## 5.0.0 - 2026-07-26
 
 - fix: the last registered repository can be removed. (#144)

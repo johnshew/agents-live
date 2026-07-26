@@ -151,9 +151,16 @@ uv run --script tools/release.py --publish --yes
 
 Publication verifies that the tagged release commit is exactly one commit
 ahead of `origin/main`, reruns every gate, pushes the commit and tag atomically,
-and creates the GitHub release. The release body contains each changelog
-entry's first-line summary, a link to the full changelog at the release tag,
-and GitHub's generated notes. That release triggers trusted publishing to PyPI.
+and creates the GitHub release. The release body is built from two sources
+reconciled into one list: the changelog entries for the version, and the pull
+requests merged since the previous tag joined to them by the issues they
+close. Any `BREAKING CHANGE:` paragraph is lifted into an `Action required`
+section ahead of the list, and each row is annotated `(PR #N fixes #M)` so a
+reader can tell a pull request from an issue. A merged pull request that
+closes an issue no changelog entry mentions is added from its title and
+reported on stderr; one that closes no issue is reported only, since releases
+organized around an umbrella issue would otherwise repeat rows. That release
+triggers trusted publishing to PyPI.
 Wait for the workflow to succeed, verify the exact version with `uvx
 --refresh --index-url https://pypi.org/simple --from
 "agents-live==<version>" agents-live --version`, then run `agents-live upgrade`
@@ -161,6 +168,14 @@ and the installed-tool checks. First confirm that the versioned PyPI JSON
 endpoint returns HTTP 200. JSON can update before the Simple API used by
 resolvers; when JSON succeeds but `uvx` cannot find the version, wait for index
 propagation and retry instead of republishing or changing the tag.
+
+To rebuild the notes on a release that is already published, preview and then
+apply them:
+
+```bash
+uv run --script tools/release.py --notes v5.0.0
+uv run --script tools/release.py --notes v5.0.0 --yes
+```
 
 Use semantic versioning:
 

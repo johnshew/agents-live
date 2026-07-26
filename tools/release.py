@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -13,8 +14,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +27,8 @@ VERSION_FILES = (
     ROOT / "src" / "agents_live" / "skill" / "VERSION",
 )
 CHANGELOG = ROOT / "src" / "agents_live" / "skill" / "docs" / "changelog.md"
+REPO_OWNER = "johnshew"
+REPO_NAME = "agents-live"
 CHANGELOG_URL = (
     "https://github.com/johnshew/agents-live/blob/{tag}/"
     "src/agents_live/skill/docs/changelog.md"
@@ -31,15 +36,15 @@ CHANGELOG_URL = (
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
-GENERATED_COMPARE_RE = re.compile(
-    r"(?m)^\*\*(?:Full Changelog|Diffs)\*\*: "
-    r"(https://github\.com/johnshew/agents-live/compare/(\S+))$"
-)
-CURATED_CHANGELOG_RE = re.compile(
-    r"(?m)^\[Full changelog\]\(https://github\.com/johnshew/agents-live/"
-    r"blob/[^/]+/src/agents_live/skill/docs/changelog\.md\)$\n*"
-)
+COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
 SUMMARY_END_RE = re.compile(r"[.!?](?: \(#\d+(?:, #\d+)*\))?$")
+ISSUE_REFS_RE = re.compile(r"\s*\((#\d+(?:,\s*#\d+)*)\)\s*$")
+COMMIT_TYPE_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?: ")
+MERGE_PR_RE = re.compile(r"^Merge pull request #(\d+) ")
+BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
+# Rows are ordered by what the change is, breaking first; anything with an
+# unrecognised prefix sorts last rather than failing the release.
+TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore")
 
 
 class ReleaseError(RuntimeError):
@@ -119,53 +124,283 @@ def _version_notes(version: str) -> str:
     return notes
 
 
-def _changelog_summaries(notes: str, section: str) -> list[str]:
-    summaries = [line for line in notes.splitlines() if line.startswith("- ")]
-    if not summaries:
+class _Entry(NamedTuple):
+    """One changelog bullet, ready to render as a release-note row."""
+
+    summary: str
+    kind: str
+    breaking: bool
+    issues: tuple[int, ...]
+    migration: str
+
+
+def _issue_refs(line: str) -> tuple[int, ...]:
+    match = ISSUE_REFS_RE.search(line)
+    if match is None:
+        return ()
+    return tuple(int(ref.lstrip("#")) for ref in match.group(1).split(", "))
+
+
+def _summary_text(line: str) -> str:
+    """Strip the bullet marker, trailing issue refs, and the sentence period.
+
+    The changelog needs a standalone sentence; a release-note row reads
+    better with the annotation carrying the references instead.
+    """
+    text = ISSUE_REFS_RE.sub("", line[2:]).rstrip()
+    return text[:-1] if text.endswith(".") else text
+
+
+def _changelog_entries(notes: str, section: str) -> list[_Entry]:
+    blocks: list[list[str]] = []
+    for line in notes.splitlines():
+        if line.startswith("- "):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+    if not blocks:
         raise ReleaseError(f"changelog section {section} has no bullet entries")
-    for summary in summaries:
+
+    entries: list[_Entry] = []
+    for block in blocks:
+        summary = block[0]
         if not SUMMARY_END_RE.search(summary):
             raise ReleaseError(
                 f"changelog section {section} has an incomplete first-line summary: "
                 f"{summary!r}; end the standalone sentence with punctuation"
             )
-    return summaries
+        prefix = COMMIT_TYPE_RE.match(summary[2:])
+        body = "\n".join(line[2:] if line.startswith("  ") else line
+                         for line in block[1:])
+        split = BREAKING_RE.split(body, maxsplit=1)
+        entries.append(_Entry(
+            summary=_summary_text(summary),
+            kind=prefix.group("type") if prefix else "",
+            breaking=bool(prefix and prefix.group("bang")),
+            issues=_issue_refs(summary),
+            migration=split[1].strip() if len(split) > 1 else "",
+        ))
+    return entries
+
+
+def _entry_rank(entry: _Entry) -> int:
+    if entry.breaking or entry.migration:
+        return 0
+    if entry.kind in TYPE_ORDER:
+        return 1 + TYPE_ORDER.index(entry.kind)
+    return 1 + len(TYPE_ORDER)
+
+
+def _reflow(text: str) -> str:
+    """Rewrap prose lifted out of the changelog's own wrapping.
+
+    Hyphen and long-word breaking stay off: these paragraphs carry inline
+    code such as `--transfer-here`, and a wrap inside one renders as a
+    command with a space in it.
+    """
+    return "\n\n".join(
+        textwrap.fill(
+            " ".join(paragraph.split()),
+            width=78,
+            break_on_hyphens=False,
+            break_long_words=False,
+        )
+        for paragraph in text.split("\n\n")
+        if paragraph.strip()
+    )
+
+
+def _previous_tag(tag: str) -> str:
+    """The release this one follows, or empty when it is the first."""
+    try:
+        return _git("describe", "--tags", "--abbrev=0", f"{tag}^")
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def _merged_pulls(base: str, tag: str) -> dict[int, tuple[str, tuple[int, ...]]]:
+    """Map each pull request merged in the range to its title and closed issues.
+
+    The closing issues are only exposed through GraphQL; `gh pr view --json`
+    has no such field. Best effort by design: a lookup that fails leaves the
+    pull requests unannotated rather than blocking a release that is
+    otherwise ready.
+    """
+    if not base:
+        return {}
+    subjects = _git("log", "--merges", "--format=%s", f"{base}..{tag}").splitlines()
+    numbers = sorted({
+        int(match.group(1))
+        for match in (MERGE_PR_RE.match(subject) for subject in subjects)
+        if match is not None
+    })
+    if not numbers:
+        return {}
+    aliases = " ".join(
+        f"p{number}: pullRequest(number: {number}) {{ ...pull }}"
+        for number in numbers
+    )
+    query = (
+        "query($owner: String!, $name: String!) { "
+        f"repository(owner: $owner, name: $name) {{ {aliases} }} }} "
+        "fragment pull on PullRequest { number title "
+        "closingIssuesReferences(first: 20) { nodes { number } } }"
+    )
+    try:
+        raw = _run(
+            ["gh", "api", "graphql", "-f", f"query={query}",
+             "-F", f"owner={REPO_OWNER}", "-F", f"name={REPO_NAME}"],
+            capture=True,
+        )
+        repository = json.loads(raw)["data"]["repository"]
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
+        print(
+            f"Warning: could not read pull requests {numbers}; "
+            "the notes will carry changelog entries only.",
+            file=sys.stderr,
+        )
+        return {}
+    pulls: dict[int, tuple[str, tuple[int, ...]]] = {}
+    for number in numbers:
+        pull = repository.get(f"p{number}")
+        if not pull:
+            continue
+        closes = tuple(
+            node["number"]
+            for node in pull["closingIssuesReferences"]["nodes"]
+        )
+        pulls[number] = (pull["title"], closes)
+    return pulls
+
+
+def _normalize_title(text: str) -> str:
+    return " ".join(text.split()).rstrip(".").casefold()
+
+
+def _annotate(pull_numbers: list[int], issues: tuple[int, ...]) -> str:
+    """Render the reference suffix.
+
+    GitHub autolinks issues and pull requests identically, so the kind is
+    spelled out rather than left to the reader to infer from position.
+    """
+    parts: list[str] = []
+    if pull_numbers:
+        parts.append("PR " + ", ".join(f"#{number}" for number in pull_numbers))
+    if issues:
+        refs = ", ".join(f"#{number}" for number in issues)
+        parts.append(f"fixes {refs}" if pull_numbers else f"closes {refs}")
+    return f" ({' '.join(parts)})" if parts else ""
 
 
 def _release_notes(version: str) -> str:
-    summaries = _changelog_summaries(_version_notes(version), version)
-    return "## Curated Summary\n\n" + "\n".join(summaries)
+    """Build the whole release body from the changelog and the merged pulls."""
+    tag = f"v{version}"
+    entries = _changelog_entries(_version_notes(version), version)
+    base = _previous_tag(tag)
+    pulls = _merged_pulls(base, tag)
+
+    rows: list[tuple[int, str]] = []
+    actions: list[str] = []
+    claimed: set[int] = set()
+    for entry in sorted(entries, key=_entry_rank):
+        matched = sorted(
+            number for number, (_, closes) in pulls.items()
+            if set(closes) & set(entry.issues)
+        )
+        claimed.update(matched)
+        annotation = _annotate(matched, entry.issues)
+        rows.append((_entry_rank(entry), f"- {entry.summary}{annotation}"))
+        if entry.migration:
+            # The changelog runs the migration on from "BREAKING CHANGE:";
+            # lifted out on its own it has to read as a sentence, and it
+            # keeps the wrap of the sentence it was cut from until reflowed.
+            migration = entry.migration[0].upper() + entry.migration[1:]
+            actions.append(_reflow(f"{migration}{annotation}"))
+
+    # A pull request the changelog missed still gets a row, so issue-tracked
+    # work cannot go unmentioned. One that closes no issue is either a step
+    # in curated work or a change the changelog deliberately passed over -
+    # adding it duplicates rows whenever a release is organised around an
+    # umbrella issue - so it is named on stderr instead.
+    summaries = {_normalize_title(entry.summary) for entry in entries}
+    for number in sorted(set(pulls) - claimed):
+        title, closes = pulls[number]
+        if _normalize_title(title) in summaries:
+            continue
+        if not closes:
+            print(
+                f"Note: pull request #{number} ({title}) has no changelog entry "
+                "and closes no issue; it is left out of the notes.",
+                file=sys.stderr,
+            )
+            continue
+        print(
+            f"Warning: pull request #{number} has no changelog entry; "
+            "its title is used verbatim.",
+            file=sys.stderr,
+        )
+        prefix = COMMIT_TYPE_RE.match(title)
+        kind = prefix.group("type") if prefix else ""
+        rank = 1 + (TYPE_ORDER.index(kind) if kind in TYPE_ORDER else len(TYPE_ORDER))
+        if prefix and prefix.group("bang"):
+            rank = 0
+        rows.append((rank, f"- {title}{_annotate([number], closes)}"))
+
+    sections: list[str] = []
+    if actions:
+        sections.append("## Action required\n\n" + "\n\n".join(actions))
+    ordered = [row for _, row in sorted(rows, key=lambda row: row[0])]
+    sections.append("## Changes\n\n" + "\n".join(ordered))
+    links = f"[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
+    if base:
+        compare = COMPARE_URL.format(base=base, tag=tag)
+        links += f" | [{base}...{tag}]({compare})"
+    sections.append(links)
+    return "\n\n".join(sections)
 
 
-def _normalize_release_body(tag: str) -> None:
-    body = _run(
-        ["gh", "release", "view", tag, "--json", "body", "--jq", ".body"],
-        capture=True,
-    )
-    updated = body
-    if not updated.startswith("## Curated Summary\n"):
-        updated = "## Curated Summary\n\n" + updated
-    updated = CURATED_CHANGELOG_RE.sub("", updated)
-    changelog_link = f"[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
-
-    def replace_comparison(match: re.Match[str]) -> str:
-        return f"{changelog_link} | [{match.group(2)}]({match.group(1)})"
-
-    updated, replacements = GENERATED_COMPARE_RE.subn(replace_comparison, updated)
-    if replacements == 0 and CHANGELOG_URL.format(tag=tag) not in updated:
-        updated = updated.rstrip() + f"\n\n{changelog_link}"
-    if updated == body:
-        return
+def _write_release_notes(tag: str, notes: str, *, create: bool) -> None:
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", suffix=".md", delete_on_close=False
     ) as notes_file:
-        notes_file.write(updated + "\n")
+        notes_file.write(notes + "\n")
         notes_file.close()
-        _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
+        if create:
+            _run([
+                "gh", "release", "create", tag,
+                "--verify-tag", "--notes-file", notes_file.name,
+                "--title", f"agents-live {tag}",
+            ])
+        else:
+            _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
+
+
+def notes(tag: str, *, apply: bool) -> None:
+    """Regenerate the notes for an existing release, previewing by default."""
+    _require_tools()
+    _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
+    body = _release_notes(tag.removeprefix("v"))
+    if not apply:
+        print()
+        print(body)
+        print()
+        print(f"Preview only. Rerun with --yes to apply these notes to {tag}.")
+        return
+    current = _run(
+        ["gh", "release", "view", tag, "--json", "body", "--jq", ".body"],
+        capture=True,
+    )
+    if current.strip() == body.strip():
+        print(f"Release {tag} already carries these notes.")
+        return
+    _write_release_notes(tag, body, create=False)
+    print(f"Updated the notes on release {tag}.")
 
 
 def _minimum_bump(notes: str) -> str:
-    if re.search(r"(?mi)^-\s+\w+(?:\([^)]*\))?!:|BREAKING CHANGE:", notes):
+    # BREAKING CHANGE is a footer, so it only counts at the start of a
+    # line; unanchored, an entry that merely discusses one forces a major.
+    if re.search(r"(?mi)^-\s+\w+(?:\([^)]*\))?!:|^\s*BREAKING CHANGE:", notes):
         return "major"
     if re.search(r"(?mi)^-\s+feat(?:\([^)]*\))?:", notes):
         return "minor"
@@ -174,7 +409,7 @@ def _minimum_bump(notes: str) -> str:
 
 def _check_bump(bump: str) -> str:
     notes = _unreleased_notes()
-    _changelog_summaries(notes, "Unreleased")
+    _changelog_entries(notes, "Unreleased")
     minimum = _minimum_bump(notes)
     if BUMP_ORDER[bump] < BUMP_ORDER[minimum]:
         raise ReleaseError(
@@ -288,8 +523,8 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
         f"git push --atomic origin main {tag}",
-        f"gh release create {tag} --verify-tag --generate-notes "
-        "--notes-file <changelog summaries>",
+        f"gh release create {tag} --verify-tag "
+        "--notes-file <changelog entries + merged pull requests>",
     )
     for command in commands:
         print(f"  {command}")
@@ -358,8 +593,8 @@ def publish() -> None:
         text=True,
     )
     if existing.returncode == 0:
-        _normalize_release_body(tag)
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
+        print(f"  Rerun the notes with: --notes {tag} --yes")
         return
     notes = _release_notes(version)
     _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
@@ -368,20 +603,7 @@ def publish() -> None:
     _run(["uv", "build"])
     if needs_push:
         _run(["git", "push", "--atomic", "origin", "main", tag])
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", suffix=".md", delete_on_close=False
-    ) as notes_file:
-        notes_file.write(notes + "\n")
-        notes_file.close()
-        # gh prepends the file's notes to the --generate-notes body, so the
-        # release shows the curated changelog first, then the PR list.
-        _run([
-            "gh", "release", "create", tag,
-            "--verify-tag", "--generate-notes",
-            "--notes-file", notes_file.name,
-            "--title", f"agents-live {tag}",
-        ])
-    _normalize_release_body(tag)
+    _write_release_notes(tag, notes, create=True)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
 
@@ -409,23 +631,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Verify and publish a prepared release",
     )
     parser.add_argument(
+        "--notes",
+        metavar="TAG",
+        help="Rebuild the notes on an already published release",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Confirm commit, tag, push, and GitHub release creation",
     )
     args = parser.parse_args(argv)
-    selected = sum((args.dry_run, args.prepare, args.publish))
+    selected = sum((args.dry_run, args.prepare, args.publish, args.notes is not None))
     if selected != 1:
-        parser.error("choose exactly one of --dry-run, --prepare, or --publish")
+        parser.error(
+            "choose exactly one of --dry-run, --prepare, --publish, or --notes")
     if (args.prepare or args.publish) and not args.yes:
         parser.error("--prepare and --publish require --yes")
-    if args.publish and args.bump != "patch":
+    if (args.publish or args.notes) and args.bump != "patch":
         parser.error("--bump applies to --dry-run and --prepare only")
     try:
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:
             prepare(args.bump)
+        elif args.notes:
+            notes(args.notes, apply=args.yes)
         else:
             publish()
     except KeyboardInterrupt:
