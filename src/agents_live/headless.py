@@ -3000,15 +3000,25 @@ def agent_details(config: AgentConfig) -> dict[str, Any]:
     # Ownership: best-effort import to avoid circulars during early init.
     try:
         from . import ownership as _ownership  # type: ignore
-        # Pass a large rate_limit so status display never triggers a
-        # git pull on its own; the dispatcher's load_owners() refreshes.
-        owners = _ownership.load_owners(rate_limit_secs=10**9)
-        host = _ownership.current_owner_id()
-        owner = owners.get(config.name)
-        details["owner"] = owner
-        details["host"] = host
-        details["hostLabel"] = _ownership.display_owner(host)
-        details["isOwner"] = owner is None or _ownership.owns(owner)
     except Exception:  # noqa: BLE001 - status must never fail on this
-        pass
+        _ownership = None  # type: ignore[assignment]
+    if _ownership is not None:
+        try:
+            # Pass a large rate_limit so status display never triggers a
+            # git pull on its own; the dispatcher's load_owners()
+            # refreshes.
+            owners = _ownership.load_owners(rate_limit_secs=10**9)
+            host = _ownership.current_owner_id()
+            owner = owners.get(config.name)
+            details["owner"] = owner
+            details["host"] = host
+            details["hostLabel"] = _ownership.display_owner(host)
+            details["isOwner"] = owner is None or _ownership.owns(owner)
+        except _ownership.OwnershipUnavailableError:
+            # Registry mode with no resolvable backend. Say so: an
+            # absent answer and "nobody owns this" render identically
+            # otherwise, and the second reads as a fact.
+            details["ownershipUnavailable"] = True
+        except Exception:  # noqa: BLE001 - status must never fail on this
+            pass
     return details

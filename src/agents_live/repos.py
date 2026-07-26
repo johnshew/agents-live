@@ -166,11 +166,12 @@ def _register_path(registry: dict, value: str) -> str:
     return name
 
 
-def _add(value: str) -> None:
+def _add(value: str) -> Path:
     with _registry_lock():
         registry = load()
-        _register_path(registry, value)
+        name = _register_path(registry, value)
         _write(registry)
+    return Path(registry["repos"][name])
 
 
 def ensure_registered(value: str | Path) -> bool:
@@ -217,7 +218,7 @@ def _resolve_ref(registry: dict, ref: str) -> str:
         "run `agents-live repos list`")
 
 
-def _set_default(ref: str) -> None:
+def _set_default(ref: str) -> Path:
     with _registry_lock():
         registry = load()
         try:
@@ -229,6 +230,7 @@ def _set_default(ref: str) -> None:
         _validated_path(registry["repos"][name], name)
         registry["default_repo"] = name
         _write(registry)
+    return Path(registry["repos"][name])
 
 
 def _remove(ref: str) -> None:
@@ -357,6 +359,31 @@ def collect_doctor() -> dict:
     return {"ok": ok, "host": host, "repos": results}
 
 
+def _converge_registered(root: Path) -> None:
+    """Install the plugins a freshly registered repo declares.
+
+    Registering a repo is the point where its declarations become this
+    host's business, so it is also where they have to take effect:
+    ``init --repo`` has always registered and converged together, and a
+    repo registered through ``repos`` is no less connected. Leaving the
+    two apart strands a registry-mode repo without its ownership
+    backend, and ``status`` renders every agent unowned until some later
+    command happens to converge.
+    """
+    from . import plugins  # noqa: PLC0415
+    try:
+        if plugins.converge([root]):
+            print("Converged declared plugins in the agents-live tool "
+                  "environment")
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        # The repo is registered either way; a plugin that cannot be
+        # installed is a problem for the commands that need it, and
+        # `doctor` names it with the fix. Registration does not unwind.
+        print(f"warning: declared plugins could not be installed: {exc}; "
+              "run `agents-live doctor` for details",
+              file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manage registered repositories")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -376,27 +403,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "help":
             parser.print_help()
         elif args.action == "add":
-            from . import plugins  # noqa: PLC0415
-            root = Path(args.path).expanduser().resolve()
-            _add(args.path)
-            try:
-                pending = [
-                    name for name, ok, _ in plugins.checks(
-                        root, require_exists=False) if not ok
-                ]
-                if pending:
-                    print(
-                        f"Declared plugin(s) not installed: {', '.join(pending)}; "
-                        "will be installed on init/start/upgrade")
-            except (OSError, ValueError, plugins.PluginError) as exc:
-                print(
-                    "warning: plugin declarations could not be checked after "
-                    f"registration: {exc}; declared plugins will be installed "
-                    "on init/start/upgrade",
-                    file=sys.stderr,
-                )
+            _converge_registered(_add(args.path))
         elif args.action == "default":
-            _set_default(args.repo)
+            _converge_registered(_set_default(args.repo))
         elif args.action == "remove":
             _remove(args.repo)
         else:

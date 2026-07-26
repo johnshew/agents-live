@@ -365,7 +365,7 @@ The uv tool environment is host-global. `init` and non-dry-run `start`
 converge the selected project; `upgrade` unions declarations from all
 registered projects and preserves requirements already recorded in uv's tool
 receipt. `doctor` only lints installed distributions and resolves their entry
-points. `init --repo` enrolls a repository and reports pending plugins.
+points. `init --repo` enrolls a repository and converges its plugins.
 
 No separate consent prompt is required. Activating a repository already grants
 its committed handlers and agent prompts execution authority on that host, so

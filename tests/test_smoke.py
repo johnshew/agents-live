@@ -407,6 +407,65 @@ class TestRepositoryRegistry(_TempProject):
         registry = repos.load()
         self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
 
+    def test_registering_returns_the_resolved_root(self) -> None:
+        # The caller converges plugins against this path, so it has to be
+        # the registered one rather than whatever spelling was typed.
+        self.assertEqual(repos._add(str(self.root / ".")), self.root)
+        other = self.root / "nested"
+        other.mkdir()
+        self.assertEqual(repos._set_default(str(other / ".")), other)
+
+    def test_every_registration_path_converges_declared_plugins(self) -> None:
+        # init --repo has always registered and converged together; a repo
+        # registered through `repos` is no less connected, and a
+        # registry-mode repo without its backend reads as fully unowned.
+        other = self.root / "nested"
+        other.mkdir()
+        with mock.patch("agents_live.plugins.converge",
+                        return_value=False) as converge:
+            repos.main(["add", str(self.root)])
+            repos.main(["default", str(other)])
+        self.assertEqual(
+            [call.args[0] for call in converge.call_args_list],
+            [[self.root], [other]])
+
+    def test_registration_survives_a_plugin_that_cannot_be_installed(
+            self) -> None:
+        # The repo is registered either way; doctor names the plugin
+        # problem with its fix, so registration does not unwind.
+        with mock.patch("agents_live.plugins.converge",
+                        side_effect=OSError("no wheel")):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(repos.main(["add", str(self.root)]), 0)
+        self.assertIn("declared plugins could not be installed",
+                      err.getvalue())
+        self.assertEqual(repos.load()["repos"],
+                         {self.root.name: str(self.root)})
+
+    def test_repos_add_is_reachable_from_the_cli(self) -> None:
+        # The implementation existed for releases while the command spec
+        # omitted it, so the front end rejected the name every user
+        # reaches for first.
+        spec = next(cmd for cmd in COMMANDS if cmd.name == "repos")
+        self.assertIn("add", [child.name for child in spec.subcommands])
+
+    def test_status_says_ownership_is_unavailable_rather_than_blank(
+            self) -> None:
+        # An unreadable registry and an unowned agent must not render
+        # alike: the second reads as a fact about ownership.
+        unavailable = status.format_table([{
+            "name": "alpha", "type": "cron", "state": "active",
+            "runtime": "none", "mode": "plan",
+            "schedule": ["0 * * * *"], "ownershipUnavailable": True,
+        }])
+        self.assertIn("unavailable", unavailable)
+        unowned = status.format_table([{
+            "name": "alpha", "type": "cron", "state": "active",
+            "runtime": "none", "mode": "plan",
+            "schedule": ["0 * * * *"], "owner": None, "isOwner": True,
+        }])
+        self.assertNotIn("unavailable", unowned)
+
     def test_add_rejects_underivable_directory_name(self) -> None:
         odd = self.root / "-leading-dash"
         odd.mkdir()
@@ -459,30 +518,17 @@ class TestRepositoryRegistry(_TempProject):
         self.assertEqual(registry["repos"], {self.root.name: str(self.root)})
         self.assertEqual(registry["default_repo"], self.root.name)
 
-    def test_add_reports_declared_plugins_without_installing(self) -> None:
-        with (
-            mock.patch.object(
-                plugins, "checks",
-                return_value=[("example-plugin", False, "not installed")]),
-            mock.patch.object(plugins, "converge") as converge,
-            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
-        ):
-            self.assertEqual(repos.main(["add", str(self.root)]), 0)
-        converge.assert_not_called()
-        self.assertIn(
-            "will be installed on init/start/upgrade", stdout.getvalue())
-
     def test_add_registers_repo_when_declared_wheel_is_missing(self) -> None:
         (self.root / ".agents-live.toml").write_text(
             '[plugins]\nexample-plugin = { path = "dist/missing.whl" }\n',
             encoding="utf-8",
         )
-        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(repos.main(["add", str(self.root)]), 0)
         self.assertEqual(
             repos.load()["repos"], {self.root.name: str(self.root)})
         self.assertIn(
-            "will be installed on init/start/upgrade", stdout.getvalue())
+            "declared plugins could not be installed", stderr.getvalue())
 
     def test_add_registers_repo_when_declared_wheel_is_invalid(self) -> None:
         wheel = self.root / "dist" / "invalid.whl"
@@ -497,7 +543,7 @@ class TestRepositoryRegistry(_TempProject):
         self.assertEqual(
             repos.load()["repos"], {self.root.name: str(self.root)})
         self.assertIn(
-            "plugin declarations could not be checked after registration",
+            "declared plugins could not be installed",
             stderr.getvalue())
 
     def test_help_action_prints_usage(self) -> None:
@@ -2527,7 +2573,7 @@ class TestCliContract(_TempProject):
         self.assertIsNone(cli.validation_error(start, ["--name=fixture"]))
         self.assertEqual(
             cli.validation_error(repos_cmd, []),
-            "repos requires one of: list, default, remove")
+            "repos requires one of: list, add, default, remove")
         for argv in (["watch-loop", "x"], ["ensure-watcher", "x"],
                      ["list-reboot-watchers"]):
             self.assertIsNone(cli.validation_error(internal, argv))
