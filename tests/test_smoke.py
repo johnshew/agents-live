@@ -435,6 +435,24 @@ class TestRepositoryRegistry(_TempProject):
         with self.assertRaisesRegex(ValueError, "not a registered repository"):
             repos._remove(str(other))
 
+    def test_the_default_guard_needs_somewhere_else_to_point(self) -> None:
+        other = self.root / "other-repo"
+        other.mkdir()
+        repos._add(str(self.root))
+        repos._add(str(other))
+        repos._set_default(self.root.name)
+        # Two entries: the guard is right, another can inherit the role.
+        with self.assertRaisesRegex(ValueError, "is the default"):
+            repos._remove(self.root.name)
+        repos._remove(str(other))
+        # One entry left, and it is the default. Refusing here would be a
+        # dead end: `default` has no other candidate to accept, so the
+        # registry could never be emptied through the CLI.
+        repos._remove(self.root.name)
+        registry = repos.load()
+        self.assertEqual(registry["repos"], {})
+        self.assertIsNone(registry["default_repo"])
+
     def test_cli_default_registers_unregistered_path(self) -> None:
         self.assertEqual(repos.main(["default", str(self.root)]), 0)
         registry = repos.load()

@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the last registered repository can be removed. (#144)
+  `repos remove` refused to drop a repository while it was the default,
+  which is right whenever another entry could inherit the role and a dead
+  end when it is the only one: `repos default` had no other candidate to
+  accept, so the registry could not be emptied through the CLI at all.
+  That is exactly the state a first `init --repo` leaves behind, so
+  anyone who tried the tool once and changed their mind had to hand-edit
+  the config. Removing the last repository now clears the default and
+  leaves an empty registry.
 - fix!: two WSL distros on one machine are no longer the same owner. (#148)
   A distro's hostname defaults to the Windows computer name, so ownership
   gave both distros the same value and each would answer to the other's
