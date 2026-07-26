@@ -228,29 +228,36 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
 
     execute = str(task.get("Execute") or "").replace("\\", "/").lower()
     arguments = str(task.get("Arguments") or "").replace("\\", "/").lower()
-    expected_execute, expected_arguments = heartbeat.task_action(distro)
-    expected_execute = expected_execute.lower()
+    try:
+        expected_execute, expected_arguments = heartbeat.task_action(distro)
+    except RuntimeError as exc:
+        # A registered task that cannot be described is not a task that
+        # can be judged, and the reason is the finding.
+        return False, str(exc)
+    expected_execute = expected_execute.replace("\\", "/").lower()
     expected_arguments = expected_arguments.replace("\\", "/").lower()
     problems: list[str] = []
     if task.get("Enabled") is not True:
         problems.append("task disabled")
-    if not execute.endswith(f"/{expected_execute}") and execute != expected_execute:
-        if execute.endswith("/wsl.exe") or execute == "wsl.exe":
-            # Pre-0.3.1 registrations launched wsl.exe directly, which
-            # flashes a visible console window every five minutes.
+    if execute != expected_execute:
+        superseded = {
+            # Launched wsl.exe with nothing to keep its console off the
+            # screen, so every five minutes one appeared.
+            "wsl.exe": "directly, showing a console every run",
+            # Hid that console through a packaged VBScript wrapper, on a
+            # scripting host Windows is retiring.
+            "wscript.exe": "through the retired VBScript wrapper",
+        }.get(execute.rsplit("/", 1)[-1])
+        if superseded:
             problems.append(
-                "task launches wsl.exe without the hidden-window wrapper "
-                "(visible console every run); re-run "
+                f"task launches the heartbeat {superseded}; re-run "
                 "`agents-live heartbeat install`")
         else:
             problems.append(
                 f"unexpected executable: {task.get('Execute') or '(none)'}")
     if arguments != expected_arguments:
-        problems.append("action does not use the hidden stable agents-live "
-                        "CLI shim invocation")
-        # Only a non-canonical action can be a legacy pin; the canonical
-        # arguments themselves contain a site-packages path (the
-        # run-hidden.vbs wrapper), so scanning them would false-positive.
+        problems.append("action does not use the windowless stable "
+                        "agents-live CLI shim invocation")
         if any(token in arguments for token in heartbeat.LEGACY_ACTION_TOKENS):
             problems.append("action pins a legacy package, Python, or project path")
     if str(task.get("Interval") or "").upper() != "PT5M":
@@ -259,7 +266,8 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
     if legacy:
         problems.append(f"legacy {heartbeat.LEGACY_TASK!r} task requires migration")
     note = "; ".join(problems) if problems else (
-        f"enabled; distro {distro}; hidden stable CLI shim; repeats every 5 min")
+        f"enabled; distro {distro}; windowless stable CLI shim; "
+        "repeats every 5 min")
     return not problems, note
 
 

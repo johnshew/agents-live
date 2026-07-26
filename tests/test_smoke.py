@@ -4626,13 +4626,16 @@ class TestWindowsHeartbeat(unittest.TestCase):
         self.assertFalse((directory / "crontab.lock").exists())
 
     def test_doctor_accepts_stable_distro_task(self) -> None:
-        execute, arguments = heartbeat.task_action("Ubuntu", self.shim)
-        # The action must launch through the hidden-window wrapper, not
-        # bare wsl.exe (which flashes a console every five minutes).
-        self.assertEqual(execute, "wscript.exe")
-        self.assertIn("run-hidden.vbs", arguments)
-        self.assertIn(r"\\wsl.localhost\Ubuntu", arguments)
-        self.assertIn("wsl.exe", arguments)
+        launcher = r"C:\Program Files\WSL\wslg.exe"
+        execute, arguments = heartbeat.task_action(
+            "Ubuntu", self.shim, launcher)
+        # The launcher has to be the one Windows gives no console to.
+        # Nothing else in the action may be a path on the Windows side:
+        # the distro reaches its own shim directly.
+        self.assertEqual(execute, launcher)
+        head, _, linux = arguments.partition(" -- ")
+        self.assertEqual(head, "-d Ubuntu")
+        self.assertEqual(shlex.split(linux), [str(self.shim), "heartbeat"])
         task = {
             "Enabled": True,
             "Execute": execute,
@@ -4640,27 +4643,112 @@ class TestWindowsHeartbeat(unittest.TestCase):
             "Interval": "PT5M",
         }
         with mock.patch.object(
-                heartbeat, "task_configuration", return_value=(task, False)):
+                heartbeat, "task_configuration", return_value=(task, False)), \
+                mock.patch.object(
+                    heartbeat, "windowless_launcher", return_value=launcher), \
+                mock.patch.object(
+                    heartbeat, "stable_cli_path", return_value=self.shim):
             self.assertEqual(
                 doctor._windows_heartbeat_config(),
-                (True, "enabled; distro Ubuntu; hidden stable CLI shim; "
+                (True, "enabled; distro Ubuntu; windowless stable CLI shim; "
                        "repeats every 5 min"))
 
-    def test_doctor_flags_visible_console_registration(self) -> None:
-        # Pre-0.3.1 tasks executed wsl.exe directly; doctor must point
-        # at the reinstall that wraps them with run-hidden.vbs.
+    def test_doctor_flags_every_superseded_launcher(self) -> None:
+        # Two shapes predate this one: wsl.exe named directly, which
+        # showed a console every five minutes, and the VBScript wrapper
+        # that hid it. Doctor names each and points at the same repair.
+        launcher = r"C:\Program Files\WSL\wslg.exe"
+        cases = {
+            "wsl.exe": "showing a console",
+            r"C:\Windows\System32\wscript.exe": "VBScript",
+        }
+        for execute, expected in cases.items():
+            with self.subTest(execute=execute):
+                task = {
+                    "Enabled": True,
+                    "Execute": execute,
+                    "Arguments": "-d Ubuntu --exec /ignored heartbeat",
+                    "Interval": "PT5M",
+                }
+                with mock.patch.object(
+                        heartbeat, "task_configuration",
+                        return_value=(task, False)), \
+                        mock.patch.object(
+                            heartbeat, "windowless_launcher",
+                            return_value=launcher), \
+                        mock.patch.object(
+                            heartbeat, "stable_cli_path",
+                            return_value=self.shim):
+                    ok, note = doctor._windows_heartbeat_config()
+                self.assertFalse(ok)
+                self.assertIn(expected, note)
+                self.assertIn("heartbeat install", note)
+
+    def test_doctor_reports_a_launcher_it_cannot_find(self) -> None:
+        # An unresolvable launcher is not a silently healthy heartbeat:
+        # the reason has to reach the developer, because the repair is
+        # on the Windows side and doctor is the only thing that says so.
         task = {
             "Enabled": True,
-            "Execute": "wsl.exe",
-            "Arguments": heartbeat.wsl_command("Ubuntu", self.shim),
+            "Execute": r"C:\Program Files\WSL\wslg.exe",
+            "Arguments": "-d Ubuntu -- /ignored heartbeat",
             "Interval": "PT5M",
         }
         with mock.patch.object(
-                heartbeat, "task_configuration", return_value=(task, False)):
+                heartbeat, "task_configuration", return_value=(task, False)), \
+                mock.patch.object(
+                    heartbeat, "windowless_launcher",
+                    side_effect=RuntimeError("cannot find wslg.exe, run "
+                                             "`wsl.exe --update`")):
             ok, note = doctor._windows_heartbeat_config()
         self.assertFalse(ok)
-        self.assertIn("visible console", note)
-        self.assertIn("heartbeat install", note)
+        self.assertIn("cannot find wslg.exe", note)
+        self.assertIn("wsl.exe --update", note)
+
+    def test_the_linux_half_of_the_action_is_quoted_for_a_shell(self) -> None:
+        # wslg hands everything after -- to the distro's shell as
+        # written, so a shim path with a space has to survive that shell
+        # rather than the Windows parser that never sees it.
+        shim = self.home / "my tools" / "agents-live"
+        _, arguments = heartbeat.task_action("Ubuntu", shim, "wslg.exe")
+        head, _, linux = arguments.partition(" -- ")
+        self.assertEqual(head, "-d Ubuntu")
+        self.assertEqual(shlex.split(linux), [str(shim), "heartbeat"])
+
+    def test_a_distro_name_with_a_space_stays_one_argument(self) -> None:
+        # The distro name is read by the Windows command-line parser,
+        # the half of the string wslg keeps for itself.
+        _, arguments = heartbeat.task_action(
+            "My Distro", self.shim, "wslg.exe")
+        self.assertTrue(arguments.startswith('-d "My Distro" -- '))
+
+    def test_the_launcher_is_located_once_and_remembered(self) -> None:
+        # Where WSL was installed does not change while the process
+        # runs, and doctor asks for the answer on a path that already
+        # spends two PowerShell round trips.
+        found = subprocess.CompletedProcess(
+            [], 0, stdout=" C:\\Program Files\\WSL\\wslg.exe \n", stderr="")
+        with mock.patch.object(heartbeat, "_launcher", None), \
+                mock.patch.object(
+                    heartbeat, "_run_powershell",
+                    return_value=found) as powershell:
+            first = heartbeat.windowless_launcher()
+            second = heartbeat.windowless_launcher()
+        self.assertEqual(first, r"C:\Program Files\WSL\wslg.exe")
+        self.assertEqual(second, first)
+        self.assertEqual(powershell.call_count, 1)
+
+    def test_a_host_without_the_launcher_says_how_to_get_it(self) -> None:
+        # Silence would leave the developer with a heartbeat that never
+        # installs and no idea that WSL itself is what needs updating.
+        empty = subprocess.CompletedProcess([], 0, stdout="\n", stderr="")
+        with mock.patch.object(heartbeat, "_launcher", None), \
+                mock.patch.object(
+                    heartbeat, "_run_powershell", return_value=empty):
+            with self.assertRaises(RuntimeError) as caught:
+                heartbeat.windowless_launcher()
+        self.assertIn("wslg.exe", str(caught.exception))
+        self.assertIn("wsl.exe --update", str(caught.exception))
 
     def test_doctor_recommends_migration_for_legacy_task(self) -> None:
         with mock.patch.object(
