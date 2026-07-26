@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.0.0 - 2026-07-26
+
 - fix: the last registered repository can be removed. (#144)
   `repos remove` refused to drop a repository while it was the default,
   which is right whenever another entry could inherit the role and a dead
