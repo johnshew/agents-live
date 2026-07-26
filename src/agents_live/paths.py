@@ -32,8 +32,9 @@ git-synced shared ownership registry ``Agents/data/agent-owners.json``.
 plan; state moved out of the tree 2026-07-19 - clean break, no legacy
 locations read.)
 
-stdlib-only on purpose: every sibling script (headless, ownership, qlog,
-timeline, doctor) imports this module flat from the same directory.
+stdlib-only on purpose, apart from the host-runtime seam beside it:
+every sibling script (headless, ownership, qlog, timeline, doctor)
+imports this module flat from the same directory.
 """
 from __future__ import annotations
 
@@ -43,6 +44,11 @@ import re
 import tempfile
 import tomllib
 from pathlib import Path
+
+try:
+    from . import hostruntime
+except ImportError:  # flat execution: qlog and timeline run as scripts
+    import hostruntime  # type: ignore[no-redef]
 
 ENV_VAR = "AGENTS_LIVE_REPO"
 CONFIG_DOTFILE = ".agents-live.toml"
@@ -159,7 +165,10 @@ def resolution_source() -> str | None:
 
 def state_home() -> Path:
     """The user-level runtime-state root (§ user-level state, 2026-07-19):
-    ``$XDG_STATE_HOME/agents-live`` (default ``~/.local/state/agents-live``).
+    ``$XDG_STATE_HOME/agents-live``, defaulting to the host's own
+    per-user state directory (``~/.local/state`` on POSIX, the local
+    application-data directory on Windows - see
+    :func:`hostruntime.user_state_base`).
 
     Host-scoped runtime artifacts live directly here (health beacon, the
     health-check loop's own log, the Windows heartbeat beacon); per-repo
@@ -168,7 +177,7 @@ def state_home() -> Path:
     export to archives, and machine-local logs must not travel with them.
     """
     root = os.environ.get("XDG_STATE_HOME", "").strip()
-    base = Path(root).expanduser() if root else Path.home() / ".local" / "state"
+    base = Path(root).expanduser() if root else hostruntime.user_state_base()
     return base / "agents-live"
 
 

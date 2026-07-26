@@ -132,7 +132,7 @@ configuration.
 | `post-processor` | *(log-only)* | Deterministic script that runs after the agent |
 | `env` | *(none)* | Map of env vars passed to the agent process |
 | `mcps` | *(none)* | List of MCP server specs |
-| `owner` | *(registry)* | Machine ownership; used only in registry mode, which requires a plugin-provided ownership backend. `"*"` (any host) or short hostname. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
+| `owner` | *(registry)* | Machine ownership; used only in registry mode, which requires a plugin-provided ownership backend. `"*"` (any host), a short hostname, or `<runtime>:<uuid>` where the machine name does not identify the runtime. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
 | `schedule` | -- | Cron expression (at least one of schedule/watchPath required) |
 | `watchPath` | -- | Repo-relative directory or list of directories |
 

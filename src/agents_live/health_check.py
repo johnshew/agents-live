@@ -354,7 +354,7 @@ def _enforce_ownership(
         return [], True
     if not owners:
         return [], False
-    host = ownership.current_host()
+    host = ownership.current_owner_id()
     deactivated: list[str] = []
     for name in sorted(states):
         owner = owners.get(name)
@@ -495,7 +495,7 @@ def plan_sweep() -> list[dict]:
         owners = ownership.load_owners(rate_limit_secs=10**9)
     except ownership.OwnershipUnavailableError:
         pass
-    host = ownership.current_host()
+    host = ownership.current_owner_id()
     ownership_deactivated: set[str] = set()
     for name, agent in sorted(states.items()):
         owner = owners.get(name)

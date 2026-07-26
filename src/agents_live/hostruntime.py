@@ -77,6 +77,36 @@ def id() -> str:  # noqa: A001 - the seam member is named `id` by design
     return LINUX
 
 
+def hostname_identifies_runtime() -> bool:
+    """Whether this host's name is enough to name this runtime.
+
+    A Linux or WSL hostname answers "which runtime environment is this"
+    on its own, and agent ownership has always been recorded that way. A
+    Windows machine and the WSL distro on it are two runtimes that
+    report related names and would answer to each other's, so ownership
+    there needs an identity of its own (see ``ownership`` and the
+    Ownership generalization section of docs/windows-support.md).
+    """
+    return not _IS_WINDOWS
+
+
+def user_state_base() -> Path:
+    """Where this host puts per-user state that is not configuration.
+
+    The XDG spelling on POSIX, the local application-data directory on
+    Windows, where a roaming profile would otherwise carry machine-local
+    runtime state to another machine. An explicit ``XDG_STATE_HOME``
+    still wins on both, which is what lets a test point the whole state
+    tree somewhere temporary.
+    """
+    if _IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        if local:
+            return Path(local)
+        return Path.home() / "AppData" / "Local"
+    return Path.home() / ".local" / "state"
+
+
 # ---------------------------------------------------------------------------
 # Environment, PATH, and executables
 # ---------------------------------------------------------------------------

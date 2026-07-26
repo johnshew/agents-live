@@ -627,7 +627,7 @@ async def pause_all(names: list[str]) -> None:
 
 def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
-    host = ownership.current_host()
+    host = ownership.current_owner_id()
     rows: list[dict] = []
     for agent in collect_agents():
         name = agent["name"]
@@ -782,7 +782,7 @@ async def _pause_row(event) -> None:
 async def _claim_row(event) -> None:
     name = event.args["name"]
     await do_action("Activate", "activate.py",
-                    ["--name", name, "--transfer-to", ownership.current_host()],
+                    ["--name", name, "--transfer-to", ownership.current_owner_id()],
                     agent_name=name)
 
 

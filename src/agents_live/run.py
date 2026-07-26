@@ -167,7 +167,7 @@ def main() -> int:
         # Otherwise load_owners pulls agent-owners.json from origin
         # (rate-limited 60s, lock-coordinated with git-sync, fail-open) and
         # re-reads disk fresh, so cross-host transfers propagate in seconds.
-        host = ownership.current_host()
+        host = ownership.current_owner_id()
         try:
             # Ephemeral (_-prefixed) agents are never ownership-gated, so
             # the smoketest works regardless of registry state.

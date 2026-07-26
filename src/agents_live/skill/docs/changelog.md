@@ -6,6 +6,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: give a runtime its own ownership identity where the machine name
+  cannot provide one. (#126)
+  Ownership decisions now match against a runtime identity rather than the
+  hostname, which stays as a display label. Linux and WSL keep the hostname
+  as that identity and are unchanged; a native Windows runtime generates
+  `windows:<uuid>` once into the user state home, which on Windows is now
+  the local application-data directory rather than the XDG path.
 - feat: run an agent in the foreground on native Windows. (#126)
   Agent invocations get the host environment a Windows process needs, the
   executable is pinned before launch rather than resolved by name, the
