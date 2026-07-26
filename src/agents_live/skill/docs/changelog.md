@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 4.0.0 - 2026-07-25
+
 - fix!: the WSL heartbeat no longer runs on VBScript. (#137)
   Its scheduled task launched `wscript.exe` on a packaged script that
   asked Windows to hide a console it had just created - a scripting host
