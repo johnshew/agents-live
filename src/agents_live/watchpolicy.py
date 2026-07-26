@@ -111,7 +111,15 @@ def select_batch(raw_paths: Iterable[str], *, root: Path,
                  target_filenames: frozenset[str] = frozenset(),
                  dir_targets: Sequence[Path] = (),
                  watch_ignore: Sequence[str] | None = None) -> list[str]:
-    """Repo-relative, de-duplicated paths this watcher should act on."""
+    """Repo-relative, de-duplicated paths this watcher should act on.
+
+    Spelled with forward slashes on every host. A repo-relative path
+    here is an identifier, not something handed back to the filesystem:
+    it keys the content-hash cache, names files in the log, and is read
+    by the agent. A cache written on one spelling and read on another
+    would miss every entry, and ``watchIgnore`` prefixes are written
+    with forward slashes in agent frontmatter.
+    """
     selected: list[str] = []
     for raw in raw_paths:
         if not _wanted_by_target(raw, target_filenames, dir_targets):
@@ -119,7 +127,7 @@ def select_batch(raw_paths: Iterable[str], *, root: Path,
         if should_ignore(raw, root=root, watch_ignore=watch_ignore):
             continue
         try:
-            selected.append(str(Path(raw).relative_to(root)))
+            selected.append(Path(raw).relative_to(root).as_posix())
         except ValueError:
             selected.append(raw)
     return list(dict.fromkeys(selected))
