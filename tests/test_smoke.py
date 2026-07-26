@@ -3342,13 +3342,33 @@ class TestWindowsScheduling(unittest.TestCase):
                          [{"kind": "daily", "hour": 9, "minute": 30}])
         self.assertEqual(wintasks.translate("@reboot"), [{"kind": "boot"}])
 
-    def test_a_step_that_drifts_from_cron_is_refused_not_approximated(self) -> None:
-        # Cron restarts */7 every hour; a repetition would not.
-        with self.assertRaises(wintasks.ScheduleNotTranslatable):
-            wintasks.translate("*/7 * * * *")
+    def test_a_step_that_drifts_from_cron_is_covered_not_approximated(self) -> None:
+        # Cron restarts */7 every hour, so no 7-minute repetition lands
+        # on its minutes; the trigger has to be finer, never coarser.
+        trigger = wintasks.translate("*/7 * * * *")[0]
+        self.assertEqual(trigger, {"kind": "interval", "minutes": 1,
+                                   "anchor_minute": 0})
 
-    def test_a_schedule_with_no_exact_trigger_yet_is_refused(self) -> None:
-        for schedule in ("0 9-17 * * 1-5", "0,30 * * * *", "0 3 1 * *"):
+    def test_a_calendar_schedule_keeps_its_native_shape(self) -> None:
+        self.assertEqual(wintasks.translate("0 3 * * 0"),
+                         [{"kind": "weekly", "weekday": 0, "hour": 3,
+                           "minute": 0}])
+        self.assertEqual(wintasks.translate("0 3 1 * *"),
+                         [{"kind": "monthly", "day": 1, "hour": 3,
+                           "minute": 0}])
+
+    def test_a_coarse_trigger_covers_every_minute_the_schedule_names(self) -> None:
+        for schedule in ("0 9-17 * * 1-5", "0,30 * * * *", "*/7 * * * *",
+                         "5,20,41 2 3 4 *"):
+            trigger = wintasks.translate(schedule)[0]
+            step = int(trigger["minutes"])
+            anchor = int(trigger["anchor_minute"])
+            covered = set(range(anchor, 60, step))
+            self.assertTrue(
+                triggers.schedule_minutes(schedule) <= covered, schedule)
+
+    def test_an_unreadable_schedule_is_refused_rather_than_guessed(self) -> None:
+        for schedule in ("nonsense", "0 99 * * *", "* * * *"):
             with self.assertRaises(wintasks.ScheduleNotTranslatable):
                 wintasks.translate(schedule)
 
@@ -3455,6 +3475,101 @@ class TestWindowsScheduling(unittest.TestCase):
         ):
             with self.assertRaises(headless.AgentsLiveError):
                 schedules.remove("todo")
+
+    def test_a_startup_schedule_gets_a_task_of_its_own(self) -> None:
+        clock = wintasks.task_name(self.ROOT, "todo")
+        boot = wintasks.task_name(self.ROOT, "todo", boot=True)
+        self.assertNotEqual(clock, boot)
+        self.assertTrue(boot.endswith(wintasks.BOOT_SUFFIX))
+        # Both still name the same agent, so enumeration and removal
+        # reach them without knowing which is which.
+        for name in (clock, boot):
+            self.assertEqual(wintasks.agent_of_task_name(name, self.ROOT),
+                             "todo")
+
+
+class TestScheduleLanguage(unittest.TestCase):
+    """Reading a cron expression, which both hosts now depend on."""
+
+    def test_a_moment_the_expression_names_is_a_firing_time(self) -> None:
+        moment = datetime(2026, 7, 27, 9, 30)  # a Monday
+        self.assertTrue(triggers.schedule_matches("30 9 * * *", moment))
+        self.assertTrue(triggers.schedule_matches("*/15 * * * *", moment))
+        self.assertTrue(triggers.schedule_matches("30 9-17 * * 1-5", moment))
+        self.assertFalse(triggers.schedule_matches("31 9 * * *", moment))
+        self.assertFalse(triggers.schedule_matches("30 9 * * 0", moment))
+
+    def test_a_restricted_day_and_weekday_are_ored_as_cron_does(self) -> None:
+        # Cron's one surprise: with both restricted, either can fire.
+        monday = datetime(2026, 7, 27, 0, 0)
+        self.assertTrue(triggers.schedule_matches("0 0 1 * 1", monday))
+        self.assertTrue(triggers.schedule_matches("0 0 27 * 5", monday))
+        self.assertFalse(triggers.schedule_matches("0 0 1 * 5", monday))
+
+    def test_sunday_has_one_spelling(self) -> None:
+        sunday = datetime(2026, 7, 26, 6, 0)
+        self.assertTrue(triggers.schedule_matches("0 6 * * 7", sunday))
+        self.assertTrue(triggers.schedule_matches("0 6 * * 0", sunday))
+
+    def test_an_expression_this_project_cannot_read_says_so(self) -> None:
+        for expression in ("", "* * * *", "0 24 * * *", "*/0 * * * *",
+                           "0 0 * * x"):
+            with self.assertRaises(triggers.ScheduleSyntaxError):
+                triggers.schedule_matches(expression, datetime(2026, 7, 27))
+
+
+class TestDueness(_TempProject):
+    """Whether a wake is a real firing time, where the host is coarse."""
+
+    SCHEDULE = ("30 9 * * *",)
+
+    def _windows(self):
+        return mock.patch.object(hostruntime, "native_scheduler",
+                                 return_value=hostruntime.TASK_SCHEDULER)
+
+    def test_a_crontab_host_never_second_guesses_its_own_scheduler(self) -> None:
+        # Cron fires only at firing times; asking again would be a way
+        # to disagree with it, not a safeguard.
+        with mock.patch.object(hostruntime, "native_scheduler",
+                               return_value=hostruntime.CRONTAB):
+            self.assertTrue(schedules.claim_due_minute(
+                "todo", self.SCHEDULE, moment=datetime(2026, 7, 27, 11, 4)))
+
+    def test_a_fire_at_a_firing_time_runs(self) -> None:
+        with self._windows():
+            self.assertTrue(schedules.claim_due_minute(
+                "todo", self.SCHEDULE, moment=datetime(2026, 7, 27, 9, 30)))
+
+    def test_a_fire_the_schedule_did_not_name_is_declined(self) -> None:
+        with self._windows():
+            self.assertFalse(schedules.claim_due_minute(
+                "todo", self.SCHEDULE, moment=datetime(2026, 7, 27, 9, 31)))
+
+    def test_a_second_fire_in_the_same_minute_runs_once(self) -> None:
+        moment = datetime(2026, 7, 27, 9, 30)
+        with self._windows():
+            self.assertTrue(
+                schedules.claim_due_minute("todo", self.SCHEDULE, moment=moment))
+            self.assertFalse(
+                schedules.claim_due_minute("todo", self.SCHEDULE,
+                                           moment=moment.replace(second=40)))
+            self.assertTrue(
+                schedules.claim_due_minute("todo", self.SCHEDULE,
+                                           moment=moment + timedelta(days=1)))
+
+    def test_one_agent_claiming_a_minute_does_not_claim_it_for_another(self) -> None:
+        moment = datetime(2026, 7, 27, 9, 30)
+        with self._windows():
+            self.assertTrue(
+                schedules.claim_due_minute("todo", self.SCHEDULE, moment=moment))
+            self.assertTrue(
+                schedules.claim_due_minute("other", self.SCHEDULE, moment=moment))
+
+    def test_any_of_an_agents_schedules_can_make_it_due(self) -> None:
+        with self._windows():
+            self.assertTrue(schedules.claim_due_minute(
+                "todo", ("@reboot", "0 * * * *"),
+                moment=datetime(2026, 7, 27, 11, 0)))
 
 
 class TestWindowsHeartbeat(unittest.TestCase):
