@@ -45,6 +45,16 @@ uv run --script tools/pre-release-audit.py
 uv build
 ```
 
+A development host has an initialized global workspace, so tests that do
+not build their own temp project still resolve a root here and fail only
+in CI. Reproduce a bare host before pushing:
+
+```bash
+env -u AGENTS_LIVE_REPO XDG_DATA_HOME=/tmp/bare/data \
+  XDG_STATE_HOME=/tmp/bare/state XDG_CONFIG_HOME=/tmp/bare/config \
+  uv run --with-editable . --script tests/test_smoke.py
+```
+
 Exercise source behavior against a configured project by keeping `--repo`
 explicit:
 

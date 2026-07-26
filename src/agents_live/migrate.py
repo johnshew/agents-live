@@ -35,7 +35,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from . import headless, hostruntime, preflight, triggers
+from . import adminlog, headless, hostruntime, preflight, triggers
 from .headless import (
     AgentsLiveError,
     cron_line_matches,
@@ -275,6 +275,10 @@ def main() -> int:
                 if rewritten != lines:
                     headless.install_crontab(rewritten)
         rewrites = _print_adoption(plan, dry_run=args.dry_run, say=say)
+        if not args.dry_run and rewrites:
+            adminlog.record("trigger-adopt", old_root=str(old_root),
+                            rewrites=rewrites,
+                            agents=sorted(plan["schedule"]) + sorted(plan["watcher"]))
         if rewrites == 0:
             say("No matching old-root entries to adopt.")
         else:
@@ -338,6 +342,9 @@ def main() -> int:
 
     done = "planned" if args.dry_run else "migrated"
     say(f"\n{rewrites} entr{'y' if rewrites == 1 else 'ies'} {done}.")
+    if not args.dry_run:
+        adminlog.record("trigger-migrate", rewrites=rewrites,
+                        agents=sorted(plan["schedule"]) + sorted(plan["watcher"]))
     if preflight.json_mode():
         print(json.dumps({
             "ok": True, "dry_run": args.dry_run,

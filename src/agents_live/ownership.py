@@ -74,7 +74,7 @@ import socket
 import subprocess
 import uuid
 
-from . import hostruntime, paths
+from . import adminlog, hostruntime, paths
 
 
 WILDCARD = "*"
@@ -390,7 +390,18 @@ def set_owner(name: str, owner: str) -> None:
     write + git commit + detached background push; no-op if unchanged).
     Raises :class:`OwnershipUnavailableError` when no backend is
     installed."""
-    _require_backend().set_owner(name, owner)
+    backend = _require_backend()
+    previous = _recorded_owner(name)
+    backend.set_owner(name, owner)
+    if previous == owner:
+        return
+    # Transfers move execution between hosts and are the mechanism behind
+    # duplicate or silently stopped agents, so who moved what, when, and
+    # from where has to survive the command that did it.
+    adminlog.record(
+        "ownership-set", agent=name, owner_from=previous, owner_to=owner,
+        claimed=_safely(lambda: owns(owner)),
+        runtime=_safely(current_label))
 
 
 def remove_owner(name: str) -> bool:
@@ -398,7 +409,36 @@ def remove_owner(name: str) -> bool:
     + git commit + detached background push). Returns True if an entry
     was removed. Raises :class:`OwnershipUnavailableError` when no
     backend is installed."""
-    return _require_backend().remove_owner(name)
+    previous = _recorded_owner(name)
+    removed = _require_backend().remove_owner(name)
+    if removed:
+        adminlog.record("ownership-remove", agent=name, owner_from=previous,
+                        runtime=_safely(current_label))
+    return removed
+
+
+def _safely(read):
+    """A field for the audit record, or None when it cannot be read.
+
+    The write has already happened by the time these are gathered, so an
+    unreadable identity must cost the record a field, never turn a
+    completed transfer into a raised error.
+    """
+    try:
+        return read()
+    except Exception:
+        return None
+
+
+def _recorded_owner(name: str) -> str | None:
+    """The owner currently recorded for *name*, for the log's ``from``.
+
+    Read without a pull: the caller is about to write, so the local
+    document is the state it is writing over, and an audit field must
+    never add a network round trip to a mutation. Nor may it stop one:
+    a read that fails costs the record a field, not the write.
+    """
+    return _safely(lambda: load_owners(rate_limit_secs=10**9).get(name))
 
 
 __all__ = [
