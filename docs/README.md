@@ -26,7 +26,7 @@ this directory is installed by `agents-live init` or `upgrade`.
 
 - [backlog.md](backlog.md) - high-level backlog: themes and direction,
   linked to the issues that carry the detail.
-- [windows-support.md](windows-support.md) - draft proposal for running
+- [windows-support.md](windows-support.md) - architecture guide to running
   the runtime natively on Windows instead of through WSL.
 
 Design documents are added here as they are written, one file per topic,
