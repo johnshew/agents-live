@@ -17,10 +17,9 @@ import sys
 import time
 from pathlib import Path
 
-from . import hostruntime, paths, preflight
+from . import hostruntime, paths, preflight, schedules
 from .headless import (
     AgentsLiveError,
-    cron_is_active,
     ensure_logs_dir,
     find_watcher_pid,
     load_agent_config,
@@ -421,7 +420,7 @@ def cleanup() -> tuple[list[str], list[str]]:
         residue.append(f"smoketest child processes remain after cleanup: {remaining_pids}")
     active_agents = [
         name for name in SMOKETEST_AGENT_NAMES
-        if cron_is_active(name) or find_watcher_pid(name) is not None
+        if schedules.is_active(name) or find_watcher_pid(name) is not None
     ]
     if active_agents:
         residue.append(f"smoketest runtime state remains after cleanup: {active_agents}")

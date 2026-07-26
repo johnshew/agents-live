@@ -26,6 +26,11 @@ import subprocess
 import sys
 from dataclasses import dataclass, asdict
 
+try:
+    from . import hostruntime
+except ImportError:  # flat execution: qlog and timeline run as scripts
+    import hostruntime  # type: ignore[no-redef]
+
 # Set by cli.py when --json is given, so in-process subcommands and their
 # children serialize typed errors as the envelope instead of prose
 # (layer 2 of the §3.6 contract - the flag must not stop at preflight).
@@ -81,6 +86,38 @@ def emit_failure(operation: str, detail: str, *,
     )
 
 
+def _probe_schedule(operation: str) -> CapabilityFailure | None:
+    """Probe whatever this host schedules with, not cron specifically."""
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _probe_task_scheduler(operation)
+    return _probe_crontab(operation)
+
+
+def _probe_task_scheduler(operation: str) -> CapabilityFailure | None:
+    if shutil.which("schtasks") is None:
+        return CapabilityFailure(
+            "dependency_missing", "schedule", operation,
+            "schtasks was not found on this host")
+    try:
+        completed = subprocess.run(
+            ["schtasks", "/Query", "/TN", "\\", "/FO", "LIST"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CapabilityFailure(
+            "host_permission_required", "schedule", operation,
+            f"cannot read the task store: {exc}")
+    # Querying the root folder answers "can this user reach the task
+    # store at all"; an empty root is a normal answer, so only a failure
+    # that says something else is a failure here.
+    if completed.returncode != 0 and "cannot find the file" not in (
+            completed.stderr or "").lower():
+        return CapabilityFailure(
+            "host_permission_required", "schedule", operation,
+            f"schtasks query failed (rc={completed.returncode}): "
+            f"{completed.stderr.strip()[:200]}")
+    return None
+
+
 def _probe_crontab(operation: str) -> CapabilityFailure | None:
     if shutil.which("crontab") is None:
         return CapabilityFailure(
@@ -112,7 +149,7 @@ def _probe_inotify(operation: str) -> CapabilityFailure | None:
 
 
 _CAPABILITY_PROBES = {
-    "crontab": _probe_crontab,
+    "schedule": _probe_schedule,
     "inotify": _probe_inotify,
 }
 

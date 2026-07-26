@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: schedule an agent with Task Scheduler on native Windows. (#126)
+  Activation registers one task per agent, named for the agent and its
+  repository so two checkouts never collide, and verifies the task it wrote
+  before replacing or removing it. Schedules that translate exactly are
+  registered and the rest are refused with a clear message until dueness
+  checking lands. One module now chooses between crontab and Task Scheduler,
+  so activation, status, stop, and the smoke test no longer name a
+  mechanism. Linux and WSL behavior is unchanged.
 - feat: give a runtime its own ownership identity where the machine name
   cannot provide one. (#126)
   Ownership decisions now match against a runtime identity rather than the

@@ -23,12 +23,8 @@ from .headless import (
     AgentConfig,
     AgentsLiveError,
     cli_invocation,
-    crontab_lock,
-    cron_line_matches,
-    current_crontab_lines,
     ensure_logs_dir,
     find_watcher_pid,
-    install_crontab,
     install_watcher_reboot_line,
     list_active_agent_names,
     list_reboot_watcher_agent_names,
@@ -36,7 +32,6 @@ from .headless import (
     load_agent_config,
     log_event,
     logs_root,
-    remove_cron_entries,
     remove_watcher_reboot_line,
     repo_root,
     run_invocation,
@@ -50,7 +45,7 @@ from . import hostruntime
 from . import ownership
 from . import paths
 from . import preflight
-from . import triggers
+from . import schedules
 from . import watchpolicy
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -126,23 +121,7 @@ def install_cron_agent(name: str) -> str:
     _validate_handler_paths(config)
 
     ensure_logs_dir()
-    new_cron_lines = triggers.render(spec)
-
-    # Exact --name token matching: a plain substring test would also drop
-    # entries for sibling agents whose name contains this one (todo vs
-    # todo-push), or arbitrary entries when the name appears in the repo
-    # or script path.
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            # Never treat an unreadable crontab as empty: install_crontab
-            # replaces the whole table, which would wipe every entry the
-            # read failed to see.
-            raise AgentsLiveError("crontab is not accessible")
-        lines = [line for line in lines if not cron_line_matches(line, name)]
-        lines.extend(new_cron_lines)
-        install_crontab(lines)
-    return "; ".join(new_cron_lines)
+    return schedules.install(spec)
 
 
 # --- Watcher dispatch ---
@@ -806,10 +785,10 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
             pruned.append(name)
             continue
         try:
-            remove_cron_entries(name)
+            schedules.remove(name)
             remove_watcher_reboot_line(name)
         except AgentsLiveError:
-            pass  # crontab unavailable; watcher stop below still applies
+            pass  # scheduler unavailable; watcher stop below still applies
         stop_watcher(name)
         log_event(system_log(), level="info", agent_name=name, phase="prune-orphan",
                   message="removed cron/watcher for deleted agent definition")

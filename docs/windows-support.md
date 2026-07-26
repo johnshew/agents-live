@@ -9,7 +9,8 @@ Status: draft. Feasibility is settled, the host-runtime seam has landed
 on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
 its locking and process members are written and measured on a native
 Windows host, a foreground `agents-live run` now executes an agent end
-to end there, and that runtime has an ownership identity of its own.
+to end there, that runtime has an ownership identity of its own, and
+Task Scheduler now fires a scheduled agent on a Windows host unattended.
 What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
@@ -428,6 +429,29 @@ working directory. Build the argument string with Windows
 a fully qualified executable rather than a PATH-resolved name, then read
 back and compare the registered task definition.
 
+### What registration looks like today
+
+Step 9 landed the registration half of this design.
+[wintasks.py](../src/agents_live/wintasks.py) builds and registers task
+definitions; [schedules.py](../src/agents_live/schedules.py) is the one
+place that chooses between crontab and Task Scheduler, so `activate`,
+`stop`, `status`, and `smoketest` no longer name a mechanism.
+
+A task is named `<agent>@<digest>`, where the digest covers the
+repository root, and lives in the `\AgentsLive` folder of the task
+store. That makes the same agent in two checkouts two tasks that cannot
+replace or delete each other, and it makes enumeration cheap. Before
+any replace or delete, the registered definition is read back and
+checked: the action has to be an `agents-live` command whose working
+directory is that repository, and a definition that does not decode or
+does not parse fails the check rather than passing it.
+
+Translation is exact-only so far. `*/N * * * *` where N divides 60,
+`M * * * *`, `M H * * *`, and `@reboot` register native triggers;
+everything else is refused with a message naming the step that will
+accept it. Refusing is honest while the dueness predicate that makes
+coarse triggers safe does not exist; step 10 removes the refusal.
+
 ### Watchers are started by Task Scheduler, not scheduled by it
 
 Each file-watch agent keeps one small watcher process, exactly as on
@@ -809,6 +833,77 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-26: scheduling dispatches through one module, not a runtime object
+
+The seam extracted in step 3 anticipated a `PosixRuntime` holding the
+crontab members and a `WindowsRuntime` holding their Task Scheduler
+counterparts. Step 9 did not build that. It added
+[schedules.py](../src/agents_live/schedules.py), a module with
+`install`, `remove`, `is_active`, and `installed_names`, which asks
+`hostruntime.native_scheduler()` once and calls either the existing
+crontab primitives or the new [wintasks.py](../src/agents_live/wintasks.py)
+leaf.
+
+The crontab primitives were already free functions with no state
+between them, and the Windows side has none either: a task store is not
+something a process holds open. A class would have been a namespace
+with a constructor, and every call site would have had to acquire an
+instance before asking a question. The module is the same dispatch with
+less ceremony, and it moves the same amount of platform knowledge out of
+the call sites, which was the point of the seam. If a future member does
+need state, the module can hand one out then.
+
+Three consequences worth recording. First, the crontab lock, read,
+filter, and write sequence moved out of `activate` into the POSIX branch
+of `schedules.install`, so `activate` now loads config, validates
+handler paths, and delegates. Second, the CLI capability formerly called
+`crontab` is now `schedule`, and its preflight probe checks `schtasks`
+on Windows and the `crontab` binary elsewhere; the old name failed every
+Windows `start` before any work began. Third, the smoke suite pins
+`native_scheduler` to crontab in its temp-project base class, because
+the crontab-shaped assertions predate Windows and, unpinned, registered
+real tasks on the developer's machine.
+
+### 2026-07-26: exact translation now, coarse triggers with step 10
+
+The design says translation produces a superset and a dueness predicate
+declines the fires that are not due. Step 9 implemented only the exact
+half and refuses the rest.
+
+A superset without the predicate is not a partial implementation of the
+design; it is a different behavior, one that runs agents at times their
+schedule does not name. Refusing a schedule tells the developer exactly
+what is not supported yet. Accepting it silently would not. The refusal
+message names step 10 so the limitation reads as a stage rather than a
+verdict.
+
+### 2026-07-26: what a Windows task read-back can and cannot verify
+
+Registration verifies itself by reading the definition back, and two
+limits of that check are worth stating.
+
+`schtasks /query /xml` writes through the console code page, so a path
+outside that code page comes back with replacement characters. Rather
+than guess, `_is_ours` treats any replacement character as a failed
+check: an unverifiable task is one this tool will not touch. A
+non-ASCII repository path therefore cannot be adopted or removed by
+name today, which is a real gap and a better one than deleting the
+wrong task.
+
+`schtasks` also distinguishes a missing task from a missing folder by
+wording alone, "cannot find the file" against "cannot find the path",
+and the first registration in a fresh install hits the second. Matching
+only the first turned an ordinary empty-folder state into a hard
+"Task Scheduler unavailable" error. The check now matches the shared
+prefix.
+
+The principal is an interactive token at least privilege, so a task
+runs only while the owning user is logged on and each run flashes a
+console window. That is the honest default for a tool that runs a
+developer's agents with the developer's credentials; a service account
+or stored password would buy background execution at a cost this
+trust model does not want to pay.
 
 Decisions that changed the approach recorded above. The document states
 the current approach; this log says when it changed and why.

@@ -49,12 +49,12 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, --quiet | Execute an agent once. |
-| start | in-process | required | crontab, inotify | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
-| stop | in-process | required | crontab | yes |  | yes | --name | Deactivate triggers and keep configuration. |
+| start | in-process | required | schedule, inotify | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --prune-orphans | Activate cron and watcher triggers. |
+| stop | in-process | required | schedule | yes |  | yes | --name | Deactivate triggers and keep configuration. |
 | status | in-process | required |  | yes | yes |  | --all-repos | List agents and runtime state. |
 | logs | subprocess | required |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | required |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
-| smoketest | in-process | required | crontab, inotify | yes |  |  | --runtime, --model | Run end-to-end validation. |
+| smoketest | in-process | required | schedule, inotify | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
