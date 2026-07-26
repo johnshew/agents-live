@@ -5534,6 +5534,18 @@ class TestReleaseTool(unittest.TestCase):
             module._minimum_bump("- feat: replace the API.\n\nBREAKING CHANGE: API v1"),
             "major",
         )
+        self.assertEqual(
+            module._minimum_bump(
+                "- feat: replace the API.\n  BREAKING CHANGE: API v1 is gone."),
+            "major",
+        )
+        # The footer only counts at the start of a line: an entry that
+        # describes the handling of a `BREAKING CHANGE:` block is not one.
+        self.assertEqual(
+            module._minimum_bump(
+                "- docs: lift a `BREAKING CHANGE:` block into the notes."),
+            "patch",
+        )
 
     def test_version_update_changes_every_release_surface(self) -> None:
         module = self._load_tool()
@@ -5654,87 +5666,33 @@ class TestReleaseTool(unittest.TestCase):
         module = self._load_tool()
         with tempfile.TemporaryDirectory() as tmp:
             self._fixture(module, Path(tmp))
-            module.CHANGELOG.write_text(
-                "# Changelog\n\n## Unreleased\n\n## 1.2.3 - 2026-07-18\n\n"
-                "- fix: keep this standalone summary.\n"
-                "  This detail stays in the changelog.\n"
-                "- feat!: replace the old contract.\n"
-                "  Migration details also stay out of the release body.\n",
-                encoding="utf-8",
-            )
             existing = subprocess.CompletedProcess(
                 args=[], returncode=0, stdout='{"url":"https://example.test/release"}\n')
-            existing_body = (
-                "- fix: keep this standalone summary.\n\n"
-                "[Full changelog](https://github.com/johnshew/agents-live/"
-                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md)\n\n"
-                "## What's Changed\n"
-                "* Fix a bug in https://example.test/pull/1\n\n"
-                "**Diffs**: https://github.com/johnshew/agents-live/"
-                "compare/v1.2.2...v1.2.3"
-            )
-            expected_body = (
-                "## Curated Summary\n\n"
-                "- fix: keep this standalone summary.\n\n"
-                "## What's Changed\n"
-                "* Fix a bug in https://example.test/pull/1\n\n"
-                "[Full changelog](https://github.com/johnshew/agents-live/"
-                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
-                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
-                "compare/v1.2.2...v1.2.3)\n"
-            )
-            edited_bodies = []
-
-            def capture_existing_run(argv, *, capture=False):
-                if argv[:3] == ["gh", "release", "view"]:
-                    return existing_body
-                if argv[:3] == ["gh", "release", "edit"]:
-                    notes_path = Path(argv[argv.index("--notes-file") + 1])
-                    edited_bodies.append(notes_path.read_text(encoding="utf-8"))
-                return ""
 
             with (
                 mock.patch.object(module, "_require_tools"),
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=existing),
-                mock.patch.object(
-                    module, "_run", side_effect=capture_existing_run
-                ) as run,
+                mock.patch.object(module, "_run", return_value="") as run,
                 mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
                 module.publish()
-            commands = [call.args[0] for call in run.call_args_list]
-            self.assertFalse(any(command[0] == "uv" for command in commands))
-            self.assertEqual(edited_bodies, [expected_body])
+            self.assertEqual(run.call_args_list, [])
 
             missing = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
             release_bodies = []
-            edited_bodies.clear()
-            generated_body = (
-                "## Curated Summary\n\n"
-                "- fix: keep this standalone summary.\n"
-                "- feat!: replace the old contract.\n\n"
-                "## What's Changed\n"
-                "* Fix a bug in https://example.test/pull/1\n\n"
-                "**Full Changelog**: https://github.com/johnshew/agents-live/"
-                "compare/v1.2.2...v1.2.3"
-            )
 
             def capture_run(argv, *, capture=False):
                 if argv[:3] == ["gh", "release", "create"]:
                     notes_path = Path(argv[argv.index("--notes-file") + 1])
                     release_bodies.append(notes_path.read_text(encoding="utf-8"))
-                if argv[:3] == ["gh", "release", "view"]:
-                    return generated_body
-                if argv[:3] == ["gh", "release", "edit"]:
-                    notes_path = Path(argv[argv.index("--notes-file") + 1])
-                    edited_bodies.append(notes_path.read_text(encoding="utf-8"))
                 return ""
 
             with (
                 mock.patch.object(module, "_require_tools"),
                 mock.patch.object(module, "_check_publish_state", return_value=False),
                 mock.patch.object(module.subprocess, "run", return_value=missing),
+                mock.patch.object(module, "_release_notes", return_value="## Changes"),
                 mock.patch.object(module, "_run", side_effect=capture_run) as run,
                 mock.patch("sys.stdout", new_callable=io.StringIO),
             ):
@@ -5746,43 +5704,148 @@ class TestReleaseTool(unittest.TestCase):
                 if command[:3] == ["gh", "release", "create"]
             )
             self.assertIn("--notes-file", release_command)
-            self.assertEqual(
-                release_bodies,
-                [
-                "## Curated Summary\n\n"
-                "- fix: keep this standalone summary.\n"
-                "- feat!: replace the old contract.\n"
-                ],
-            )
-            self.assertEqual(
-                edited_bodies,
-                [
-                "## Curated Summary\n\n"
-                "- fix: keep this standalone summary.\n"
-                "- feat!: replace the old contract.\n\n"
-                "## What's Changed\n"
-                "* Fix a bug in https://example.test/pull/1\n\n"
-                "[Full changelog](https://github.com/johnshew/agents-live/"
-                "blob/v1.2.3/src/agents_live/skill/docs/changelog.md) | "
-                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
-                "compare/v1.2.2...v1.2.3)\n"
-                ],
-            )
+            # The body is built here in full; asking gh to generate one is
+            # what produced the second, unreconciled list.
+            self.assertNotIn("--generate-notes", release_command)
+            self.assertEqual(release_bodies, ["## Changes\n"])
 
-            edited_bodies.clear()
+    def _notes_fixture(self, module, root: Path) -> None:
+        self._fixture(module, root)
+        module.CHANGELOG.write_text(
+            "# Changelog\n\n## Unreleased\n\n## 1.2.3 - 2026-07-18\n\n"
+            "- fix: the last repository can be removed. (#144)\n"
+            "  Detail that stays in the changelog.\n"
+            "- feat!: own an agent by uuid. (#148)\n"
+            "  Detail that stays in the changelog.\n"
+            "  BREAKING CHANGE: existing claims do not carry forward, so run\n"
+            "  `agents-live start <agent> --transfer-here` on the owning host.\n"
+            "- docs: document the seam. (#147)\n",
+            encoding="utf-8",
+        )
 
-            def capture_normalized_run(argv, *, capture=False):
-                if argv[:3] == ["gh", "release", "view"]:
-                    return expected_body.rstrip()
-                if argv[:3] == ["gh", "release", "edit"]:
-                    edited_bodies.append(argv)
-                return ""
+    def test_release_notes_lift_migration_and_annotate_each_row(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._notes_fixture(module, Path(tmp))
+            pulls = {
+                149: ("fix!: own an agent by uuid", (148,)),
+                151: ("fix: let the last repository be removed", (144,)),
+                153: ("docs: document the seam", (147,)),
+            }
 
-            with mock.patch.object(
-                module, "_run", side_effect=capture_normalized_run
+            with (
+                mock.patch.object(module, "_previous_tag", return_value="v1.2.2"),
+                mock.patch.object(module, "_merged_pulls", return_value=pulls),
             ):
-                module._normalize_release_body("v1.2.3")
-            self.assertEqual(edited_bodies, [])
+                body = module._release_notes("1.2.3")
+
+            # The migration is lifted out of the changelog rather than left
+            # a link away, and reads as a sentence on its own.
+            self.assertIn("## Action required\n\nExisting claims do not carry", body)
+            # A wrap inside the flag would render it as `--transfer- here`.
+            self.assertIn("--transfer-here", body)
+            self.assertIn("(PR #149 fixes #148)", body)
+            # One list, breaking first, then feat, fix, docs.
+            rows = [line for line in body.splitlines() if line.startswith("- ")]
+            self.assertEqual(rows, [
+                "- feat!: own an agent by uuid (PR #149 fixes #148)",
+                "- fix: the last repository can be removed (PR #151 fixes #144)",
+                "- docs: document the seam (PR #153 fixes #147)",
+            ])
+            self.assertNotIn("Curated Summary", body)
+            self.assertNotIn("What's Changed", body)
+            self.assertIn(
+                "[Full changelog](https://github.com/johnshew/agents-live/blob/"
+                "v1.2.3/src/agents_live/skill/docs/changelog.md) | "
+                "[v1.2.2...v1.2.3](https://github.com/johnshew/agents-live/"
+                "compare/v1.2.2...v1.2.3)",
+                body,
+            )
+
+    def test_release_notes_recover_a_pull_the_changelog_missed(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._notes_fixture(module, Path(tmp))
+            pulls = {
+                150: ("fix: drop the emoji trailer", (146,)),
+                151: ("fix: let the last repository be removed", (144,)),
+            }
+
+            with (
+                mock.patch.object(module, "_previous_tag", return_value="v1.2.2"),
+                mock.patch.object(module, "_merged_pulls", return_value=pulls),
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                body = module._release_notes("1.2.3")
+
+            self.assertIn("- fix: drop the emoji trailer (PR #150 fixes #146)", body)
+            self.assertIn("#150 has no changelog entry", stderr.getvalue())
+
+    def test_release_notes_drop_pulls_that_would_duplicate_a_row(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._notes_fixture(module, Path(tmp))
+            # Releases organised around an umbrella issue leave sub-pulls
+            # closing nothing; joining on the issue alone repeats each row.
+            pulls = {
+                130: ("docs: document the seam", ()),
+                131: ("chore: tidy an unrelated import", ()),
+            }
+
+            with (
+                mock.patch.object(module, "_previous_tag", return_value="v1.2.2"),
+                mock.patch.object(module, "_merged_pulls", return_value=pulls),
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                body = module._release_notes("1.2.3")
+
+            rows = [line for line in body.splitlines() if line.startswith("- ")]
+            self.assertEqual(len(rows), 3)
+            self.assertNotIn("PR #130", body)
+            self.assertNotIn("PR #131", body)
+            self.assertIn("#131", stderr.getvalue())
+
+    def test_release_notes_omit_the_action_section_without_a_migration(self) -> None:
+        module = self._load_tool()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fixture(module, Path(tmp))
+            module.CHANGELOG.write_text(
+                "# Changelog\n\n## Unreleased\n\n## 1.2.3 - 2026-07-18\n\n"
+                "- fix: a fix that needs nothing of the reader.\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(module, "_previous_tag", return_value=""),
+                mock.patch.object(module, "_merged_pulls", return_value={}),
+            ):
+                body = module._release_notes("1.2.3")
+
+            self.assertNotIn("## Action required", body)
+            self.assertIn("- fix: a fix that needs nothing of the reader", body)
+            # No prior tag means no comparison link to offer.
+            self.assertNotIn("compare/", body)
+
+    def test_reflow_never_breaks_a_hyphenated_token(self) -> None:
+        module = self._load_tool()
+        # Wrapping on the hyphen renders the flag as `--transfer- here`.
+        text = (
+            "Claim each one on the machine that should own it by running the "
+            "documented command `agents-live start <agent> --transfer-here` "
+            "before the next health sweep runs."
+        )
+        wrapped = module._reflow(text)
+        self.assertIn("--transfer-here", wrapped)
+        self.assertGreater(len(wrapped.splitlines()), 1)
+
+    def test_annotate_renders_each_reference_kind(self) -> None:
+        module = self._load_tool()
+        self.assertEqual(module._annotate([151], (144,)), " (PR #151 fixes #144)")
+        self.assertEqual(
+            module._annotate([143, 145], (137,)), " (PR #143, #145 fixes #137)")
+        self.assertEqual(module._annotate([150], ()), " (PR #150)")
+        self.assertEqual(module._annotate([], (126,)), " (closes #126)")
+        self.assertEqual(module._annotate([], ()), "")
 
 
 class TestInstallSkill(_TempProject):

@@ -22,7 +22,7 @@ transcript in `dashboard-transcript.log`.
 
 Scope: this build acts on the *local* host. Health check activates
 agents owned by this host or `*`; per-agent Claim transfers an agent's
-ownership to this host (`activate.py --name X --transfer-to <host>`)
+ownership to this host (`activate.py --name X --transfer-here`)
 and registers its cron/watcher. Bulk cross-host reassignment to *other*
 hosts is still deferred.
 
