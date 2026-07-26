@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- change: the WSL heartbeat no longer runs on VBScript. (#137)
+  Its scheduled task launched `wscript.exe` on a packaged script that
+  asked Windows to hide a console it had just created - a scripting host
+  Windows 11 is removing, and a hiding technique the default terminal
+  application can override. The task now runs `wslg.exe`, the windowless
+  launcher WSL itself ships, which is given no console to begin with. Run
+  `agents-live heartbeat install` to move an existing task over;
+  `agents-live doctor` names the old shape until you do.
 - test: the suite runs on native Windows, and CI keeps it that way. (#119)
   Every push and pull request now runs the tests on Windows as well as
   Linux. Getting there fixed four defects the Windows host exposed: a

@@ -1,7 +1,7 @@
 ---
 title: Agents Live Windows Heartbeat
 description: Keep WSL available for scheduled Agents Live agents with Windows Task Scheduler
-ms.date: 2026-07-21
+ms.date: 2026-07-27
 ms.topic: how-to
 ---
 
@@ -17,18 +17,24 @@ every 5 minutes from Windows Task Scheduler.
 One task per WSL distro runs this action every five minutes:
 
 ```text
-wscript.exe "\\wsl.localhost\<distro>\...\agents_live\run-hidden.vbs"
-    "wsl.exe -d <distro> --exec /home/<user>/.local/bin/agents-live heartbeat"
+"C:\Program Files\WSL\wslg.exe"
+    -d <distro> -- /home/<user>/.local/bin/agents-live heartbeat
 ```
 
-The packaged `run-hidden.vbs` wrapper launches wsl.exe with a hidden
-window, so the five-minute cadence never flashes a console. The distro
-argument selects the host runtime. The uv-managed shim selects the
-currently installed agents-live version without pinning a checkout or a
-Python-minor-version directory (the wrapper's own path tracks the
-installed package through the `\\wsl.localhost` share). There is
-deliberately no project binding: one host heartbeat serves every Agents
-Live project in that distro.
+`wslg.exe` is the windowless build of `wsl.exe` that ships with WSL, the
+one it uses to start Linux GUI programs. Windows gives it no console, so
+the five-minute cadence has no window to hide and nothing a terminal
+application can reopen somewhere visible. The distro argument selects
+the host runtime; everything after `--` is handed to the distro's shell
+as written. The uv-managed shim selects the currently installed
+agents-live version without pinning a checkout or a
+Python-minor-version directory. There is deliberately no project
+binding: one host heartbeat serves every Agents Live project in that
+distro.
+
+Nothing in the action is a Windows path except the launcher, and nothing
+in it points back into the distro's filesystem, so upgrading agents-live
+does not invalidate the registration.
 
 The command writes `heartbeat.ok` and `heartbeat.log` under
 `${XDG_STATE_HOME:-~/.local/state}/agents-live/`. Repository discovery is never
@@ -40,10 +46,14 @@ stable CLI shim makes installation fail clearly.
 `agents-live doctor` verifies the shared beacon is less than 10 minutes old.
 
 It also verifies the current distro's task is enabled, repeats every five
-minutes, and invokes the stable shim through the hidden-window wrapper.
-Direct `wsl.exe` actions (visible console), checkout, Python-versioned,
-project-pinned, and legacy `WSL Heartbeat` actions produce a
-re-registration or migration recommendation.
+minutes, and invokes the stable shim through `wslg.exe`. Superseded
+launchers are named for what they were: a direct `wsl.exe` action showed
+a console every run, and the VBScript wrapper that replaced it hid that
+console on a scripting host Windows is retiring. Those, along with
+checkout, Python-versioned, project-pinned, and legacy `WSL Heartbeat`
+actions, produce a re-registration or migration recommendation. A host
+where `wslg.exe` cannot be found is reported with the repair: run
+`wsl.exe --update` on the Windows side.
 
 ## Diagnosing
 

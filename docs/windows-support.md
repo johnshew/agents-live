@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: How agents-live runs natively on Windows - Task Scheduler instead of cron, ReadDirectoryChangesW instead of inotifywait, and the seam that keeps the two implementations from leaking into each other
-ms.date: 2026-07-27
+ms.date: 2026-07-28
 ms.topic: concept
 ---
 
@@ -29,11 +29,8 @@ ownership model that can say which of the two runtimes on one physical
 machine owns an agent.
 
 Status: implemented and covered by CI on `windows-latest` alongside
-`ubuntu-latest`. The one piece still carrying its original shape is the
-WSL heartbeat's launcher, which goes through VBScript
-([#137](https://github.com/johnshew/agents-live/issues/137)). Whether
-the Windows half earns its keep in the long run stays an open product
-question; the engineering question is settled.
+`ubuntu-latest`. Whether the Windows half earns its keep in the long run
+stays an open product question; the engineering question is settled.
 
 ## Where the code lives
 
@@ -688,13 +685,6 @@ through a quoting parser.
 
 ## Open questions
 
-- **The WSL heartbeat still launches through VBScript.** `wscript.exe`
-  running `run-hidden.vbs` can only ask for `SW_HIDE`, which allocates a
-  console and then hides it, and VBScript is a Feature on Demand slated
-  for removal. The native side already solved this with `pythonw` and
-  `CREATE_NO_WINDOW`; the heartbeat is registered from inside WSL and so
-  cannot assume a Windows Python is present.
-  ([#137](https://github.com/johnshew/agents-live/issues/137))
 - **Logged-off execution.** Tasks run with an interactive token, so
   nothing fires while nobody is signed in. `doctor` says so. Stored
   credentials, S4U, mapped drives, and network repositories are separate
@@ -713,6 +703,50 @@ failure settled it. Superseded planning content - the implementation
 order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
+
+### 2026-07-28: WSL already ships the windowless launcher
+
+The heartbeat's task action ran `wscript.exe` on a packaged VBScript that
+called `WScript.Shell.Run(cmd, 0, True)`. That was two bets going bad at
+once. VBScript is a Feature on Demand in Windows 11 and is being removed,
+and persisted task definitions outlive the decision that wrote them. And
+window style 0 is `SW_HIDE`, which asks for a console and then hides it -
+so whether anything appears depends on the default terminal application,
+and Windows Terminal reopens it somewhere visible.
+
+`pythonw`, the native side's answer, is not available here: the heartbeat
+is registered from inside the distro, and a WSL-only install has no
+Windows Python to point at. Three other options were measured on a real
+host and rejected:
+
+| Rejected | Measurement |
+|---|---|
+| `conhost.exe --headless <command>` | Returns in about a second, exit 0, and the command never runs. It expects to be driven as a pseudoconsole host, not used as a launcher |
+| A non-interactive principal (`-LogonType S4U`) | `Register-ScheduledTask` fails with "Access is denied" unelevated, and the heartbeat installs as an ordinary user |
+| A resolved Windows `pythonw.exe` | Present only if the developer also installed Python on Windows, which a WSL deployment has no reason to have done |
+
+The answer was already installed: `wslg.exe`, the GUI-subsystem build of
+`wsl.exe` that WSL ships to start Linux GUI programs. Windows gives a
+GUI-subsystem process no console at all, so there is no window to hide
+and nothing for a terminal application to reopen. It needs no packaged
+file, no `\\wsl.localhost` path in the action, and no second runtime. It
+is not on `PATH`, so it is looked up where WSL installs it -
+`%ProgramFiles%\WSL` for the MSI package, the `WindowsApps` execution
+alias for the Store package - and the result is cached for the process.
+
+Two properties of it are worth writing down. It takes its own options
+from the Windows command line and hands everything after `--` to the
+distro's shell as written, so the action's argument string is quoted by
+two different rules in its two halves. And it does not dependably report
+the Linux command's exit status: a task firing `exit 9` was observed
+returning both 9 and 0. Nothing reads that status. The beacon file the
+heartbeat writes is the health signal, `doctor` compares its age, and
+that is unaffected.
+
+The old shapes are not migrated in place, because a task definition is
+the developer's to keep: `doctor` names each superseded launcher for what
+it was and points at `agents-live heartbeat install`, which converges the
+action on the next run.
 
 ### 2026-07-27: this document became an architecture guide
 
@@ -914,14 +948,13 @@ invisibly all run in session 0, which is the logged-off execution that
 this design deliberately deferred.
 
 So the action names a program with no console to show, and that program
-starts the real one hidden. The WSL heartbeat solved the same problem
-with `wscript.exe` and a packaged VBScript, but VBScript is a
-feature-on-demand in Windows 11 and is being removed, and persisted task
-definitions outlive the decision that wrote them. The interpreter that
-is already installed beside the pinned executable answers instead:
-`pythonw` is a windowless build of the same Python, and
-[hidden.py](../src/agents_live/hidden.py) is eleven lines that start the
-command with `CREATE_NO_WINDOW` and exit with its status.
+starts the real one hidden. The interpreter that is already installed
+beside the pinned executable answers: `pythonw` is a windowless build of
+the same Python, and [hidden.py](../src/agents_live/hidden.py) is eleven
+lines that start the command with `CREATE_NO_WINDOW` and exit with its
+status. The WSL heartbeat has the same problem and cannot use the same
+answer, because it is registered from inside the distro and there is no
+Windows Python to assume; the entry below settles that half.
 
 The indirection is not incidental. Under `pythonw` there are no standard
 streams at all, so running the CLI directly there would fail on its

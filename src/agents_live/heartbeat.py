@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,14 @@ LEGACY_TASK = "WSL Heartbeat"
 LEGACY_ACTION_TOKENS = (
     "windows-heartbeat.sh", "site-packages", "python3.", "--repo")
 INVALID_DISTRO_CHARS = ('"', "\n", "\r", "\0")
+LAUNCHER = "wslg.exe"
+# Where WSL puts it: the MSI package first, then the Store package's
+# execution alias. It is deliberately not on PATH in either.
+LAUNCHER_CANDIDATES = (
+    r"$env:ProgramFiles\WSL\wslg.exe",
+    r"$env:LOCALAPPDATA\Microsoft\WindowsApps\wslg.exe",
+)
+_launcher: str | None = None
 
 
 def state_dir() -> Path:
@@ -46,47 +55,54 @@ def stable_cli_path() -> Path:
     return Path.home() / ".local" / "bin" / "agents-live"
 
 
-def wsl_command(distro: str, cli_path: Path | None = None) -> str:
-    """The full wsl.exe command line the scheduled task ultimately runs."""
-    return subprocess.list2cmdline([
-        "wsl.exe", "-d", current_distro(distro), "--exec",
-        str(cli_path or stable_cli_path()), "heartbeat",
-    ])
+def windowless_launcher() -> str:
+    r"""Where this host keeps ``wslg.exe``, WSL's own windowless launcher.
+
+    A task action runs with an interactive token, in the developer's own
+    session, so a console program named directly opens a console window -
+    every five minutes, on top of whatever they were doing. ``wslg.exe``
+    is the GUI-subsystem build of ``wsl.exe`` that WSL ships to start
+    Linux GUI programs: the operating system gives it no console, so
+    there is no window to hide and nothing for the default terminal
+    application to reopen somewhere visible.
+
+    It ships beside ``wsl.exe`` but is not on PATH, so it is looked up
+    where WSL installs it. The answer is cached because it is a property
+    of the host, and every caller in a process wants the same one.
+    """
+    global _launcher
+    if _launcher is not None:
+        return _launcher
+    candidates = ",".join(f'"{candidate}"' for candidate in LAUNCHER_CANDIDATES)
+    script = (
+        f"$found=$null;foreach ($p in @({candidates})) "
+        "{if (Test-Path -LiteralPath $p) {$found=$p;break}};"
+        f"if (-not $found) {{$c=Get-Command {LAUNCHER} "
+        "-ErrorAction SilentlyContinue;if ($c) {$found=$c.Source}};"
+        "if ($found) {$found}")
+    resolved = _run_powershell(script).stdout.strip()
+    if not resolved:
+        raise RuntimeError(
+            f"cannot find {LAUNCHER}, which runs the heartbeat without a "
+            "console window; it ships with WSL 2, so run `wsl.exe --update` "
+            "on the Windows side and try again")
+    _launcher = resolved
+    return _launcher
 
 
-def _installed_vbs() -> Path | None:
-    """``run-hidden.vbs`` inside the uv tool environment, if installed.
-
-    Persisted task actions must reference the installed tool (matching
-    stable_cli_path()'s contract), never a development checkout that
-    happens to be running this code."""
-    tool_dir = Path.home() / ".local" / "share" / "uv" / "tools" / "agents-live"
-    matches = sorted(tool_dir.glob(
-        "lib/python3.*/site-packages/agents_live/run-hidden.vbs"))
-    return matches[-1] if matches else None
-
-
-def vbs_windows_path(distro: str) -> str:
-    r"""The ``run-hidden.vbs`` wrapper as Windows sees it.
-
-    The wrapper lives in this package inside the distro's filesystem;
-    Windows tools reach it through the ``\\wsl.localhost\<distro>`` UNC
-    share."""
-    vbs = _installed_vbs() or Path(__file__).resolve().with_name(
-        "run-hidden.vbs")
-    return (rf"\\wsl.localhost\{current_distro(distro)}"
-            + str(vbs).replace("/", "\\"))
-
-
-def task_action(distro: str, cli_path: Path | None = None) -> tuple[str, str]:
+def task_action(distro: str, cli_path: Path | None = None,
+                launcher: str | None = None) -> tuple[str, str]:
     """(Execute, Arguments) for the scheduled task.
 
-    ``wscript.exe`` runs the packaged ``run-hidden.vbs`` wrapper, which
-    launches wsl.exe with a hidden window - a task that executes wsl.exe
-    directly flashes a visible console every five minutes.
+    The two halves of the argument string are quoted by different rules,
+    because two different parsers read them: ``wslg.exe`` takes its own
+    options from the Windows command line, and hands everything after
+    ``--`` to the distro's shell exactly as written.
     """
-    return "wscript.exe", subprocess.list2cmdline([
-        vbs_windows_path(distro), wsl_command(distro, cli_path)])
+    return (launcher or windowless_launcher()), " ".join([
+        subprocess.list2cmdline(["-d", current_distro(distro)]), "--",
+        shlex.join([str(cli_path or stable_cli_path()), "heartbeat"]),
+    ])
 
 
 def run_once() -> int:
