@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a console window no longer flashes on every spawn under native
+  Windows. (#139)
+  Starting a watcher, a cron loop, or the maintenance loop opened a window
+  that closed again a moment later. The spawn asked for no window and for a
+  detached process, and Windows ignores the first request whenever the
+  second is made, so every detached child came up owning a fresh console
+  with a window for the console host to draw. The child now gets a console
+  of its own that is never drawn, which its own descendants inherit.
 - feat: harden the failure paths under native Windows. (#136)
   A file-change storm can no longer grow without limit: the watcher's event
   queue is bounded, and past the bound it falls back to the same single

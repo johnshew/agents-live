@@ -871,6 +871,45 @@ design isolation that the trusted-administrator model cannot provide.
 
 ## Decision log
 
+### 2026-07-25: a detached child is the one thing a spawn must not be
+
+Every detached spawn flashed a console window on the desktop. Starting a
+watcher opened a window that shut again a moment later, and a test run
+that spawns processes produced a burst of them. The flags asked for
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, which
+reads as "no window" and is not: Windows ignores `CREATE_NO_WINDOW`
+whenever `DETACHED_PROCESS` or `CREATE_NEW_CONSOLE` is also set, so the
+one flag naming the symptom was the one flag with no effect.
+
+Measuring settled it. The same child, spawned under each flag set,
+reported `GetConsoleCP()` and `GetConsoleWindow()`:
+
+| creation flags | code page | console window |
+| --- | --- | --- |
+| `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_NO_WINDOW` | 437 | non-zero |
+| `CREATE_NEW_PROCESS_GROUP \| CREATE_NO_WINDOW` | 437 | 0 |
+
+Detaching does not mean "no console". It means "not the parent's
+console", and Windows supplies a new one with a window attached.
+`CREATE_NO_WINDOW` on its own gives the child a console of its own that
+is never drawn, which is what the spawn wanted all along, and which
+descendants inherit rather than allocating another. Process group
+isolation is the flag that was actually carrying the detachment, and it
+stays.
+
+Sampling visible top-level windows every 10 ms is what made this
+provable rather than anecdotal: a flash is over long before a one-second
+poll notices, and the failure had been mistaken for the scheduled tasks
+and then for `uv` more than once. Before the change, three runs of the
+process tests opened sixteen windows; after it, those runs and a full
+351-test run opened none. The same four tests also went from about 1.1 s
+to about 0.37 s, because allocating a console and handing it to the
+default console host was most of what they were doing.
+
+The regression test asserts the pair that distinguishes the two states:
+a non-zero code page, so the child still has a console to hand down, and
+a zero window handle, so nothing is ever drawn.
+
 ### 2026-07-25: a queue that cannot grow, and a batch that cannot either
 
 The watcher had two unbounded places between the kernel and an agent.

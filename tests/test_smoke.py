@@ -3330,6 +3330,32 @@ class TestHostRuntimeProcesses(unittest.TestCase):
         child.wait(timeout=15)
         hostruntime.terminate(child.pid, grace_s=1)
 
+    def test_a_detached_child_owns_a_console_nobody_can_see(self) -> None:
+        """The property that keeps consoles from flashing on the desktop.
+
+        Measured: with ``DETACHED_PROCESS`` set, Windows ignores
+        ``CREATE_NO_WINDOW`` and gives the child a fresh console whose
+        window handle is real - the flash. Without it the child still
+        gets a console, so descendants inherit one, but the window
+        handle is zero and nothing is ever drawn.
+        """
+        if hostruntime.id() != hostruntime.WINDOWS:
+            self.skipTest("only Windows attaches consoles to processes")
+        source = (
+            "import ctypes\n"
+            "kernel32 = ctypes.windll.kernel32\n"
+            "print(kernel32.GetConsoleCP(), kernel32.GetConsoleWindow(),"
+            " flush=True)\n"
+        )
+        child = hostruntime.spawn_detached(
+            [sys.executable, "-c", source], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.addCleanup(child.stdout.close)
+        code_page, console_window = child.stdout.readline().split()
+        self.assertNotEqual(code_page, "0")
+        self.assertEqual(console_window, "0")
+
 
 class TestHostRuntimeEnvironment(unittest.TestCase):
     """The environment, PATH, and executable an agent run is launched with."""

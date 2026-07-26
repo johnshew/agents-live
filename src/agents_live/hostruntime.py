@@ -355,7 +355,6 @@ if _IS_WINDOWS:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     PROCESS_TERMINATE = 0x0001
     STILL_ACTIVE = 259
-    DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_NO_WINDOW = 0x08000000
     CP_UTF8 = 65001
@@ -552,8 +551,21 @@ if _IS_WINDOWS:
         return found
 
     def _detached_popen_kwargs() -> dict:
-        return {"creationflags": (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-                                  | CREATE_NO_WINDOW)}
+        """Flags for a child that outlives us and stays out of sight.
+
+        ``CREATE_NO_WINDOW`` is deliberately not paired with
+        ``DETACHED_PROCESS``: Windows ignores it whenever
+        ``DETACHED_PROCESS`` or ``CREATE_NEW_CONSOLE`` is also set.
+        Measured with both flags, the child came up owning a fresh
+        console with a real window handle, which the default console host
+        draws on the desktop - a window flashing open and shut on every
+        spawn. ``CREATE_NO_WINDOW`` alone still gives the child its own
+        console, so descendants that want one inherit it rather than
+        allocating another, but its window handle is zero and nothing is
+        ever drawn. ``CREATE_NEW_PROCESS_GROUP`` still keeps our
+        console's Ctrl+C away from it.
+        """
+        return {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
 
     def _use_utf8_console() -> None:
         """Put the attached console into UTF-8 for the life of this run."""
