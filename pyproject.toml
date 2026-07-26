@@ -7,8 +7,14 @@ name = "agents-live"
 version = "4.0.0"
 description = "Take your agents live: cron and file-watch dispatch, safety wrappers, and operations for standard agent definitions"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = ["PyYAML", "mcp[cli]", "jsonschema"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 
 [project.scripts]
 agents-live = "agents_live.cli:main"
