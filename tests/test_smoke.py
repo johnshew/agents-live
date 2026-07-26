@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,8 +40,8 @@ try:  # installed package layout
     from agents_live import (  # type: ignore
         activate, agent_adapters, cli, completions, headless, health_check,
         heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
-        preflight, doctor, repos, run, spawn, status, uninstall,
-        update_check, upgrade, triggers, watchpolicy,
+        preflight, doctor, repos, run, schedules, spawn, status, uninstall,
+        update_check, upgrade, triggers, watchpolicy, wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -66,6 +67,7 @@ except ImportError:  # flat checkout layout
     import doctor
     import repos
     import run
+    import schedules
     import spawn
     import status
     import update_check
@@ -73,6 +75,7 @@ except ImportError:  # flat checkout layout
     import uninstall
     import triggers
     import watchpolicy
+    import wintasks
     from cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
@@ -108,6 +111,15 @@ class _TempProject(unittest.TestCase):
         self._saved_config_home = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_CONFIG_HOME"] = str(self.root / "xdg-config")
         paths.clear_cache()
+        # The crontab-shaped expectations in this suite predate Windows
+        # support, and the Task Scheduler branch registers real tasks on
+        # the developer's machine. Pin the dispatcher so every host runs
+        # the same assertions; TestWindowsScheduling covers the other
+        # branch with no host writes at all.
+        scheduler = mock.patch.object(
+            hostruntime, "native_scheduler", return_value=hostruntime.CRONTAB)
+        scheduler.start()
+        self.addCleanup(scheduler.stop)
 
     def tearDown(self) -> None:
         if self._saved_env is None:
@@ -169,7 +181,8 @@ class TestSmoketestDispatch(_TempProject):
             mock.patch.object(smoketest, "_stop_process_tree", return_value=[]),
             mock.patch.object(smoketest.subprocess, "run", return_value=stopped),
             mock.patch.object(smoketest, "_smoketest_run_pids", return_value=[]),
-            mock.patch.object(smoketest, "cron_is_active", return_value=False),
+            mock.patch.object(smoketest.schedules, "is_active",
+                              return_value=False),
             mock.patch.object(smoketest, "find_watcher_pid", return_value=None),
         ):
             residue, diagnostics = smoketest.cleanup()
@@ -1135,10 +1148,7 @@ class TestInvocationForms(_TempProject):
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
             mock.patch.object(headless, "current_crontab_lines",
                               return_value=None),
-            mock.patch.object(activate, "current_crontab_lines",
-                              return_value=None),
             mock.patch.object(headless, "install_crontab") as h_install,
-            mock.patch.object(activate, "install_crontab") as a_install,
             mock.patch.object(activate, "_validate_handler_paths"),
         ):
             with self.assertRaisesRegex(
@@ -1148,7 +1158,6 @@ class TestInvocationForms(_TempProject):
                     headless.AgentsLiveError, "not accessible"):
                 activate.install_cron_agent("smoke-fixture")
         h_install.assert_not_called()
-        a_install.assert_not_called()
 
     def test_watcher_matching_is_scoped_to_current_repo(self) -> None:
         packaged = ["/home/u/.local/bin/agents-live", "--repo", str(self.root),
@@ -1290,9 +1299,9 @@ class TestInvocationForms(_TempProject):
         with (
             mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
-            mock.patch.object(activate, "current_crontab_lines",
+            mock.patch.object(headless, "current_crontab_lines",
                               return_value=[user_path, foreign]),
-            mock.patch.object(activate, "install_crontab") as install,
+            mock.patch.object(headless, "install_crontab") as install,
             mock.patch.object(activate, "_validate_handler_paths"),
         ):
             activate.install_cron_agent("smoke-fixture")
@@ -3257,6 +3266,195 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
             os.environ.pop("PYTHONUTF8", None)
             hostruntime.use_utf8_io()
             self.assertEqual(os.environ["PYTHONUTF8"], "1")
+
+
+class TestWindowsScheduling(unittest.TestCase):
+    """What a Windows host would be told to schedule.
+
+    Everything here is the pure half of the task store: what the command
+    string says, what the task is called, and what the XML asks for. It
+    runs on every platform because that is what decides whether the
+    Windows half does the right thing, and on Windows the round trip is
+    checked by the same function that will parse the string for real.
+    """
+
+    ROOT = Path("C:\\Users\\dev\\projects\\demo")
+    AWKWARD = [
+        "plain",
+        "with space",
+        r"C:\Program Files\repo",
+        "C:\\ends\\with\\sep\\",
+        'quote"inside',
+        r"back\\slashes",
+        "trailing\\",
+        "",
+    ]
+
+    def test_an_argument_string_parses_back_to_its_arguments(self) -> None:
+        line = wintasks.argument_string(self.AWKWARD)
+        self.assertEqual(
+            wintasks.parse_command_line(f'"prog" {line}')[1:], self.AWKWARD)
+
+    def test_a_directory_argument_keeps_its_trailing_separator(self) -> None:
+        # The backslash before the closing quote is the case every
+        # Windows path argument runs into.
+        args = ["--repo", "C:\\Users\\dev\\my repo\\"]
+        parsed = wintasks.parse_command_line(
+            f'"prog" {wintasks.argument_string(args)}')[1:]
+        self.assertEqual(parsed, args)
+
+    def test_a_string_that_does_not_parse_back_is_refused(self) -> None:
+        with mock.patch.object(wintasks, "quote_argument", lambda value: value):
+            with self.assertRaises(wintasks.ArgumentQuotingError):
+                wintasks.argument_string(["--repo", "C:\\two words\\repo"])
+
+    def test_the_same_agent_in_two_repositories_gets_two_tasks(self) -> None:
+        here = wintasks.task_name(self.ROOT, "todo")
+        there = wintasks.task_name(self.ROOT.with_name("other"), "todo")
+        self.assertNotEqual(here, there)
+        self.assertEqual(here, wintasks.task_name(self.ROOT, "todo"))
+
+    def test_a_task_belongs_to_the_repository_that_named_it(self) -> None:
+        leaf = wintasks.task_name(self.ROOT, "todo")
+        self.assertEqual(wintasks.agent_of_task_name(leaf, self.ROOT), "todo")
+        self.assertIsNone(
+            wintasks.agent_of_task_name(leaf, self.ROOT.with_name("other")))
+        self.assertIsNone(wintasks.agent_of_task_name("someone-elses-task",
+                                                      self.ROOT))
+
+    def test_a_name_that_cannot_be_a_task_name_is_refused(self) -> None:
+        with self.assertRaises(wintasks.TaskError):
+            wintasks.task_name(self.ROOT, "sneaky\\name")
+
+    def test_every_task_lives_in_one_folder(self) -> None:
+        self.assertTrue(
+            wintasks.task_path(self.ROOT, "todo").startswith(
+                wintasks.TASK_FOLDER + "\\"))
+
+    def test_schedules_that_map_exactly_become_native_triggers(self) -> None:
+        self.assertEqual(wintasks.translate("*/5 * * * *"),
+                         [{"kind": "interval", "minutes": 5,
+                           "anchor_minute": 0}])
+        self.assertEqual(wintasks.translate("17 * * * *"),
+                         [{"kind": "interval", "minutes": 60,
+                           "anchor_minute": 17}])
+        self.assertEqual(wintasks.translate("30 9 * * *"),
+                         [{"kind": "daily", "hour": 9, "minute": 30}])
+        self.assertEqual(wintasks.translate("@reboot"), [{"kind": "boot"}])
+
+    def test_a_step_that_drifts_from_cron_is_refused_not_approximated(self) -> None:
+        # Cron restarts */7 every hour; a repetition would not.
+        with self.assertRaises(wintasks.ScheduleNotTranslatable):
+            wintasks.translate("*/7 * * * *")
+
+    def test_a_schedule_with_no_exact_trigger_yet_is_refused(self) -> None:
+        for schedule in ("0 9-17 * * 1-5", "0,30 * * * *", "0 3 1 * *"):
+            with self.assertRaises(wintasks.ScheduleNotTranslatable):
+                wintasks.translate(schedule)
+
+    def test_the_first_firing_time_is_ahead_of_registration(self) -> None:
+        # A start boundary in the past is a missed start Task Scheduler
+        # would catch up on, which would run the agent at install time.
+        now = datetime(2026, 7, 25, 17, 33, 12)
+        for schedule in ("*/5 * * * *", "17 * * * *", "30 9 * * *"):
+            trigger = wintasks.translate(schedule)[0]
+            boundary = datetime.strptime(wintasks._boundary(trigger, now),
+                                         "%Y-%m-%dT%H:%M:%S")
+            self.assertGreater(boundary, now, schedule)
+
+    def test_an_interval_lands_on_the_minutes_cron_would_have(self) -> None:
+        now = datetime(2026, 7, 25, 17, 33, 12)
+        trigger = wintasks.translate("*/5 * * * *")[0]
+        self.assertEqual(wintasks._boundary(trigger, now),
+                         "2026-07-25T17:35:00")
+
+    def _document(self, root: Path | str = ROOT, command: str | None = None) -> str:
+        return wintasks.build_task_xml(
+            command=command or "C:\\tools\\agents-live.exe",
+            arguments=wintasks.argument_string(
+                ["--repo", str(root), "run", "--name", "todo", "--quiet"]),
+            working_dir=str(root), schedules=("*/5 * * * *",),
+            description="Agents Live: run agent 'todo'",
+            uri=wintasks.task_path(root, "todo"), user_id="EXAMPLE\\dev",
+            now=datetime(2026, 7, 25, 17, 33, 12))
+
+    def test_a_task_pins_its_executable_and_working_directory(self) -> None:
+        task = ET.fromstring(self._document().split("?>", 1)[1])
+        namespace = {"t": wintasks._NS}
+        action = task.find(".//t:Exec", namespace)
+        self.assertEqual(action.findtext("t:Command", namespaces=namespace),
+                         "C:\\tools\\agents-live.exe")
+        self.assertEqual(
+            action.findtext("t:WorkingDirectory", namespaces=namespace),
+            str(self.ROOT))
+
+    def test_a_repository_path_that_needs_escaping_survives_the_xml(self) -> None:
+        root = "C:\\Users\\dev\\r&d <notes> \"one\""
+        task = ET.fromstring(self._document(root).split("?>", 1)[1])
+        namespace = {"t": wintasks._NS}
+        action = task.find(".//t:Exec", namespace)
+        self.assertEqual(
+            action.findtext("t:WorkingDirectory", namespaces=namespace), root)
+        arguments = action.findtext("t:Arguments", namespaces=namespace)
+        self.assertEqual(
+            wintasks.parse_command_line(f'"prog" {arguments}')[1:],
+            ["--repo", root, "run", "--name", "todo", "--quiet"])
+
+    def test_a_task_declares_the_encoding_the_scheduler_expects(self) -> None:
+        self.assertTrue(self._document().startswith(
+            '<?xml version="1.0" encoding="UTF-16"?>'))
+
+    def test_a_registered_task_is_recognised_as_ours(self) -> None:
+        self.assertTrue(wintasks._is_ours(self._document(), self.ROOT))
+
+    def test_a_task_for_another_repository_is_not_ours(self) -> None:
+        self.assertFalse(
+            wintasks._is_ours(self._document(), self.ROOT.with_name("other")))
+
+    def test_a_task_that_runs_something_else_is_not_ours(self) -> None:
+        document = self._document(command="C:\\Windows\\System32\\cmd.exe")
+        self.assertFalse(wintasks._is_ours(document, self.ROOT))
+
+    def test_a_definition_that_did_not_decode_is_not_ours(self) -> None:
+        # Read-back comes through the console code page; anything lossy
+        # fails the check rather than being interpreted.
+        self.assertFalse(
+            wintasks._is_ours(self._document().replace("agents-live",
+                                                       "agents-l\ufffdve"),
+                              self.ROOT))
+
+    def test_a_definition_that_is_not_a_task_is_not_ours(self) -> None:
+        self.assertFalse(wintasks._is_ours("not xml at all", self.ROOT))
+
+    def test_the_host_dispatches_to_the_scheduler_it_has(self) -> None:
+        expected = (hostruntime.TASK_SCHEDULER
+                    if sys.platform == "win32" else hostruntime.CRONTAB)
+        self.assertEqual(hostruntime.native_scheduler(), expected)
+
+    def test_scheduling_goes_where_the_host_keeps_schedules(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("*/5 * * * *",),
+            command=("C:\\tools\\agents-live.exe", "run"), path="")
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "install",
+                              return_value="registered") as install,
+        ):
+            self.assertEqual(schedules.install(spec), "registered")
+        install.assert_called_once_with(spec)
+
+    def test_a_task_store_failure_reaches_the_command_layer(self) -> None:
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "remove",
+                              side_effect=wintasks.TaskError("no")),
+            mock.patch.object(headless, "repo_root", return_value=self.ROOT),
+        ):
+            with self.assertRaises(headless.AgentsLiveError):
+                schedules.remove("todo")
 
 
 class TestWindowsHeartbeat(unittest.TestCase):

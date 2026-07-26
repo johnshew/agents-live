@@ -211,7 +211,7 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
         return frozenset()
     capabilities = set()
     if config.schedule:
-        capabilities.add("crontab")
+        capabilities.add("schedule")
     if config.watch_path:
         capabilities.add("inotify")
     return frozenset(capabilities)

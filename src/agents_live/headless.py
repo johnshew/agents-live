@@ -629,11 +629,13 @@ def packaged_execution() -> bool:
 
 
 def cli_shim_path() -> Path:
-    """Absolute path of the installed ``agents-live`` shim (§3.4.2: cron
-    does not inherit the interactive tool PATH, so persisted entries pin
-    the executable). In a uv tool environment the entry-point script
-    lives beside the interpreter; PATH lookup is the fallback."""
-    beside_interpreter = Path(sys.executable).with_name("agents-live")
+    """Absolute path of the installed ``agents-live`` shim (§3.4.2: neither
+    cron nor a scheduled task inherits the interactive tool PATH, so
+    persisted entries pin the executable). In a uv tool environment the
+    entry-point file lives beside the interpreter; PATH lookup is the
+    fallback."""
+    filename = hostruntime.executable_filename("agents-live")
+    beside_interpreter = Path(sys.executable).with_name(filename)
     if beside_interpreter.is_file():
         return beside_interpreter.resolve()
     found = shutil.which("agents-live")
@@ -641,7 +643,7 @@ def cli_shim_path() -> Path:
         return Path(found).resolve()
     raise AgentsLiveError(
         "cannot resolve the agents-live executable to pin into the "
-        "crontab entry (install with `uv tool install agents-live`)")
+        "scheduled entry (install with `uv tool install agents-live`)")
 
 
 def run_invocation(name: str) -> list[str]:
@@ -2858,15 +2860,18 @@ def _list_active_watcher_agent_names() -> list[str]:
 
 
 def list_active_agent_names() -> set[str]:
-    """Union of all agent names live on this host (cron entries + watchers).
+    """Union of all agent names live on this host (scheduled + watchers).
 
-    The host's runtime (crontab + ``inotifywait`` processes) is the source of
-    truth for what is running. This reverse lookup is what makes orphan
-    detection possible: compare it against :func:`list_agents` (the agents that
-    still have a definition file); anything running without a definition is an
-    orphan left behind by a deleted or renamed agent.
+    The host's runtime (its scheduler plus the running watcher processes)
+    is the source of truth for what is running. This reverse lookup is
+    what makes orphan detection possible: compare it against
+    :func:`list_agents` (the agents that still have a definition file);
+    anything running without a definition is an orphan left behind by a
+    deleted or renamed agent.
     """
-    return set(_list_active_cron_agent_names()) | set(_list_active_watcher_agent_names())
+    from . import schedules  # noqa: PLC0415 - the host layer sits below this
+
+    return set(schedules.installed_names()) | set(_list_active_watcher_agent_names())
 
 
 def _wait_for_pids_to_stop(
@@ -2907,9 +2912,11 @@ def stop_watcher(name: str) -> int | None:
 
 def _trigger_states(config: AgentConfig) -> dict[str, str]:
     """Return per-trigger state for multi-trigger agents."""
+    from . import schedules  # noqa: PLC0415 - the host layer sits below this
+
     states: dict[str, str] = {}
     if config.schedule:
-        active = cron_is_active(config.name)
+        active = schedules.is_active(config.name)
         if active is None:
             states["cron"] = "unknown"
         elif active:
@@ -2940,7 +2947,9 @@ def _agent_state(config: AgentConfig) -> str:
             return "partial"
         return "stopped"
     if trigger_type == "cron":
-        active = cron_is_active(config.name)
+        from . import schedules  # noqa: PLC0415 - the host layer sits below this
+
+        active = schedules.is_active(config.name)
         if active is None:
             return "unknown"
         if active:

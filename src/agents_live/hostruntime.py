@@ -108,6 +108,23 @@ def user_state_base() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+
+# Which of the host's own schedulers persists a trigger. Named for the
+# mechanism rather than the platform, because that is what the answer is
+# used for: `schedules` maps it to an implementation, and nothing else
+# asks the question at all.
+CRONTAB = "crontab"
+TASK_SCHEDULER = "task-scheduler"
+
+
+def native_scheduler() -> str:
+    """The scheduler this host dispatches with."""
+    return TASK_SCHEDULER if _IS_WINDOWS else CRONTAB
+
+
+# ---------------------------------------------------------------------------
 # Environment, PATH, and executables
 # ---------------------------------------------------------------------------
 
@@ -258,6 +275,16 @@ def use_utf8_io() -> None:
             pass
     if _IS_WINDOWS:
         _use_utf8_console()
+
+
+def executable_filename(name: str) -> str:
+    """The file name an installed console entry point has on this host.
+
+    A packaged entry point is a script on POSIX and a launcher executable
+    on Windows. Anything that has to find one by path, rather than by
+    PATH lookup, needs the difference spelled out.
+    """
+    return f"{name}.exe" if _IS_WINDOWS else name
 
 
 def pin_executable(name: str, *, path: str | None = None) -> str:

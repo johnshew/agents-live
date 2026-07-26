@@ -11,12 +11,12 @@ import sys
 from .headless import (
     AgentsLiveError,
     load_agent_config,
-    remove_cron_entries,
     remove_watcher_reboot_line,
     stop_watcher,
 )
 
 from . import preflight
+from . import schedules
 
 
 def main() -> int:
@@ -32,7 +32,7 @@ def main() -> int:
             trigger_type = ""
 
         if trigger_type in {"", "cron", "multi"}:
-            removed = remove_cron_entries(args.name)
+            removed = schedules.remove(args.name)
             if removed:
                 print(f"Removed cron entry for '{args.name}'")
             elif trigger_type == "cron":
