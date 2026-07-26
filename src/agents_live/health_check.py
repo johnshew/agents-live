@@ -39,14 +39,14 @@ import contextlib
 import hashlib
 import io
 import json
-import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from . import (
-    heartbeat, hostruntime, ownership, paths, plugins, preflight, repos)
+    heartbeat, hostruntime, ownership, paths, plugins, preflight, repos,
+    schedules, triggers)
 from .headless import (
     AgentsLiveError,
     EventLog,
@@ -54,11 +54,7 @@ from .headless import (
     agent_file_exists,
     clean_path,
     cli_shim_path,
-    crontab_lock,
-    current_crontab_lines,
-    install_crontab,
     list_agents,
-    list_reboot_watcher_agent_names,
     load_agent_config,
     packaged_execution,
     repo_root,
@@ -80,7 +76,25 @@ def _err(message: str) -> None:
     print(f"{PREFIX} {message}", file=sys.stderr)
 
 
-# --- Host crontab entries ---------------------------------------------------
+# --- The loop's own host entries --------------------------------------------
+
+def maintenance_spec() -> triggers.TriggerSpec:
+    """The trigger that runs this loop on this host.
+
+    Host-scoped, not repo-scoped: it names no repository and resolves
+    registered repositories itself. Its root is the user state home,
+    which is the directory it works in and the one thing about it that
+    is per-user rather than per-project.
+    """
+    return triggers.TriggerSpec(
+        name="maintenance",
+        kind=triggers.MAINTENANCE,
+        root=paths.state_home(),
+        schedules=HEALTH_SCHEDULES,
+        command=(str(cli_shim_path()), "internal", "maintain", "--quiet"),
+        path=clean_path(),
+    )
+
 
 def build_health_cron_lines() -> list[str]:
     """The canonical host-level crontab lines for this loop.
@@ -89,61 +103,31 @@ def build_health_cron_lines() -> list[str]:
     registered repositories itself. PATH rides inside each line
     (self-contained crontab lines, same policy as agent entries).
     """
-    shim = shlex.quote(str(cli_shim_path()))
-    prefix = f"PATH={shlex.quote(clean_path())}"
-    return [f"{sched} {prefix} {shim} internal maintain --quiet 2>&1"
-            for sched in HEALTH_SCHEDULES]
+    return triggers.render(maintenance_spec())
 
 
 def health_cron_line_matches(line: str) -> bool:
-    """True when *line* invokes this built-in loop (any install of it).
-
-    Matches both the internal maintenance command and legacy health-check
-    entries so convergence removes the retired public invocation.
-    """
-    try:
-        tokens = shlex.split(line)
-    except ValueError:
-        tokens = line.split()
-    is_maintenance = (
-        "health-check" in tokens
-        or any(tokens[index:index + 2] == ["internal", "maintain"]
-               for index in range(len(tokens) - 1))
-    )
-    return is_maintenance and any(
-        Path(token).name == "agents-live" for token in tokens)
+    """True when *line* invokes this built-in loop (any install of it)."""
+    return triggers.is_maintenance_line(line)
 
 
 def ensure_health_cron_lines(*, install: bool = True) -> bool:
-    """Install/converge the loop's crontab entries. True when changed.
+    """Install/converge the loop's host entries. True when changed.
 
     ``install=False`` converges existing entries after an upgrade re-homes
     the pinned shim path, but never adds them to an uninitialized host.
     """
-    desired = build_health_cron_lines()
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        kept = [line for line in lines if not health_cron_line_matches(line)]
-        current = [line for line in lines if health_cron_line_matches(line)]
-        if current == desired or (not current and not install):
-            return False
-        install_crontab(kept + desired)
-        return True
+    return schedules.install_maintenance(maintenance_spec(), install=install)
 
 
 def remove_health_cron_lines() -> bool:
-    """Remove the loop's crontab entries (uninstall). True when removed."""
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        kept = [line for line in lines if not health_cron_line_matches(line)]
-        if len(kept) == len(lines):
-            return False
-        install_crontab(kept)
-        return True
+    """Remove the loop's host entries (uninstall). True when removed."""
+    return schedules.remove_maintenance(maintenance_spec())
+
+
+def health_entries_installed() -> bool | None:
+    """Whether this host runs the loop; None when that cannot be read."""
+    return schedules.maintenance_installed(maintenance_spec())
 
 
 # --- Per-repo sweep (runs with the repo resolved) ---------------------------
@@ -159,7 +143,7 @@ def _self_argv(*args: str, root: Path | None = None) -> list[str]:
     return base + list(args)
 
 
-def _converge_crontab(events: list[dict[str, str]]) -> bool:
+def _converge_triggers(events: list[dict[str, str]]) -> bool:
     """Converge this repo's persisted entries via migrate (in-process).
 
     Returns False (degrades the beacon) when migration fails or stale
@@ -176,15 +160,15 @@ def _converge_crontab(events: list[dict[str, str]]) -> bool:
         finally:
             sys.argv = saved_argv
     except Exception as exc:
-        msg = f"crontab convergence failed: {exc}"
+        msg = f"trigger convergence failed: {exc}"
         _err(f"WARNING: {msg}")
-        events.append({"level": "warning", "phase": "converge-crontab",
+        events.append({"level": "warning", "phase": "converge-triggers",
                        "message": msg})
         return False
     if code != 0:
-        msg = f"crontab convergence failed (exit {code})"
+        msg = f"trigger convergence failed (exit {code})"
         _err(f"WARNING: {msg}")
-        events.append({"level": "warning", "phase": "converge-crontab",
+        events.append({"level": "warning", "phase": "converge-triggers",
                        "message": msg})
         return False
     rewritten = list(dict.fromkeys(
@@ -193,22 +177,22 @@ def _converge_crontab(events: list[dict[str, str]]) -> bool:
         if line.startswith("Rewriting") and line.count("'") >= 2
     ))
     for name in rewritten:
-        events.append({"level": "info", "phase": "converge-crontab",
+        events.append({"level": "info", "phase": "converge-triggers",
                        "agent_name": name,
-                       "message": f"converged stale crontab entry for '{name}'"})
+                       "message": f"converged stale trigger for '{name}'"})
     try:
-        consistency = doctor._crontab_inconsistencies()
+        consistency = doctor._trigger_inconsistencies()
     except Exception as exc:  # pragma: no cover - defensive
-        _err(f"WARNING: could not verify crontab consistency: {exc}")
+        _err(f"WARNING: could not verify trigger consistency: {exc}")
         return True
     if consistency is None:
         return True
     stale = consistency[1]
     if stale:
-        msg = ("crontab still references missing script(s) after migrate: "
+        msg = ("triggers still reference missing script(s) after migrate: "
                + ", ".join(stale))
         _err(f"WARNING: {msg}")
-        events.append({"level": "warning", "phase": "converge-crontab",
+        events.append({"level": "warning", "phase": "converge-triggers",
                        "message": msg})
         return False
     return True
@@ -226,7 +210,7 @@ def _agent_states() -> dict[str, dict]:
 
 def _add_persisted_agent_states(states: dict[str, dict]) -> None:
     """Load path-backed definitions named by persisted watcher intent."""
-    for selector in list_reboot_watcher_agent_names():
+    for selector in schedules.watcher_respawn_names():
         if selector in states:
             continue
         try:
@@ -389,7 +373,7 @@ def sweep() -> dict:
     root = repo_root()
     events: list[dict[str, str]] = []
 
-    crontab_degraded = not _converge_crontab(events)
+    triggers_degraded = not _converge_triggers(events)
 
     # Decommission deleted agents: any cron/watcher still live here whose
     # agent file is gone is torn down, so a deleted definition self-cleans
@@ -413,10 +397,11 @@ def sweep() -> dict:
     ownership_degraded = ownership_degraded or bool(
         registry_prune.get("degraded"))
 
-    # Intended watchers: the durable set encoded as @reboot respawn lines.
-    # A deliberate stop removes the line, so a stopped agent is invisible
-    # here and is not restarted ("owned but stopped" is durable).
-    intended = [name for name in list_reboot_watcher_agent_names()
+    # Intended watchers: the durable set the host records a respawn
+    # intent for. A deliberate stop removes that intent, so a stopped
+    # agent is invisible here and is not restarted ("owned but stopped"
+    # is durable).
+    intended = [name for name in schedules.watcher_respawn_names()
                 if name not in ownership_deactivated]
 
     dead: list[str] = []
@@ -425,7 +410,7 @@ def sweep() -> dict:
     for name in intended:
         agent = states.get(name)
         if not agent:
-            msg = (f"watcher '{name}' has an @reboot respawn line but no "
+            msg = (f"watcher '{name}' has a respawn entry but no "
                    "agent definition found")
             _err(f"WARNING: {msg}")
             events.append({"level": "warning", "phase": "check",
@@ -470,7 +455,7 @@ def sweep() -> dict:
         "failed": failed,
         "ownership_deactivated": ownership_deactivated,
         "ownership_degraded": ownership_degraded,
-        "crontab_degraded": crontab_degraded,
+        "triggers_degraded": triggers_degraded,
         "registry_pruned": registry_prune["pruned"],
         "registry_prune_abstained": registry_prune["abstained"],
         "events": events,
@@ -513,7 +498,7 @@ def plan_sweep() -> list[dict]:
                 "owner": owner,
             })
 
-    for name in list_reboot_watcher_agent_names():
+    for name in schedules.watcher_respawn_names():
         if name in ownership_deactivated:
             continue
         agent = states.get(name)
@@ -753,22 +738,7 @@ def _registered_roots() -> list[tuple[str, Path]]:
 
 def persisted_roots() -> list[Path]:
     """Existing roots pinned by active Agents Live trigger invocations."""
-    roots: list[Path] = []
-    for line in current_crontab_lines() or []:
-        try:
-            tokens = shlex.split(line)
-        except ValueError:
-            continue
-        if not any(Path(token).name == "agents-live" for token in tokens):
-            continue
-        for first, second in zip(tokens, tokens[1:]):
-            if first != "--repo":
-                continue
-            root = Path(second).expanduser().resolve()
-            if root.is_dir() and root not in roots:
-                roots.append(root)
-            break
-    return roots
+    return schedules.persisted_roots()
 
 
 def _check_windows_heartbeat(events: list[dict[str, str]]) -> None:
@@ -877,7 +847,7 @@ def run_host_loop(quiet: bool) -> int:
     sweep_errors = [alias for alias, s in sweeps.items()
                     if s.get("status") == "error"]
     ownership_degraded = any(s.get("ownership_degraded") for s in sweeps.values())
-    crontab_degraded = any(s.get("crontab_degraded") for s in sweeps.values())
+    triggers_degraded = any(s.get("triggers_degraded") for s in sweeps.values())
 
     _check_windows_heartbeat(events)
 
@@ -890,14 +860,14 @@ def run_host_loop(quiet: bool) -> int:
             default, prev if isinstance(prev, dict) else {}, events)
 
     # A failing smoketest, unavailable ownership (enforcement abstained),
-    # or an unconverged crontab means the system is NOT healthy even
+    # or unconverged triggers mean the system is NOT healthy even
     # though watcher/cron infrastructure is up. Freshness (mtime) stays
     # the liveness signal in all states.
     if infra_ok:
         beacon_status = (
             "degraded"
             if smoketest_field.get("status") == "fail" or ownership_degraded
-            or crontab_degraded or not targets
+            or triggers_degraded or not targets
             else "healthy"
         )
         payload = {
@@ -907,7 +877,7 @@ def run_host_loop(quiet: bool) -> int:
             "watchers": watcher_total,
             "cron": cron_total,
             "ownership": "unavailable" if ownership_degraded else "ok",
-            "crontab": "stale" if crontab_degraded else "ok",
+            "triggers": "stale" if triggers_degraded else "ok",
             "smoketest": smoketest_field,
             "repos": {alias: {k: v for k, v in s.items() if k != "events"}
                       for alias, s in sweeps.items()},
@@ -927,7 +897,7 @@ def run_host_loop(quiet: bool) -> int:
         "failed": failed,
         "sweep_errors": sweep_errors,
         "ownership_degraded": ownership_degraded,
-        "crontab_degraded": crontab_degraded,
+        "triggers_degraded": triggers_degraded,
         "smoketest": smoketest_field,
         "events": events,
     }
@@ -950,12 +920,11 @@ def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
         return run_host_loop(quiet=quiet)
     targets = _registered_roots()
     actions: list[dict] = []
-    lines = current_crontab_lines()
-    if lines is None:
+    change = schedules.maintenance_change(maintenance_spec())
+    if change is None:
         preflight.emit_failure("doctor", "crontab is not accessible")
         return 1
-    desired = build_health_cron_lines()
-    current = [line for line in lines if health_cron_line_matches(line)]
+    current, desired = change
     if current != desired:
         actions.append({
             "action": "replace-maintenance-schedule",

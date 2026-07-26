@@ -57,7 +57,12 @@ TASK_FOLDER = "\\AgentsLive"
 CLOCK = ""
 BOOT = ".boot"
 WATCH = ".watch"
-_SUFFIXES = (BOOT, WATCH)
+# The tool's own check-and-repair loop. It is registered like any
+# trigger, but it belongs to the tool rather than to an agent, and
+# saying so in the name is what keeps the loop from being swept up as
+# an orphan by the very pass it runs.
+HOST = ".host"
+_SUFFIXES = (BOOT, WATCH, HOST)
 
 _NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _TASK_VERSION = "1.4"
@@ -227,6 +232,76 @@ def argument_string(args: Sequence[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Hidden execution
+# ---------------------------------------------------------------------------
+
+# A task action names a program Windows will start in the developer's
+# own session, so it has to be one that has no window to show. These
+# are the interpreter that has none and the module it runs.
+_HIDDEN_HOST = "pythonw"
+_HIDDEN_MODULE = "agents_live.hidden"
+# -P keeps the working directory off sys.path, so a repository that
+# happens to contain a matching name cannot answer the import.
+_HIDDEN_ARGS = ("-P", "-m", _HIDDEN_MODULE)
+
+
+def hidden_host() -> Path | None:
+    """The windowless interpreter beside this one, or None if absent.
+
+    Same installation the pinned executable comes from:
+    :func:`headless.cli_shim_path` also resolves against the interpreter
+    that is running, and both end up in the environment ``uv tool
+    install`` made.
+    """
+    if not sys.executable:
+        return None
+    host = Path(sys.executable).with_name(
+        f"{_HIDDEN_HOST}{Path(sys.executable).suffix}")
+    return host if host.is_file() else None
+
+
+def action_form(command: str, args: Sequence[str]) -> tuple[str, str]:
+    """The ``(Command, Arguments)`` that run *command* with no window.
+
+    A task runs with an interactive token, in the developer's session,
+    so a console program named directly opens a console window - once
+    per fire, on top of whatever they were doing. The action therefore
+    names ``pythonw``, which has no console to show, and it starts the
+    real command with ``CREATE_NO_WINDOW`` (see :mod:`agents_live.hidden`).
+
+    The indirection is what keeps the agent's own output working: run
+    under ``pythonw`` directly it would have no standard streams at all
+    and fail on its first write, while started this way it gets a
+    console of its own that simply is not drawn.
+
+    Wrapping is not identity: :func:`_action_program` reads back through
+    it, so ownership still asks what finally runs. With no interpreter
+    to wrap with, the command is registered plainly - a visible window
+    is worse than none, and better than an agent that does not run.
+    """
+    host = hidden_host()
+    if host is None:
+        return command, argument_string(list(args))
+    return str(host), argument_string([*_HIDDEN_ARGS, command, *args])
+
+
+def _action_program(command: str, arguments: str) -> str:
+    """The program a registered action ultimately runs.
+
+    Anything not recognised as this module's own wrapper is taken at
+    face value, so an interpreter running something else stays exactly
+    as foreign as it was.
+    """
+    if PureWindowsPath(command).stem.casefold() != _HIDDEN_HOST:
+        return command
+    parts = parse_command_line(f"{_PROGRAM_TOKEN} {arguments}")[1:]
+    if _HIDDEN_MODULE not in parts:
+        return command
+    index = parts.index(_HIDDEN_MODULE) + 1
+    return parts[index] if index < len(parts) else command
+
+
+# ---------------------------------------------------------------------------
 # Task identity
 # ---------------------------------------------------------------------------
 
@@ -274,8 +349,14 @@ def kind_of_task_name(name: str) -> str:
 
 
 def agent_of_task_name(name: str, root: Path | str) -> str | None:
-    """The agent *name* schedules for *root*, or None if it is not ours."""
+    """The agent *name* schedules for *root*, or None if it is not ours.
+
+    A host task names no agent: nothing in a project defines it, so
+    every caller asking "which agent is this" must hear nothing.
+    """
     kind = kind_of_task_name(name)
+    if kind == HOST:
+        return None
     if kind:
         name = name[:-len(kind)]
     prefix, _, digest = name.rpartition("@")
@@ -553,8 +634,8 @@ def read_definition(path: str) -> str | None:
     return out
 
 
-def _definition_action(document: str) -> tuple[str, str] | None:
-    """The command and working directory the registered task would run."""
+def _definition_action(document: str) -> tuple[str, str, str] | None:
+    """The command, arguments, and working directory of a registered task."""
     # The document declares UTF-16 but arrives already decoded, so the
     # declaration is dropped rather than believed.
     body = document.split("?>", 1)[-1].strip()
@@ -566,8 +647,9 @@ def _definition_action(document: str) -> tuple[str, str] | None:
     if exec_action is None:
         return None
     command = exec_action.findtext(f"{{{_NS}}}Command", default="")
+    arguments = exec_action.findtext(f"{{{_NS}}}Arguments", default="")
     working_dir = exec_action.findtext(f"{{{_NS}}}WorkingDirectory", default="")
-    return command, working_dir
+    return command, arguments, working_dir
 
 
 def _is_ours(document: str, root: Path | str) -> bool:
@@ -584,10 +666,162 @@ def _is_ours(document: str, root: Path | str) -> bool:
     action = _definition_action(document)
     if action is None:
         return False
-    command, working_dir = action
+    command, arguments, working_dir = action
     if _path_key(working_dir) != _path_key(root):
         return False
-    return PureWindowsPath(command).stem.casefold() == "agents-live"
+    program = _action_program(command, arguments)
+    return PureWindowsPath(program).stem.casefold() == "agents-live"
+
+
+def _kind_plan(spec: triggers.TriggerSpec
+               ) -> dict[str, tuple[list[str], list[str]]]:
+    """Which task kinds *spec* asks for: schedules and extra arguments.
+
+    The one place that knows a spec becomes more than one task. A kind
+    present with no schedules is a kind the agent used to declare and
+    no longer does; a kind that is absent was never this spec's to own.
+    """
+    if spec.kind == triggers.WATCHER:
+        return {WATCH: (list(spec.schedules), [])}
+    if spec.kind == triggers.MAINTENANCE:
+        # One task carrying every trigger the loop runs on. Nothing has
+        # to tell a startup fire from a clock fire here: the loop does
+        # the same work either way, so there is no --boot to add and no
+        # second task to add it to.
+        return {HOST: (list(spec.schedules), [])}
+    if spec.kind != triggers.SCHEDULE:
+        raise TaskError(f"cannot register a {spec.kind} trigger as a task")
+    return {
+        CLOCK: ([s for s in spec.schedules if s.strip() != triggers.BOOT], []),
+        BOOT: ([s for s in spec.schedules if s.strip() == triggers.BOOT],
+               ["--boot"]),
+    }
+
+
+def kinds(spec: triggers.TriggerSpec) -> tuple[str, ...]:
+    """Every task kind *spec* could own, registered here or not.
+
+    Convergence has to look at the kinds a spec can own rather than the
+    kinds it currently asks for, because a task the spec has stopped
+    asking for is exactly the one that has to be found and removed.
+    """
+    return tuple(_kind_plan(spec))
+
+
+def desired_form(spec: triggers.TriggerSpec, *, kind: str
+                 ) -> tuple[str, str, list[tuple]] | None:
+    """What *kind*'s task should run and fire on, or None for no task.
+
+    The comparable form of a registration: a command, an argument
+    string, and what the store was asked to fire on. It is the wrapped
+    form, because that is what a task holds and convergence has to
+    compare like with like.
+    """
+    plan = _kind_plan(spec)
+    if kind not in plan:
+        return None
+    schedules, extra = plan[kind]
+    if not schedules:
+        return None
+    command, arguments = action_form(spec.command[0],
+                                     list(spec.command[1:]) + extra)
+    return command, arguments, trigger_signature(schedules)
+
+
+def trigger_signature(schedules: Sequence[str]) -> list[tuple]:
+    """What *schedules* ask the store to fire on, comparably.
+
+    Not the XML: a registered document carries a start boundary
+    computed from the moment it was written, so two documents that fire
+    identically differ by the clock. The signature keeps what the
+    boundary means (the phase of a repetition, the time of day of a
+    calendar trigger) and drops when it was chosen.
+    """
+    return sorted(_signature_of(trigger)
+                  for schedule in schedules
+                  for trigger in translate(schedule))
+
+
+def _signature_of(trigger: dict[str, object]) -> tuple:
+    kind = trigger["kind"]
+    if kind == "boot":
+        return ("logon",)
+    if kind == "interval":
+        return ("interval", int(trigger["minutes"]),
+                int(trigger["anchor_minute"]))
+    if kind == "weekly":
+        return ("weekly", int(trigger["weekday"]), int(trigger["hour"]),
+                int(trigger["minute"]))
+    if kind == "monthly":
+        return ("monthly", int(trigger["day"]), int(trigger["hour"]),
+                int(trigger["minute"]))
+    return ("daily", int(trigger["hour"]), int(trigger["minute"]))
+
+
+_ISO_INTERVAL = re.compile(r"P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?\Z")
+
+
+def _interval_minutes(interval: str) -> int | None:
+    """Minutes in an ISO-8601 repetition interval, or None if unreadable.
+
+    Written as ``PT60M`` and read back as ``PT1H``: the scheduler
+    normalizes the duration it stores, so an interval that is only ever
+    matched as minutes reads as a task that lost its repetition, and
+    convergence rewrites it forever.
+    """
+    match = _ISO_INTERVAL.fullmatch(interval.strip())
+    if match is None:
+        return None
+    days, hours, minutes = (int(part or 0) for part in match.groups())
+    total = days * 1440 + hours * 60 + minutes
+    return total or None
+
+
+def _definition_signature(document: str) -> list[tuple]:
+    """The same signature, read back out of a registered definition."""
+    body = document.split("?>", 1)[-1].strip()
+    try:
+        task = ET.fromstring(body)
+    except ET.ParseError:
+        return []
+    found: list[tuple] = []
+    parent = task.find(f"{{{_NS}}}Triggers")
+    for element in ([] if parent is None else list(parent)):
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "LogonTrigger":
+            found.append(("logon",))
+            continue
+        boundary = element.findtext(f"{{{_NS}}}StartBoundary", default="")
+        try:
+            start = datetime.strptime(boundary, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            continue
+        if tag == "TimeTrigger":
+            minutes = _interval_minutes(element.findtext(
+                f".//{{{_NS}}}Interval", default=""))
+            if minutes is None:
+                continue
+            found.append(("interval", minutes, start.minute % minutes))
+            continue
+        if element.find(f".//{{{_NS}}}ScheduleByWeek") is not None:
+            days = element.find(f".//{{{_NS}}}DaysOfWeek")
+            weekday = next(
+                (index for index, name in enumerate(_WEEKDAY_ELEMENTS)
+                 if days is not None
+                 and days.find(f"{{{_NS}}}{name}") is not None),
+                None)
+            if weekday is None:
+                continue
+            found.append(("weekly", weekday, start.hour, start.minute))
+            continue
+        if element.find(f".//{{{_NS}}}ScheduleByMonth") is not None:
+            day = element.findtext(f".//{{{_NS}}}Day", default="")
+            if not day.isdigit():
+                continue
+            found.append(("monthly", int(day), start.hour, start.minute))
+            continue
+        found.append(("daily", start.hour, start.minute))
+    return sorted(found)
 
 
 def install(spec: triggers.TriggerSpec) -> str:
@@ -609,26 +843,23 @@ def install(spec: triggers.TriggerSpec) -> str:
     if not PureWindowsPath(command).is_absolute():
         raise TaskError(
             f"a task must name a fully qualified executable, not '{command}'")
-    if spec.kind == triggers.WATCHER:
-        return _register(spec, command, argument_string(list(spec.command[1:])),
-                         list(spec.schedules), kind=WATCH)
-    if spec.kind != triggers.SCHEDULE:
-        raise TaskError(f"cannot register a {spec.kind} trigger as a task")
-    boot = [s for s in spec.schedules if s.strip() == triggers.BOOT]
-    clock = [s for s in spec.schedules if s.strip() != triggers.BOOT]
     lines = []
-    for schedules, kind in ((clock, CLOCK), (boot, BOOT)):
+    for kind, (schedules, extra) in _kind_plan(spec).items():
         if not schedules:
             delete(spec.root, spec.name, kind=kind)
             continue
-        arguments = argument_string(
-            list(spec.command[1:]) + (["--boot"] if kind == BOOT else []))
-        lines.append(_register(spec, command, arguments, schedules, kind=kind))
+        args = list(spec.command[1:]) + extra
+        registered, arguments = action_form(command, args)
+        path = _register(spec, registered, arguments, schedules, kind=kind)
+        # Reported without the wrapper: what the developer wants to see
+        # is the command that runs, not the interpreter that hides it.
+        lines.append(f"{path}: {command} {argument_string(args)}".rstrip())
     return "; ".join(lines)
 
 
 def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
               schedules: Sequence[str], *, kind: str) -> str:
+    """Write one task and read it back. Returns the path it was given."""
     path = task_path(spec.root, spec.name, kind=kind)
     existing = read_definition(path)
     if existing is not None and not _is_ours(existing, spec.root):
@@ -636,12 +867,16 @@ def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
             f"a scheduled task named {path} exists and is not one this tool "
             "registered for this repository; remove it by hand first")
 
-    purpose = ("restart the watcher for agent" if kind == WATCH
-               else "run agent")
+    if spec.kind == triggers.MAINTENANCE:
+        description = "Agents Live: run the check-and-repair loop for this user"
+    else:
+        purpose = ("restart the watcher for agent" if kind == WATCH
+                   else "run agent")
+        description = f"Agents Live: {purpose} '{spec.name}' in {spec.root}"
     document = build_task_xml(
         command=command, arguments=arguments, working_dir=str(spec.root),
         schedules=schedules,
-        description=f"Agents Live: {purpose} '{spec.name}' in {spec.root}",
+        description=description,
         uri=path, user_id=current_user_id())
     handle, xml_file = tempfile.mkstemp(suffix=".xml", prefix="agents-live-task-")
     try:
@@ -656,7 +891,71 @@ def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
     registered = read_definition(path)
     if registered is None:
         raise TaskError(f"{path} was registered but cannot be read back")
-    return f"{path}: {command} {arguments}".rstrip()
+    return path
+
+
+def registered_tasks() -> list[dict[str, str]]:
+    """Every task this tool could have registered, whatever repository.
+
+    The consistency check has to see tasks pinned to a project root that
+    no longer exists, and those can never be found by name: the name
+    carries a digest of the root, and a root nobody can name cannot be
+    digested. So this reads the folder rather than asking for a name,
+    and reports what each task would run: ``{"name", "command",
+    "arguments", "working_dir"}``.
+    """
+    try:
+        code, out, _err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
+                                "CSV", "/NH"])
+    except TaskSchedulerUnavailable:
+        return []
+    if code != 0:
+        return []
+    tasks = []
+    seen: set[str] = set()
+    for row in csv.reader(out.splitlines()):
+        if not row:
+            continue
+        leaf = row[0].rsplit("\\", 1)[-1]
+        # A query reports a task once per trigger, and a task that fires
+        # two ways is still one task.
+        if leaf in seen:
+            continue
+        seen.add(leaf)
+        try:
+            document = read_definition(f"{TASK_FOLDER}\\{leaf}")
+        except TaskSchedulerUnavailable:
+            continue
+        if document is None:
+            continue
+        action = _definition_action(document)
+        if action is None:
+            continue
+        command, arguments, working_dir = action
+        tasks.append({"name": leaf, "command": command,
+                      "arguments": arguments, "working_dir": working_dir})
+    return tasks
+
+
+def registered_form(root: Path | str, agent: str,
+                    *, kind: str) -> tuple[str, str, list[tuple]] | None:
+    """What *agent*'s task of *kind* runs and fires on, or None.
+
+    The read-back counterpart of :func:`desired_form`, so convergence
+    compares two values of the same shape. A task this tool did not
+    write for *root* reads as absent: it is not ours to converge.
+    """
+    try:
+        document = read_definition(task_path(root, agent, kind=kind))
+    except TaskSchedulerUnavailable:
+        return None
+    if document is None or not _is_ours(document, root):
+        return None
+    action = _definition_action(document)
+    if action is None:
+        return None
+    command, arguments, _working_dir = action
+    return command, arguments, _definition_signature(document)
 
 
 def delete(root: Path | str, agent: str, *, kind: str) -> bool:

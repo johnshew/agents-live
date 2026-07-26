@@ -10,9 +10,11 @@ on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
 its locking and process members are written and measured on a native
 Windows host, a foreground `agents-live run` now executes an agent end
 to end there, that runtime has an ownership identity of its own, Task
-Scheduler now fires a scheduled agent on a Windows host unattended, and a
+Scheduler now fires a scheduled agent on a Windows host unattended, a
 watcher agent now dispatches on file changes there through
-`ReadDirectoryChangesW`. What remains is the rest of the vertical slice
+`ReadDirectoryChangesW`, and the lifecycle commands around them,
+`doctor`, `upgrade`, `migrate`, and `uninstall`, now speak to the store
+the host actually keeps. What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
@@ -466,6 +468,15 @@ suffix. One task carries one action, and its action carries `--boot`,
 which is how a startup fire is told apart from a clock fire: the first
 is exact and asks nothing, the second has to be checked.
 
+No task action names the tool directly. A task runs with an interactive
+token, in the developer's own session, so a console program named as
+the action opens a console window on every fire. The action names
+`pythonw` instead, and `pythonw` runs
+[hidden.py](../src/agents_live/hidden.py), which starts the real
+command with `CREATE_NO_WINDOW`. Ownership reads back through that
+wrapper to the program that finally runs, so the identity check is
+unchanged by it.
+
 
 ### Watchers are started by Task Scheduler, not scheduled by it
 
@@ -856,6 +867,128 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-26: a task action names a program that has no window
+
+A scheduled task runs with an interactive token so the agent gets the
+developer's own session, environment, and credentials. The cost of that
+choice is that Windows draws a console window for any console program
+started as the action, once per fire, on top of whatever the developer
+was doing. Four agents on five-minute schedules made the point better
+than any argument could.
+
+Task Scheduler has no setting for this. `Hidden` hides the task from the
+scheduler's own list, not the window, and the settings that do run
+invisibly all run in session 0, which is the logged-off execution that
+this design deliberately deferred.
+
+So the action names a program with no console to show, and that program
+starts the real one hidden. The WSL heartbeat solved the same problem
+with `wscript.exe` and a packaged VBScript, but VBScript is a
+feature-on-demand in Windows 11 and is being removed, and persisted task
+definitions outlive the decision that wrote them. The interpreter that
+is already installed beside the pinned executable answers instead:
+`pythonw` is a windowless build of the same Python, and
+[hidden.py](../src/agents_live/hidden.py) is eleven lines that start the
+command with `CREATE_NO_WINDOW` and exit with its status.
+
+The indirection is not incidental. Under `pythonw` there are no standard
+streams at all, so running the CLI directly there would fail on its
+first write; started from the launcher it gets a console of its own that
+simply is not drawn, and its output behaves exactly as it does anywhere
+else. The argument vector stays a vector the whole way, so the quoting
+round trip still verifies the command that will run.
+
+Ownership was the one thing that could have quietly broken. `_is_ours`
+asks whether the action is an `agents-live` command working in this
+repository, and the action is now an interpreter. It reads back through
+the wrapper to the program that finally runs, and anything it does not
+recognise as its own wrapper is taken at face value, so an interpreter
+running something else stays exactly as foreign as it was.
+
+### 2026-07-26: doctor names the mechanism, not the Linux tool
+
+Doctor checked for `crontab` and `inotifywait` by name on every host, so
+a working Windows machine failed two required checks and was told to
+install them with `apt`. The check that matters is not "is this program
+present" but "can this host schedule and can it watch", which is the
+question `preflight` already answers through the capability seam. So the
+mechanism checks ask `preflight` and report the name the host actually
+uses, Task Scheduler and directory change notification on Windows,
+`crontab` and `inotifywait` elsewhere, with a fix line that names a
+package manager that exists there. The same reasoning retired
+`python3.12 (via uv)`: the Microsoft Store installs a `python3` alias
+that is not Python, so the probe asks for `python` on Windows.
+
+### 2026-07-26: the check-and-repair loop is a trigger like any other
+
+The loop installed itself by writing crontab lines directly, which is
+why `upgrade` failed on Windows with `crontab: command not found`. It is
+now a `TriggerSpec` with its own kind, dispatched through
+[schedules.py](../src/agents_live/schedules.py) like every other
+trigger, so it lands in whichever store the host keeps schedules in.
+
+Its root is the state directory rather than a repository. That is what
+makes it nameable on Windows: a task is `<agent>@<digest of root>`, so
+the loop becomes one `maintenance@<digest>` task, and the ownership
+check has a working directory to verify against. It carries both its
+startup and its hourly trigger in that single task, because the loop
+does the same work either way and has no `--boot` to tell them apart.
+
+The name also carries a kind of its own, `.host`. Registered as an
+agent's task it was destructive: the loop's first pass reads every
+registered task, finds one whose agent file does not exist because
+nothing in any project defines it, and prunes it - the loop deleted
+itself on every run, and its state directory was swept as if it were a
+project. A kind that says "this belongs to the tool" is what keeps the
+enumeration a repository does from ever seeing it.
+
+### 2026-07-26: convergence compares a form, not a document
+
+Upgrade converges persisted entries when the pinned shim path moves. On
+crontab that is a string comparison against the rendered line. A task
+has no such line, and comparing the registered XML would report a change
+on every run: the document carries a start boundary computed when it was
+written, so two identical registrations differ by their timestamps.
+
+So a task is compared as a form: the command, the argument string, and a
+canonical signature of what it was asked to fire on. The signature is
+built from the schedule and read back out of the registered document
+with the boundary date normalized away, which makes a round trip that
+loses a schedule a test failure rather than an infinite convergence.
+
+Reading it back means reading what the store chose to write, not what it
+was given. An hourly repetition is registered as `PT60M` and returned as
+`PT1H`: matched only as minutes it reads as a task that lost its
+repetition, and convergence rewrites the task on every pass forever. The
+read-back parses the whole duration, so the comparison is between what
+the two sides mean rather than how each spells it.
+
+### 2026-07-26: in JSON mode the whole of stdout is the document
+
+`doctor --repair` builds its plan by running `internal migrate
+--dry-run` and parsing the result, and on Windows it failed with
+`invalid trigger migration plan`. The cause was older than Windows:
+`migrate` printed its human narration before the document, so the JSON
+mode emitted a stream no parser could read, and only Windows had a
+caller that parsed it.
+
+A command in JSON mode now says nothing except the document. The
+narration is not lost - it says what the plan already carries, and a
+developer reading it runs the command without `--json`.
+
+### 2026-07-26: `--adopt` is refused where a name carries its root
+
+`migrate --adopt <old-root>` rewrites entries left behind by a project
+that moved. It works on crontab because a line carries its root as text
+and can be found by reading it. A task is found by a name that digests
+its root, and a root that is gone cannot be digested, so there is
+nothing to look up. Rather than fail obscurely, `--adopt` on a task host
+refuses with the reason and the alternative: run `start --all` from the
+new location, which registers the moved project under its new name.
+Entries pinned to the old root then surface in `doctor`, which reads the
+task folder rather than asking for names, and are the only place they
+can surface at all.
 
 ### 2026-07-26: `ReadDirectoryChangesW` directly, measured before chosen
 

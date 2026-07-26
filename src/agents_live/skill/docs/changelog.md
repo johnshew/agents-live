@@ -6,6 +6,23 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: complete the lifecycle commands on native Windows. (#126)
+  `doctor`, `upgrade`, `migrate`, and `uninstall` now speak to the store the
+  host actually keeps schedules in, rather than assuming crontab. Doctor
+  checks that this host can schedule and can watch, naming the mechanism it
+  uses and offering a fix that works there, and reports scheduled tasks that
+  name an agent or a project directory that is gone. The tool's own
+  check-and-repair loop installs as a scheduled task, so upgrades no longer
+  fail looking for `crontab`, and an upgrade that re-homes the pinned
+  executable rewrites the tasks that referenced the old one. Agents no longer
+  open a console window when they run: a scheduled task starts them through a
+  windowless launcher, and the ownership check still verifies the command
+  that finally runs. Linux and WSL behavior is unchanged.
+- fix: a command asked for JSON prints only the document. (#126)
+  `migrate` printed its human narration ahead of the JSON, so anything
+  parsing it - `doctor --repair` among them - saw a stream it could not
+  read. The narration says what the plan already carries; run the command
+  without `--json` to see it.
 - feat: watch a directory on native Windows. (#126)
   A watcher agent now dispatches on file changes there, using the Windows
   directory-change notification API in place of `inotifywait`. Creations,
