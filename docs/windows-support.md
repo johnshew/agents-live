@@ -920,12 +920,18 @@ virtualenv interpreter looked for in `bin` rather than `Scripts`, and a
 test that chdir'd into a temporary directory and only left it after the
 directory had been deleted - which POSIX permits and Windows does not.
 
-Two things stay skipped on Windows, and deliberately.
+Some tests stay skipped on Windows, and deliberately.
 `TestCrontabConvergenceBehavior` drives a real `crontab` process from a
 shebang script, which `CreateProcess` cannot run and which no Windows
 host would dispatch through anyway; the Task Scheduler branch it would
-otherwise cover has its own tests. The command-line round-trip test for
-a repository path containing a space is Windows-only because only
+otherwise cover has its own tests. Three more run something under
+`bash`: the WSL compatibility wrapper, which is a POSIX script a WSL
+crontab executes inside the distro, and the generated bash completion.
+A bare `bash` on a Windows PATH is as likely to be the WSL launcher as
+a shell - which is exactly how CI failed while the local host, with Git
+Bash first on PATH, passed - so what those tests measure there is the
+host, not the artifact. The command-line round-trip test for a
+repository path containing a space runs only on Windows, because only
 Windows reads a command line back through a quoting parser.
 
 The lesson is narrower than "test on both platforms". It is that a

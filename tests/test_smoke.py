@@ -2676,6 +2676,11 @@ class TestCliContract(_TempProject):
                 self.assertNotIn("--watch-loop", script)
                 self.assertNotIn("--ensure-watcher", script)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "runs the completion script under bash, and a bare `bash` on a "
+        "Windows PATH is as likely to be the WSL launcher as a shell. "
+        "The artifact is a POSIX one; Linux CI is where it is checked.")
     def test_bash_completion_conforms_to_public_grammar(self) -> None:
         script = completions.bash()
         public = [command for command in COMMANDS if not command.hidden]
