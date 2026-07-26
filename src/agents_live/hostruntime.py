@@ -520,6 +520,37 @@ if _IS_WINDOWS:
                 return
             time.sleep(0.05)
 
+    def process_command_lines() -> list[tuple[int, str]]:
+        """Every visible process as ``(pid, command line)``.
+
+        A process snapshot carries the executable name but not the
+        arguments, and the arguments are what say which agent a watcher
+        belongs to. CIM is the supported way to ask for them; when it
+        cannot be reached the answer is "nothing found", which reads as
+        "no watcher is running" - visibly wrong rather than silently
+        stopping the wrong process.
+        """
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        if shell is None:
+            return []
+        script = ("Get-CimInstance Win32_Process | "
+                  "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
+        try:
+            completed = subprocess.run(
+                [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=30,
+                creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if completed.returncode != 0:
+            return []
+        found: list[tuple[int, str]] = []
+        for line in completed.stdout.splitlines():
+            pid_text, _, command = line.strip().partition(" ")
+            if pid_text.isdigit() and command:
+                found.append((int(pid_text), command))
+        return found
+
     def _detached_popen_kwargs() -> dict:
         return {"creationflags": (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
                                   | CREATE_NO_WINDOW)}
@@ -579,6 +610,21 @@ else:
                 deadline = time.monotonic() + grace_s
                 while time.monotonic() < deadline and is_alive(pid):
                     time.sleep(0.05)
+
+    def process_command_lines() -> list[tuple[int, str]]:
+        """Every visible process as ``(pid, command line)``."""
+        try:
+            completed = subprocess.run(
+                ["ps", "-eo", "pid=,args="], capture_output=True, text=True,
+                check=True)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        found: list[tuple[int, str]] = []
+        for line in completed.stdout.splitlines():
+            pid_text, _, command = line.strip().partition(" ")
+            if pid_text.isdigit() and command:
+                found.append((int(pid_text), command))
+        return found
 
     def _detached_popen_kwargs() -> dict:
         return {"start_new_session": True}

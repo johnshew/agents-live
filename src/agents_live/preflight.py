@@ -44,7 +44,7 @@ def json_mode() -> bool:
 @dataclass(frozen=True)
 class CapabilityFailure:
     code: str          # symbolic error code (see module docstring)
-    capability: str    # what was probed, e.g. "crontab", "inotify"
+    capability: str    # what was probed, e.g. "schedule", "watch"
     operation: str     # the subcommand that needed it
     detail: str        # one concise human sentence
 
@@ -140,17 +140,40 @@ def _probe_crontab(operation: str) -> CapabilityFailure | None:
     return None
 
 
+def _probe_watch(operation: str) -> CapabilityFailure | None:
+    """Can this host be told when a file changed?"""
+    if hostruntime.id() == hostruntime.WINDOWS:
+        return _probe_directory_changes(operation)
+    return _probe_inotify(operation)
+
+
+def _probe_directory_changes(operation: str) -> CapabilityFailure | None:
+    # Nothing to install on Windows: the change notifications come from
+    # the kernel. What can fail is reaching it, so probe that and say so
+    # rather than reporting a capability nobody can act on.
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.ReadDirectoryChangesW
+    except (OSError, AttributeError, ValueError) as exc:
+        return CapabilityFailure(
+            "dependency_missing", "watch", operation,
+            f"directory change notifications are unavailable: {exc}")
+    return None
+
+
 def _probe_inotify(operation: str) -> CapabilityFailure | None:
     if shutil.which("inotifywait") is None:
         return CapabilityFailure(
-            "dependency_missing", "inotify", operation,
+            "dependency_missing", "watch", operation,
             "inotifywait not found (install inotify-tools)")
     return None
 
 
 _CAPABILITY_PROBES = {
     "schedule": _probe_schedule,
-    "inotify": _probe_inotify,
+    "watch": _probe_watch,
 }
 
 

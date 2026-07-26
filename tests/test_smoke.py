@@ -15,6 +15,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -24,6 +25,7 @@ import os
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -41,7 +43,8 @@ try:  # installed package layout
         activate, agent_adapters, cli, completions, headless, health_check,
         heartbeat, hostruntime, init, migrate, ownership, paths, plugins,
         preflight, doctor, repos, run, schedules, spawn, status, uninstall,
-        update_check, upgrade, triggers, watchpolicy, wintasks,
+        update_check, upgrade, triggers, watchpolicy, watchsource, winwatch,
+        wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -75,6 +78,8 @@ except ImportError:  # flat checkout layout
     import uninstall
     import triggers
     import watchpolicy
+    import watchsource
+    import winwatch
     import wintasks
     from cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -1802,6 +1807,110 @@ class TestWatchPolicy(unittest.TestCase):
         self.assertIsNone(window.remaining(5.0))
 
 
+def _change_records(names: list[str]) -> bytes:
+    """A ``FILE_NOTIFY_INFORMATION`` chain as the kernel would fill one."""
+    chunks: list[bytes] = []
+    for index, name in enumerate(names):
+        encoded = name.encode("utf-16-le")
+        # Records are 4-byte aligned; the last one says "no next entry".
+        size = 12 + len(encoded)
+        padding = (-size) % 4
+        last = index == len(names) - 1
+        chunks.append(struct.pack("<III", 0 if last else size + padding,
+                                  1, len(encoded))
+                      + encoded + b"\x00" * padding)
+    return b"".join(chunks)
+
+
+class TestWindowsWatchSource(unittest.TestCase):
+    """The Windows event source, minus the kernel calls.
+
+    ``ReadDirectoryChangesW`` itself cannot be exercised off Windows,
+    but everything the watcher's correctness rests on can be: reading
+    the records the kernel hands back, and what the source does with
+    the two states it cannot get more information about - an overflowed
+    buffer and a root that stopped being readable.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def buffer_of(self, names: list[str]) -> object:
+        raw = _change_records(names)
+        return ctypes.create_string_buffer(raw, len(raw))
+
+    def test_a_filled_buffer_reads_back_as_the_names_that_changed(self) -> None:
+        self.assertEqual(
+            winwatch._records(self.buffer_of(["note.md", r"nested\deep.md"])),
+            ["note.md", r"nested\deep.md"])
+
+    def test_a_record_running_past_the_buffer_ends_the_chain(self) -> None:
+        raw = bytearray(_change_records(["note.md", "second.md"]))
+        # Claim a name far longer than the buffer holds: a truncated or
+        # corrupt chain must stop the walk, not read past its end.
+        struct.pack_into("<I", raw, 8, 4096)
+        buffer = ctypes.create_string_buffer(bytes(raw), len(raw))
+        self.assertEqual(winwatch._records(buffer), [])
+
+    def test_an_overflowed_buffer_degrades_to_a_rescan(self) -> None:
+        (self.root / "one.md").write_text("1", encoding="utf-8")
+        (self.root / "nested").mkdir()
+        (self.root / "nested" / "two.md").write_text("2", encoding="utf-8")
+        source = winwatch.WindowsEventSource([self.root])
+
+        source.events.put(("overflow", str(self.root)))
+
+        # What changed is unrecoverable, so the source answers with a
+        # superset: every file under the watched root.
+        self.assertEqual(
+            sorted(Path(p).name for p in source.poll(0.1)),
+            ["one.md", "two.md"])
+        # And the rescan happens once, not on every later poll.
+        self.assertEqual(source.poll(0.01), [])
+
+    def test_a_rescan_stays_bounded_however_large_the_storm(self) -> None:
+        for index in range(12):
+            (self.root / f"file{index}.md").write_text("x", encoding="utf-8")
+        with mock.patch.object(winwatch, "RESCAN_FILE_LIMIT", 5):
+            self.assertEqual(len(winwatch.rescan([self.root])), 5)
+
+    def test_a_watch_that_failed_is_raised_rather_than_polled_again(self) -> None:
+        source = winwatch.WindowsEventSource([self.root])
+        source.events.put(("failed", "the watched directory is no longer readable"))
+        with self.assertRaises(winwatch.WatchFailed):
+            source.poll(0.1)
+
+    def test_a_poll_returns_the_whole_batch_that_is_waiting(self) -> None:
+        source = winwatch.WindowsEventSource([self.root])
+        for name in ("a.md", "b.md"):
+            source.events.put(("path", str(self.root / name)))
+        self.assertEqual([Path(p).name for p in source.poll(0.1)],
+                         ["a.md", "b.md"])
+        self.assertEqual(source.poll(0.01), [])
+
+    def test_stopping_wakes_a_poll_that_is_waiting_without_a_timeout(self) -> None:
+        source = winwatch.WindowsEventSource([])
+        source.stop()
+        # No timeout: without the stop sentinel this would never return.
+        self.assertEqual(source.poll(None), [])
+
+
+class TestWatchSourceSelection(unittest.TestCase):
+    """Which mechanism a host watches files with."""
+
+    def test_a_windows_host_watches_with_the_directory_change_api(self) -> None:
+        with mock.patch.object(hostruntime, "id",
+                               return_value=hostruntime.WINDOWS):
+            self.assertEqual(watchsource.mechanism(), "ReadDirectoryChangesW")
+
+    def test_every_other_host_keeps_inotifywait(self) -> None:
+        with mock.patch.object(hostruntime, "id",
+                               return_value=hostruntime.LINUX):
+            self.assertEqual(watchsource.mechanism(), "inotifywait")
+
+
 class TestTriggerSpecs(unittest.TestCase):
     """The vocabulary both trigger kinds share."""
 
@@ -3446,6 +3555,51 @@ class TestWindowsScheduling(unittest.TestCase):
     def test_a_definition_that_is_not_a_task_is_not_ours(self) -> None:
         self.assertFalse(wintasks._is_ours("not xml at all", self.ROOT))
 
+    def test_a_watcher_respawn_registers_as_a_startup_task(self) -> None:
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.WATCHER, root=self.ROOT,
+            schedules=("@reboot",),
+            command=("C:\\tools\\agents-live.exe", "--repo", str(self.ROOT),
+                     "internal", "ensure-watcher", "todo"),
+            path="C:\\Windows\\System32")
+        registered: dict[str, object] = {}
+        with (
+            # Nothing registered, then the read-back of what was written.
+            mock.patch.object(wintasks, "read_definition",
+                              side_effect=[None, "<Task/>"]),
+            mock.patch.object(wintasks, "current_user_id",
+                              return_value="EXAMPLE\\dev"),
+            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
+            mock.patch.object(
+                wintasks, "build_task_xml",
+                side_effect=lambda **kwargs: registered.update(kwargs) or "<Task/>"),
+        ):
+            wintasks.install(spec)
+        # A respawn is a startup trigger, and it never carries --boot:
+        # its action is restarting a watcher, not running the agent.
+        self.assertEqual(list(registered["schedules"]), ["@reboot"])
+        self.assertNotIn("--boot", str(registered["arguments"]))
+        self.assertTrue(str(registered["uri"]).endswith(wintasks.WATCH))
+
+    def test_the_host_dispatches_the_watcher_respawn_it_can_persist(self) -> None:
+        with (
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(headless, "repo_root", return_value=self.ROOT),
+            mock.patch.object(headless, "watcher_spec") as spec,
+            mock.patch.object(wintasks, "install", return_value="task") as install,
+            mock.patch.object(wintasks, "delete", return_value=True) as delete,
+            mock.patch.object(wintasks, "installed_names",
+                              return_value=["todo"]) as installed,
+        ):
+            self.assertEqual(schedules.install_watcher_respawn("todo"), "task")
+            self.assertTrue(schedules.remove_watcher_respawn("todo"))
+            self.assertEqual(schedules.watcher_respawn_names(), ["todo"])
+        spec.assert_called_once_with("todo")
+        install.assert_called_once()
+        delete.assert_called_once_with(self.ROOT, "todo", kind=wintasks.WATCH)
+        installed.assert_called_once_with(self.ROOT, kind=wintasks.WATCH)
+
     def test_the_host_dispatches_to_the_scheduler_it_has(self) -> None:
         expected = (hostruntime.TASK_SCHEDULER
                     if sys.platform == "win32" else hostruntime.CRONTAB)
@@ -3476,14 +3630,16 @@ class TestWindowsScheduling(unittest.TestCase):
             with self.assertRaises(headless.AgentsLiveError):
                 schedules.remove("todo")
 
-    def test_a_startup_schedule_gets_a_task_of_its_own(self) -> None:
+    def test_each_way_an_agent_fires_gets_a_task_of_its_own(self) -> None:
         clock = wintasks.task_name(self.ROOT, "todo")
-        boot = wintasks.task_name(self.ROOT, "todo", boot=True)
-        self.assertNotEqual(clock, boot)
-        self.assertTrue(boot.endswith(wintasks.BOOT_SUFFIX))
-        # Both still name the same agent, so enumeration and removal
-        # reach them without knowing which is which.
-        for name in (clock, boot):
+        boot = wintasks.task_name(self.ROOT, "todo", kind=wintasks.BOOT)
+        watch = wintasks.task_name(self.ROOT, "todo", kind=wintasks.WATCH)
+        self.assertEqual(len({clock, boot, watch}), 3)
+        self.assertTrue(boot.endswith(wintasks.BOOT))
+        self.assertTrue(watch.endswith(wintasks.WATCH))
+        # All three still name the same agent, so enumeration and
+        # removal reach them without knowing which is which.
+        for name in (clock, boot, watch):
             self.assertEqual(wintasks.agent_of_task_name(name, self.ROOT),
                              "todo")
 

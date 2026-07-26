@@ -69,7 +69,7 @@ COMMANDS = (
     ),
     Cmd(
         "start", "Activate cron and watcher triggers.", "activate", "in-process",
-        probes=("schedule", "inotify"), dynamic_probes="start", json=True,
+        probes=("schedule", "watch"), dynamic_probes="start", json=True,
         name_sugar=True,
         mutually_exclusive=(("--yes", "--all"),),
         requires_one_of=("--name", "--all"),
@@ -84,7 +84,7 @@ COMMANDS = (
     ),
     Cmd(
         "internal", "Run internal watcher plumbing.", "activate", "in-process",
-        probes=("schedule", "inotify"), hidden=True, subcommand_required=True,
+        probes=("schedule", "watch"), hidden=True, subcommand_required=True,
         subcommands=(
             Cmd(
                 "watch-loop", "Run one watcher loop.", "activate", "in-process",
@@ -177,7 +177,7 @@ COMMANDS = (
     ),
     Cmd(
         "smoketest", "Run end-to-end validation.", "smoketest", "in-process",
-        probes=("schedule", "inotify"), json=True, default_notice=True,
+        probes=("schedule", "watch"), json=True, default_notice=True,
         args=(
             Arg(("--runtime",), "Agent runtime.", kind="value"),
             Arg(("--model",), "Model override.", kind="value"),

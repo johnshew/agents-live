@@ -191,7 +191,7 @@ def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
 
 def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
     """Trigger-derived capability set for ``start`` (2026-07-12 finding:
-    a cron-only agent must not require inotify). None = the default probe
+    a cron-only agent must not require a watcher). None = the default probe
     set (``--all`` or no name to derive from); an empty set skips the
     preflight so a nonexistent agent reports ``agent_invalid`` from the
     operation itself, not ``dependency_missing`` from the gate."""
@@ -213,7 +213,7 @@ def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
     if config.schedule:
         capabilities.add("schedule")
     if config.watch_path:
-        capabilities.add("inotify")
+        capabilities.add("watch")
     return frozenset(capabilities)
 
 
