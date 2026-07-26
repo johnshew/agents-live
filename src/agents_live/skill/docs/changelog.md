@@ -62,6 +62,12 @@ history is retained in the source repository.
   resolves a new release on purpose, is the only caller that opts out and
   so remains the way to change versions.
 
+- chore: a release can be cut from a Windows checkout. (#169)
+  The release script compared the files git reported as changed, which git
+  always names with forward slashes, against paths built with the platform
+  separator, so the version bump looked like it had touched an unexpected
+  file set and preparation aborted on Windows every time.
+
 ## 5.1.0 - 2026-07-26
 
 - feat: `repos add` registers a repository from the CLI. (#159)
