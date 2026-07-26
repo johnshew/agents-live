@@ -43,7 +43,7 @@ from hashlib import sha256
 from math import gcd
 from pathlib import Path, PureWindowsPath
 
-from . import triggers
+from . import hostruntime, triggers
 
 # Every registration this tool makes lives here, so the enumeration a
 # developer runs to confirm teardown is one command with one answer.
@@ -1049,9 +1049,24 @@ def is_active(root: Path | str, agent: str) -> bool | None:
 
     Any of the three counts: an agent scheduled only for startup is as
     active as one scheduled by the clock.
+
+    The folder listing decides which definitions are worth reading. It
+    is one query for the whole host and is taken once per enumeration
+    pass, so an agent with one task costs one definition read and an
+    agent with none costs nothing - where every agent used to cost
+    three regardless. A listing that cannot be read decides nothing,
+    and all three are read as before.
     """
+    kinds: tuple[str, ...] = (CLOCK, BOOT, WATCH)
+    registered = registered_task_names()
+    if registered is not None:
+        present = {name.casefold() for name in registered}
+        kinds = tuple(kind for kind in kinds
+                      if task_name(root, agent, kind=kind).casefold() in present)
+        if not kinds:
+            return False
     answers = []
-    for kind in (CLOCK, BOOT, WATCH):
+    for kind in kinds:
         try:
             existing = read_definition(task_path(root, agent, kind=kind))
         except TaskSchedulerUnavailable:
@@ -1060,27 +1075,50 @@ def is_active(root: Path | str, agent: str) -> bool | None:
     return any(answers)
 
 
+def _read_task_names() -> list[str] | None:
+    """Every task name in the tool's folder, or None if that cannot be read.
+
+    Names only, from one ``schtasks`` query. Nothing is decided from
+    this listing that ownership rests on: the verbose form of the query
+    reports neither the working directory nor a stable, locale-free
+    action, so :func:`_is_ours` still reads the registered XML. An empty
+    folder and an unreachable task store are told apart because the
+    caller has to treat them differently.
+    """
+    try:
+        code, out, err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
+                               "CSV", "/NH"])
+    except TaskSchedulerUnavailable:
+        return None
+    if code != 0:
+        # No folder yet means nothing is registered, which is an answer.
+        # Anything else is a store that did not answer.
+        return [] if _NOT_REGISTERED in err.lower() else None
+    names: list[str] = []
+    for row in csv.reader(out.splitlines()):
+        if row and row[0].strip():
+            names.append(row[0].rsplit("\\", 1)[-1])
+    return names
+
+
+def registered_task_names() -> list[str] | None:
+    """The tool's registered task names, read once per enumeration pass."""
+    return hostruntime.pass_cached("wintasks-registered-names", _read_task_names)
+
+
 def installed_names(root: Path | str, *, kind: str | None = None) -> list[str]:
     """Every agent in *root* with a task registered on this host.
 
     With *kind*, only agents whose task of that kind is registered: the
     question "which watchers is this host meant to be running" is asked
     of the watcher tasks alone.
+
+    Runtime-is-truth enumeration: an orphan sweep asks this question, so
+    a store that cannot be read answers with nothing rather than
+    raising.
     """
-    try:
-        code, out, _err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
-                                "CSV", "/NH"])
-    except TaskSchedulerUnavailable:
-        return []
-    if code != 0:
-        # Nothing registered here yet, or nothing readable: an orphan
-        # sweep asks this question and must not fail because of it.
-        return []
     names = []
-    for row in csv.reader(out.splitlines()):
-        if not row:
-            continue
-        leaf = row[0].rsplit("\\", 1)[-1]
+    for leaf in registered_task_names() or []:
         if kind is not None and kind_of_task_name(leaf) != kind:
             continue
         agent = agent_of_task_name(leaf, root)

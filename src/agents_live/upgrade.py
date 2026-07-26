@@ -71,9 +71,12 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
         return 1
     with adminlog.operation("upgrade-runtime",
                             version_before=__version__) as end:
-        status = subprocess.run(
-            [uv, "tool", "upgrade", "agents-live"], check=False,
-        ).returncode
+        # The upgrade rewrites this tool's own executables, and on
+        # Windows one of them is the running process.
+        with plugins.replaceable_entrypoints():
+            status = subprocess.run(
+                [uv, "tool", "upgrade", "agents-live"], check=False,
+            ).returncode
         if status != 0:
             end["status"] = "error"
             end["level"] = "error"

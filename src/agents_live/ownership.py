@@ -220,7 +220,14 @@ def current_host() -> str:
     a table shows. It is not what an owner value is matched against:
     that is the uuid part, because a hostname does not distinguish the
     WSL distros on one machine, which default to sharing it.
+
+    Asked once per enumeration pass: this costs a subprocess, and the
+    status views ask for it once per agent.
     """
+    return hostruntime.pass_cached("hostname", _read_current_host)
+
+
+def _read_current_host() -> str:
     try:
         out = subprocess.run(
             ["hostname", "-s"], capture_output=True, text=True, check=True, timeout=2,

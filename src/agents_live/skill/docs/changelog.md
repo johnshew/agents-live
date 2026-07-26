@@ -6,6 +6,38 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: convergence no longer fails on the executable it is running from.
+  (#162)
+  Windows holds a mandatory lock on a running image, so `uv tool install
+  --force` could not rewrite `agents-live.exe` while the convergence was
+  itself started through it, and the install ended with "Failed to
+  install entrypoint ... os error 32". Retrying re-entered through the
+  same executable and failed the same way, so a plugin declaration could
+  not be applied from a Windows host at all. A locked image can still be
+  renamed: the entry points uv recorded in its own receipt are moved
+  aside for the install and put back if the install writes nothing, which
+  is the move `uv self update` makes to replace itself. Only a locked
+  file is moved, and nothing is moved on POSIX.
+
+- fix: enumerating agents asks the host once instead of once per agent.
+  (#165)
+  Reading whether an agent is active asked questions that answer for the
+  whole machine: the process table, which costs about two seconds on
+  Windows because it is a PowerShell CIM query, and the folder of
+  registered tasks, which cost three `schtasks` subprocesses per agent
+  whether or not the agent had a task. Those reads were taken once per
+  agent, the state word and the per-trigger detail each took their own,
+  and the dashboard built its rows three times per render. With thirteen
+  agents the dashboard never finished a page: the build blocked the event
+  loop long enough for the browser connection to be dropped and retried,
+  indefinitely. Host-wide reads are now taken once per enumeration pass,
+  the task folder listing decides which task definitions are worth
+  reading, and the state word is derived from the reading already taken.
+  The registered XML still decides ownership wherever ownership is
+  asserted. Measured on a thirteen-agent project, a status sweep went
+  from 32s to 2.2s and the dashboard from never finishing to interactive
+  in 2.3s.
+
 - feat: administrative operations are logged, not just agent runs. (#164)
   Logging recorded what agents did and nothing about how the host was
   changed, so a plugin install, an ownership transfer, a schedule teardown,
