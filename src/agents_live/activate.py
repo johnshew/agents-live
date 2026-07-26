@@ -649,7 +649,7 @@ def _resolve_activation_ownership(
         else:
             ownership.set_owner(name, owner)
 
-    if owner == ownership.WILDCARD or ownership.owns(owner):
+    if ownership.owns(owner):
         return True
 
     # Owned by a different host: take over only with per-invocation consent.

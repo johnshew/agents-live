@@ -14,6 +14,8 @@ history is retained in the source repository.
   reads only the hostname and runtime, so a machine or distro rename
   changes how a row reads and never who owns it, and `status` and the
   dashboard show `hostname/runtime` instead of a 32-character hex string.
+  `doctor` scopes its agent-CLI warnings through the same matcher, so it
+  still checks only the tools this runtime's own agents need.
   BREAKING CHANGE: an owner value that cannot be reduced to a uuid is
   treated as another runtime's, which is what makes the model durable
   against a truncated write, a bad merge, or a hand edit - but it also

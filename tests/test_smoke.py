@@ -881,6 +881,32 @@ class TestOwnershipEnforcement(_TempProject):
                     {"smoke-fixture": {"state": "active"}}, []),
                 ([], True))
 
+    def test_doctor_scopes_cli_warnings_by_the_same_matcher(self) -> None:
+        # doctor decides which agent CLIs this host actually needs by
+        # reading owner values. It used to compare them to a hostname it
+        # spelled itself, which the triple would have made false for every
+        # claimed agent - silently dropping the CLI checks that matter.
+        self.write_agent(
+            "claude-fixture",
+            AGENT_DEFINITION.replace("runtime: none", "runtime: claude"))
+        owners = self.root / "Agents" / "data" / "agent-owners.json"
+        owners.parent.mkdir(parents=True, exist_ok=True)
+
+        def needed_when(owner: str) -> list[str]:
+            owners.write_text(
+                json.dumps({"owners": {"claude-fixture": owner}}),
+                encoding="utf-8")
+            with mock.patch.object(doctor, "REPO", self.root):
+                buckets = doctor._agent_cli_needed_by_host()
+            return buckets["claude"]["owned"]
+
+        self.assertEqual(needed_when(ownership.current_owner_id()),
+                         ["claude-fixture"])
+        self.assertEqual(needed_when(ownership.WILDCARD), ["claude-fixture"])
+        self.assertEqual(needed_when("some-host/ubuntu/" + "ab" * 16), [])
+        self.assertEqual(needed_when("some-host"), [])
+
+
 
 class TestProjectPlugins(_TempProject):
     def _wheel(self, name: str = "example-plugin", version: str = "1.2.3") -> Path:

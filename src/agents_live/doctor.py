@@ -100,13 +100,31 @@ def _mechanism_check(capability: str) -> tuple[str, bool, bool, str, str]:
     return name, failure is None, True, fix, note
 
 
-def _agent_cli_needed_by_host(host: str) -> dict[str, dict[str, list[str]]]:
+def _owns(owner: str) -> bool:
+    """Whether this runtime owns ``owner``, best-effort.
+
+    Doctor reports; it never blocks on ownership. A runtime that cannot
+    read its own identity answers "yes" here so the CLI checks stay
+    conservative - warning about a tool that may not be needed is a much
+    smaller failure than silently skipping one that is.
+    """
+    from . import ownership  # noqa: PLC0415
+    try:
+        return ownership.owns(owner)
+    except ownership.OwnershipUnavailableError:
+        return True
+
+
+def _agent_cli_needed_by_host() -> dict[str, dict[str, list[str]]]:
     """Map each agent-CLI keyword ("claude", "copilot", "agency") to the
-    names of agents that require it, split into "owned" (this host or "*",
-    per agent-owners.json falling back to frontmatter `owner:`) and
+    names of agents that require it, split into "owned" (this runtime or
+    "*", per agent-owners.json falling back to frontmatter `owner:`) and
     "unclaimed" (no registry entry and no frontmatter owner - any host may
     end up running these, so they still warrant a conservative warning, but
     they are not owned by this host).
+
+    An owner value this runtime cannot match is another runtime's, so it
+    is scoped out exactly like one naming a different machine.
 
     Some hosts (e.g. a machine without Microsoft-account/network access)
     never run `agency`-based agents because ownership pins those agents to a
@@ -144,8 +162,8 @@ def _agent_cli_needed_by_host(host: str) -> dict[str, dict[str, list[str]]]:
             continue
         if owner is None:
             owner = cfg.owner  # unclaimed: fall back to frontmatter seed (may be None)
-        if owner not in (host, "*", None):
-            continue  # owned by a different host; not this host's concern
+        if owner is not None and not _owns(owner):
+            continue  # owned by another runtime; not this host's concern
         bucket = "unclaimed" if owner is None else "owned"
         runtime = (cfg.runtime or "").strip().lower()
         for keyword in ("claude", "copilot", "agency"):
@@ -619,8 +637,7 @@ def collect() -> list[dict]:
                 note="Windows-interop node writes MSAL tokens to the Windows "
                      "keychain; MCP logins won't populate ~/.config/ms365-mcp")
 
-        host = _hostname()
-        needed = _agent_cli_needed_by_host(host) if project_checks else {}
+        needed = _agent_cli_needed_by_host() if project_checks else {}
 
         def agent_note(keyword: str, default: str) -> str:
             if not project_checks:
