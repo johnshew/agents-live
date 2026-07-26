@@ -47,11 +47,9 @@ Scheduler and Windows change notification behind a small host-runtime
 seam, is implemented and covered by CI on `windows-latest`.
 [windows-support.md](windows-support.md) is the architecture guide: what
 the seam is, why it is functions rather than a protocol object, and what
-the spikes contradicted. The one piece still carrying its original shape
-is the WSL heartbeat's VBScript launcher
-([#137](https://github.com/johnshew/agents-live/issues/137)). Whether the
-Windows half earns its keep in the long run stays an open product
-question; the engineering question is settled.
+the spikes contradicted. Whether the Windows half earns its keep in the
+long run stays an open product question; the engineering question is
+settled.
 
 ## Maintaining this file
 

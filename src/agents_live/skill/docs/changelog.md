@@ -6,14 +6,27 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- change: the WSL heartbeat no longer runs on VBScript. (#137)
+- fix!: the WSL heartbeat no longer runs on VBScript. (#137)
   Its scheduled task launched `wscript.exe` on a packaged script that
   asked Windows to hide a console it had just created - a scripting host
   Windows 11 is removing, and a hiding technique the default terminal
   application can override. The task now runs `wslg.exe`, the windowless
-  launcher WSL itself ships, which is given no console to begin with. Run
-  `agents-live heartbeat install` to move an existing task over;
-  `agents-live doctor` names the old shape until you do.
+  launcher WSL itself ships, which is given no console to begin with.
+  BREAKING CHANGE: the retired script lived inside the tool environment,
+  so upgrading the package in place leaves the old task pointing at a file
+  that is gone; it then fails every five minutes and stops holding WSL
+  open. Python packaging runs no code on install or uninstall, so neither
+  version can correct this unaided. Remove the old task with the version
+  that registered it, then reinstall: `agents-live uninstall
+  --retain-state`, `uv tool install agents-live`, `agents-live init`.
+  After an in-place upgrade, `agents-live init` alone re-registers the
+  task, and `doctor` names the stale action until it does.
+- feat: `init` registers the Windows heartbeat on WSL. (#137)
+  Keeping WSL alive is part of initializing host support, not a step to
+  remember afterwards: without it, scheduled agents only run while a WSL
+  session happens to be open. A host that cannot reach Task Scheduler is
+  reported with the command that repairs it, and the rest of init still
+  succeeds.
 - test: the suite runs on native Windows, and CI keeps it that way. (#119)
   Every push and pull request now runs the tests on Windows as well as
   Linux. Getting there fixed four defects the Windows host exposed: a
@@ -26,15 +39,14 @@ history is retained in the source repository.
   exist there. New tests cover the two ways a lifecycle operation ends up
   aimed at the wrong thing - a reused process id, and one repository
   reached under a second name through a junction.
-- fix: writing a config file no longer fails under native Windows on
-  Python 3.12. (#119)
+- fix: writing a config file no longer fails on native Windows. (#119)
   Every write that restricts the file's permissions went through a call
-  Windows only grew in 3.13, so registering a repository, or anything else
+  Windows only grew in 3.13, so under Python 3.12 registering a repository,
+  or anything else
   that touches the config, raised an `AttributeError` there - and the
   cleanup behind it left the half-written temporary file in place, because
   Windows will not remove a file that is still open.
-- fix: a console window no longer flashes on every spawn under native
-  Windows. (#139)
+- fix: a console window no longer flashes on every native Windows spawn. (#139)
   Starting a watcher, a cron loop, or the maintenance loop opened a window
   that closed again a moment later. The spawn asked for no window and for a
   detached process, and Windows ignores the first request whenever the
@@ -81,8 +93,7 @@ history is retained in the source repository.
   alongside the agent's own, and preflight now asks the host whether it can
   watch rather than looking for a Linux tool. Linux and WSL behavior is
   unchanged.
-- feat: accept every schedule on native Windows, and run agents only when
-  they are due. (#126)
+- feat: accept every schedule on native Windows. (#126)
   Schedules that do not map exactly onto a Task Scheduler trigger now
   register as a repetition that covers every minute they can name, and each
   fire is checked against the expression before it becomes a run, so an
@@ -98,10 +109,10 @@ history is retained in the source repository.
   checking lands. One module now chooses between crontab and Task Scheduler,
   so activation, status, stop, and the smoke test no longer name a
   mechanism. Linux and WSL behavior is unchanged.
-- feat: give a runtime its own ownership identity where the machine name
-  cannot provide one. (#126)
+- feat: give a runtime its own ownership identity. (#126)
   Ownership decisions now match against a runtime identity rather than the
-  hostname, which stays as a display label. Linux and WSL keep the hostname
+  hostname, which stays as a display label, for hosts where the machine
+  name cannot provide one. Linux and WSL keep the hostname
   as that identity and are unchanged; a native Windows runtime generates
   `windows:<uuid>` once into the user state home, which on Windows is now
   the local application-data directory rather than the XDG path.
@@ -111,11 +122,11 @@ history is retained in the source repository.
   terminal path is skipped where the CLI does not need one, handlers that
   need a shell are refused where there is none, and console output no longer
   fails on a legacy code page. Linux and WSL behavior is unchanged.
-- refactor: move locking, detached spawning, liveness, and termination onto
-  the host-runtime seam. (#126)
-  Locks are file locks on every platform, and stopping a process now stops the
-  tree it started rather than a POSIX process group alone. Linux and WSL
-  behavior is unchanged.
+- refactor: move process control onto the host-runtime seam. (#126)
+  Locking, detached spawning, liveness, and termination now live behind that
+  seam. Locks are file locks on every platform, and stopping a process now
+  stops the tree it started rather than a POSIX process group alone. Linux
+  and WSL behavior is unchanged.
 - refactor: extract the host-runtime seam. (#120)
   Triggers are described by a spec and rendered into crontab lines in one
   place, watcher policy decides batches without a live event source, and
