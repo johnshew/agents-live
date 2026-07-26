@@ -241,7 +241,11 @@ Full bring-up sequence for a new host. Every step is idempotent -- safe to
 re-run.
 
 1. **Initialize host support.** `agents-live init` creates global
-   configuration and state and installs automatic maintenance.
+   configuration and state, installs automatic maintenance, and on WSL
+   registers the distro-level Windows heartbeat so cron fires when the
+   machine is idle -- see [windows-heartbeat.md](windows-heartbeat.md).
+   A host that cannot reach Task Scheduler is reported with the command
+   that repairs it; the rest of init still succeeds.
 2. **Check readiness.** `agents-live doctor` reports what's missing,
    scoped to the agents this host owns.
 3. **Install missing tools.** Use the commands above. Hand sudo-gated
@@ -251,12 +255,7 @@ re-run.
    every machine: it activates only what this host owns.
 5. **Initialize additional repositories.** Run
    `agents-live init --repo <path>` for each additional workspace.
-6. **(WSL only) Register one distro-level Windows heartbeat.** Run
-   `agents-live heartbeat install --distro "$WSL_DISTRO_NAME"` so cron fires
-   when the machine is idle -- see
-   [windows-heartbeat.md](windows-heartbeat.md). Without it, cron only runs
-   while a WSL session is open.
-7. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
+6. **Verify.** Confirm `health.ok` is fresh with `status: healthy` and no
    warning `events`. On agency hosts the system `smoketest` also validates
    the agent path end-to-end; it is recorded as `skipped` (not `fail`) on
    agency-less hosts.

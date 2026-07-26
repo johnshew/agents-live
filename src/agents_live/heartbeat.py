@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import paths, preflight
+from . import hostruntime, paths, preflight
 
 TASK_PREFIX = "Agents Live Heartbeat"
 LEGACY_TASK = "WSL Heartbeat"
@@ -235,6 +235,27 @@ def install(distro: str | None = None) -> None:
     print(f"Installed {task_name(selected)} using {cli_path}")
     if legacy_exists:
         print(f"Migrated and removed legacy task {LEGACY_TASK}")
+
+
+def install_best_effort(operation: str) -> bool:
+    """Register the host heartbeat without failing a larger operation.
+
+    Only WSL carries a Windows-side task, and only a host that can reach
+    Task Scheduler can register one. Neither condition is the caller's
+    to satisfy, and neither makes the surrounding lifecycle operation a
+    failure, so an unmet one is reported with the command that repairs
+    it rather than raised.
+    """
+    if hostruntime.id() != hostruntime.WSL:
+        return False
+    try:
+        install()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: could not register the Windows heartbeat during "
+              f"{operation}: {exc}; run `agents-live heartbeat install` "
+              "once the cause is resolved", file=sys.stderr)
+        return False
+    return True
 
 
 def uninstall(distro: str | None = None, *, retain_state: bool = False) -> None:

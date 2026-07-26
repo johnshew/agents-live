@@ -1,7 +1,7 @@
 ---
 title: Agents Live Windows Heartbeat
 description: Keep WSL available for scheduled Agents Live agents with Windows Task Scheduler
-ms.date: 2026-07-27
+ms.date: 2026-07-25
 ms.topic: how-to
 ---
 
@@ -76,31 +76,60 @@ tail "${XDG_STATE_HOME:-$HOME/.local/state}/agents-live/heartbeat.log"
 
 ## Installing the scheduled task
 
-Install agents-live as a uv tool, then register the current distro:
+Install agents-live as a uv tool, then initialize host support:
 
 ```bash
 uv tool install agents-live
-agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
+agents-live init
 ```
 
-A bare `uv tool install` does not carry project-declared plugin wheels;
-if any project declares them, follow with `agents-live upgrade` (hourly
-automatic maintenance also converges them).
+On WSL, `init` registers the current distro's task itself. Register a
+specific distro, or repair a task after a failed registration, with:
+
+```bash
+agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
+```
 
 Registration is idempotent. It replaces a stale canonical action, starts the
 new task, and waits for a fresh global beacon. Only after that verification
 succeeds does it remove the legacy `WSL Heartbeat` task. If verification fails,
-the legacy task remains. Upgraded copies of the temporary
-`windows-heartbeat.sh` compatibility wrapper perform this migration
-automatically when an old task next invokes them and its old path still
-resolves. If a checkout, environment, or Python path was already removed,
-`doctor` identifies the stale action and the same install command repairs it.
+the legacy task remains. If a checkout, environment, or Python path was
+already removed, `doctor` identifies the stale action and the same install
+command repairs it.
 
 Editable development may exercise
 `uv run --with-editable . agents-live heartbeat`, but an editable checkout must
 not be persisted in Task Scheduler. Production registration requires the
 executable `~/.local/bin/agents-live` uv shim. Package and Python upgrades can
 therefore replace the shim's target without changing the task.
+
+## Upgrading from a release before 4.0
+
+Releases before 4.0 launched the heartbeat through a packaged VBScript
+file that no longer ships. Because that path pointed inside the tool
+environment, upgrading the package in place leaves the task pointing at a
+file that is gone: it fails every five minutes and WSL is no longer held
+open. Python packaging runs no code on install or uninstall, so neither
+the outgoing nor the incoming version can correct this on its own.
+
+Remove the old task with the version that registered it, then reinstall:
+
+```bash
+agents-live uninstall --retain-state
+uv tool install agents-live
+agents-live init
+```
+
+`--retain-state` keeps the beacon, log, and existing configuration.
+Agent triggers are left in place throughout, so scheduled agents keep
+their registrations; only the brief window between the first two commands
+has no CLI to run. If the package was already upgraded in place,
+`agents-live init` alone re-registers the task, and `doctor` names the
+stale action until it does.
+
+A bare `uv tool install` does not carry project-declared plugin wheels;
+if any project declares them, follow with `agents-live upgrade` (hourly
+automatic maintenance also converges them).
 
 ## Removing the scheduled task
 

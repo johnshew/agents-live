@@ -109,7 +109,7 @@ not the user-facing contract.
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `repair` | `agents-live doctor --repair [--dry-run]` |
-| `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive) |
+| `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive; `init` registers it already) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
 | `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |

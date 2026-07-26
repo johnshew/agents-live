@@ -837,6 +837,8 @@ class TestProjectPlugins(_TempProject):
                 completions, "update_best_effort", return_value=True) as update,
             mock.patch.object(
                 health_check, "ensure_health_cron_lines", return_value=True),
+            mock.patch.object(
+                heartbeat, "install_best_effort", return_value=True) as beat,
             mock.patch("importlib.reload", return_value=mock.Mock(
                 main=mock.Mock(return_value=0))),
             mock.patch("sys.argv", ["agents-live init"]),
@@ -845,6 +847,7 @@ class TestProjectPlugins(_TempProject):
             self.assertEqual(init.main(), 0)
         converge.assert_called_once_with([paths.global_root(), self.root])
         update.assert_called_once_with("init")
+        beat.assert_called_once_with("init")
         self.assertEqual(repos.default_root(), self.root)
         self.assertIn(
             "into .claude/agents/<agent-name>.md", init_stdout.getvalue())
@@ -4527,6 +4530,39 @@ class TestWindowsHeartbeat(unittest.TestCase):
             heartbeat.task_name("Ubuntu"), "Agents Live Heartbeat (Ubuntu)")
         self.assertEqual(
             heartbeat.task_name("Debian"), "Agents Live Heartbeat (Debian)")
+
+    def test_best_effort_install_registers_only_on_wsl(self) -> None:
+        with (
+            mock.patch.object(heartbeat.hostruntime, "id",
+                              return_value=heartbeat.hostruntime.WSL),
+            mock.patch.object(heartbeat, "install") as install,
+        ):
+            self.assertTrue(heartbeat.install_best_effort("init"))
+        install.assert_called_once_with()
+        for runtime in (heartbeat.hostruntime.LINUX, heartbeat.hostruntime.WINDOWS):
+            with (
+                mock.patch.object(heartbeat.hostruntime, "id",
+                                  return_value=runtime),
+                mock.patch.object(heartbeat, "install") as install,
+            ):
+                self.assertFalse(heartbeat.install_best_effort("init"))
+            install.assert_not_called()
+
+    def test_best_effort_install_reports_failure_without_raising(self) -> None:
+        with (
+            mock.patch.object(heartbeat.hostruntime, "id",
+                              return_value=heartbeat.hostruntime.WSL),
+            mock.patch.object(
+                heartbeat, "install",
+                side_effect=RuntimeError("Windows PowerShell interop is "
+                                         "unavailable")),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            self.assertFalse(heartbeat.install_best_effort("init"))
+        message = stderr.getvalue()
+        self.assertIn("could not register the Windows heartbeat during init",
+                      message)
+        self.assertIn("agents-live heartbeat install", message)
 
     def test_failed_migration_preserves_legacy_task(self) -> None:
         with (
