@@ -22,6 +22,7 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import shlex
 import shutil
 import signal
@@ -1719,6 +1720,19 @@ class TestWatchPolicy(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
 
+    def test_a_batch_within_the_limit_is_carried_whole(self) -> None:
+        paths = [f"note{index}.md" for index in range(4)]
+        self.assertEqual(watchpolicy.bound_batch(paths, limit=4), (paths, 0))
+
+    def test_a_batch_past_the_limit_is_cut_and_counted(self) -> None:
+        # A rescan can select thousands of files. The agent gets a list
+        # it can act on; the count is what the log has to say about the
+        # rest, because a silent truncation is a lie about the batch.
+        paths = [f"note{index}.md" for index in range(10)]
+        carried, omitted = watchpolicy.bound_batch(paths, limit=4)
+        self.assertEqual(carried, paths[:4])
+        self.assertEqual(omitted, 6)
+
     def select(self, paths: list[str], **kwargs: object) -> list[str]:
         return watchpolicy.select_batch(
             [str(self.root / p) for p in paths], root=self.root, **kwargs)
@@ -1876,6 +1890,41 @@ class TestWindowsWatchSource(unittest.TestCase):
             (self.root / f"file{index}.md").write_text("x", encoding="utf-8")
         with mock.patch.object(winwatch, "RESCAN_FILE_LIMIT", 5):
             self.assertEqual(len(winwatch.rescan([self.root])), 5)
+
+    def test_a_queue_that_is_full_drops_rather_than_blocking(self) -> None:
+        # A reader that blocks stops calling ReadDirectoryChangesW, and
+        # records that arrive with no read pending are lost anyway. The
+        # drop has to be recorded instead.
+        sink: queue.Queue = queue.Queue(maxsize=1)
+        watch = winwatch.DirectoryWatch(self.root, sink)
+        watch._offer("path", str(self.root / "one.md"))
+        self.assertFalse(watch.dropped.is_set())
+        watch._offer("path", str(self.root / "two.md"))
+        self.assertTrue(watch.dropped.is_set())
+        self.assertEqual(sink.qsize(), 1)
+
+    def test_a_dropped_event_degrades_to_the_same_rescan(self) -> None:
+        (self.root / "one.md").write_text("1", encoding="utf-8")
+        (self.root / "two.md").write_text("2", encoding="utf-8")
+        source = winwatch.WindowsEventSource([self.root])
+        watch = source._watches[0]
+        watch.dropped.set()
+
+        # Nothing is known about what was dropped, so the answer is the
+        # superset a buffer overflow would have given - and it is given
+        # even though no event was waiting to wake the poll.
+        self.assertEqual(sorted(Path(p).name for p in source.poll(0.1)),
+                         ["one.md", "two.md"])
+        self.assertFalse(watch.dropped.is_set())
+        self.assertEqual(source.poll(0.01), [])
+
+    def test_a_stop_does_not_wait_for_room_in_a_full_queue(self) -> None:
+        source = winwatch.WindowsEventSource([])
+        for index in range(winwatch.QUEUE_LIMIT):
+            source.events.put_nowait(("path", f"file{index}.md"))
+        # A poll woken by the sentinel is a poll with nothing else to
+        # return; a full queue has plenty, so the stop must not block.
+        source.stop()
 
     def test_a_watch_that_failed_is_raised_rather_than_polled_again(self) -> None:
         source = winwatch.WindowsEventSource([self.root])
@@ -3412,6 +3461,33 @@ class TestWindowsScheduling(unittest.TestCase):
         self.assertEqual(
             wintasks.parse_command_line(f'"prog" {line}')[1:], self.AWKWARD)
 
+    @contextlib.contextmanager
+    def _recording_task_store(self, registered: dict[str, object]):
+        """A store that reads back exactly what was written to it.
+
+        Registration verifies its own read-back, so a stub document
+        would fail the write it is meant to stand in for. Keeping the
+        real document also means these tests exercise the round trip
+        rather than asserting on the call that started it.
+        """
+        written: dict[str, str] = {}
+        build_task_xml = wintasks.build_task_xml
+
+        def build(**kwargs):
+            registered.update(kwargs)
+            written["document"] = build_task_xml(**kwargs)
+            return written["document"]
+
+        with (
+            mock.patch.object(wintasks, "read_definition",
+                              side_effect=lambda _path: written.get("document")),
+            mock.patch.object(wintasks, "current_user_id",
+                              return_value="EXAMPLE\\dev"),
+            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
+            mock.patch.object(wintasks, "build_task_xml", side_effect=build),
+        ):
+            yield
+
     def test_a_directory_argument_keeps_its_trailing_separator(self) -> None:
         # The backslash before the closing quote is the case every
         # Windows path argument runs into.
@@ -3621,6 +3697,119 @@ class TestWindowsScheduling(unittest.TestCase):
                                side_effect=OSError("no such program")):
             self.assertEqual(hidden.main(["missing"]), 127)
 
+    def _clock_spec(self) -> triggers.TriggerSpec:
+        return triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("*/5 * * * *",),
+            command=("C:\\tools\\agents-live.exe", "--repo", str(self.ROOT),
+                     "run", "--name", "todo"),
+            path="C:\\Windows\\System32")
+
+    def test_a_task_that_reads_back_as_something_else_fails_the_write(
+            self) -> None:
+        # An update interrupted partway through leaves a store holding
+        # something other than what was asked for. Saying so where it
+        # happened beats reporting success and being surprised later.
+        foreign = wintasks.build_task_xml(
+            command="C:\\other.exe", arguments="", working_dir=str(self.ROOT),
+            schedules=("*/5 * * * *",), description="", uri="x",
+            user_id="EXAMPLE\\dev")
+        with (
+            mock.patch.object(wintasks, "read_definition",
+                              side_effect=[None, foreign]),
+            mock.patch.object(wintasks, "current_user_id",
+                              return_value="EXAMPLE\\dev"),
+            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
+        ):
+            with self.assertRaises(wintasks.TaskError):
+                wintasks.install(self._clock_spec())
+
+    def test_a_task_that_reads_back_firing_differently_fails_the_write(
+            self) -> None:
+        # The failure a normalized duration used to cause: written one
+        # way, read back another, and rewritten by every later pass.
+        spec = self._clock_spec()
+        command, arguments = wintasks.action_form(spec.command[0],
+                                                  list(spec.command[1:]))
+        other = wintasks.build_task_xml(
+            command=command, arguments=arguments, working_dir=str(self.ROOT),
+            schedules=("0 9 * * *",), description="", uri="x",
+            user_id="EXAMPLE\\dev")
+        with (
+            mock.patch.object(wintasks, "read_definition",
+                              side_effect=[None, other]),
+            mock.patch.object(wintasks, "current_user_id",
+                              return_value="EXAMPLE\\dev"),
+            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
+        ):
+            with self.assertRaises(wintasks.TaskError):
+                wintasks.install(spec)
+
+    def test_an_agent_is_registered_before_anything_is_removed(self) -> None:
+        # Between the two an interruption can happen. Leaving an extra
+        # task behind is visible and converges; leaving an agent with no
+        # task at all is silence.
+        spec = triggers.TriggerSpec(
+            name="todo", kind=triggers.SCHEDULE, root=self.ROOT,
+            schedules=("*/5 * * * *",),
+            command=("C:\\tools\\agents-live.exe", "run", "--name", "todo"),
+            path="C:\\Windows\\System32")
+        order: list[str] = []
+        registered: dict[str, object] = {}
+        with (
+            self._recording_task_store(registered),
+            mock.patch.object(wintasks, "delete",
+                              side_effect=lambda *_a, **kw: order.append(
+                                  f"delete:{kw['kind']}")),
+        ):
+            with mock.patch.object(
+                    wintasks, "_verify",
+                    side_effect=lambda path, *_a: order.append("register")):
+                wintasks.install(spec)
+        self.assertEqual(order, ["register", f"delete:{wintasks.BOOT}"])
+
+    def test_a_task_runs_as_the_user_who_registered_it(self) -> None:
+        document = wintasks.build_task_xml(
+            command="C:\\tools\\agents-live.exe", arguments="run",
+            working_dir=str(self.ROOT), schedules=("*/5 * * * *",),
+            description="", uri="x", user_id="EXAMPLE\\dev")
+        self.assertEqual(wintasks.principal_of_definition(document),
+                         ("EXAMPLE\\dev", wintasks.LOGON_TYPE))
+        self.assertIsNone(wintasks.principal_of_definition("not xml"))
+
+    def test_a_task_given_another_logon_type_is_reported(self) -> None:
+        # An interactive token is what makes a scheduled agent run as the
+        # developer, in their session. A task carrying a different one
+        # runs under other rules, and that is not silent.
+        tasks = [
+            {"name": "todo@1", "command": "x", "arguments": "",
+             "working_dir": str(self.ROOT),
+             "principal": ("S-1-5-21-0", wintasks.LOGON_TYPE)},
+            {"name": "other@2", "command": "x", "arguments": "",
+             "working_dir": str(self.ROOT),
+             "principal": ("S-1-5-21-0", "Password")},
+        ]
+        with (
+            mock.patch.object(doctor.hostruntime, "native_scheduler",
+                              return_value=doctor.hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "registered_tasks",
+                              return_value=tasks),
+        ):
+            ok, note = doctor._task_session_requirement()
+        self.assertFalse(ok)
+        self.assertIn("other@2", note)
+        self.assertNotIn("todo@1", note)
+
+    def test_the_signed_in_limit_is_stated_when_nothing_is_wrong(self) -> None:
+        with (
+            mock.patch.object(doctor.hostruntime, "native_scheduler",
+                              return_value=doctor.hostruntime.TASK_SCHEDULER),
+            mock.patch.object(wintasks, "registered_tasks", return_value=[]),
+        ):
+            ok, note = doctor._task_session_requirement()
+        self.assertTrue(ok)
+        self.assertIn("signed in", note)
+
     def test_a_watcher_respawn_registers_as_a_startup_task(self) -> None:
         spec = triggers.TriggerSpec(
             name="todo", kind=triggers.WATCHER, root=self.ROOT,
@@ -3629,17 +3818,7 @@ class TestWindowsScheduling(unittest.TestCase):
                      "internal", "ensure-watcher", "todo"),
             path="C:\\Windows\\System32")
         registered: dict[str, object] = {}
-        with (
-            # Nothing registered, then the read-back of what was written.
-            mock.patch.object(wintasks, "read_definition",
-                              side_effect=[None, "<Task/>"]),
-            mock.patch.object(wintasks, "current_user_id",
-                              return_value="EXAMPLE\\dev"),
-            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
-            mock.patch.object(
-                wintasks, "build_task_xml",
-                side_effect=lambda **kwargs: registered.update(kwargs) or "<Task/>"),
-        ):
+        with self._recording_task_store(registered):
             wintasks.install(spec)
         # A respawn is a startup trigger, and it never carries --boot:
         # its action is restarting a watcher, not running the agent.
@@ -3775,16 +3954,7 @@ class TestWindowsScheduling(unittest.TestCase):
                      "--quiet"),
             path="C:\\Windows\\System32")
         registered: dict[str, object] = {}
-        with (
-            mock.patch.object(wintasks, "read_definition",
-                              side_effect=[None, "<Task/>"]),
-            mock.patch.object(wintasks, "current_user_id",
-                              return_value="EXAMPLE\\dev"),
-            mock.patch.object(wintasks, "_run", return_value=(0, "", "")),
-            mock.patch.object(
-                wintasks, "build_task_xml",
-                side_effect=lambda **kwargs: registered.update(kwargs) or "<Task/>"),
-        ):
+        with self._recording_task_store(registered):
             wintasks.install(spec)
         # The loop does the same work at startup and on the hour, so one
         # task carries both triggers and no --boot tells them apart.

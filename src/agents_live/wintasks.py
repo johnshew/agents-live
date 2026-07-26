@@ -67,6 +67,16 @@ _SUFFIXES = (BOOT, WATCH, HOST)
 _NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _TASK_VERSION = "1.4"
 
+# The token every task this tool registers runs with. An interactive
+# token is what makes a scheduled agent behave like a cron job started
+# by the developer: their environment, their credentials, their agent
+# CLI logins. The price is that it can only run inside a signed-in
+# session, so a machine sitting at the sign-in screen runs nothing.
+# Running while logged off means stored credentials or S4U, which is a
+# different security posture and deliberately not this one
+# (docs/windows-support.md, Security model).
+LOGON_TYPE = "InteractiveToken"
+
 # Agent names reach a task name, an XML document, and a command line.
 # The set that is safe in all three is the set agent files already use.
 _SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -538,7 +548,7 @@ def build_task_xml(*, command: str, arguments: str, working_dir: str,
     # developer's environment and credentials, only while they are logged
     # on. Logged-off execution needs stored credentials or S4U and is
     # deliberately separate work (docs/windows-support.md, Security model).
-    _child(principal, "LogonType", "InteractiveToken")
+    _child(principal, "LogonType", LOGON_TYPE)
     _child(principal, "RunLevel", "LeastPrivilege")
 
     settings = _child(task, "Settings")
@@ -632,6 +642,26 @@ def read_definition(path: str) -> str | None:
             return None
         raise TaskSchedulerUnavailable(err.strip() or "schtasks query failed")
     return out
+
+
+def principal_of_definition(document: str) -> tuple[str, str] | None:
+    """The user a registered task runs as, and the token it runs with.
+
+    What decides whether a scheduled agent can run at all: an
+    interactive token means the run happens in the owner's session and
+    only while they are signed in. Reading it back is how the tool can
+    say that out loud instead of leaving a missed run unexplained.
+    """
+    body = document.split("?>", 1)[-1].strip()
+    try:
+        task = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    principal = task.find(f".//{{{_NS}}}Principal")
+    if principal is None:
+        return None
+    return (principal.findtext(f"{{{_NS}}}UserId", default=""),
+            principal.findtext(f"{{{_NS}}}LogonType", default=""))
 
 
 def _definition_action(document: str) -> tuple[str, str, str] | None:
@@ -844,9 +874,14 @@ def install(spec: triggers.TriggerSpec) -> str:
         raise TaskError(
             f"a task must name a fully qualified executable, not '{command}'")
     lines = []
-    for kind, (schedules, extra) in _kind_plan(spec).items():
+    plan = _kind_plan(spec)
+    # Registrations first, removals second. An interruption between the
+    # two then leaves the agent with more triggers than it asked for,
+    # never with none: a task that fires when it should not is visible
+    # and converges on the next pass, while an agent that has quietly
+    # stopped firing is neither.
+    for kind, (schedules, extra) in plan.items():
         if not schedules:
-            delete(spec.root, spec.name, kind=kind)
             continue
         args = list(spec.command[1:]) + extra
         registered, arguments = action_form(command, args)
@@ -854,6 +889,9 @@ def install(spec: triggers.TriggerSpec) -> str:
         # Reported without the wrapper: what the developer wants to see
         # is the command that runs, not the interpreter that hides it.
         lines.append(f"{path}: {command} {argument_string(args)}".rstrip())
+    for kind, (schedules, _extra) in plan.items():
+        if not schedules:
+            delete(spec.root, spec.name, kind=kind)
     return "; ".join(lines)
 
 
@@ -891,7 +929,31 @@ def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
     registered = read_definition(path)
     if registered is None:
         raise TaskError(f"{path} was registered but cannot be read back")
+    _verify(path, registered, command, arguments, schedules)
     return path
+
+
+def _verify(path: str, document: str, command: str, arguments: str,
+            schedules: Sequence[str]) -> None:
+    """Fail unless the store holds what registration asked it to hold.
+
+    Reading the definition back is not enough on its own: it says a
+    task is there, not that it is the right one. Comparing the action
+    and the trigger signature catches an update that was interrupted or
+    only partly applied at the moment it happened, and it catches a
+    schedule this tool can write but cannot read back as the same
+    thing - which otherwise looks like a task that converges cleanly
+    and is then rewritten by every maintenance pass, forever.
+    """
+    action = _definition_action(document)
+    if action is None or action[0] != command or action[1] != arguments:
+        raise TaskError(
+            f"{path} was registered but reads back running something else; "
+            "remove it by hand in Task Scheduler and register again")
+    if _definition_signature(document) != trigger_signature(schedules):
+        raise TaskError(
+            f"{path} was registered but reads back firing on a different "
+            f"schedule than {', '.join(schedules)}")
 
 
 def registered_tasks() -> list[dict[str, str]]:
@@ -902,7 +964,7 @@ def registered_tasks() -> list[dict[str, str]]:
     carries a digest of the root, and a root nobody can name cannot be
     digested. So this reads the folder rather than asking for a name,
     and reports what each task would run: ``{"name", "command",
-    "arguments", "working_dir"}``.
+    "arguments", "working_dir", "principal"}``.
     """
     try:
         code, out, _err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
@@ -933,7 +995,8 @@ def registered_tasks() -> list[dict[str, str]]:
             continue
         command, arguments, working_dir = action
         tasks.append({"name": leaf, "command": command,
-                      "arguments": arguments, "working_dir": working_dir})
+                      "arguments": arguments, "working_dir": working_dir,
+                      "principal": principal_of_definition(document)})
     return tasks
 
 

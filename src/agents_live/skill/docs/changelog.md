@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: harden the failure paths under native Windows. (#136)
+  A file-change storm can no longer grow without limit: the watcher's event
+  queue is bounded, and past the bound it falls back to the same single
+  bounded rescan an overflowed kernel buffer already used. One dispatch
+  carries a bounded number of file names, and says in the log how many it
+  left out. Registering a scheduled task now verifies that the store kept
+  the command and the schedule it was given, so an interrupted or partly
+  applied update fails where it happened instead of surfacing later as a
+  task that gets rewritten by every maintenance pass. An agent's tasks are
+  registered before any are removed, so an interruption leaves an extra
+  trigger rather than none. `doctor` states the limit that comes with
+  running as you: nothing scheduled runs while nobody is signed in.
 - feat: complete the lifecycle commands on native Windows. (#126)
   `doctor`, `upgrade`, `migrate`, and `uninstall` now speak to the store the
   host actually keeps schedules in, rather than assuming crontab. Doctor
