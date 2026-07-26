@@ -21,6 +21,7 @@ from . import paths
 from . import repos
 from . import preflight
 from . import ownership
+from . import hostruntime
 
 
 def _last_run_times(name: str, log_dir: Path) -> tuple[str, str]:
@@ -236,11 +237,12 @@ def main() -> int:
             return 0
 
         agents = []
-        for name in names:
-            try:
-                agents.append(agent_details(load_agent_config(name)))
-            except AgentsLiveError:
-                continue
+        with hostruntime.enumeration_pass():
+            for name in names:
+                try:
+                    agents.append(agent_details(load_agent_config(name)))
+                except AgentsLiveError:
+                    continue
 
         if json_mode:
             print(json.dumps({"agents": agents}, indent=2))

@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import os
 import re
 import subprocess
 import sys
 import tomllib
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
@@ -282,6 +285,144 @@ def _receipt_requirements() -> tuple[
     return primary, result
 
 
+# ---------------------------------------------------------------------------
+# Replacing our own executables while one of them is running
+# ---------------------------------------------------------------------------
+
+# What a uv tool install writes for this package. uv copies entry points
+# on Windows rather than symlinking them, so the same executable exists
+# in the tool environment and in uv's executable directory, and both are
+# rewritten by an install or an upgrade.
+_SHIM_NAME = "agents-live.exe"
+
+# A moved-aside executable is still running, so it cannot be deleted
+# until it exits. The name marks it for the sweep at the start of the
+# next convergence rather than leaving a mystery file behind.
+_ASIDE_SUFFIX = ".replaced"
+
+
+def _entrypoint_paths() -> list[Path]:
+    """Every copy of this tool's executable a uv install would rewrite.
+
+    uv records where it installed each entry point in the same receipt
+    that records the requirements, so this is uv's own answer rather
+    than a reconstruction of where it would have put them. The copy in
+    the tool environment is rewritten too and is not in that list.
+    """
+    found: list[Path] = []
+    tool_env_copy = Path(sys.prefix) / "Scripts" / _SHIM_NAME
+    if tool_env_copy.is_file():
+        found.append(tool_env_copy)
+    receipt = _receipt_path()
+    if receipt is None:
+        return found
+    try:
+        with receipt.open("rb") as handle:
+            entrypoints = tomllib.load(handle)["tool"]["entrypoints"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        return found
+    for entrypoint in entrypoints:
+        install_path = entrypoint.get("install-path") if isinstance(
+            entrypoint, dict) else None
+        if not isinstance(install_path, str):
+            continue
+        shim = Path(install_path)
+        if shim.is_file() and shim not in found:
+            found.append(shim)
+    return found
+
+
+def _sweep_aside(directory: Path) -> None:
+    """Delete executables moved aside by an earlier run, if they have exited."""
+    try:
+        leftovers = list(directory.glob(f"{_SHIM_NAME}.*{_ASIDE_SUFFIX}"))
+    except OSError:
+        return
+    for leftover in leftovers:
+        try:
+            leftover.unlink()
+        except OSError:
+            # Still running, or not ours to remove. Either way the next
+            # sweep gets it; nothing depends on it being gone.
+            continue
+
+
+def _is_locked(path: Path) -> bool:
+    """Whether *path* cannot be written where it is.
+
+    Windows denies write access to the file backing a running image, so
+    this is the difference between the executable this process is
+    running from and the copies that merely exist. Only a locked one has
+    to be moved, which keeps a convergence started some other way from
+    disturbing files it could have replaced in place.
+    """
+    try:
+        with path.open("r+b"):
+            return False
+    except OSError:
+        return True
+
+
+@contextmanager
+def replaceable_entrypoints() -> Iterator[None]:
+    """Let uv rewrite this tool's executables while one of them runs.
+
+    Windows holds a mandatory lock on a running image, so uv cannot
+    delete or overwrite ``agents-live.exe`` during a convergence that
+    was itself started through it; it fails with "Failed to install
+    entrypoint ... os error 32" (astral-sh/uv#11930), and the obvious
+    retry re-enters through the same executable and fails the same way.
+
+    A locked image can still be renamed. Moving it aside frees the name
+    for uv to write while the running process keeps executing from the
+    renamed file - the same move ``uv self update`` makes to replace
+    itself. Nothing is renamed on POSIX, where replacing a running
+    executable was never a problem.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    moved: list[tuple[Path, Path]] = []
+    for shim in _entrypoint_paths():
+        _sweep_aside(shim.parent)
+        if not _is_locked(shim):
+            continue
+        aside = shim.with_name(f"{shim.name}.{os.getpid()}{_ASIDE_SUFFIX}")
+        try:
+            shim.rename(aside)
+        except OSError:
+            # Not movable: let uv run and report what it finds rather
+            # than turning a possible success into a failure here.
+            continue
+        moved.append((shim, aside))
+    try:
+        yield
+    except BaseException:
+        _restore(moved)
+        raise
+    for shim, aside in moved:
+        if not shim.exists():
+            # uv did not write the executable it was asked to write.
+            # Leaving the name empty would uninstall the tool.
+            _restore([(shim, aside)])
+            continue
+        try:
+            aside.unlink()
+        except OSError:
+            continue  # still running: the next sweep removes it
+
+
+def _restore(moved: list[tuple[Path, Path]]) -> None:
+    """Put moved-aside executables back, where the name is still free."""
+    for shim, aside in moved:
+        if shim.exists() or not aside.exists():
+            continue
+        try:
+            aside.rename(shim)
+        except OSError:
+            continue
+
+
 def converge(roots: list[Path]) -> bool:
     """Converge the host-global uv tool environment.
 
@@ -329,7 +470,8 @@ def converge(roots: list[Path]) -> bool:
         # --with-editable option used for co-installed requirements.
         flag = "--with-editable" if requirement.editable else "--with"
         command.extend([flag, requirement.value])
-    completed = subprocess.run(command, check=False)
+    with replaceable_entrypoints():
+        completed = subprocess.run(command, check=False)
     if completed.returncode:
         raise PluginError(
             f"plugin convergence failed with exit code {completed.returncode}; "

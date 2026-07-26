@@ -200,23 +200,25 @@ def _converge_triggers(events: list[dict[str, str]]) -> bool:
 
 def _agent_states() -> dict[str, dict]:
     states: dict[str, dict] = {}
-    for name in list_agents():
-        try:
-            states[name] = agent_details(load_agent_config(name))
-        except AgentsLiveError:
-            continue
+    with hostruntime.enumeration_pass():
+        for name in list_agents():
+            try:
+                states[name] = agent_details(load_agent_config(name))
+            except AgentsLiveError:
+                continue
     return states
 
 
 def _add_persisted_agent_states(states: dict[str, dict]) -> None:
     """Load path-backed definitions named by persisted watcher intent."""
-    for selector in schedules.watcher_respawn_names():
-        if selector in states:
-            continue
-        try:
-            states[selector] = agent_details(load_agent_config(selector))
-        except AgentsLiveError:
-            continue
+    with hostruntime.enumeration_pass():
+        for selector in schedules.watcher_respawn_names():
+            if selector in states:
+                continue
+            try:
+                states[selector] = agent_details(load_agent_config(selector))
+            except AgentsLiveError:
+                continue
 
 
 def _lifecycle(subcommand: str, name: str) -> bool:

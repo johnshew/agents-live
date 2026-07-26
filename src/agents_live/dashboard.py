@@ -59,12 +59,14 @@ if (SCRIPTS_DIR / "__init__.py").is_file():
     if str(SCRIPTS_DIR.parent) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
-    from agents_live import cli_spec, headless, ownership, paths, repos  # noqa: E402
+    from agents_live import (  # noqa: E402
+        cli_spec, headless, hostruntime, ownership, paths, repos)
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
     import cli_spec  # noqa: E402
     import headless  # noqa: E402
+    import hostruntime  # noqa: E402
     import ownership  # noqa: E402
     import paths  # noqa: E402
     import repos  # noqa: E402
@@ -955,13 +957,22 @@ def header_actions() -> None:
 
 
 def _refresh_views() -> None:
-    summary = _refresh_summary()
-    agent_grid.refresh()
-    header_actions.refresh()
+    # One pass for the whole render: the summary, the table, and the
+    # header each ask every agent for its state, and without this they
+    # would each read the host's process table and task folder again.
+    with hostruntime.enumeration_pass():
+        summary = _refresh_summary()
+        agent_grid.refresh()
+        header_actions.refresh()
     _safe_ui(output_log.push, summary)
 
 
 def build_page() -> None:
+    with hostruntime.enumeration_pass():
+        _build_page()
+
+
+def _build_page() -> None:
     ui.dark_mode().auto()
     startup_summary = _refresh_summary()
     ui.add_css(

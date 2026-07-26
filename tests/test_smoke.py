@@ -227,6 +227,9 @@ pre-processor: Agents/handlers/prep.py
 ---
 Smoke fixture body.
 """
+MULTI_TRIGGER_DEFINITION = AGENT_DEFINITION.replace(
+    f'schedule: "{TEST_CRON_SCHEDULE}"',
+    f'schedule: "{TEST_CRON_SCHEDULE}"\nwatchPath: Agents/data')
 FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
@@ -1255,6 +1258,118 @@ class TestProjectPlugins(_TempProject):
             self.assertRaisesRegex(plugins.PluginError, "wheel does not exist"),
         ):
             plugins.converge([self.root])
+
+
+class TestReplacingOurOwnExecutable(_TempProject):
+    """Installing over the executable this process is running from.
+
+    Windows holds a mandatory lock on a running image, so uv cannot
+    write the entry point it is asked to write and the convergence
+    fails with os error 32. A locked image can still be renamed, which
+    frees the name while the process keeps running from the renamed
+    file.
+    """
+
+    def _tool_shim(self) -> Path:
+        shim = self.root / "bin" / "agents-live.exe"
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_bytes(b"old")
+        receipt = self.root / "uv-receipt.toml"
+        receipt.write_text(
+            "[tool]\nrequirements = []\n"
+            'entrypoints = [{ name = "agents-live", install-path = '
+            f'"{shim.as_posix()}", from = "agents-live" }}]\n',
+            encoding="utf-8")
+        self._receipt = receipt
+        return shim
+
+    def test_the_executables_come_from_uvs_own_receipt(self) -> None:
+        # Where uv installed each entry point is recorded by uv, so this
+        # is its answer rather than a guess at its layout.
+        shim = self._tool_shim()
+        with mock.patch.object(plugins, "_receipt_path",
+                               return_value=self._receipt):
+            self.assertIn(shim, plugins._entrypoint_paths())
+
+    def test_a_receipt_without_entrypoints_is_not_an_error(self) -> None:
+        (self.root / "uv-receipt.toml").write_text(
+            "[tool]\nrequirements = []\n", encoding="utf-8")
+        with mock.patch.object(plugins, "_receipt_path",
+                               return_value=self.root / "uv-receipt.toml"):
+            self.assertEqual(
+                [path for path in plugins._entrypoint_paths()
+                 if self.root in path.parents], [])
+
+    def test_an_unlocked_executable_is_left_where_it_is(self) -> None:
+        # A convergence started some other way can replace the file in
+        # place, and moving it would be a change nobody asked for.
+        shim = self._tool_shim()
+        with mock.patch.object(plugins, "_entrypoint_paths",
+                               return_value=[shim]):
+            with plugins.replaceable_entrypoints():
+                self.assertEqual(shim.read_bytes(), b"old")
+        self.assertEqual(shim.read_bytes(), b"old")
+
+    def test_a_locked_executable_is_moved_out_of_the_way(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("only Windows locks a running image")
+        shim = self._tool_shim()
+        with (
+            mock.patch.object(plugins, "_entrypoint_paths", return_value=[shim]),
+            mock.patch.object(plugins, "_is_locked", return_value=True),
+        ):
+            with plugins.replaceable_entrypoints():
+                # The name is free, which is all uv needs.
+                self.assertFalse(shim.exists())
+                shim.write_bytes(b"new")
+        self.assertEqual(shim.read_bytes(), b"new")
+        self.assertEqual(list(shim.parent.glob("*.replaced")), [])
+
+    def test_an_install_that_writes_nothing_leaves_the_tool_installed(
+            self) -> None:
+        # uv can fail after the name is free. Leaving it free would
+        # uninstall the tool from under whoever runs it next.
+        if sys.platform != "win32":
+            self.skipTest("only Windows locks a running image")
+        shim = self._tool_shim()
+        with (
+            mock.patch.object(plugins, "_entrypoint_paths", return_value=[shim]),
+            mock.patch.object(plugins, "_is_locked", return_value=True),
+        ):
+            with plugins.replaceable_entrypoints():
+                self.assertFalse(shim.exists())
+        self.assertEqual(shim.read_bytes(), b"old")
+
+    def test_a_failed_install_puts_the_executable_back(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("only Windows locks a running image")
+        shim = self._tool_shim()
+        with (
+            mock.patch.object(plugins, "_entrypoint_paths", return_value=[shim]),
+            mock.patch.object(plugins, "_is_locked", return_value=True),
+        ):
+            with self.assertRaises(RuntimeError):
+                with plugins.replaceable_entrypoints():
+                    raise RuntimeError("uv fell over")
+        self.assertEqual(shim.read_bytes(), b"old")
+
+    def test_an_executable_left_behind_by_an_earlier_run_is_swept(self) -> None:
+        shim = self._tool_shim()
+        stale = shim.with_name("agents-live.exe.4321.replaced")
+        stale.write_bytes(b"older")
+        plugins._sweep_aside(shim.parent)
+        self.assertFalse(stale.exists())
+        self.assertTrue(shim.exists())
+
+    def test_nothing_is_moved_where_a_running_image_is_replaceable(
+            self) -> None:
+        if sys.platform == "win32":
+            self.skipTest("Windows is the platform that has to move it")
+        shim = self._tool_shim()
+        with mock.patch.object(plugins, "_entrypoint_paths",
+                               return_value=[shim]):
+            with plugins.replaceable_entrypoints():
+                self.assertTrue(shim.exists())
 
 
 class TestAgentParsing(_TempProject):
@@ -3774,6 +3889,101 @@ class TestHostRuntimeProcesses(unittest.TestCase):
         self.assertEqual(console_window, "0")
 
 
+class TestEnumerationPasses(_TempProject):
+    """Asking the host once for what answers about the whole host.
+
+    A process table or a folder of registered tasks describes the
+    machine, not an agent, but the callers that want them are per-agent
+    loops. On Windows each of those reads costs a subprocess and about
+    two seconds, so a dashboard that asked per agent could not finish a
+    page. What is asserted here is the count, because the count is the
+    bug.
+    """
+
+    def test_a_host_read_inside_a_pass_happens_once(self) -> None:
+        reads = []
+        with hostruntime.enumeration_pass():
+            for _ in range(5):
+                hostruntime.pass_cached("probe", lambda: reads.append(1))
+        self.assertEqual(len(reads), 1)
+
+    def test_a_host_read_outside_a_pass_is_never_remembered(self) -> None:
+        # An action changes the host, and the read after it has to see
+        # the change. Nothing is cached unless a caller said where the
+        # snapshot begins and ends.
+        reads = []
+        for _ in range(5):
+            hostruntime.pass_cached("probe", lambda: reads.append(1))
+        self.assertEqual(len(reads), 5)
+
+    def test_an_inner_pass_joins_the_outer_one(self) -> None:
+        # A caller declares a pass without knowing whether one of its
+        # callers already did, so nesting must not restart the reads.
+        reads = []
+        with hostruntime.enumeration_pass():
+            hostruntime.pass_cached("probe", lambda: reads.append(1))
+            with hostruntime.enumeration_pass():
+                hostruntime.pass_cached("probe", lambda: reads.append(1))
+        self.assertEqual(len(reads), 1)
+        with hostruntime.enumeration_pass():
+            hostruntime.pass_cached("probe", lambda: reads.append(1))
+        self.assertEqual(len(reads), 2)
+
+    def _watcher_command(self, name: str) -> str:
+        argv = ["agents-live", "--repo", str(self.root),
+                "internal", "watch-loop", name]
+        if sys.platform == "win32":
+            return subprocess.list2cmdline(argv)
+        return " ".join(argv)
+
+    def test_a_sweep_reads_the_process_table_once(self) -> None:
+        table = [(4321, self._watcher_command("alpha")),
+                 (8765, self._watcher_command("beta"))]
+        with mock.patch.object(hostruntime, "process_command_lines",
+                               return_value=table) as read:
+            with hostruntime.enumeration_pass():
+                self.assertEqual(headless._find_watcher_pids_table("alpha"),
+                                 [4321])
+                self.assertEqual(headless._find_watcher_pids_table("beta"),
+                                 [8765])
+                self.assertEqual(headless._find_watcher_pids_table("gamma"), [])
+        read.assert_called_once()
+
+    def test_a_multi_trigger_agent_is_asked_once_per_trigger(self) -> None:
+        # The state word and the per-trigger detail are the same two
+        # questions. Asking them twice doubled every status sweep.
+        from agents_live import schedules
+
+        self.write_agent("multi", MULTI_TRIGGER_DEFINITION)
+        config = headless.load_agent_config("multi")
+        self.assertEqual(config.trigger_type, "multi")
+        with (
+            mock.patch.object(schedules, "is_active",
+                              return_value=True) as scheduled,
+            mock.patch.object(headless, "find_watcher_pid",
+                              return_value=4321) as watching,
+        ):
+            details = headless.agent_details(config)
+        scheduled.assert_called_once_with("multi")
+        watching.assert_called_once_with("multi")
+        self.assertEqual(details["state"], "active")
+        self.assertEqual(details["triggerStates"],
+                         {"cron": "active", "watcher": "active (pid 4321)"})
+
+    def test_a_partly_stopped_agent_still_reads_as_partial(self) -> None:
+        # Taking the reading instead of making one must not change what
+        # the word means.
+        from agents_live import schedules
+
+        self.write_agent("multi", MULTI_TRIGGER_DEFINITION)
+        config = headless.load_agent_config("multi")
+        with (
+            mock.patch.object(schedules, "is_active", return_value=True),
+            mock.patch.object(headless, "find_watcher_pid", return_value=None),
+        ):
+            self.assertEqual(headless.agent_details(config)["state"], "partial")
+
+
 class TestStaleIdentityAndPathAliases(_TempProject):
     """Two ways a lifecycle operation ends up aimed at the wrong thing.
 
@@ -4029,6 +4239,65 @@ class TestWindowsScheduling(unittest.TestCase):
             mock.patch.object(wintasks, "build_task_xml", side_effect=build),
         ):
             yield
+
+    def test_an_agent_with_no_registered_task_costs_no_definition_reads(
+            self) -> None:
+        # The folder listing is one query for the whole host. Where it
+        # names nothing of this agent's, there is nothing to read.
+        with (
+            mock.patch.object(wintasks, "registered_task_names",
+                              return_value=[]),
+            mock.patch.object(wintasks, "read_definition") as read,
+        ):
+            self.assertFalse(wintasks.is_active(self.ROOT, "todo"))
+        read.assert_not_called()
+
+    def test_only_the_kinds_the_folder_lists_are_read(self) -> None:
+        watcher = wintasks.task_name(self.ROOT, "todo", kind=wintasks.WATCH)
+        with (
+            # Upper case because the store compares names that way and
+            # returns whatever spelling it holds.
+            mock.patch.object(wintasks, "registered_task_names",
+                              return_value=[watcher.upper()]),
+            mock.patch.object(wintasks, "read_definition",
+                              return_value="<Task/>") as read,
+            mock.patch.object(wintasks, "_is_ours", return_value=True),
+        ):
+            self.assertTrue(wintasks.is_active(self.ROOT, "todo"))
+        read.assert_called_once_with(
+            wintasks.task_path(self.ROOT, "todo", kind=wintasks.WATCH))
+
+    def test_the_registered_xml_still_decides_ownership(self) -> None:
+        # A listed name is only a reason to read the definition. What
+        # the definition says is what makes the task ours.
+        watcher = wintasks.task_name(self.ROOT, "todo", kind=wintasks.WATCH)
+        with (
+            mock.patch.object(wintasks, "registered_task_names",
+                              return_value=[watcher]),
+            mock.patch.object(wintasks, "read_definition",
+                              return_value="<Task/>"),
+            mock.patch.object(wintasks, "_is_ours", return_value=False),
+        ):
+            self.assertFalse(wintasks.is_active(self.ROOT, "todo"))
+
+    def test_a_store_that_will_not_list_is_asked_the_long_way(self) -> None:
+        with (
+            mock.patch.object(wintasks, "registered_task_names",
+                              return_value=None),
+            mock.patch.object(wintasks, "read_definition",
+                              return_value=None) as read,
+        ):
+            self.assertFalse(wintasks.is_active(self.ROOT, "todo"))
+        self.assertEqual(read.call_count, 3)
+
+    def test_the_task_folder_is_listed_once_per_enumeration_pass(self) -> None:
+        with mock.patch.object(wintasks, "_read_task_names",
+                               return_value=[]) as listing:
+            with hostruntime.enumeration_pass():
+                for agent in ("todo", "notes", "digest"):
+                    self.assertFalse(wintasks.is_active(self.ROOT, agent))
+                self.assertEqual(wintasks.installed_names(self.ROOT), [])
+        listing.assert_called_once()
 
     def test_a_directory_argument_keeps_its_trailing_separator(self) -> None:
         # The backslash before the closing quote is the case every

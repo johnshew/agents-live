@@ -2807,10 +2807,28 @@ def _find_watcher_pids_proc(name: str, proc_dir: Path) -> list[int]:
     return pids
 
 
+def _watcher_processes() -> list[tuple[int, str]]:
+    """``(pid, watched agent)`` for every watcher process, once per pass.
+
+    Read and parsed once for the whole pass rather than once per agent.
+    The parse is not free either: a Windows command line is split by the
+    same rules that built it, and doing that for every process for every
+    agent is quadratic in a project's size.
+    """
+    def read() -> list[tuple[int, str]]:
+        found: list[tuple[int, str]] = []
+        for pid, command in hostruntime.process_command_lines():
+            name = _watcher_cmdline_agent_name(split_command_line(command))
+            if name:
+                found.append((pid, name))
+        return found
+
+    return hostruntime.pass_cached("watcher-processes", read)
+
+
 def _find_watcher_pids_table(name: str) -> list[int]:
     """Watcher pids on a host without ``/proc``: macOS and Windows."""
-    return [pid for pid, command in hostruntime.process_command_lines()
-            if _is_watcher_cmdline(split_command_line(command), name)]
+    return [pid for pid, watched in _watcher_processes() if watched == name]
 
 
 def find_watcher_pid(name: str) -> int | None:
@@ -2859,11 +2877,7 @@ def _list_active_watcher_agent_names() -> list[str]:
             if name:
                 names.append(name)
         return names
-    for _pid, command in hostruntime.process_command_lines():
-        name = _watcher_cmdline_agent_name(split_command_line(command))
-        if name:
-            names.append(name)
-    return names
+    return [name for _pid, name in _watcher_processes()]
 
 
 def list_active_agent_names() -> set[str]:
@@ -2939,13 +2953,19 @@ def _trigger_states(config: AgentConfig) -> dict[str, str]:
     return states
 
 
-def _agent_state(config: AgentConfig) -> str:
+def _agent_state(config: AgentConfig, states: dict[str, str]) -> str:
+    """The one word status shows for an agent, derived from *states*.
+
+    Takes the reading rather than making one: the state word and the
+    per-trigger detail are the same two host questions, and asking them
+    once each per agent instead of twice is half the cost of a status
+    sweep.
+    """
     try:
         trigger_type = config.trigger_type
     except AgentsLiveError:
         return "stopped"
     if trigger_type == "multi":
-        states = _trigger_states(config)
         if all(s == "unknown" for s in states.values()):
             return "unknown"
         if all(s.startswith("active") or s == "unknown" for s in states.values()):
@@ -2954,28 +2974,22 @@ def _agent_state(config: AgentConfig) -> str:
             return "partial"
         return "stopped"
     if trigger_type == "cron":
-        from . import schedules  # noqa: PLC0415 - the host layer sits below this
-
-        active = schedules.is_active(config.name)
-        if active is None:
-            return "unknown"
-        if active:
-            return "active"
-        return "stopped"
-    pid = find_watcher_pid(config.name)
-    if pid is not None:
-        return f"active (pid {pid})"
-    return "stopped"
+        return states.get("cron", "stopped")
+    return states.get("watcher", "stopped")
 
 
 def agent_details(config: AgentConfig) -> dict[str, Any]:
+    try:
+        trigger_states = _trigger_states(config)
+    except AgentsLiveError:
+        trigger_states = None
     details: dict[str, Any] = {
         "name": config.name,
         "type": config.trigger_type,
         "runtime": config.runtime,
         "mode": config.mode,
         "promptPath": config.prompt_reference,
-        "state": _agent_state(config),
+        "state": _agent_state(config, trigger_states or {}),
     }
     if config.description:
         details["description"] = config.description
@@ -2993,10 +3007,8 @@ def agent_details(config: AgentConfig) -> dict[str, Any]:
         details["mcps"] = config.mcps
     if config.transcript:
         details["transcript"] = True
-    try:
-        details["triggerStates"] = _trigger_states(config)
-    except AgentsLiveError:
-        pass
+    if trigger_states is not None:
+        details["triggerStates"] = trigger_states
     # Ownership: best-effort import to avoid circulars during early init.
     try:
         from . import ownership as _ownership  # type: ignore

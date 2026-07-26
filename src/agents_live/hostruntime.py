@@ -33,9 +33,11 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import TypeVar
 
 LINUX = "linux"
 WSL = "wsl"
@@ -113,6 +115,57 @@ def user_state_base() -> Path:
             return Path(local)
         return Path.home() / "AppData" / "Local"
     return Path.home() / ".local" / "state"
+
+
+# ---------------------------------------------------------------------------
+# Enumeration passes
+# ---------------------------------------------------------------------------
+
+# Some host reads answer for the whole machine at once - the process
+# table, the folder of registered tasks - and the callers that ask are
+# per-agent loops. Asking once per agent is what made the dashboard
+# unusable on Windows, where a process-table read costs about two
+# seconds and the views ask for it twice per agent, three times over.
+#
+# The scope is declared, not timed. A cache with a lifetime would also
+# answer a read taken right after an action from before it, which is
+# exactly the case where a stale answer is a wrong answer.
+_T = TypeVar("_T")
+
+_PASS: ContextVar[dict[str, object] | None] = ContextVar(
+    "agents_live_enumeration_pass", default=None)
+
+
+@contextmanager
+def enumeration_pass() -> Iterator[None]:
+    """Take each host-wide read once for everything inside this block.
+
+    Re-entrant: an inner pass joins the outer one instead of starting a
+    second, so a caller can declare a pass without knowing whether one
+    of its callers already did.
+    """
+    if _PASS.get() is not None:
+        yield
+        return
+    token = _PASS.set({})
+    try:
+        yield
+    finally:
+        _PASS.reset(token)
+
+
+def pass_cached(key: str, read: Callable[[], _T]) -> _T:
+    """What *read* answers, taken once per enclosing enumeration pass.
+
+    Outside a pass every call reads the host, so nothing is ever
+    answered from a snapshot the caller did not ask for.
+    """
+    cache = _PASS.get()
+    if cache is None:
+        return read()
+    if key not in cache:
+        cache[key] = read()
+    return cache[key]  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

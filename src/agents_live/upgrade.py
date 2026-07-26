@@ -69,9 +69,12 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
     except FileNotFoundError as exc:
         preflight.emit_failure("upgrade", str(exc))
         return 1
-    status = subprocess.run(
-        [uv, "tool", "upgrade", "agents-live"], check=False,
-    ).returncode
+    # The upgrade rewrites this tool's own executables, and on Windows
+    # one of them is the running process.
+    with plugins.replaceable_entrypoints():
+        status = subprocess.run(
+            [uv, "tool", "upgrade", "agents-live"], check=False,
+        ).returncode
     if status != 0:
         return status
     try:
