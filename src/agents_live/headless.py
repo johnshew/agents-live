@@ -2705,7 +2705,25 @@ def _find_all_watcher_pids(name: str) -> list[int]:
     proc_dir = Path("/proc")
     if proc_dir.is_dir():
         return _find_watcher_pids_proc(name, proc_dir)
-    return _find_watcher_pids_ps(name)
+    return _find_watcher_pids_table(name)
+
+
+def split_command_line(text: str) -> list[str]:
+    """A process's command line as the argument list it was built from.
+
+    On Windows that is not a split on spaces: the arguments were joined
+    by quoting rules, and the repo root a watcher carries routinely has
+    a space in it. The same parser that writes those command lines
+    reads them back.
+    """
+    if hostruntime.id() == hostruntime.WINDOWS:
+        from . import wintasks  # noqa: PLC0415 - Windows leaf
+
+        try:
+            return wintasks.parse_command_line(text)
+        except wintasks.TaskError:
+            return text.split()
+    return text.split()
 
 
 def _watcher_argv_is_agents_live(args: list[str]) -> bool:
@@ -2717,7 +2735,7 @@ def _watcher_argv_is_agents_live(args: list[str]) -> bool:
     ``--repo`` path like ``.../agents-live-test`` cannot false-positive.
     """
     return any(
-        "activate.py" in arg or Path(arg).name == "agents-live"
+        "activate.py" in arg or Path(arg).stem == "agents-live"
         for arg in args
     )
 
@@ -2773,31 +2791,10 @@ def _find_watcher_pids_proc(name: str, proc_dir: Path) -> list[int]:
     return pids
 
 
-def _find_watcher_pids_ps(name: str) -> list[int]:
-    """Fallback for non-Linux systems using ps."""
-    try:
-        completed = subprocess.run(
-            ["ps", "-eo", "pid=,args="],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return []
-
-    pids: list[int] = []
-    for line in completed.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        pid_text, _, args_text = stripped.partition(" ")
-        if not _is_watcher_cmdline(args_text.split(), name):
-            continue
-        try:
-            pids.append(int(pid_text))
-        except ValueError:
-            continue
-    return pids
+def _find_watcher_pids_table(name: str) -> list[int]:
+    """Watcher pids on a host without ``/proc``: macOS and Windows."""
+    return [pid for pid, command in hostruntime.process_command_lines()
+            if _is_watcher_cmdline(split_command_line(command), name)]
 
 
 def find_watcher_pid(name: str) -> int | None:
@@ -2828,8 +2825,8 @@ def _list_active_watcher_agent_names() -> list[str]:
     """Every agents-live watcher process running on this host.
 
     Runtime-is-truth enumeration (the reverse of the per-name watcher
-    lookup): scans ``/proc`` (or ``ps`` on non-Linux) for
-    ``activate.py watch-loop <name>`` processes.
+    lookup): scans ``/proc``, or the host's process table where there is
+    no ``/proc``, for ``watch-loop <name>`` processes.
     """
     names: list[str] = []
     proc_dir = Path("/proc")
@@ -2846,14 +2843,8 @@ def _list_active_watcher_agent_names() -> list[str]:
             if name:
                 names.append(name)
         return names
-    try:
-        completed = subprocess.run(
-            ["ps", "-eo", "args="], capture_output=True, text=True, check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return names
-    for line in completed.stdout.splitlines():
-        name = _watcher_cmdline_agent_name(line.split())
+    for _pid, command in hostruntime.process_command_lines():
+        name = _watcher_cmdline_agent_name(split_command_line(command))
         if name:
             names.append(name)
     return names

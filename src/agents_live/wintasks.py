@@ -49,9 +49,15 @@ from . import triggers
 # developer runs to confirm teardown is one command with one answer.
 TASK_FOLDER = "\\AgentsLive"
 
-# The suffix that marks an agent's startup task, kept apart from its
-# clock task because the two answer the dueness question differently.
-BOOT_SUFFIX = ".boot"
+# One task carries one action, so an agent that fires in more than one
+# way gets more than one task, and the suffix says which is which. They
+# answer the dueness question differently: a clock fire is checked
+# against the expression, a startup fire is always due, and a watcher
+# respawn does not run the agent at all.
+CLOCK = ""
+BOOT = ".boot"
+WATCH = ".watch"
+_SUFFIXES = (BOOT, WATCH)
 
 _NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _TASK_VERSION = "1.4"
@@ -234,7 +240,7 @@ def _path_key(value: Path | str) -> str:
     return PureWindowsPath(str(value)).as_posix().rstrip("/").casefold()
 
 
-def task_name(root: Path | str, agent: str, *, boot: bool = False) -> str:
+def task_name(root: Path | str, agent: str, *, kind: str = CLOCK) -> str:
     """The task name for *agent* in the repository at *root*.
 
     Deterministic and repository-scoped: the same agent in two checkouts
@@ -242,28 +248,36 @@ def task_name(root: Path | str, agent: str, *, boot: bool = False) -> str:
     The digest carries the root because a task name is one flat string
     with no room for a path.
 
-    An agent's ``@reboot`` schedules register as a second, ``.boot``
-    task. One task carries one action, and a startup fire has to be
-    distinguishable from a clock fire: a startup fire is always due,
-    while a clock fire has to be checked against the expression.
+    *kind* names which of the agent's tasks this is: its clock schedule,
+    its ``@reboot`` schedule, or the respawn that puts its watcher back
+    after a restart.
     """
     if not _SAFE_AGENT_NAME.fullmatch(agent):
         raise TaskError(
             f"agent name '{agent}' cannot be part of a task name; use "
             "letters, digits, dot, dash, and underscore")
     digest = sha256(_path_key(root).encode("utf-8")).hexdigest()
-    return f"{agent}@{digest[:8]}{BOOT_SUFFIX if boot else ''}"
+    return f"{agent}@{digest[:8]}{kind}"
 
 
-def task_path(root: Path | str, agent: str, *, boot: bool = False) -> str:
+def task_path(root: Path | str, agent: str, *, kind: str = CLOCK) -> str:
     """The full task-store path for *agent*, inside the tool's folder."""
-    return f"{TASK_FOLDER}\\{task_name(root, agent, boot=boot)}"
+    return f"{TASK_FOLDER}\\{task_name(root, agent, kind=kind)}"
+
+
+def kind_of_task_name(name: str) -> str:
+    """Which of an agent's tasks *name* is: clock, startup, or watcher."""
+    for suffix in _SUFFIXES:
+        if name.endswith(suffix):
+            return suffix
+    return CLOCK
 
 
 def agent_of_task_name(name: str, root: Path | str) -> str | None:
     """The agent *name* schedules for *root*, or None if it is not ours."""
-    if name.endswith(BOOT_SUFFIX):
-        name = name[:-len(BOOT_SUFFIX)]
+    kind = kind_of_task_name(name)
+    if kind:
+        name = name[:-len(kind)]
     prefix, _, digest = name.rpartition("@")
     if not prefix or not digest:
         return None
@@ -585,40 +599,49 @@ def install(spec: triggers.TriggerSpec) -> str:
     ``@reboot`` schedules gets two tasks; one that loses a kind of
     schedule loses the matching task in the same call, so the store
     never keeps a trigger the agent no longer declares.
+
+    A watcher respawn is the third kind: one startup task whose action
+    is not a run of the agent but the guarded restart of its watcher.
     """
-    if spec.kind != triggers.SCHEDULE:
-        raise TaskError(f"cannot register a {spec.kind} trigger as a task")
     command = spec.command[0]
-    if not Path(command).is_absolute():
+    # A task store holds Windows paths, so the question "is this fully
+    # qualified" is a Windows question wherever it is asked.
+    if not PureWindowsPath(command).is_absolute():
         raise TaskError(
             f"a task must name a fully qualified executable, not '{command}'")
+    if spec.kind == triggers.WATCHER:
+        return _register(spec, command, argument_string(list(spec.command[1:])),
+                         list(spec.schedules), kind=WATCH)
+    if spec.kind != triggers.SCHEDULE:
+        raise TaskError(f"cannot register a {spec.kind} trigger as a task")
     boot = [s for s in spec.schedules if s.strip() == triggers.BOOT]
     clock = [s for s in spec.schedules if s.strip() != triggers.BOOT]
     lines = []
-    for schedules, is_boot in ((clock, False), (boot, True)):
+    for schedules, kind in ((clock, CLOCK), (boot, BOOT)):
         if not schedules:
-            _delete(spec.root, spec.name, boot=is_boot)
+            delete(spec.root, spec.name, kind=kind)
             continue
         arguments = argument_string(
-            list(spec.command[1:]) + (["--boot"] if is_boot else []))
-        lines.append(_register(spec, command, arguments, schedules,
-                               boot=is_boot))
+            list(spec.command[1:]) + (["--boot"] if kind == BOOT else []))
+        lines.append(_register(spec, command, arguments, schedules, kind=kind))
     return "; ".join(lines)
 
 
 def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
-              schedules: Sequence[str], *, boot: bool) -> str:
-    path = task_path(spec.root, spec.name, boot=boot)
+              schedules: Sequence[str], *, kind: str) -> str:
+    path = task_path(spec.root, spec.name, kind=kind)
     existing = read_definition(path)
     if existing is not None and not _is_ours(existing, spec.root):
         raise TaskNotOurs(
             f"a scheduled task named {path} exists and is not one this tool "
             "registered for this repository; remove it by hand first")
 
+    purpose = ("restart the watcher for agent" if kind == WATCH
+               else "run agent")
     document = build_task_xml(
         command=command, arguments=arguments, working_dir=str(spec.root),
         schedules=schedules,
-        description=f"Agents Live: run agent '{spec.name}' in {spec.root}",
+        description=f"Agents Live: {purpose} '{spec.name}' in {spec.root}",
         uri=path, user_id=current_user_id())
     handle, xml_file = tempfile.mkstemp(suffix=".xml", prefix="agents-live-task-")
     try:
@@ -636,8 +659,8 @@ def _register(spec: triggers.TriggerSpec, command: str, arguments: str,
     return f"{path}: {command} {arguments}".rstrip()
 
 
-def _delete(root: Path | str, agent: str, *, boot: bool) -> bool:
-    path = task_path(root, agent, boot=boot)
+def delete(root: Path | str, agent: str, *, kind: str) -> bool:
+    path = task_path(root, agent, kind=kind)
     existing = read_definition(path)
     if existing is None:
         return False
@@ -652,29 +675,36 @@ def _delete(root: Path | str, agent: str, *, boot: bool) -> bool:
 
 
 def remove(root: Path | str, agent: str) -> bool:
-    """Delete *agent*'s tasks, clock and startup alike."""
-    removed = _delete(root, agent, boot=False)
-    return _delete(root, agent, boot=True) or removed
+    """Delete *agent*'s tasks: clock, startup, and watcher respawn."""
+    removed = False
+    for kind in (CLOCK, BOOT, WATCH):
+        removed = delete(root, agent, kind=kind) or removed
+    return removed
 
 
 def is_active(root: Path | str, agent: str) -> bool | None:
     """True if *agent* has a task registered, None if nothing reads.
 
-    Either task counts: an agent scheduled only for startup is as
+    Any of the three counts: an agent scheduled only for startup is as
     active as one scheduled by the clock.
     """
     answers = []
-    for boot in (False, True):
+    for kind in (CLOCK, BOOT, WATCH):
         try:
-            existing = read_definition(task_path(root, agent, boot=boot))
+            existing = read_definition(task_path(root, agent, kind=kind))
         except TaskSchedulerUnavailable:
             return None
         answers.append(existing is not None and _is_ours(existing, root))
     return any(answers)
 
 
-def installed_names(root: Path | str) -> list[str]:
-    """Every agent in *root* with a task registered on this host."""
+def installed_names(root: Path | str, *, kind: str | None = None) -> list[str]:
+    """Every agent in *root* with a task registered on this host.
+
+    With *kind*, only agents whose task of that kind is registered: the
+    question "which watchers is this host meant to be running" is asked
+    of the watcher tasks alone.
+    """
     try:
         code, out, _err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
                                 "CSV", "/NH"])
@@ -689,8 +719,10 @@ def installed_names(root: Path | str) -> list[str]:
         if not row:
             continue
         leaf = row[0].rsplit("\\", 1)[-1]
+        if kind is not None and kind_of_task_name(leaf) != kind:
+            continue
         agent = agent_of_task_name(leaf, root)
-        # An agent with both a clock and a startup task is one agent.
+        # An agent with a clock, a startup, and a watcher task is one agent.
         if agent and agent not in names:
             names.append(agent)
     return names

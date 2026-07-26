@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import os
 import json
@@ -25,14 +24,11 @@ from .headless import (
     cli_invocation,
     ensure_logs_dir,
     find_watcher_pid,
-    install_watcher_reboot_line,
     list_active_agent_names,
-    list_reboot_watcher_agent_names,
     list_agents,
     load_agent_config,
     log_event,
     logs_root,
-    remove_watcher_reboot_line,
     repo_root,
     run_invocation,
     schedule_spec,
@@ -47,6 +43,7 @@ from . import paths
 from . import preflight
 from . import schedules
 from . import watchpolicy
+from . import watchsource
 
 SCRIPT_PATH = Path(__file__).resolve()
 RUN_ONCE_PATH = SCRIPT_PATH.with_name("run.py")
@@ -196,7 +193,8 @@ def _validate_watcher_prereqs(config: AgentConfig) -> list[Path]:
             print(f"Created missing watch directory: {wp}")
         watch_targets.append(abs_path)
 
-    if not shutil.which("inotifywait"):
+    if (hostruntime.id() != hostruntime.WINDOWS
+            and not shutil.which("inotifywait")):
         raise AgentsLiveError("inotifywait not found")
     return watch_targets
 
@@ -254,31 +252,13 @@ def watch_loop(name: str) -> int:
             seen.add(d)
             unique_dirs.append(d)
 
-    # Events: close_write (direct writes), moved_to (atomic saves and
-    # files arriving via temp+rename), moved_from (files leaving a
-    # watched directory), delete (files removed from a watched directory).
-    # moved_to is always included - atomic writes (os.replace) into a
-    # watched directory only produce moved_to, not close_write.
-    events = "close_write,moved_to,moved_from,delete"
-    inotify_args = [
-        "inotifywait", "-m", "-r", "-e", events,
-        *[str(d) for d in unique_dirs], "--format", "%w%f",
-    ]
-
-    process = subprocess.Popen(
-        inotify_args,
-        cwd=repo_root(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+    source = watchsource.open_source(unique_dirs, cwd=root)
 
     watch_desc = ", ".join(str(d) for d in unique_dirs)
     if target_filenames:
         watch_desc += f" (filtering: {', '.join(sorted(target_filenames))})"
     log_event(config.agent_log, level="info", phase="watcher",
-             message=f"inotifywait started, watching {watch_desc}")
+             message=f"{watchsource.mechanism()} started, watching {watch_desc}")
 
     _started_at = time.monotonic()
     # Per-process dispatch rate, the last line of defence against a cascade.
@@ -290,12 +270,14 @@ def watch_loop(name: str) -> int:
         nonlocal shutdown_requested, shutdown_signal
         shutdown_requested = True
         shutdown_signal = signum
-        if process.poll() is None:
-            process.terminate()
+        source.stop()
 
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
-    signal.signal(signal.SIGHUP, handle_shutdown)
+    # SIGHUP has no Windows spelling; the two that every host has are
+    # the two a stop actually sends.
+    for signal_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        number = getattr(signal, signal_name, None)
+        if number is not None:
+            signal.signal(number, handle_shutdown)
 
     def _log_exit(reason: str, extra: dict | None = None) -> None:
         uptime_s = round(time.monotonic() - _started_at, 1)
@@ -317,24 +299,11 @@ def watch_loop(name: str) -> int:
     atexit.register(_log_exit, "atexit")
 
     try:
-        if process.stdout is None:
-            raise AgentsLiveError("watcher stdout was not available")
-
-        import select
-        import fcntl
-
-        # Use the raw file descriptor for non-blocking I/O.
-        # TextIOWrapper.read() can buffer internally and miss select()
-        # readiness, so we use os.read() on the raw fd instead.
-        fd = process.stdout.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
         COLLECT_SECS = 1.0  # drain events for this long before deciding
 
         # Layer-2 debounce (frontmatter `debounce: N`): batches accumulate
         # in the window and dispatch only after N seconds of quiet, timed
-        # in-process via the select timeout below.
+        # in-process via the poll timeout below.
         debounce = watchpolicy.DebounceWindow(config.debounce or 0)
 
         def _fire_debounce(reason: str) -> None:
@@ -356,87 +325,50 @@ def watch_loop(name: str) -> int:
                                   f"debounced file(s) on {reason}",
                           changed_files=files)
 
-        pending_line = ""
         while True:
             # Block until an event arrives or, when a Layer-2 debounce
             # window is pending, until that window expires.
             remaining_window = debounce.remaining(time.monotonic())
-            if remaining_window is not None:
-                if remaining_window > 0:
-                    ready, _, _ = select.select([fd], [], [], remaining_window)
-                else:
-                    ready = []
-                if shutdown_requested:
-                    _drop_debounce("shutdown")
-                    return 0
-                if not ready:
+            try:
+                raw_events = source.poll(
+                    remaining_window if remaining_window is None
+                    else max(remaining_window, 0))
+            except watchsource.WatchFailed as exc:
+                log_event(config.agent_log, level="warning", phase="watcher",
+                          message=str(exc)[:MAX_LOG_FIELD_LENGTH])
+                # Don't lose edits already accumulated in a pending
+                # debounce window on an unexpected exit.
+                _fire_debounce("watch ended")
+                return 0
+            if shutdown_requested:
+                _drop_debounce("shutdown")
+                return 0
+            if not raw_events:
+                if remaining_window is not None:
                     # Quiet window elapsed with no new events: dispatch.
                     _fire_debounce("quiet window elapsed")
-                    continue
-            else:
-                select.select([fd], [], [])
-                if shutdown_requested:
-                    return 0
-
-            # Read all immediately available events
-            raw_events: list[str] = []
-            try:
-                while True:
-                    raw = os.read(fd, 8192)
-                    if not raw:
-                        # EOF - inotifywait exited
-                        inotify_stderr = ""
-                        if process.stderr:
-                            try:
-                                inotify_stderr = process.stderr.read().strip()
-                            except Exception:
-                                pass
-                        log_event(config.agent_log, level="warning", phase="watcher",
-                                  message=f"inotifywait exited (rc={process.poll()})"
-                                  + (f": {inotify_stderr[:MAX_LOG_FIELD_LENGTH]}" if inotify_stderr else ""))
-                        # Don't lose edits already accumulated in a
-                        # pending debounce window on an unexpected exit.
-                        _fire_debounce("inotifywait exit")
-                        return 0
-                    chunk = raw.decode("utf-8", errors="replace")
-                    pending_line += chunk
-                    while "\n" in pending_line:
-                        line, pending_line = pending_line.split("\n", 1)
-                        if line.strip():
-                            raw_events.append(line.strip())
-            except (BlockingIOError, IOError):
-                pass
+                continue
 
             changed_files = _accept(raw_events)
             if not changed_files:
                 continue
 
             # Wait briefly for more events to arrive (collection window)
-            raw_events = []
             deadline = time.monotonic() + COLLECT_SECS
-            while time.monotonic() < deadline:
+            while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                ready, _, _ = select.select([fd], [], [], remaining)
+                try:
+                    raw_events = source.poll(remaining)
+                except watchsource.WatchFailed:
+                    break
                 if shutdown_requested:
                     _drop_debounce("shutdown")
                     return 0
-                if not ready:
+                if not raw_events:
                     break
-                try:
-                    raw = os.read(fd, 8192)
-                    if not raw:
-                        break
-                    chunk = raw.decode("utf-8", errors="replace")
-                    pending_line += chunk
-                    while "\n" in pending_line:
-                        line, pending_line = pending_line.split("\n", 1)
-                        if line.strip():
-                            raw_events.append(line.strip())
-                except (BlockingIOError, IOError):
-                    break
-            changed_files.extend(_accept(raw_events))
+                changed_files.extend(_accept(raw_events))
 
             relative_files = list(dict.fromkeys(changed_files))
             # Content-hash cascade guard: drop individual files whose
@@ -523,13 +455,7 @@ def watch_loop(name: str) -> int:
         raise
     finally:
         sys.stderr = _orig_stderr
-        process.terminate()
-        # Close the pipes we own: a watcher that returns without this
-        # leaks both descriptors until the process itself exits.
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                with contextlib.suppress(OSError):
-                    stream.close()
+        source.stop()
     return 0
 
 
@@ -786,7 +712,7 @@ def prune_orphans(*, dry_run: bool = False) -> list[str]:
             continue
         try:
             schedules.remove(name)
-            remove_watcher_reboot_line(name)
+            schedules.remove_watcher_respawn(name)
         except AgentsLiveError:
             pass  # scheduler unavailable; watcher stop below still applies
         stop_watcher(name)
@@ -838,7 +764,7 @@ def activate_one(
                   f"watching {config.watch_path}")
         else:
             pid = activate_watcher(name)
-            install_watcher_reboot_line(name)
+            schedules.install_watcher_respawn(name)
             log_event(system_log(), level="info", agent_name=config.name, phase="activate", type="watcher",
                       watchPath=config.watch_path, pid=pid)
             print(f"Activated watcher for '{config.name}': watching {config.watch_path}, pid {pid}")
@@ -888,7 +814,7 @@ def main() -> int:
 
     try:
         if getattr(args, "internal_command", None) == "list-reboot-watchers":
-            for agent_name in list_reboot_watcher_agent_names():
+            for agent_name in schedules.watcher_respawn_names():
                 print(agent_name)
             return 0
 

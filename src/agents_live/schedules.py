@@ -71,6 +71,35 @@ def installed_names() -> list[str]:
     return headless._list_active_cron_agent_names()
 
 
+def install_watcher_respawn(name: str) -> str:
+    """Persist "this watcher should be running" so a restart restores it.
+
+    A watcher is a process, and a process does not survive a reboot; the
+    durable statement of intent is a startup trigger that re-runs the
+    guarded respawn. Which store holds it is the same question this
+    module answers for schedules, so it is answered in the same place.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _windows(lambda: wintasks.install(headless.watcher_spec(name)))
+    return headless.install_watcher_reboot_line(name)
+
+
+def remove_watcher_respawn(name: str) -> bool:
+    """Withdraw that intent. True if there was one to withdraw."""
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _windows(
+            lambda: wintasks.delete(_root(), name, kind=wintasks.WATCH))
+    return headless.remove_watcher_reboot_line(name)
+
+
+def watcher_respawn_names() -> list[str]:
+    """Every watcher this host is meant to be running for this repository."""
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return _windows(
+            lambda: wintasks.installed_names(_root(), kind=wintasks.WATCH))
+    return headless.list_reboot_watcher_agent_names()
+
+
 def _root() -> Path:
     return headless.repo_root()
 

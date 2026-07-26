@@ -9,9 +9,10 @@ Status: draft. Feasibility is settled, the host-runtime seam has landed
 on Linux and WSL ([#120](https://github.com/johnshew/agents-live/issues/120)),
 its locking and process members are written and measured on a native
 Windows host, a foreground `agents-live run` now executes an agent end
-to end there, that runtime has an ownership identity of its own, and
-Task Scheduler now fires a scheduled agent on a Windows host unattended.
-What remains is the rest of the vertical slice
+to end there, that runtime has an ownership identity of its own, Task
+Scheduler now fires a scheduled agent on a Windows host unattended, and a
+watcher agent now dispatches on file changes there through
+`ReadDirectoryChangesW`. What remains is the rest of the vertical slice
 ([#126](https://github.com/johnshew/agents-live/issues/126)); whether the
 Windows half is worth building stays open. The design decisions recorded
 here stand unless implementation experience overturns them; see the
@@ -359,15 +360,20 @@ paths from a child process stdout. Costs a PowerShell start per watcher,
 inherits execution-policy and quoting hazards, and adds a script to the
 package payload.
 
-Recommendation: prototype A and B behind the typed contract, then choose from
-measured reliability and maintenance cost. Do not commit to a line-count
-estimate before overflow, cancellation, and rescan tests pass. C trades a
-well-understood in-process failure mode for an interop and quoting boundary.
+Step 11 chose A, on measurement rather than preference; the decision log
+records what the spike showed and why B was not needed.
+[winwatch.py](../src/agents_live/winwatch.py) is the implementation and
+[watchsource.py](../src/agents_live/watchsource.py) is the seam that
+picks it: one `EventSource` protocol, `start`, `poll`, `stop`, with
+`inotifywait` behind the same three methods on Linux and WSL. C trades a
+well-understood in-process failure mode for an interop and quoting
+boundary and was not built.
 
 Event storms need explicit limits on queued paths, batch bytes, debounce
-memory, file size hashed, rescan frequency, and total rescan work. A batch of
-changed files goes to a file in the state directory rather than onto the
-command line, which is length-limited.
+memory, file size hashed, rescan frequency, and total rescan work. Step 11
+bounds the rescan; the rest belongs to step 13. A batch of changed files
+goes to a file in the state directory rather than onto the command line,
+which is length-limited.
 
 ## Scheduling on Windows
 
@@ -469,6 +475,14 @@ and a repetition interval runs
 `agents-live internal ensure-watcher <name>`, which exits immediately
 when the watcher is alive and respawns it when it is not. That one task
 replaces both the `@reboot` respawn line and the health-check restart.
+
+Step 11 landed it as a third task kind. A task name carries a suffix
+naming what it is for, empty for a clock task, `.boot` for a startup run
+of the agent, and `.watch` for the respawn of its watcher, so the three
+cannot collide and enumeration, ownership, and removal read all of them.
+The choice between that task and the crontab `@reboot` line belongs to
+[schedules.py](../src/agents_live/schedules.py), like every other
+mechanism choice.
 
 The watcher stays resident because Windows publishes no native trigger
 for "this directory changed". Task Scheduler event triggers read the
@@ -842,6 +856,93 @@ design isolation that the trusted-administrator model cannot provide.
   a Windows spelling.
 
 ## Decision log
+
+### 2026-07-26: `ReadDirectoryChangesW` directly, measured before chosen
+
+The spike answered the questions the recommendation asked it to answer,
+and every answer favored option A.
+
+Cancellation is clean: an overlapped read parked in
+`WaitForSingleObject` ends promptly when another thread calls
+`CancelIoEx`, and `GetOverlappedResult` then reports
+`ERROR_OPERATION_ABORTED`, which is a stop rather than a fault. Renames
+arrive as a pair of records, the old name and the new one, both relative
+to the watched root, so the loop sees two changed paths, which is what
+the debounce already expects from a move on Linux. Overflow is
+unambiguous: the API reports zero bytes returned rather than a partial
+buffer, so a dropped batch cannot be mistaken for a small one. Deleting
+the watched root fails the read with access denied, which the loop
+reports as a watch that ended rather than as an event.
+
+None of that needed a second implementation to interpret. Building
+`watchdog` to compare against would have measured a wrapper over the
+same call, and adopting it would have added a runtime dependency and a
+second event model for no reliability the spike could not already see.
+So the comparison stopped at the point the answer stopped moving.
+
+Two details cost more than expected. `ctypes.wintypes` is unavailable on
+Linux, so the module declares its own `DWORD` and `HANDLE` aliases and
+imports everywhere, which is what lets the record parser be tested off
+Windows. And `wstring_at` decodes with the platform's `wchar_t`, four
+bytes on Linux, so the parser reads the change records with
+`struct.unpack_from` and an explicit UTF-16LE decode instead of trusting
+the host's idea of a wide character.
+
+### 2026-07-26: overflow degrades to one bounded rescan
+
+When the kernel drops changes, the watcher does not ask what it missed;
+it lists the watched directories once and treats every file it finds as
+changed, then goes back to reading events. The list is capped, at two
+thousand files, and the cap is a constant rather than a setting because
+the number that matters is "small enough that a rescan cannot itself
+become the storm".
+
+The alternative, retrying the read immediately in the hope of catching
+up, cannot work: the dropped records are gone, and under a storm the
+retry overflows again. One bounded rescan converts an unbounded unknown
+into a bounded known, and the debounce and the hash filter that already
+sit downstream discard the files that did not really change.
+
+### 2026-07-26: the watcher reads through an event source, not a pipe
+
+`watch_loop` used to own a subprocess, a non-blocking pipe, and a
+`select` call. It now owns an `EventSource`: `start`, `poll(timeout)`
+returning a batch of paths, `stop`, and a `WatchFailed` exception for
+the end of the stream. `inotifywait` moved behind that protocol
+unchanged, and the Windows implementation appears as a peer rather than
+as a branch inside the loop.
+
+The loop's debounce, collection window, cascade guard, and fire-rate
+breaker did not change, which is the test of the seam: the WSL suite
+stayed green through the extraction, before any Windows code ran through
+it.
+
+Two small platform facts surfaced with it. `SIGHUP` does not exist on
+Windows, so the shutdown handlers register by name and skip what the
+platform does not define. And a blocking `poll` has to be woken by
+`stop`, so stopping puts a sentinel on the queue rather than relying on
+a timeout to notice.
+
+### 2026-07-26: the capability is `watch`, and a watcher is found by query
+
+Two things broke on the first live `start`, both because a capability
+was named after its Linux implementation.
+
+The preflight probe asked whether `inotifywait` was on PATH before any
+command that might watch, which no Windows host can satisfy. The
+capability is now `watch`, and the probe asks the host: `kernel32` must
+load and expose `ReadDirectoryChangesW` there, `inotifywait` must be
+present here. Naming the capability after the need rather than the tool
+is the same move the rest of the seam makes.
+
+Then finding a running watcher failed, because both implementations read
+process command lines from `/proc` or `ps`, and Windows has neither. The
+host runtime now answers "what is running and how was it started" as a
+query, through a CIM lookup on Windows and `ps` on POSIX, and the
+argument splitting follows the platform's quoting rules rather than
+splitting on spaces. The executable check compares the stem of the
+program name, because the same watcher is `agents-live` on one host and
+`agents-live.exe` on the other.
 
 ### 2026-07-26: the coarse trigger is a repetition on a divisor of the hour
 

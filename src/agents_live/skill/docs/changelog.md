@@ -6,6 +6,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: watch a directory on native Windows. (#126)
+  A watcher agent now dispatches on file changes there, using the Windows
+  directory-change notification API in place of `inotifywait`. Creations,
+  edits, renames, and deletions all reach the same debounce, cascade guard,
+  and fire-rate breaker the Linux watcher uses, and a batch of changes still
+  becomes one run. If the system drops changes under load, the watcher lists
+  the watched directories once, within a fixed limit, rather than losing
+  them. Keeping the watcher alive across a logon is a scheduled task
+  alongside the agent's own, and preflight now asks the host whether it can
+  watch rather than looking for a Linux tool. Linux and WSL behavior is
+  unchanged.
 - feat: accept every schedule on native Windows, and run agents only when
   they are due. (#126)
   Schedules that do not map exactly onto a Task Scheduler trigger now

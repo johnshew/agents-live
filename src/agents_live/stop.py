@@ -11,7 +11,6 @@ import sys
 from .headless import (
     AgentsLiveError,
     load_agent_config,
-    remove_watcher_reboot_line,
     stop_watcher,
 )
 
@@ -40,7 +39,7 @@ def main() -> int:
 
         if trigger_type in {"", "watcher", "multi"}:
             pid = stop_watcher(args.name)
-            remove_watcher_reboot_line(args.name)
+            schedules.remove_watcher_respawn(args.name)
             if trigger_type in {"watcher", "multi"}:
                 if pid is not None:
                     print(f"Stopped watcher for '{args.name}'")
