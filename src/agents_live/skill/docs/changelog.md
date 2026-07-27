@@ -27,8 +27,7 @@ history is retained in the source repository.
   their agent converges, and a crontab line is corrected by
   re-activating the agent.
 
-- fix: the framework smoketest refuses a project it was not asked to
-  act on.
+- fix: the smoketest refuses a project it was not asked to act on.
   It targeted whatever root resolved, so on a host with a configured
   default it created, activated, ran, and deleted agents inside a real
   project and dispatched an agent runtime there, without ever naming
@@ -46,15 +45,13 @@ history is retained in the source repository.
   in process, and the post-processor check compares paths in a
   normalized form rather than asserting a POSIX-shaped string.
 
-- fix: an agent whose name starts with an underscore can register a
-  Windows task. (#171)
+- fix: an underscore-named agent can register a Windows task. (#171)
   Ephemeral agents are named `_name` so they match the `Agents/_*`
   ignore patterns, but the task-name rule required an alphanumeric first
   character and refused every one of them. A leading dot or dash is
   still refused: one hides the task, the other reads as an option.
 
-- feat: the smoketest serves the dashboard and reads its agent list back
-  over HTTP.
+- feat: the smoketest reads the dashboard's agent list over HTTP.
   The dashboard is where several recent defects lived and nothing
   exercised it outside a browser. A new step starts it against the
   project under test and reads the new `/api/agents` endpoint, which
