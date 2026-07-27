@@ -422,6 +422,27 @@ def main() -> int:
     started_at = time.time()
     model_for_verdict = args.model or ("sonnet" if args.runtime in ("claude", "agency claude") else "claude-haiku-4.5")
 
+    # This test creates, activates, runs, and deletes agents inside the
+    # project it targets, and dispatches a real agent runtime there.
+    # Reaching that project by fallback - the configured default or the
+    # global workspace - means acting on whichever project the host
+    # happens to point at, which on a developer machine is a real one.
+    # Only an intentional pointer counts: --repo, the environment
+    # variable, or a marker at or above the working directory.
+    target = repo_root()
+    reached_by = paths.resolution_source()
+    if reached_by in ("default", "global"):
+        how = ("the configured default project" if reached_by == "default"
+               else "the host-global workspace")
+        preflight.emit_failure(
+            "smoketest",
+            f"refusing to run against {target}: it was reached through "
+            f"{how} rather than being named. This test creates, activates, "
+            "runs, and deletes agents in its target; name one with "
+            "`agents-live --repo <path> smoketest`, or run from inside it",
+            code="unnamed_target")
+        return 1
+
     smoketest_lock = contextlib.ExitStack()
     try:
         smoketest_lock.enter_context(

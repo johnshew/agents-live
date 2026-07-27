@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the framework smoketest refuses a project it was not asked to
+  act on.
+  It targeted whatever root resolved, so on a host with a configured
+  default it created, activated, ran, and deleted agents inside a real
+  project and dispatched an agent runtime there, without ever naming
+  it. A root reached through the configured default or the host-global
+  workspace is now refused; `--repo`, the environment variable, or a
+  marker at or above the working directory still work.
+
 - fix: the framework smoketest runs on a Task Scheduler host. (#171)
   It stopped at the first Windows-absent primitive every time, so the
   release gate could only be run from WSL and Windows regressions
