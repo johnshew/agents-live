@@ -1411,6 +1411,81 @@ class TestReplacingOurOwnExecutable(_TempProject):
             with plugins.replaceable_entrypoints():
                 self.assertTrue(shim.exists())
 
+    def test_an_untouched_executable_is_reported_as_displacing_nothing(
+            self) -> None:
+        # Nothing was running the old image, so nothing is stale after.
+        shim = self._tool_shim()
+        with (
+            mock.patch.object(plugins, "_entrypoint_paths", return_value=[shim]),
+            mock.patch.object(plugins, "_is_locked", return_value=False),
+        ):
+            with plugins.replaceable_entrypoints() as displaced:
+                self.assertEqual(displaced, [])
+
+    def test_a_displaced_executable_is_reported_to_the_caller(self) -> None:
+        # Renaming frees the name without stopping the process, so a
+        # displaced shim is exactly the evidence that something is still
+        # running the version being replaced (#188). A caller cannot warn
+        # about what it is not told.
+        if sys.platform != "win32":
+            self.skipTest("only Windows locks a running image")
+        shim = self._tool_shim()
+        with (
+            mock.patch.object(plugins, "_entrypoint_paths", return_value=[shim]),
+            mock.patch.object(plugins, "_is_locked", return_value=True),
+        ):
+            with plugins.replaceable_entrypoints() as displaced:
+                shim.write_bytes(b"new")
+                self.assertEqual(displaced, [shim])
+
+
+class TestRuntimeInstallCommand(unittest.TestCase):
+    """What `upgrade` asks uv to install, without asking uv.
+
+    Constructed commands are asserted directly rather than through a
+    patched subprocess: a test that patches the call can only confirm
+    the caller agrees with the author's belief about it, which is how a
+    release gated the wrong project through seventeen passing tests
+    (#184).
+    """
+
+    def test_no_source_upgrades_the_published_package(self) -> None:
+        self.assertEqual(
+            upgrade._install_command("uv", None),
+            ["uv", "tool", "upgrade", "agents-live"])
+
+    def test_a_source_installs_that_source_over_the_installed_tool(
+            self) -> None:
+        command = upgrade._install_command("uv", Path("/build/agents-live"))
+        # --force is what makes this replace an existing install rather
+        # than fail as already-present, and the source has to be the
+        # path asked for rather than the package name.
+        self.assertIn("--force", command)
+        self.assertIn(str(Path("/build/agents-live")), command)
+        self.assertNotIn("upgrade", command)
+
+    def test_a_local_source_never_reaches_the_index(self) -> None:
+        # The package name may appear as the thing to rebuild, but never
+        # as the thing to install: a bare "agents-live" target would
+        # silently install the published release while the command
+        # reported the local build.
+        source = Path("/build/agents-live")
+        command = upgrade._install_command("uv", source)
+        self.assertEqual(command[-1], str(source))
+        named = [i for i, arg in enumerate(command) if arg == "agents-live"]
+        for index in named:
+            self.assertEqual(command[index - 1], "--reinstall-package")
+
+    def test_a_local_source_is_rebuilt_rather_than_served_from_cache(
+            self) -> None:
+        # uv will reuse a cached build of the same directory, so --force
+        # alone can install the *previous* source and report success.
+        # Installing a stale build is the one outcome --from exists to
+        # rule out. Scoped to the package so dependencies stay cached.
+        command = upgrade._install_command("uv", Path("/build/agents-live"))
+        self.assertIn("--reinstall-package", command)
+        self.assertNotIn("--reinstall", command)
+
 
 class TestAdminLog(_TempProject):
     """Host-scoped records of the operations that change this host."""
@@ -3563,7 +3638,7 @@ class TestCliContract(_TempProject):
             mock.patch("sys.stdout", new_callable=io.StringIO),
         ):
             self.assertEqual(cli.main(["upgrade"]), 0)
-        runtime.assert_called_once_with([])
+        runtime.assert_called_once_with([], source=None)
         refresh.assert_called_once_with(refresh_skills=True)
         resolve_root.assert_not_called()
 
@@ -6683,6 +6758,118 @@ class TestInstallSkill(_TempProject):
         converge.assert_called_once_with(
             [], trigger="upgrade", pin_primary=False)
 
+    def test_runtime_install_from_a_local_source_replaces_the_tool(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            mock.patch.object(subprocess, "run", return_value=completed) as run,
+            mock.patch.object(plugins, "converge", return_value=False),
+        ):
+            self.assertEqual(
+                upgrade._upgrade_runtime(source=Path("/build/al")), 0)
+        run.assert_called_once_with(
+            ["/usr/bin/uv", "tool", "install", "--force",
+             "--reinstall-package", "agents-live", str(Path("/build/al"))],
+            check=False,
+        )
+
+    @contextlib.contextmanager
+    def _failing_install(self, *, reached_launcher: bool):
+        """A uv install that exits non-zero, having got that far.
+
+        The tool environment is a temporary directory, so the test turns
+        on the same evidence as a host - whether uv generated the
+        environment's launcher before failing - without writing to the
+        real one.
+        """
+        with tempfile.TemporaryDirectory() as prefix:
+            launcher = Path(prefix) / "Scripts" / plugins._SHIM_NAME
+            launcher.parent.mkdir(parents=True)
+            failed = subprocess.CompletedProcess(args=[], returncode=2)
+
+            def install(*args, **kwargs):
+                if reached_launcher:
+                    launcher.write_bytes(b"trampoline")
+                return failed
+
+            with (
+                mock.patch.object(sys, "prefix", prefix),
+                mock.patch.object(subprocess, "run", side_effect=install),
+            ):
+                yield
+
+    def test_a_launcher_left_behind_does_not_fail_an_upgrade_that_happened(
+            self) -> None:
+        # Windows locks the launcher while any agents-live process runs,
+        # including this one, so uv installs the new runtime and then
+        # fails to publish the launcher. The runtime is upgraded; the
+        # launcher carries no version. Reporting failure would send a
+        # person looking for a broken install that is not broken (#179).
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            self._failing_install(reached_launcher=True),
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 0)
+        converge.assert_called_once_with(
+            [], trigger="upgrade", pin_primary=False)
+
+    def test_an_install_that_never_reached_the_runtime_still_fails(
+            self) -> None:
+        # The mirror of the case above, and the reason the check is a
+        # measurement rather than a reading of uv's message: uv never
+        # got as far as the launcher, so it never finished the
+        # environment either, so the exit code stands.
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            self._failing_install(reached_launcher=False),
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 2)
+        converge.assert_not_called()
+
+    def test_a_failed_install_off_windows_keeps_its_exit_code(self) -> None:
+        # Replacing a running executable is unremarkable on POSIX, so a
+        # failure there has some other cause - a directory that cannot
+        # be written, a full disk - and excusing it would trade a loud
+        # failure for a silent one. Same evidence as the Windows case,
+        # opposite conclusion, which is what makes this a seam.
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            self._failing_install(reached_launcher=True),
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 2)
+        converge.assert_not_called()
+
+    def test_installing_from_a_path_that_is_not_there_installs_nothing(
+            self) -> None:
+        # The source is a boundary value: a typo here would otherwise
+        # reach uv and be reported in uv's terms.
+        missing = self.root / "no-such-build"
+        with (
+            mock.patch.object(upgrade, "_upgrade_runtime") as runtime,
+            mock.patch("sys.argv",
+                       ["agents-live upgrade", "--from", str(missing)]),
+        ):
+            self.assertEqual(upgrade.main(), 1)
+        runtime.assert_not_called()
+
+    def test_a_local_install_cannot_be_asked_for_without_installing(
+            self) -> None:
+        # --skills-only says "install no runtime"; --from says which
+        # runtime to install. Accepting both would silently drop one.
+        with (
+            mock.patch.object(upgrade, "_upgrade_runtime") as runtime,
+            mock.patch("sys.argv", ["agents-live upgrade", "--from",
+                                    str(self.root), "--skills-only"]),
+        ):
+            self.assertEqual(upgrade.main(), 1)
+        runtime.assert_not_called()
+
     def test_runtime_upgrade_keeps_coinstalled_wheel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6819,7 +7006,7 @@ class TestInstallSkill(_TempProject):
                 "XDG_CONFIG_HOME": str(self.root / "xdg-config")}),
         ):
             self.assertEqual(upgrade.main(), 0)
-        runtime.assert_called_once_with([target])
+        runtime.assert_called_once_with([target], source=None)
         refresh.assert_called_once_with(refresh_skills=True)
         install.assert_not_called()
 

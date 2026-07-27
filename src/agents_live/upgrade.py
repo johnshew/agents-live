@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, adminlog, init, paths, plugins, preflight, repos
@@ -63,25 +64,61 @@ def _migrate_triggers(root: Path) -> None:
             f"trigger migration failed with exit {completed.returncode}")
 
 
-def _upgrade_runtime(roots: list[Path] | None = None) -> int:
+def _install_command(uv: str, source: Path | None) -> list[str]:
+    """The uv command that puts a new runtime in the tool environment.
+
+    Without a source this is the published package. With one it is a
+    local build - a project directory or a built artifact - which is the
+    only way to exercise the installed-tool leg of the testing boundary
+    without publishing first (#179). ``--force`` is required because the
+    tool is already installed; that is the whole point.
+
+    ``--force`` alone is not enough for a local source: uv will happily
+    reuse a cached build of the same directory, so an install can report
+    success having put the *previous* source on disk. Installing a stale
+    build is the one outcome this flag exists to rule out, so the local
+    path also asks for the package itself to be rebuilt. It is scoped to
+    ``agents-live`` rather than a blanket ``--reinstall`` so dependencies
+    stay cached and the install does not turn into a full re-download.
+    """
+    if source is None:
+        return [uv, "tool", "upgrade", "agents-live"]
+    return [uv, "tool", "install", "--force",
+            "--reinstall-package", "agents-live", str(source)]
+
+
+def _upgrade_runtime(roots: list[Path] | None = None,
+                     source: Path | None = None) -> int:
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
         preflight.emit_failure("upgrade", str(exc))
         return 1
     with adminlog.operation("upgrade-runtime",
-                            version_before=__version__) as end:
+                            version_before=__version__,
+                            source=str(source) if source else "pypi") as end:
         # The upgrade rewrites this tool's own executables, and on
         # Windows one of them is the running process.
-        with plugins.replaceable_entrypoints():
+        started = time.time()
+        with plugins.replaceable_entrypoints() as displaced:
             status = subprocess.run(
-                [uv, "tool", "upgrade", "agents-live"], check=False,
+                _install_command(uv, source), check=False,
             ).returncode
+        kept_launcher = False
         if status != 0:
-            end["status"] = "error"
-            end["level"] = "error"
-            end["message"] = f"uv tool upgrade exited {status}"
-            return status
+            if not plugins.only_the_launcher_failed(started):
+                end["status"] = "error"
+                end["level"] = "error"
+                end["message"] = f"uv install exited {status}"
+                return status
+            kept_launcher = True
+            end["launcher_replaced"] = False
+            end["message"] = (
+                f"uv install exited {status} after upgrading the runtime; "
+                f"the launcher was in use and was left in place")
+        _warn_displaced(displaced)
+        if kept_launcher:
+            _warn_launcher_kept()
         try:
             plugins.converge(roots or [], trigger="upgrade", pin_primary=False)
         except (OSError, ValueError, plugins.PluginError) as exc:
@@ -92,6 +129,46 @@ def _upgrade_runtime(roots: list[Path] | None = None) -> int:
             return 1
         end["version_after"] = plugins.installed_version()
     return 0
+
+
+def _warn_launcher_kept() -> None:
+    """Say the runtime is upgraded but its launcher is the old file.
+
+    Worth saying rather than passing over in silence, because two
+    things outlive the upgrade. uv writes its receipt only after the
+    launcher lands, so its record of this tool still describes the
+    previous install. And processes already running keep the code they
+    started with regardless (#188).
+
+    The launcher itself does not carry the version. It selects an
+    interpreter and a module, both of which now resolve to the new
+    runtime, so keeping the old one costs nothing at the command line.
+    """
+    print("note: the runtime was upgraded, but its launcher was in use and "
+          "could not be replaced; the launcher does not carry the version, "
+          "so commands run the new runtime. uv's own record of this tool "
+          "stays on the previous install until an upgrade runs with no "
+          "agents-live process running",
+          file=sys.stderr)
+
+
+def _warn_displaced(displaced: list[Path]) -> None:
+    """Say that something is still running the version just replaced.
+
+    A shim only has to be moved aside when a process is executing it,
+    and renaming frees the name without stopping that process, so those
+    processes carry on from the renamed image. Reported rather than left
+    silent: the alternative is an agent that behaves like an older
+    release with nothing connecting it to this upgrade. Naming the
+    processes, and deciding whether to restart them, is #188.
+    """
+    if not displaced:
+        return
+    print(f"warning: {len(displaced)} executable(s) were in use and were "
+          f"replaced in place; processes started before this upgrade "
+          f"(watchers in particular) keep running the previous version "
+          f"until restarted with `agents-live stop` then `agents-live start`",
+          file=sys.stderr)
 
 
 def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
@@ -144,8 +221,31 @@ def main() -> int:
         "--skills-only", action="store_true",
         help="Refresh project skill payloads without upgrading the uv tool",
     )
+    # Not in the mode group: --from selects where the runtime comes
+    # from, not whether it is installed, so it composes with
+    # --runtime-only. Only --skills-only contradicts it.
+    parser.add_argument(
+        "--from", dest="source", metavar="PATH",
+        help="Install the runtime from a local project directory or built "
+             "artifact instead of PyPI",
+    )
     args = parser.parse_args()
     print(f"Installed agents-live version: {__version__}")
+
+    source: Path | None = None
+    if args.source is not None:
+        if args.skills_only:
+            preflight.emit_failure(
+                "upgrade", "--from installs a runtime; it cannot be combined "
+                "with --skills-only", code="invalid_arguments")
+            return 1
+        source = Path(args.source).expanduser()
+        if not source.exists():
+            preflight.emit_failure(
+                "upgrade", f"no such path to install from: {source}",
+                code="source_missing")
+            return 1
+        source = source.resolve()
 
     try:
         targets, errors = _targets()
@@ -166,7 +266,8 @@ def main() -> int:
         return 1
 
     if not args.skills_only:
-        runtime_status = _upgrade_runtime(list(dict.fromkeys(target_roots)))
+        runtime_status = _upgrade_runtime(
+            list(dict.fromkeys(target_roots)), source=source)
         if runtime_status != 0:
             return runtime_status
         if args.runtime_only:

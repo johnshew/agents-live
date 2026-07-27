@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 import zipfile
 from collections.abc import Iterator
@@ -384,7 +385,7 @@ def _is_locked(path: Path) -> bool:
 
 
 @contextmanager
-def replaceable_entrypoints() -> Iterator[None]:
+def replaceable_entrypoints() -> Iterator[list[Path]]:
     """Let uv rewrite this tool's executables while one of them runs.
 
     Windows holds a mandatory lock on a running image, so uv cannot
@@ -392,15 +393,33 @@ def replaceable_entrypoints() -> Iterator[None]:
     was itself started through it; it fails with "Failed to install
     entrypoint ... os error 32" (astral-sh/uv#11930), and the obvious
     retry re-enters through the same executable and fails the same way.
+    The lock is not only the caller's own: any running watcher holds the
+    same shim, which is what blocks a plain ``uv tool install --force``
+    on a host that is actually running agents (#179).
 
-    A locked image can still be renamed. Moving it aside frees the name
-    for uv to write while the running process keeps executing from the
-    renamed file - the same move ``uv self update`` makes to replace
-    itself. Nothing is renamed on POSIX, where replacing a running
-    executable was never a problem.
+    A locked image can often still be renamed, and moving it aside
+    frees the name for uv to write while the running process keeps
+    executing from the renamed file - the move ``uv self update`` makes
+    to replace itself. It is not always available. A uv trampoline
+    holds its own file in a way that refuses the rename as well as the
+    write, so the shim this process was started through generally
+    cannot be moved; the rename is attempted and the failure accepted.
+    Nothing is renamed on POSIX, where replacing a running executable
+    was never a problem.
+
+    This is therefore best effort, and not on its own enough to let uv
+    replace an entry point that something is running. What makes that
+    survivable is that uv rebuilds the environment before it installs
+    launchers, so the runtime is upgraded even when the launcher is
+    not; ``upgrade`` checks for that rather than trusting the exit code.
+
+    Yields the shims that had to be moved. A non-empty list is proof
+    that some process was executing the old image when the replacement
+    began, and still is: renaming frees the name without stopping the
+    process (#188). Callers that report to a person should say so.
     """
     if sys.platform != "win32":
-        yield
+        yield []
         return
     moved: list[tuple[Path, Path]] = []
     for shim in _entrypoint_paths():
@@ -416,7 +435,7 @@ def replaceable_entrypoints() -> Iterator[None]:
             continue
         moved.append((shim, aside))
     try:
-        yield
+        yield [shim for shim, _aside in moved]
     except BaseException:
         _restore(moved)
         raise
@@ -505,14 +524,53 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
                 else plugin.name for plugin in declarations.values()),
             pending=sorted(plugin.name for plugin in pending.values()),
     ) as end:
+        started = time.time()
         with replaceable_entrypoints():
             completed = subprocess.run(command, check=False)
-        if completed.returncode:
+        if completed.returncode and not only_the_launcher_failed(started):
             raise PluginError(
                 f"plugin convergence failed with exit code {completed.returncode}; "
                 "run `agents-live upgrade` to retry")
         end["version_after"] = installed_version()
     return True
+
+
+def only_the_launcher_failed(started: float) -> bool:
+    """Whether a failed install still left the environment upgraded.
+
+    uv builds the environment first and installs the launchers last, so
+    a launcher it cannot replace fails the command over an environment
+    that is already correct. Windows holds a lock on the launcher while
+    any agents-live process runs, including the one doing the install,
+    which makes that the ordinary outcome on a host that is running
+    agents rather than a rare one (#179).
+
+    Windows is also the only place that conclusion is safe to draw.
+    Replacing a running executable is unremarkable on POSIX, so a
+    failed install there has some other cause and keeps its exit code.
+    Excusing it would trade a loud failure for a silent one.
+
+    What is left is measured rather than read out of uv's message,
+    which is not an interface. uv builds the environment, generates the
+    launcher inside it, and only then publishes that launcher to the
+    directory on PATH, so a freshly generated one places the failure at
+    the last step and proves everything before it finished. The check
+    fails safe, because an install that stopped earlier leaves the
+    generated launcher as it was.
+
+    The environment's own files are not evidence here: convergence
+    installs a plugin beside a runtime that is already satisfied, so uv
+    has no reason to rewrite the runtime, and its timestamp says
+    nothing about whether this install got anywhere.
+    """
+    if sys.platform != "win32":
+        return False
+    generated = Path(sys.prefix) / "Scripts" / _SHIM_NAME
+    try:
+        written = generated.stat().st_mtime
+    except OSError:
+        return False
+    return written >= started
 
 
 def installed_version() -> str:
