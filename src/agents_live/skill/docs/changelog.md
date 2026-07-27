@@ -6,6 +6,59 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the framework smoketest brings its own handlers. (#171)
+  It set its agents' post-processor to the project's own
+  `write-files.sh`, so the gate assumed a project that happened to have
+  that handler and a host with both bash and `jq`. A fresh project or a
+  Windows host failed on the fixture rather than on the framework. The
+  gate now writes its own ephemeral handlers in Python, each carrying a
+  PEP 723 header so `uv` provisions the interpreter and nothing depends
+  on what `python` means in a cron or watcher context.
+
+- fix: a run someone asks for is no longer discarded as not due. (#172)
+  Whether a run came from the clock was inferred from whether the agent
+  had a schedule, so `agents-live run <name>` on a scheduled agent was
+  treated as a clock fire and refused by the Windows dueness gate,
+  reporting success while doing nothing. A run now says how it was
+  invoked: persisted schedule entries pass `--scheduled` and only those
+  are checked for dueness. On a crontab host the gate was always open,
+  so nothing there changes but the recorded trigger. Existing schedule
+  entries predate the flag: Windows tasks are corrected the next time
+  their agent converges, and a crontab line is corrected by
+  re-activating the agent.
+
+- fix: the smoketest refuses a project it was not asked to act on.
+  It targeted whatever root resolved, so on a host with a configured
+  default it created, activated, ran, and deleted agents inside a real
+  project and dispatched an agent runtime there, without ever naming
+  it. A root reached through the configured default or the host-global
+  workspace is now refused; `--repo`, the environment variable, or a
+  marker at or above the working directory still work.
+
+- fix: the framework smoketest runs on a Task Scheduler host. (#171)
+  It stopped at the first Windows-absent primitive every time, so the
+  release gate could only be run from WSL and Windows regressions
+  reached releases unchallenged. Four assumptions are gone: `SIGHUP` is
+  registered only where it exists, process discovery and teardown go
+  through the host-neutral `hostruntime` helpers instead of reading
+  `/proc`, the `inotifywait` preflight is skipped on a host that watches
+  in process, and the post-processor check compares paths in a
+  normalized form rather than asserting a POSIX-shaped string.
+
+- fix: an underscore-named agent can register a Windows task. (#171)
+  Ephemeral agents are named `_name` so they match the `Agents/_*`
+  ignore patterns, but the task-name rule required an alphanumeric first
+  character and refused every one of them. A leading dot or dash is
+  still refused: one hides the task, the other reads as an option.
+
+- feat: the smoketest reads the dashboard's agent list over HTTP.
+  The dashboard is where several recent defects lived and nothing
+  exercised it outside a browser. A new step starts it against the
+  project under test and reads the new `/api/agents` endpoint, which
+  returns the same row model the table binds to. One assertion now
+  covers the dashboard binding a port, resolving the intended project,
+  and enumerating its agents.
+
 ## 5.2.0 - 2026-07-26
 
 - fix: convergence no longer fails on the executable it is running from.

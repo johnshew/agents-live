@@ -655,8 +655,13 @@ def run_invocation(name: str) -> list[str]:
     (retired at the F7 flip via ``migrate``). Both forms carry the
     repo root and ``--name <name>`` tokens that :func:`cron_line_matches`
     keys on.
+
+    ``--scheduled`` is what tells the run it came from the clock rather
+    than from a person. Nothing else can: the same command serves both,
+    and inferring it from the agent's own configuration is what made
+    every hand-run of a scheduled agent look like a clock fire (#172).
     """
-    return cli_invocation("run", "--name", name, "--quiet",
+    return cli_invocation("run", "--name", name, "--scheduled", "--quiet",
                           flat_script=RUN_SCRIPT_PATH)
 
 

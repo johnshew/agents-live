@@ -248,9 +248,8 @@ class TestSmoketestDispatch(_TempProject):
 
         stopped = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with (
-            mock.patch.object(smoketest, "_smoketest_process_tree",
-                              return_value={}),
-            mock.patch.object(smoketest, "_stop_process_tree", return_value=[]),
+            mock.patch.object(smoketest, "_stop_smoketest_processes",
+                              return_value=[]),
             mock.patch.object(smoketest.subprocess, "run", return_value=stopped),
             mock.patch.object(smoketest, "_smoketest_run_pids", return_value=[]),
             mock.patch.object(smoketest.schedules, "is_active",
