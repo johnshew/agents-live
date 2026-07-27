@@ -6,6 +6,34 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a host-mutating command no longer acts on an unnamed project.
+  (#192) Root resolution learned to fall back to the sole registered
+  repository so the dashboard had something to show, but it answers for
+  every command, not only the read-only ones. "Exactly one repository is
+  registered" is the state of every host that has run `repos add` once,
+  so `start`, `stop`, `delete` and `migrate` run from an unrelated
+  directory silently targeted that project, writing cron entries or
+  scheduled tasks into it without ever naming it. The fallback is now
+  opt-in and reaches only the read-only commands it was added for: the
+  dashboard, `status`, `logs` and `timeline`. Everything else fails
+  loudly again, as it did before, and a command added later inherits
+  that answer by default. A sole registered repository that has since
+  been moved or deleted also no longer turns a missing root into a
+  failure about an alias the caller never mentioned.
+
+- fix: the smoketest cleans up after an installed tool. (#193) It found
+  the agent runs it had started by looking for `run.py` on the command
+  line, which only the flat checkout dispatches; an installed package
+  runs the pinned CLI shim with a `run` subcommand and no script path
+  anywhere on the line. Cleanup therefore matched nothing for every
+  user of the released package, reporting success while leaving the
+  fixture's runs behind. Both invocation forms are now recognized.
+
+- fix: the export-clean audit checks every drive letter. (#195) The
+  personal-path pattern was pinned to `C:\Users\...`, so a checkout on
+  any other drive, which is ordinary on a Windows development host,
+  could carry a personal path into a release and still pass the gate.
+
 - feat: `upgrade --from PATH` installs a local build. (#179)
   Until now the runtime could only be upgraded from PyPI, so the
   installed-tool leg of the testing boundary could not be exercised
@@ -30,10 +58,14 @@ history is retained in the source repository.
   the environment first and publishes launchers last, so what actually
   happened in these runs was a complete upgrade reported as a failure,
   leaving the install state needing a hand check. The upgrade and
-  convergence paths now check whether uv generated the environment's
+  convergence paths now check whether uv rewrote the environment's
   launcher before it stopped, which places the failure at the final
   step and proves everything before it finished, and treat that case as
-  the upgrade it was. The check is confined to Windows and to that
+  the upgrade it was. The launcher is compared against its own recorded
+  timestamp rather than against the clock, because a file's stamp comes
+  from the coarse system clock while the clock reading does not, and a
+  launcher written in the same tick could otherwise pass for one uv
+  never touched. The check is confined to Windows and to that
   evidence, so an install that stopped earlier, or failed anywhere
   else, still fails. A note says the launcher was kept, since it
   carries no version and commands run the new runtime either way,
@@ -103,9 +135,18 @@ history is retained in the source repository.
   reporting success while doing nothing. A run now says how it was
   invoked: persisted schedule entries pass `--scheduled` and only those
   are checked for dueness. On a crontab host the gate was always open,
-  so nothing there changes but the recorded trigger. Existing schedule
-  entries predate the flag: Windows tasks are corrected the next time
-  their agent converges, and a crontab line is corrected by
+  so nothing there changes but the recorded trigger. Existing entries
+  predate the flag. Until a Windows task is rewritten it fires without
+  `--scheduled` and the dueness check is skipped, so the agent runs on
+  every trigger the Task Scheduler delivers; that same check is what
+  claims a minute, so a repeated fire is no longer suppressed either.
+  Those runs report success and spend tokens, which is why they are
+  worth correcting rather than waiting out. Correction is not automatic:
+  a task is rewritten when its agent next converges, which needs the
+  maintenance loop installed. To correct a host deterministically, run
+  `agents-live upgrade`, which converges the persisted entries of every
+  registered project. Updating the runtime by itself, with `uv tool
+  upgrade agents-live`, rewrites nothing. A crontab line is corrected by
   re-activating the agent.
 
 - fix: the smoketest refuses a project it was not asked to act on.
