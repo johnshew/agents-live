@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.2.0 - 2026-07-26
+
 - fix: convergence no longer fails on the executable it is running from.
   (#162)
   Windows holds a mandatory lock on a running image, so `uv tool install
