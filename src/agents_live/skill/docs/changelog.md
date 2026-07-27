@@ -21,18 +21,20 @@ history is retained in the source repository.
   been moved or deleted also no longer turns a missing root into a
   failure about an alias the caller never mentioned.
 
-- fix: the smoketest cleans up after an installed tool. (#193) It found
-  the agent runs it had started by looking for `run.py` on the command
-  line, which only the flat checkout dispatches; an installed package
-  runs the pinned CLI shim with a `run` subcommand and no script path
-  anywhere on the line. Cleanup therefore matched nothing for every
-  user of the released package, reporting success while leaving the
-  fixture's runs behind. Both invocation forms are now recognized.
+- fix: the smoketest cleans up after an installed tool.
+  (#193) It found the agent runs it had started by looking for
+  `run.py` on the command line, which only the flat checkout
+  dispatches; an installed package runs the pinned CLI shim with a
+  `run` subcommand and no script path anywhere on the line. Cleanup
+  therefore matched nothing for every user of the released package,
+  reporting success while leaving the fixture's runs behind. Both
+  invocation forms are now recognized.
 
-- fix: the export-clean audit checks every drive letter. (#195) The
-  personal-path pattern was pinned to `C:\Users\...`, so a checkout on
-  any other drive, which is ordinary on a Windows development host,
-  could carry a personal path into a release and still pass the gate.
+- fix: the export-clean audit checks every drive letter.
+  (#195) The personal-path pattern was pinned to `C:\Users\...`, so a
+  checkout on any other drive, which is ordinary on a Windows
+  development host, could carry a personal path into a release and
+  still pass the gate.
 
 - feat: `upgrade --from PATH` installs a local build. (#179)
   Until now the runtime could only be upgraded from PyPI, so the
