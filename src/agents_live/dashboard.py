@@ -79,9 +79,21 @@ from nicegui import run as ng_run  # noqa: E402
 
 try:
     REPO_ROOT = headless.repo_root()
-except ValueError:
+    REPO_ERROR: str | None = None
+except ValueError as exc:
     REPO_ROOT = None
+    REPO_ERROR = str(exc)
 LOGS_DIR = paths.repo_state_dir(REPO_ROOT) / "logs" if REPO_ROOT else None
+# Shown instead of the agent panel when nothing resolves: an empty table
+# reads as broken agent discovery, so the page has to say what happened
+# and how to choose a project (issue #173).
+NO_PROJECT_HINT = (
+    "No project is selected, so there are no agents to show. Start the "
+    "dashboard inside an initialized project, pass "
+    "`agents-live --repo <path> dashboard`, select a registered project "
+    "with `agents-live repos default <path>`, or run "
+    "`agents-live dashboard --all-repos`."
+)
 # The health beacon is host-scoped (written by `agents-live
 # health-check`), so the panel works with or without a selected repo.
 HEALTH_OK_PATH = paths.health_beacon_path()
@@ -107,6 +119,15 @@ def _require_repo_path(path: Path | None) -> Path:
             "single-repository dashboard requires a project root; "
             "use --all-repos outside an initialized project")
     return path
+
+
+def _scope_label() -> str:
+    """What the view is scoped to, for the header beside the host label.
+
+    Without it an empty table cannot be told apart from the wrong
+    project, and a populated one never says which project it describes.
+    """
+    return str(REPO_ROOT) if REPO_ROOT is not None else "no project selected"
 
 
 # --- Data ---------------------------------------------------------------
@@ -974,6 +995,9 @@ def build_page() -> None:
 
 def _build_page() -> None:
     ui.dark_mode().auto()
+    if REPO_ROOT is None:
+        _build_no_project_page()
+        return
     startup_summary = _refresh_summary()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
@@ -996,6 +1020,7 @@ def _build_page() -> None:
         with ui.row().classes("items-center gap-4 no-wrap"):
             ui.label("Agents Live").classes("text-xl font-semibold")
             ui.label(host).classes("text-sm text-gray-500")
+            ui.label(_scope_label()).classes("text-sm text-gray-500")
         with ui.row().classes("items-center gap-3 no-wrap"):
             header_actions()
             refresh_age = ui.label().classes("text-sm text-gray-500")
@@ -1020,6 +1045,24 @@ def _build_page() -> None:
         output_log.push(startup_summary)
 
     ui.timer(600.0, _refresh_views, immediate=False)
+
+
+def _build_no_project_page() -> None:
+    """Header plus an explanation, when no project root resolves.
+
+    The agent panel reads agent configs and logs through the project
+    root; with none there is nothing to enumerate, so the page states
+    that rather than rendering a complete but empty dashboard.
+    """
+    with ui.row().classes("w-full items-center gap-4"):
+        ui.label("Agents Live").classes("text-xl font-semibold")
+        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
+        ui.label(_scope_label()).classes("text-sm text-gray-500")
+    with ui.card().classes("w-full"):
+        ui.label("No project selected").classes("text-base font-medium")
+        ui.label(NO_PROJECT_HINT).classes("text-sm text-gray-500")
+        if REPO_ERROR:
+            ui.label(REPO_ERROR).classes("text-xs text-gray-500")
 
 
 def _all_repos_rows() -> list[dict]:
@@ -1051,6 +1094,7 @@ def build_all_repos_page() -> None:
 
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
+        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
         ui.label("All registered repositories (read only)").classes(
             "text-sm text-gray-500")
     names = sorted({row["repo"] for row in rows})
