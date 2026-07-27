@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.3.0 - 2026-07-27
+
 - fix: a host-mutating command no longer acts on an unnamed project.
   (#192) Root resolution learned to fall back to the sole registered
   repository so the dashboard had something to show, but it answers for
