@@ -135,6 +135,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
     parser.add_argument("--changed-files", help="JSON array of changed file paths")
+    parser.add_argument("--scheduled", action="store_true",
+                        help="this run came from an installed schedule")
     parser.add_argument("--boot", action="store_true",
                         help="this run came from a startup trigger")
     parser.add_argument("--quiet", action="store_true")
@@ -162,16 +164,25 @@ def main() -> int:
         tlog = EventLog(config.agent_log, agent_name=config.name)
         slog = EventLog(system_log(), agent_name=config.name)
         ensure_logs_dir()
-        trigger = "file-change" if changed_files else "cron" if config.schedule else "manual"
+        # How this run was invoked, which is not what the agent is
+        # configured for. A persisted schedule entry passes --scheduled
+        # (a startup entry --boot) and a watcher passes changed files;
+        # anything else is a person, or a caller acting for one.
+        # Reading it off config.schedule instead made every hand-run of
+        # a scheduled agent look like a clock fire (issue #172).
+        scheduled = args.scheduled or args.boot
+        trigger = ("file-change" if changed_files
+                   else "cron" if scheduled else "manual")
         os.environ["AGENTS_LIVE_TRIGGER"] = trigger
 
         # --- Dueness ----------------------------------------------------------
         # A native trigger may be coarser than the expression it came
         # from, so a clock fire has to be checked before it becomes a run
         # (docs/windows-support.md, Scheduling on Windows). A startup
-        # fire is exact and asks nothing. On a crontab host this is
+        # fire is exact and asks nothing, and a run someone asked for
+        # never asks: they picked the moment. On a crontab host this is
         # always true, and nothing about the POSIX path changes.
-        if (trigger == "cron" and not args.boot
+        if (args.scheduled and not args.boot and config.schedule
                 and not schedules.claim_due_minute(config.name, config.schedule)):
             slog.event(level="info", phase="skip", status="not-due",
                        trigger=trigger)

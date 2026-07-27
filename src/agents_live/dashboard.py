@@ -709,6 +709,23 @@ def agent_rows() -> list[dict]:
     return rows
 
 
+@app.get("/api/agents")
+def api_agents() -> dict:
+    """Machine-readable snapshot of the rows the agent table renders.
+
+    The page itself draws over a websocket, so an HTTP GET of ``/``
+    proves only that a port was bound - the agent names never appear in
+    the served HTML. Checks that run outside a browser, the framework
+    smoketest among them, read this instead, which makes "the dashboard
+    started, resolved a project, and can see its agents" one assertion.
+    """
+    return {
+        "host": ownership.current_label(),
+        "repo": str(REPO_ROOT) if REPO_ROOT is not None else None,
+        "agents": agent_rows() if REPO_ROOT is not None else [],
+    }
+
+
 def _filtered_agent_rows(rows: list[dict], filters: dict) -> list[dict]:
     name_filter = str(filters.get("name", "")).casefold().strip()
     return [

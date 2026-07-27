@@ -79,7 +79,11 @@ LOGON_TYPE = "InteractiveToken"
 
 # Agent names reach a task name, an XML document, and a command line.
 # The set that is safe in all three is the set agent files already use.
-_SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# A leading underscore is part of that set: ephemeral agents are named
+# `_name` so they match the `Agents/_*` ignore patterns. A leading dot
+# or dash is still refused - one hides the task, the other reads as an
+# option on the command line.
+_SAFE_AGENT_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 
 _INTERVAL_MINUTE = re.compile(r"\*/(\d{1,4})")
 
@@ -340,7 +344,8 @@ def task_name(root: Path | str, agent: str, *, kind: str = CLOCK) -> str:
     if not _SAFE_AGENT_NAME.fullmatch(agent):
         raise TaskError(
             f"agent name '{agent}' cannot be part of a task name; use "
-            "letters, digits, dot, dash, and underscore")
+            "letters, digits, dot, dash, and underscore, starting with a "
+            "letter, digit, or underscore")
     digest = sha256(_path_key(root).encode("utf-8")).hexdigest()
     return f"{agent}@{digest[:8]}{kind}"
 
