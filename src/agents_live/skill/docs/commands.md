@@ -36,7 +36,7 @@ timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] 
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ]
 init         ::= "init" [ "--repo" VALUE ]
-upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ]
+upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ] [ "--from" VALUE ]
 heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ "--distro" VALUE ] [ "--retain-state" ] ) ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
@@ -57,7 +57,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
-| upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only | Upgrade runtime and project skill payloads. |
+| upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only, --from | Upgrade runtime and project skill payloads. |
 | heartbeat | in-process | none |  |  |  |  |  | Run or manage the host heartbeat. |
 | heartbeat install | in-process | none |  |  |  |  | --distro | Install the heartbeat. |
 | heartbeat uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove the heartbeat. |

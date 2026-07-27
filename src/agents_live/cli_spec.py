@@ -210,10 +210,13 @@ COMMANDS = (
     Cmd(
         "upgrade", "Upgrade runtime and project skill payloads.", "upgrade",
         "in-process", root="none", json=True, update_notice=False,
-        mutually_exclusive=(("--runtime-only", "--skills-only"),),
+        mutually_exclusive=(("--runtime-only", "--skills-only"),
+                            ("--from", "--skills-only")),
         args=(
             Arg(("--runtime-only",), "Upgrade only the runtime."),
             Arg(("--skills-only",), "Refresh only skill payloads."),
+            Arg(("--from",), "Install the runtime from a local path "
+                "instead of PyPI.", kind="value"),
         ),
     ),
     Cmd(

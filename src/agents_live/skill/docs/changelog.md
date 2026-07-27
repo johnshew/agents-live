@@ -6,6 +6,40 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: `upgrade --from PATH` installs a local build. (#179)
+  Until now the runtime could only be upgraded from PyPI, so the
+  installed-tool leg of the testing boundary could not be exercised
+  without publishing first. The command now takes the source to install
+  from, a project directory or a built artifact, and runs it through
+  the same path as a published upgrade, with the payload refresh,
+  plugin convergence, and completion update that follow any upgrade.
+  It cannot be combined with `--skills-only`, which installs no
+  runtime. `--force` on its own lets uv serve a cached build of the
+  same directory, which would install the previous source while
+  reporting success; the local path therefore asks for the package
+  itself to be rebuilt, scoped so that dependencies stay cached rather
+  than turning the install into a full re-download.
+
+- fix: an upgrade no longer fails over a launcher it could not replace.
+  (#179) Windows holds a lock on a running executable, and a uv
+  trampoline refuses to be renamed as well as written, so the launcher
+  cannot be moved out of the way while anything is running it. That
+  includes any watcher on the host and the upgrade command itself,
+  which reaches the runtime through the very launcher being replaced,
+  making this the ordinary outcome rather than a rare one. uv builds
+  the environment first and publishes launchers last, so what actually
+  happened in these runs was a complete upgrade reported as a failure,
+  leaving the install state needing a hand check. The upgrade and
+  convergence paths now check whether uv generated the environment's
+  launcher before it stopped, which places the failure at the final
+  step and proves everything before it finished, and treat that case as
+  the upgrade it was. The check is confined to Windows and to that
+  evidence, so an install that stopped earlier, or failed anywhere
+  else, still fails. A note says the launcher was kept, since it
+  carries no version and commands run the new runtime either way,
+  while uv's own record of the tool stays on the previous install until
+  an upgrade runs with nothing holding the launcher.
+
 - fix: the Windows release gate no longer fails on a healthy host.
   Two budgets in the smoketest path were set below the work they wait
   for. The scheduler preflight asked schtasks to walk the whole machine
