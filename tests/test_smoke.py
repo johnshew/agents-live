@@ -236,6 +236,26 @@ FOREIGN_REPO = "/tmp/foreign-agents-live-project"
 
 
 class TestSmoketestDispatch(_TempProject):
+    def test_cleanup_finds_runs_in_either_invocation_form(self) -> None:
+        """Issue #193: the installed form carries no script path.
+
+        The flat checkout dispatches ``run.py`` through ``uv run
+        --script``; an installed package dispatches the pinned CLI shim
+        with a ``run`` subcommand. Matching only the first meant cleanup
+        silently found nothing for every user of the released package.
+        """
+        smoketest = importlib.import_module(
+            f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
+        source_form = (
+            "uv run --script /opt/agents_live/run.py --name _smoketest-cron")
+        installed_form = (
+            r"C:\tools\agents-live.exe --repo D:\project run "
+            "--name _smoketest-cron --scheduled")
+        self.assertTrue(smoketest._is_agent_run(source_form))
+        self.assertTrue(smoketest._is_agent_run(installed_form))
+        self.assertFalse(smoketest._is_agent_run(
+            r"C:\tools\agents-live.exe --repo D:\project status"))
+
     def test_cleanup_removes_smoketest_watch_hashes(self) -> None:
         smoketest = importlib.import_module(
             f"{cli.__package__}.smoketest" if cli.__package__ else "smoketest")
@@ -601,8 +621,71 @@ class TestRepositoryRegistry(_TempProject):
             try:
                 os.chdir(outside)
                 paths.clear_cache()
-                self.assertEqual(paths.resolve_root(), self.root)
+                self.assertEqual(
+                    paths.resolve_root(allow_sole_registered=True), self.root)
                 self.assertEqual(paths.resolution_source(), "sole-registered")
+            finally:
+                os.chdir(saved)
+
+    def _sole_registered_outside_any_project(self, registered: Path) -> None:
+        """Register *registered* and initialize the global workspace."""
+        repos._add(str(registered))
+        global_root = paths.global_root()
+        global_root.mkdir(parents=True)
+        (global_root / ".agents-live.toml").write_text("", encoding="utf-8")
+        os.environ.pop(paths.ENV_VAR, None)
+
+    def test_sole_registered_repo_is_not_offered_to_other_callers(self) -> None:
+        # The fallback is a convenience for read-only views. Handing it to
+        # every caller would let `start`, `stop`, `delete` and `migrate`
+        # write triggers into a project the invocation never named, which
+        # is the whole of issue #192.
+        self._sole_registered_outside_any_project(self.root)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                self.assertEqual(paths.resolve_root(), paths.global_root())
+                self.assertEqual(paths.resolution_source(), "global")
+            finally:
+                os.chdir(saved)
+
+    def test_a_cached_registry_fallback_is_not_reused_by_other_callers(
+            self) -> None:
+        # Resolution is cached per process, so a read-only caller running
+        # first must not leave the registry answer lying around where a
+        # mutating one would pick it up.
+        self._sole_registered_outside_any_project(self.root)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                self.assertEqual(
+                    paths.resolve_root(allow_sole_registered=True), self.root)
+                with self.assertRaisesRegex(
+                        ValueError, "no project root found"):
+                    paths.resolve_root()
+            finally:
+                os.chdir(saved)
+
+    def test_a_moved_sole_repo_falls_through_to_the_remaining_resolution(
+            self) -> None:
+        # The step is a convenience, so an unusable entry must not turn a
+        # missing root into a failure about an alias nobody mentioned.
+        registered = self.root / "registered-then-moved"
+        registered.mkdir()
+        self._sole_registered_outside_any_project(registered)
+        shutil.rmtree(registered)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                self.assertEqual(
+                    paths.resolve_root(allow_sole_registered=True),
+                    paths.global_root())
             finally:
                 os.chdir(saved)
 
@@ -3103,6 +3186,26 @@ class TestCliContract(_TempProject):
                     0)
                 resolve_root.assert_not_called()
 
+    def test_only_read_only_commands_may_use_the_registry_fallback(
+            self) -> None:
+        """The seam that keeps issue #192 from coming back.
+
+        ``root="registry"`` lets a command resolve to the sole registered
+        repository when nothing else names one. That is safe only for
+        commands that read; anything that writes triggers or state has to
+        keep failing loudly rather than act on a project the invocation
+        never named.
+        """
+        def walk(commands):
+            for command in commands:
+                yield command
+                yield from walk(command.subcommands)
+
+        self.assertEqual(
+            {command.name for command in walk(COMMANDS)
+             if command.root == "registry"},
+            {"status", "logs", "timeline", "dashboard"})
+
     def test_required_root_commands_emit_no_project_envelope(self) -> None:
         saved_cwd = Path.cwd()
         try:
@@ -3117,7 +3220,7 @@ class TestCliContract(_TempProject):
                     Path(outside) / "isolated-config")
                 with mock.patch.dict(os.environ, environ, clear=True):
                     for command in COMMANDS:
-                        if command.root != "required":
+                        if command.root not in ("required", "registry"):
                             continue
                         with self.subTest(command=command.name):
                             paths.clear_cache()
@@ -3866,14 +3969,14 @@ import importlib.util
 import sys
 import types
 from unittest import mock
-from agents_live import headless, repos
+from agents_live import paths, repos
 
 nicegui = types.ModuleType("nicegui")
 nicegui.app = mock.MagicMock()
 nicegui.ui = mock.MagicMock()
 nicegui.run = mock.MagicMock()
 sys.modules["nicegui"] = nicegui
-headless.repo_root = mock.Mock(
+paths.resolve_root = mock.Mock(
     side_effect=ValueError("no project root found"))
 repos.collect_status = mock.Mock(return_value={{"ok": True, "repos": []}})
 
@@ -3934,14 +4037,14 @@ import importlib.util
 import sys
 import types
 from unittest import mock
-from agents_live import headless, repos
+from agents_live import paths, repos
 
 nicegui = types.ModuleType("nicegui")
 nicegui.app = mock.MagicMock()
 nicegui.ui = mock.MagicMock()
 nicegui.run = mock.MagicMock()
 sys.modules["nicegui"] = nicegui
-headless.repo_root = mock.Mock(side_effect=ValueError("no root"))
+paths.resolve_root = mock.Mock(side_effect=ValueError("no root"))
 repos.collect_status = mock.Mock(return_value={{"ok": True, "repos": []}})
 sys.argv = ["dashboard.py", "--all-repos"]
 spec = importlib.util.spec_from_file_location(
@@ -6774,17 +6877,25 @@ class TestInstallSkill(_TempProject):
         )
 
     @contextlib.contextmanager
-    def _failing_install(self, *, reached_launcher: bool):
+    def _failing_install(self, *, reached_launcher: bool,
+                         preexisting: bool = False):
         """A uv install that exits non-zero, having got that far.
 
         The tool environment is a temporary directory, so the test turns
-        on the same evidence as a host - whether uv generated the
+        on the same evidence as a host - whether uv rewrote the
         environment's launcher before failing - without writing to the
-        real one.
+        real one. ``preexisting`` stages the launcher a real host always
+        has, backdated so that a rewrite is unambiguous: file timestamps
+        come from the coarse system clock, and two writes within one of
+        its ticks can otherwise carry the same stamp.
         """
         with tempfile.TemporaryDirectory() as prefix:
             launcher = Path(prefix) / "Scripts" / plugins._SHIM_NAME
             launcher.parent.mkdir(parents=True)
+            if preexisting:
+                launcher.write_bytes(b"old trampoline")
+                stale = time.time() - 3600
+                os.utime(launcher, (stale, stale))
             failed = subprocess.CompletedProcess(args=[], returncode=2)
 
             def install(*args, **kwargs):
@@ -6829,6 +6940,36 @@ class TestInstallSkill(_TempProject):
         ):
             self.assertEqual(upgrade._upgrade_runtime(), 2)
         converge.assert_not_called()
+
+    def test_a_stale_launcher_nobody_touched_still_fails_the_install(
+            self) -> None:
+        # The case a real host is always in: a launcher from the last
+        # install is already there. Its presence proves nothing, so the
+        # evidence has to be that this install changed it. An install
+        # that stopped earlier leaves it alone and keeps its exit code.
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            self._failing_install(reached_launcher=False, preexisting=True),
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 2)
+        converge.assert_not_called()
+
+    def test_a_rewritten_launcher_is_recognized_over_a_stale_one(
+            self) -> None:
+        # The same host, one step further on: uv reached the launcher
+        # and rewrote it, so the environment behind it is complete even
+        # though the command failed publishing it.
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            self._failing_install(reached_launcher=True, preexisting=True),
+            mock.patch.object(plugins, "converge", return_value=False) as converge,
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 0)
+        converge.assert_called_once_with(
+            [], trigger="upgrade", pin_primary=False)
 
     def test_a_failed_install_off_windows_keeps_its_exit_code(self) -> None:
         # Replacing a running executable is unremarkable on POSIX, so a

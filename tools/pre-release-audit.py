@@ -66,7 +66,10 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 # Patterns that indicate hardcoded personal paths
 PATH_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Home directory",  re.compile(r"/home/[a-z][a-z0-9_-]+/(?!runner/)")),
-    ("Windows user",    re.compile(r"C:\\Users\\[A-Za-z][A-Za-z0-9_-]+\\")),
+    # Any drive letter, not just C:. A checkout on D: is ordinary on a
+    # Windows development host, and pinning the pattern to C: let those
+    # paths through the export-clean gate (issue #195).
+    ("Windows user",    re.compile(r"[A-Za-z]:\\Users\\[A-Za-z][A-Za-z0-9_-]+\\")),
     ("macOS user",      re.compile(r"/Users/[A-Za-z][A-Za-z0-9_-]+/")),
     # Tilde forms bypass the absolute-path patterns above; the
     # maintainer's personal project checkout must never ship.

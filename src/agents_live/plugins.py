@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 import tomllib
 import zipfile
 from collections.abc import Iterator
@@ -524,10 +523,11 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
                 else plugin.name for plugin in declarations.values()),
             pending=sorted(plugin.name for plugin in pending.values()),
     ) as end:
-        started = time.time()
+        launcher_before = launcher_stamp()
         with replaceable_entrypoints():
             completed = subprocess.run(command, check=False)
-        if completed.returncode and not only_the_launcher_failed(started):
+        if (completed.returncode
+                and not only_the_launcher_failed(launcher_before)):
             raise PluginError(
                 f"plugin convergence failed with exit code {completed.returncode}; "
                 "run `agents-live upgrade` to retry")
@@ -535,7 +535,23 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
     return True
 
 
-def only_the_launcher_failed(started: float) -> bool:
+def launcher_stamp() -> int | None:
+    """The generated launcher's modification time, or None if absent.
+
+    Recorded before an install so :func:`only_the_launcher_failed` can
+    compare the launcher against itself. A wall-clock reading cannot
+    serve here: on Windows a file's timestamp comes from the coarse
+    system clock while ``time.time()`` reads the precise one, so a
+    launcher written in the same tick as the reading can carry a stamp
+    fractionally behind it and be mistaken for one uv never touched.
+    """
+    try:
+        return (Path(sys.prefix) / "Scripts" / _SHIM_NAME).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def only_the_launcher_failed(before: int | None) -> bool:
     """Whether a failed install still left the environment upgraded.
 
     uv builds the environment first and installs the launchers last, so
@@ -553,10 +569,10 @@ def only_the_launcher_failed(started: float) -> bool:
     What is left is measured rather than read out of uv's message,
     which is not an interface. uv builds the environment, generates the
     launcher inside it, and only then publishes that launcher to the
-    directory on PATH, so a freshly generated one places the failure at
-    the last step and proves everything before it finished. The check
-    fails safe, because an install that stopped earlier leaves the
-    generated launcher as it was.
+    directory on PATH, so a launcher that changed during this install
+    places the failure at the last step and proves everything before it
+    finished. The check fails safe, because an install that stopped
+    earlier leaves the generated launcher exactly as it was.
 
     The environment's own files are not evidence here: convergence
     installs a plugin beside a runtime that is already satisfied, so uv
@@ -565,12 +581,8 @@ def only_the_launcher_failed(started: float) -> bool:
     """
     if sys.platform != "win32":
         return False
-    generated = Path(sys.prefix) / "Scripts" / _SHIM_NAME
-    try:
-        written = generated.stat().st_mtime
-    except OSError:
-        return False
-    return written >= started
+    after = launcher_stamp()
+    return after is not None and after != before
 
 
 def installed_version() -> str:

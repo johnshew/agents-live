@@ -351,7 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     # delegated module.
     if command.root != "none" and not all_repos:
         try:
-            paths.resolve_root()
+            paths.resolve_root(
+                allow_sole_registered=command.root == "registry")
         except ValueError as exc:
             allow_markerless_invocation = (
                 command.root == "markerless"

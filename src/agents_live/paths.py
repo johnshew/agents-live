@@ -9,7 +9,8 @@ Resolution order:
    ``.agents-live.toml``, or ``pyproject.toml`` with a
    ``[tool.agents-live]`` table.
 4. The optional user-configured default workspace.
-5. The sole registered repository, when the registry holds exactly one.
+5. The sole registered repository, when the registry holds exactly one
+   AND the caller opted in (``allow_sole_registered``).
 6. The initialized host-global workspace.
 
 Step 5 precedes the global workspace because ``init`` always initializes
@@ -18,6 +19,16 @@ the host actually manages (issue #173: the dashboard rendered the empty
 global workspace instead). One registered repository is unambiguous;
 two or more without a default are not, and those still fall through to
 the global workspace.
+
+Step 5 is opt-in rather than automatic because this resolver answers for
+every command, not only the read-only ones that needed it. "Exactly one
+repository is registered" is the state of every host that has run
+``repos add`` once, so left automatic it silently supplies a target to
+``start``, ``stop``, ``delete`` and ``migrate`` as well - writing cron
+entries or scheduled tasks into a project the invocation never named
+(issue #192). Read-only callers pass ``allow_sole_registered=True``;
+everything else keeps failing loudly, which is also what makes a command
+added later inherit the safe answer by default.
 
 No script-location fallback exists: it would resolve inside the installed
 package instead of the user's project. With no explicit root, environment
@@ -84,7 +95,29 @@ def _repos_module():
     return repos
 
 
-def resolve_root(explicit: str | Path | None = None) -> Path:
+def _no_root_error(allow_sole_registered: bool) -> ValueError:
+    """The shared "nothing resolved" failure.
+
+    The registry clause appears only when the caller opted in: telling a
+    host-mutating command there was "no single registered repository to
+    fall back to" would describe a fallback it is not allowed to use.
+    """
+    reasons = [
+        f"no {ENV_VAR} set",
+        "no --repo given",
+        f"no marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents",
+    ]
+    if allow_sole_registered:
+        reasons.append("no single registered repository to fall back to")
+    reasons.append("the global workspace is not initialized")
+    return ValueError(
+        "no project root found: " + ", ".join(reasons[:-1])
+        + f", and {reasons[-1]}; run `agents-live init` here, or "
+        "`agents-live repos default <path>` to select a registered project")
+
+
+def resolve_root(explicit: str | Path | None = None, *,
+                 allow_sole_registered: bool = False) -> Path:
     """Return the repository/project root per the resolution order above.
 
     ``explicit`` bypasses the cache; the default resolution is computed
@@ -92,6 +125,11 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     Explicit and environment-supplied roots must exist and be
     directories - a typo must fail loudly here, not silently redirect
     logs and state to a location later code would create.
+
+    ``allow_sole_registered`` opts in to step 5. It is off by default so
+    that a host-mutating command run from an unrelated directory fails
+    loudly instead of acting on whichever project happens to be the only
+    one registered (issue #192).
     """
     if explicit is not None:
         if isinstance(explicit, str) and _is_name_candidate(explicit):
@@ -111,6 +149,12 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
 
     global _cached_default_root, _cached_default_source
     if _cached_default_root is not None:
+        if (_cached_default_source == "sole-registered"
+                and not allow_sole_registered):
+            # A read-only caller resolved first and cached the registry
+            # fallback; handing that root to a mutating caller would
+            # reintroduce #192 through the cache.
+            raise _no_root_error(allow_sole_registered)
         return _cached_default_root
 
     env_value = os.environ.get(ENV_VAR, "").strip()
@@ -133,11 +177,21 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
         return _cached_default_root
 
     registry = repos.load()
-    if len(registry["repos"]) == 1:
+    if allow_sole_registered and len(registry["repos"]) == 1:
         alias = next(iter(registry["repos"]))
-        _cached_default_root = repos.resolve_name(alias, registry)
-        _cached_default_source = "sole-registered"
-        return _cached_default_root
+        try:
+            sole = repos.resolve_name(alias, registry)
+        except ValueError:
+            # The one registered repository has been moved or deleted.
+            # This step is a convenience, so an unusable entry falls
+            # through to the remaining resolution rather than turning a
+            # missing root into a failure about an alias the caller
+            # never mentioned.
+            sole = None
+        if sole is not None:
+            _cached_default_root = sole
+            _cached_default_source = "sole-registered"
+            return _cached_default_root
 
     global_workspace = global_root()
     if config_source(global_workspace) is not None:
@@ -145,13 +199,7 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
         _cached_default_source = "global"
         return _cached_default_root
 
-    raise ValueError(
-        f"no project root found: no {ENV_VAR} set, no --repo given, and no "
-        f"marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents, "
-        "no single registered repository to fall back to, and the global "
-        "workspace is not initialized; run `agents-live init` here, or "
-        "`agents-live repos default <path>` to select a registered project"
-    )
+    raise _no_root_error(allow_sole_registered)
 
 
 def local_root() -> Path | None:

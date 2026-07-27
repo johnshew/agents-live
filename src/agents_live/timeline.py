@@ -38,7 +38,8 @@ try:
 except ImportError:
     import preflight
 
-REPO = resolve_root()
+# Read-only: the registry fallback is safe here (issue #192).
+REPO = resolve_root(allow_sole_registered=True)
 LOGS_DIR = repo_state_dir(REPO) / "logs"
 HOST_LOGS = host_logs_dir()
 
