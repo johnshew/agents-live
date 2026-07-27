@@ -48,7 +48,7 @@ def _module_argv(module: str) -> list[str]:
 SMOKETEST_LOCK_PATH = paths.repo_state_dir(repo_root()) / "smoketest-framework.lock"
 # Ephemeral fixture files the smoketest's agents and handlers write via
 # repo-relative paths. These must stay inside the repository (watch
-# paths are validated to; the write-files.sh handler writes relative to
+# paths are validated to; the write-files handler writes relative to
 # the repo root), so they cannot follow the logs to the state home.
 FIXTURES_REL = "Agents/_smoketest-tmp"
 SMOKETEST_BUSY_EXIT = 75
@@ -61,10 +61,83 @@ SMOKETEST_AGENT_NAMES = (
     "_smoketest-spawn-child",
     "_smoketest-pipeline",
 )
+# The gate brings its own handlers. It used to reach for the project's
+# own Agents/handlers/write-files.sh, which assumed a project that had
+# one and a host with bash and jq; a fresh project or a Windows host
+# failed on the fixture rather than on the framework. These are Python,
+# which the framework dispatches through `uv run` (headless
+# _build_handler_command), so each carries a PEP 723 header and uv
+# provisions the interpreter. Nothing about the handler then depends on
+# what `python` happens to mean in a cron or watcher context.
+WRITE_FILES_HANDLER = "_smoketest-write-files.py"
 SMOKETEST_HANDLER_NAMES = (
+    WRITE_FILES_HANDLER,
     "_smoketest-preprocessor-prep.py",
-    "_smoketest-preprocessor-post.sh",
+    "_smoketest-preprocessor-post.py",
 )
+
+# PEP 723 inline metadata: no dependencies, so `uv run` builds the
+# environment from the standard library alone and never reaches the
+# network to execute a handler.
+HANDLER_PEP723_HEADER = '''\
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+'''
+
+WRITE_FILES_HANDLER_SOURCE = HANDLER_PEP723_HEADER + '''\
+"""Smoketest post-processor: write each entry of a JSON "files" array.
+
+Reads the agent's JSON response on stdin and writes every
+{"path": ..., "content": ...} entry relative to the repository root,
+refusing absolute paths and parent traversal.
+"""
+import json
+import sys
+from pathlib import Path, PurePosixPath
+
+raw = sys.stdin.read()
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError as exc:
+    print(f"[handler] ERROR: input is not valid JSON: {exc}", file=sys.stderr)
+    print(f"[handler] Raw input (first 500 chars): {raw[:500]}", file=sys.stderr)
+    sys.exit(1)
+
+entries = payload.get("files") or []
+if not entries:
+    print("[handler] WARNING: no files in output", file=sys.stderr)
+    print(f"[handler] {payload.get('summary') or 'No summary provided'}",
+          file=sys.stderr)
+    sys.exit(0)
+
+for entry in entries:
+    rel = entry.get("path")
+    if not rel:
+        print("[handler] WARNING: skipping entry with no path", file=sys.stderr)
+        continue
+    parts = PurePosixPath(rel.replace("\\\\", "/"))
+    if parts.is_absolute() or ".." in parts.parts or (len(rel) > 1 and rel[1] == ":"):
+        print(f"[handler] ERROR: rejecting unsafe path: {rel}", file=sys.stderr)
+        continue
+    target = Path(*parts.parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text((entry.get("content") or "") + "\\n", encoding="utf-8")
+    print(f"[handler] wrote: {rel}", file=sys.stderr)
+
+summary = payload.get("summary")
+if summary:
+    print(f"[handler] {summary}", file=sys.stderr)
+'''
+
+
+def _write_smoketest_handlers() -> None:
+    """Install the gate's own handlers into the target project."""
+    handlers_dir = repo_root() / "Agents" / "handlers"
+    handlers_dir.mkdir(parents=True, exist_ok=True)
+    (handlers_dir / WRITE_FILES_HANDLER).write_text(
+        WRITE_FILES_HANDLER_SOURCE, encoding="utf-8")
 
 
 class SmokeFailure(RuntimeError):
@@ -384,7 +457,8 @@ def cleanup() -> tuple[list[str], list[str]]:
     # Also remove legacy non-prefixed names left over from older smoketest runs
     for legacy in ("smoketest-cron", "smoketest-watcher", "smoketest-preprocessor", "smoketest-debounce", "smoketest-spawn-child", "smoketest-pipeline"):
         (agents_dir() / f"{legacy}.md").unlink(missing_ok=True)
-    for legacy in ("smoketest-preprocessor-prep.py", "smoketest-preprocessor-post.sh"):
+    for legacy in ("smoketest-preprocessor-prep.py", "smoketest-preprocessor-post.sh",
+                   "_smoketest-preprocessor-post.sh"):
         (repo_root() / "Agents" / "handlers" / legacy).unlink(missing_ok=True)
     # Remove empty smoketest directories
     for d in (trigger_dir, debounce_dir, repo_root() / FIXTURES_REL):
@@ -604,6 +678,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         current_step = "1/14 create cron agent"
         print(f"[1/14] Creating test cron agent \"{cron_name}\"...")
         ensure_logs_dir()
+        _write_smoketest_handlers()
         (repo_root() / "Agents" / f"{cron_name}.md").write_text(
             "\n".join(
                 [
@@ -611,7 +686,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                     f"runtime: {args.runtime}",
                     f"model: {model}",
                     "mode: plan",
-                    "post-processor: write-files.sh",
+                    f"post-processor: {WRITE_FILES_HANDLER}",
                     'schedule: "0 0 */3 * *"',
                     "---",
                     "",
@@ -692,8 +767,9 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Status reports paths in the host's own separator, so compare on a
         # normalized form rather than asserting a POSIX-shaped string.
         post_processor = (cron_status.get("post-processor") or "").replace("\\", "/")
-        if post_processor != "Agents/handlers/write-files.sh":
-            fail("Expected post-processor=Agents/handlers/write-files.sh, got "
+        expected_pp = f"Agents/handlers/{WRITE_FILES_HANDLER}"
+        if post_processor != expected_pp:
+            fail(f"Expected post-processor={expected_pp}, got "
                  f"{cron_status.get('post-processor')!r}")
         print("  Cron agent: fields verified")
 
@@ -847,23 +923,24 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Create a Python pre-processor that outputs structured JSON
         pre_processor_path = handlers_dir / "_smoketest-preprocessor-prep.py"
         pre_processor_path.write_text(
+            HANDLER_PEP723_HEADER +
             'import json, sys\n'
             'print(json.dumps({"magic": "pre-xyzzy", "data": [1, 2, 3], "skip": False}))\n',
             encoding="utf-8",
         )
 
-        # Create a shell post-processor that reads pre-processor output from stdin
+        # Create a post-processor that reads pre-processor output from stdin
         # and verifies the magic value
-        post_processor_path = handlers_dir / "_smoketest-preprocessor-post.sh"
+        post_processor_path = handlers_dir / "_smoketest-preprocessor-post.py"
         post_processor_path.write_text(
-            '#!/bin/bash\n'
-            'INPUT=$(cat)\n'
-            'if echo "$INPUT" | grep -q "pre-xyzzy"; then\n'
-            '  echo "post-processor: received pre-processor data with magic"\n'
-            'else\n'
-            '  echo "post-processor: MISSING pre-processor data" >&2\n'
-            '  exit 1\n'
-            'fi\n',
+            HANDLER_PEP723_HEADER +
+            'import sys\n'
+            'data = sys.stdin.read()\n'
+            'if "pre-xyzzy" in data:\n'
+            '    print("post-processor: received pre-processor data with magic")\n'
+            'else:\n'
+            '    print("post-processor: MISSING pre-processor data", file=sys.stderr)\n'
+            '    sys.exit(1)\n',
             encoding="utf-8",
         )
         post_processor_path.chmod(0o755)
@@ -873,7 +950,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 "---",
                 "runtime: none",
                 "pre-processor: _smoketest-preprocessor-prep.py",
-                "post-processor: _smoketest-preprocessor-post.sh",
+                "post-processor: _smoketest-preprocessor-post.py",
                 'schedule: "0 0 1 1 *"',
                 "---",
                 "",
@@ -1065,7 +1142,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 f"runtime: {args.runtime}",
                 f"model: {model}",
                 "mode: plan",
-                "post-processor: write-files.sh",
+                f"post-processor: {WRITE_FILES_HANDLER}",
                 'schedule: "0 0 1 1 *"',
                 "---",
                 "",
@@ -1130,16 +1207,15 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         debounce_trigger = debounce_dir / "trigger.txt"
         debounce_trigger.unlink(missing_ok=True)
 
-        # Post-processor: write-files.sh (already exists) writes the output.
-        # Result file is written OUTSIDE the watched directory to avoid
-        # self-triggering the watcher.
+        # The write-files handler writes the output. Result file is written
+        # OUTSIDE the watched directory to avoid self-triggering the watcher.
         (agents_dir() / f"{debounce_name}.md").write_text(
             "\n".join([
                 "---",
                 f"runtime: {args.runtime}",
                 f"model: {model}",
                 "mode: plan",
-                "post-processor: write-files.sh",
+                f"post-processor: {WRITE_FILES_HANDLER}",
                 f"watchPath: {FIXTURES_REL}/{debounce_name}/",
                 "debounce: 5",
                 "---",
@@ -1282,6 +1358,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"PASS - full chain validated ({args.runtime}):")
         print(f"  create -> frontmatter -> status -> activate watcher -> {args.runtime} CLI -> JSON output ->")
         print(f"  post-processor -> file write -> watcher detect -> auto-run -> confirm outputs ->")
+        print(f"  dashboard HTTP agent list ->")
         print(f"  pre-processor -> post-processor (agent:none) -> skip gating ->")
         print(f"  mode: pipeline (PipelineMcp side-channel) ->")
         print(f"  spawn module (detached dispatch) -> debounced dispatch (quiet window) -> stop")

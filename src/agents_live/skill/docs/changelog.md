@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the framework smoketest brings its own handlers. (#171)
+  It set its agents' post-processor to the project's own
+  `write-files.sh`, so the gate assumed a project that happened to have
+  that handler and a host with both bash and `jq`. A fresh project or a
+  Windows host failed on the fixture rather than on the framework. The
+  gate now writes its own ephemeral handlers in Python, each carrying a
+  PEP 723 header so `uv` provisions the interpreter and nothing depends
+  on what `python` means in a cron or watcher context.
+
 - fix: a run someone asks for is no longer discarded as not due. (#172)
   Whether a run came from the clock was inferred from whether the agent
   had a schedule, so `agents-live run <name>` on a scheduled agent was
