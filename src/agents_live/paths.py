@@ -9,12 +9,20 @@ Resolution order:
    ``.agents-live.toml``, or ``pyproject.toml`` with a
    ``[tool.agents-live]`` table.
 4. The optional user-configured default workspace.
-5. The initialized host-global workspace.
+5. The sole registered repository, when the registry holds exactly one.
+6. The initialized host-global workspace.
+
+Step 5 precedes the global workspace because ``init`` always initializes
+that workspace, so it always resolves and would mask the single project
+the host actually manages (issue #173: the dashboard rendered the empty
+global workspace instead). One registered repository is unambiguous;
+two or more without a default are not, and those still fall through to
+the global workspace.
 
 No script-location fallback exists: it would resolve inside the installed
 package instead of the user's project. With no explicit root, environment
-variable, marker, configured default, or initialized global workspace,
-resolution fails loudly. All persisted
+variable, marker, configured default, sole registered repository, or
+initialized global workspace, resolution fails loudly. All persisted
 invocations (cron lines, watcher respawns, dispatches) pin CWD to the
 repo, so the marker walk always succeeds for scheduled work. One
 first-use exception lives at the CLI layer, not here: an explicit agent file
@@ -124,6 +132,13 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
         _cached_default_source = "default"
         return _cached_default_root
 
+    registry = repos.load()
+    if len(registry["repos"]) == 1:
+        alias = next(iter(registry["repos"]))
+        _cached_default_root = repos.resolve_name(alias, registry)
+        _cached_default_source = "sole-registered"
+        return _cached_default_root
+
     global_workspace = global_root()
     if config_source(global_workspace) is not None:
         _cached_default_root = global_workspace
@@ -133,7 +148,9 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     raise ValueError(
         f"no project root found: no {ENV_VAR} set, no --repo given, and no "
         f"marker ({' or '.join(MARKERS)}) in {Path.cwd()} or its parents, "
-        "and the global workspace is not initialized; run `agents-live init`"
+        "no single registered repository to fall back to, and the global "
+        "workspace is not initialized; run `agents-live init` here, or "
+        "`agents-live repos default <path>` to select a registered project"
     )
 
 

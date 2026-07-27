@@ -41,6 +41,7 @@ import argparse
 import asyncio
 import json
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -60,7 +61,7 @@ if (SCRIPTS_DIR / "__init__.py").is_file():
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
     from agents_live import (  # noqa: E402
-        cli_spec, headless, hostruntime, ownership, paths, repos)
+        cli_spec, headless, hostruntime, ownership, paths, preflight, repos)
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
@@ -69,6 +70,7 @@ else:
     import hostruntime  # noqa: E402
     import ownership  # noqa: E402
     import paths  # noqa: E402
+    import preflight  # noqa: E402
     import repos  # noqa: E402
     try:
         AGENTS_LIVE_VERSION = version("agents-live")
@@ -79,9 +81,21 @@ from nicegui import run as ng_run  # noqa: E402
 
 try:
     REPO_ROOT = headless.repo_root()
-except ValueError:
+    REPO_ERROR: str | None = None
+except ValueError as exc:
     REPO_ROOT = None
+    REPO_ERROR = str(exc)
 LOGS_DIR = paths.repo_state_dir(REPO_ROOT) / "logs" if REPO_ROOT else None
+# Shown instead of the agent panel when nothing resolves: an empty table
+# reads as broken agent discovery, so the page has to say what happened
+# and how to choose a project (issue #173).
+NO_PROJECT_HINT = (
+    "No project is selected, so there are no agents to show. Start the "
+    "dashboard inside an initialized project, pass "
+    "`agents-live --repo <path> dashboard`, select a registered project "
+    "with `agents-live repos default <path>`, or run "
+    "`agents-live dashboard --all-repos`."
+)
 # The health beacon is host-scoped (written by `agents-live
 # health-check`), so the panel works with or without a selected repo.
 HEALTH_OK_PATH = paths.health_beacon_path()
@@ -107,6 +121,15 @@ def _require_repo_path(path: Path | None) -> Path:
             "single-repository dashboard requires a project root; "
             "use --all-repos outside an initialized project")
     return path
+
+
+def _scope_label() -> str:
+    """What the view is scoped to, for the header beside the host label.
+
+    Without it an empty table cannot be told apart from the wrong
+    project, and a populated one never says which project it describes.
+    """
+    return str(REPO_ROOT) if REPO_ROOT is not None else "no project selected"
 
 
 # --- Data ---------------------------------------------------------------
@@ -642,7 +665,13 @@ def agent_rows() -> list[dict]:
         owner = (ownership.display_owner(owner_value)
                  if owner_value else "-")
         ok_ago, err_ago, last_status = last_runs(name)
-        unhealthy = last_status == "error" and state != "inactive"
+        # A failed last run only makes this host's view unhealthy while
+        # the agent is still registered here. "stopped" means no trigger
+        # is registered on this host - commonly an agent owned by
+        # another host, whose stale error belongs to that host's view.
+        # "unknown" (scheduler unreadable) keeps the flag rather than
+        # hiding a real failure (issue #176).
+        unhealthy = last_status == "error" and state != "stopped"
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
@@ -991,6 +1020,9 @@ def build_page() -> None:
 
 def _build_page() -> None:
     ui.dark_mode().auto()
+    if REPO_ROOT is None:
+        _build_no_project_page()
+        return
     startup_summary = _refresh_summary()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
@@ -1013,6 +1045,7 @@ def _build_page() -> None:
         with ui.row().classes("items-center gap-4 no-wrap"):
             ui.label("Agents Live").classes("text-xl font-semibold")
             ui.label(host).classes("text-sm text-gray-500")
+            ui.label(_scope_label()).classes("text-sm text-gray-500")
         with ui.row().classes("items-center gap-3 no-wrap"):
             header_actions()
             refresh_age = ui.label().classes("text-sm text-gray-500")
@@ -1037,6 +1070,24 @@ def _build_page() -> None:
         output_log.push(startup_summary)
 
     ui.timer(600.0, _refresh_views, immediate=False)
+
+
+def _build_no_project_page() -> None:
+    """Header plus an explanation, when no project root resolves.
+
+    The agent panel reads agent configs and logs through the project
+    root; with none there is nothing to enumerate, so the page states
+    that rather than rendering a complete but empty dashboard.
+    """
+    with ui.row().classes("w-full items-center gap-4"):
+        ui.label("Agents Live").classes("text-xl font-semibold")
+        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
+        ui.label(_scope_label()).classes("text-sm text-gray-500")
+    with ui.card().classes("w-full"):
+        ui.label("No project selected").classes("text-base font-medium")
+        ui.label(NO_PROJECT_HINT).classes("text-sm text-gray-500")
+        if REPO_ERROR:
+            ui.label(REPO_ERROR).classes("text-xs text-gray-500")
 
 
 def _all_repos_rows() -> list[dict]:
@@ -1068,6 +1119,7 @@ def build_all_repos_page() -> None:
 
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
+        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
         ui.label("All registered repositories (read only)").classes(
             "text-sm text-gray-500")
     names = sorted({row["repo"] for row in rows})
@@ -1110,6 +1162,45 @@ def build_all_repos_page() -> None:
     ).classes("text-sm text-gray-500")
 
 
+PORT_PROBE_TIMEOUT_S = 0.5
+DASHBOARD_HOST = "127.0.0.1"
+
+
+def port_conflict(host: str, port: int) -> str | None:
+    """Describe what already holds ``host:port``, or None if it is free.
+
+    Asked before the server starts, because NiceGUI prints its readiness
+    line before uvicorn attempts the bind: without this, a start that
+    cannot possibly work announces success first and then fails with a
+    bare errno (#175).
+
+    Two different questions, and both have to be asked. Talking to the
+    port finds a server that is already answering there, which a bind
+    does not: Windows lets a second listener bind an address another
+    process is serving unless that process asked for exclusive use, so
+    two servers coexist and the first one wins every connection. That is
+    how a local dashboard ended up invisible behind a WSL relay while
+    reporting no problem (#174). Binding, with exclusive use where the
+    platform offers it, then finds a holder that is not yet answering.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(PORT_PROBE_TIMEOUT_S)
+        if probe.connect_ex((host, port)) == 0:
+            return (f"another server is already answering on {host}:{port}, "
+                    f"and its connections would be served instead of this one")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as binder:
+        # SO_EXCLUSIVEADDRUSE is Windows-only and is what makes the bind
+        # a real question there; elsewhere a plain bind already answers it.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            binder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            binder.bind((host, port))
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            return f"{host}:{port} is not available ({reason})"
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -1130,13 +1221,28 @@ def main() -> None:
         help="Show a read-only view of all registered repositories")
     args = parser.parse_args()
 
+    # Asked before anything is announced or built, and only by the
+    # process that is going to start a server. Under --dev the reloader
+    # re-imports this module as __mp_main__, where the port is held by
+    # the server the parent already started, and the test harness loads
+    # it under a name of its own to reach the page builders without
+    # serving anything. Neither is in a position to ask.
+    if __name__ == "__main__":
+        conflict = port_conflict(DASHBOARD_HOST, args.port)
+        if conflict is not None:
+            preflight.emit_failure(
+                "dashboard",
+                f"{conflict}; retry with --port <other> or stop what holds it",
+                code="port_unavailable")
+            raise SystemExit(1)
+
     if args.all_repos:
         build_all_repos_page()
     else:
         build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
     ui.run(
-        host="127.0.0.1",
+        host=DASHBOARD_HOST,
         port=args.port,
         title="Agents Live",
         native=args.native,

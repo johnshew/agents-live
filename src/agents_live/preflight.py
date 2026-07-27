@@ -93,28 +93,47 @@ def _probe_schedule(operation: str) -> CapabilityFailure | None:
     return _probe_crontab(operation)
 
 
+# Mirrors wintasks.TASK_FOLDER, with the trailing separator schtasks
+# wants when /TN names a folder rather than a single task. This module
+# stays stdlib-only so sibling scripts can import it flat, so the value
+# is repeated rather than imported; the two must agree.
+_TASK_FOLDER_QUERY = "\\AgentsLive\\"
+
+
 def _probe_task_scheduler(operation: str) -> CapabilityFailure | None:
     if shutil.which("schtasks") is None:
         return CapabilityFailure(
             "dependency_missing", "schedule", operation,
             "schtasks was not found on this host")
-    try:
-        completed = subprocess.run(
-            ["schtasks", "/Query", "/TN", "\\", "/FO", "LIST"],
-            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return CapabilityFailure(
-            "host_permission_required", "schedule", operation,
-            f"cannot read the task store: {exc}")
-    # Querying the root folder answers "can this user reach the task
-    # store at all"; an empty root is a normal answer, so only a failure
-    # that says something else is a failure here.
-    if completed.returncode != 0 and "cannot find the file" not in (
-            completed.stderr or "").lower():
-        return CapabilityFailure(
-            "host_permission_required", "schedule", operation,
-            f"schtasks query failed (rc={completed.returncode}): "
-            f"{completed.stderr.strip()[:200]}")
+    # Ask about our own folder first. Querying the root walks the whole
+    # machine's task tree - about 2000 lines on a normal install, and
+    # measured anywhere from 4 to 26 seconds on the same host - which is
+    # slow enough to time out and turn this advisory probe into a hard
+    # failure. Our folder answers the same question ("can this user
+    # reach the task store") in a fraction of a second once anything has
+    # been registered here. Fall back to the root only when that folder
+    # is not there yet, and give the walk room to finish.
+    for target, timeout in ((_TASK_FOLDER_QUERY, 15), ("\\", 120)):
+        try:
+            completed = subprocess.run(
+                ["schtasks", "/Query", "/TN", target, "/FO", "LIST"],
+                capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return CapabilityFailure(
+                "host_permission_required", "schedule", operation,
+                f"cannot read the task store: {exc}")
+        if completed.returncode == 0:
+            return None
+        # A missing folder is a normal answer and proves the store was
+        # reachable, but only the root query can distinguish that from a
+        # refusal, so retry there before deciding.
+        if target != "\\":
+            continue
+        if "cannot find the file" not in (completed.stderr or "").lower():
+            return CapabilityFailure(
+                "host_permission_required", "schedule", operation,
+                f"schtasks query failed (rc={completed.returncode}): "
+                f"{completed.stderr.strip()[:200]}")
     return None
 
 

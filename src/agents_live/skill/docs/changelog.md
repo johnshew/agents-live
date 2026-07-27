@@ -6,6 +6,53 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the Windows release gate no longer fails on a healthy host.
+  Two budgets in the smoketest path were set below the work they wait
+  for. The scheduler preflight asked schtasks to walk the whole machine
+  task tree, about 2000 lines, measured between 4 and 26 seconds on one
+  host, against a 10 second limit; it now queries the folder this tool
+  registers into, the form the rest of the code already used, and falls
+  back to the root walk with room to finish only when that folder does
+  not exist yet. The smoketest also waited 90 seconds for an agent
+  result, but an agent call gets its own timeout on each attempt and is
+  retried once, so a run that succeeds only on the retry can take both
+  budgets. On a high-latency link that is the ordinary case, and the
+  gate failed work the framework went on to finish. Both waits now
+  derive from the retry-inclusive worst case rather than restating a
+  smaller number.
+
+- fix: the dashboard refuses a port something else is already on. (#174, #175)
+  NiceGUI prints its readiness line before uvicorn attempts the bind, so
+  a start that could not work announced success and then failed with a
+  bare errno. Worse on Windows, where a second listener may bind an
+  address another process is serving unless that process asked for
+  exclusive use: two servers coexisted, the first one took every
+  connection, and the new dashboard sat unreachable while reporting no
+  problem. The port is now settled before anything is announced, by
+  talking to it as well as binding it, and a conflict is refused through
+  the standard error envelope as `port_unavailable`.
+
+- fix: the dashboard finds its project and names what it shows. (#173)
+  Started outside a project with a single repository registered but no
+  default selected, the dashboard rendered a complete page whose agent
+  table was empty, with no message and no error, and setting a default
+  made every agent appear. `init` always initializes the host-global
+  workspace, so root resolution reached that empty workspace and stopped
+  there. Resolution now falls back to the sole registered repository
+  before the global workspace, and when several are registered without a
+  default it fails naming the commands that select one. The header shows
+  the project the view is scoped to beside the host label, the
+  `--all-repos` view shows the host too, and a host where nothing
+  resolves gets that explanation in place of an empty table.
+
+- fix: the dashboard Failing filter ignores agents from another host. (#176)
+  The health flag excluded agents whose state was `inactive`, a value no
+  code path produces, so the guard was inert and an old error from a run
+  on the owning host marked an agent as failing in this host's view. It
+  now excludes `stopped`, the state of an agent with no trigger
+  registered here, and keeps flagging `unknown`, where the scheduler
+  could not be read.
+
 - fix: the framework smoketest brings its own handlers. (#171)
   It set its agents' post-processor to the project's own
   `write-files.sh`, so the gate assumed a project that happened to have

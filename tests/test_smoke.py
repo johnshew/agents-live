@@ -26,6 +26,7 @@ import queue
 import shlex
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -583,6 +584,43 @@ class TestRepositoryRegistry(_TempProject):
                 os.chdir(outside)
                 self.assertEqual(
                     paths.resolve_root(self.root.name), self.root)
+            finally:
+                os.chdir(saved)
+
+    def test_sole_registered_repo_resolves_without_a_default(self) -> None:
+        # `init` always initializes the global workspace, so without this
+        # step the one registered project is masked by an empty workspace
+        # and read-only views render nothing at all (issue #173).
+        repos._add(str(self.root))
+        global_root = paths.global_root()
+        global_root.mkdir(parents=True)
+        (global_root / ".agents-live.toml").write_text("", encoding="utf-8")
+        os.environ.pop(paths.ENV_VAR, None)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                self.assertEqual(paths.resolve_root(), self.root)
+                self.assertEqual(paths.resolution_source(), "sole-registered")
+            finally:
+                os.chdir(saved)
+
+    def test_several_registered_repos_without_a_default_say_how_to_choose(self) -> None:
+        # Two registrations are ambiguous: guessing one would be worse
+        # than failing, so the failure has to name the way to select one.
+        other = self.root / "other-repo"
+        other.mkdir()
+        repos._add(str(self.root))
+        repos._add(str(other))
+        os.environ.pop(paths.ENV_VAR, None)
+        with tempfile.TemporaryDirectory() as outside:
+            saved = Path.cwd()
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                with self.assertRaisesRegex(ValueError, "repos default"):
+                    paths.resolve_root()
             finally:
                 os.chdir(saved)
 
@@ -3599,6 +3637,26 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
 
+    def test_dashboard_refuses_a_port_another_server_answers_on(self) -> None:
+        # Silent by construction: Windows lets a second listener bind an
+        # address another process is serving, so before this check the
+        # dashboard announced readiness and then sat unreachable behind
+        # whatever already held the port (#174, #175).
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            port = held.getsockname()[1]
+            result = subprocess.run(
+                ["uv", "run", "--script", str(dashboard), "--port", str(port)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("port_unavailable", result.stderr)
+        self.assertNotIn("ready to go", result.stdout)
+
     def test_dashboard_structured_snapshot_deduplicates_correlated_errors(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
         code = f'''
@@ -3710,6 +3768,55 @@ assert "thishost/ubuntu" in foreign["activate_tip"], foreign["activate_tip"]
 local = rows["beta"]
 assert local["can_claim"] is False, local
 assert local["claim_tip"] == "Already local", local["claim_tip"]
+'''
+        result = subprocess.run(
+            ["uv", "run", "--with", "duckdb", "--with", "nicegui",
+             "--with-editable", ".", "python", "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_dashboard_without_a_project_says_so(self) -> None:
+        """A page with no resolvable project must explain itself.
+
+        A fully rendered dashboard whose agent table is empty is
+        indistinguishable from broken agent discovery (issue #173), so
+        the no-project page states what happened and how to select one.
+        """
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        code = f'''
+import importlib.util
+import sys
+import types
+from unittest import mock
+from agents_live import headless, repos
+
+nicegui = types.ModuleType("nicegui")
+nicegui.app = mock.MagicMock()
+nicegui.ui = mock.MagicMock()
+nicegui.run = mock.MagicMock()
+sys.modules["nicegui"] = nicegui
+headless.repo_root = mock.Mock(
+    side_effect=ValueError("no project root found"))
+repos.collect_status = mock.Mock(return_value={{"ok": True, "repos": []}})
+
+sys.argv = ["dashboard.py", "--all-repos"]
+spec = importlib.util.spec_from_file_location(
+    "agents_live._dashboard_no_project_test", {str(dashboard)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+assert module.REPO_ROOT is None
+assert module._scope_label() == "no project selected"
+nicegui.ui.label.reset_mock()
+module.build_page()
+labels = [
+    call.args[0] for call in nicegui.ui.label.call_args_list if call.args]
+assert "No project selected" in labels, labels
+assert any("repos default" in text for text in labels), labels
+assert any("no project root found" in text for text in labels), labels
 '''
         result = subprocess.run(
             ["uv", "run", "--with", "duckdb", "--with", "nicegui",
