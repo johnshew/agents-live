@@ -22,6 +22,8 @@ from pathlib import Path
 from . import hostruntime, paths, preflight, schedules
 from .headless import (
     AgentsLiveError,
+    HEADLESS_TIMEOUT,
+    HEADLESS_TIMEOUT_RETRIES,
     ensure_logs_dir,
     find_watcher_pid,
     load_agent_config,
@@ -53,6 +55,17 @@ SMOKETEST_LOCK_PATH = paths.repo_state_dir(repo_root()) / "smoketest-framework.l
 FIXTURES_REL = "Agents/_smoketest-tmp"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
+# An agent call gets HEADLESS_TIMEOUT per attempt and is retried, so a
+# run that succeeds only on the retry can legitimately take every
+# attempt's budget. On a high-latency link that is the common case, not
+# the exception. Wait for the framework's real worst case plus room for
+# dispatch and the post-processor that writes the file being waited on;
+# anything less fails work the framework would have completed.
+AGENT_RESULT_TIMEOUT_S = (
+    HEADLESS_TIMEOUT * (HEADLESS_TIMEOUT_RETRIES + 1) + 60)
+# The quiet window the debounce fixture declares, named once so the
+# frontmatter it writes and the wait for its result cannot drift apart.
+DEBOUNCE_WINDOW_S = 5
 SMOKETEST_AGENT_NAMES = (
     "_smoketest-cron",
     "_smoketest-watcher",
@@ -622,7 +635,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         return 1
 
     # Pre-flight: fail fast if environment can't support the smoketest.
-    # Avoids burning 90s on watcher timeouts in sandboxed environments.
+    # Avoids burning the watcher wait budget in sandboxed environments.
     # Only a crontab host watches through inotifywait; a Task Scheduler
     # host watches in-process and has nothing external to probe.
     if hostruntime.native_scheduler() == hostruntime.CRONTAB:
@@ -848,7 +861,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("[6/14] Waiting for watcher to detect change and run agent...")
         # The watcher (started via activate.py) should detect the trigger file
         # written by step 5's handler and automatically invoke run.py.
-        max_wait = 90
+        max_wait = AGENT_RESULT_TIMEOUT_S
         poll_interval = 3
         waited = 0
         watcher_output = ""
@@ -1167,7 +1180,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Wait for the child to produce output
         spawn_log = logs_root() / f"{spawn_agent_name}.log"
-        max_wait = 90
+        max_wait = AGENT_RESULT_TIMEOUT_S
         poll_interval = 3
         waited = 0
         while waited < max_wait:
@@ -1217,7 +1230,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                 "mode: plan",
                 f"post-processor: {WRITE_FILES_HANDLER}",
                 f"watchPath: {FIXTURES_REL}/{debounce_name}/",
-                "debounce: 5",
+                f"debounce: {DEBOUNCE_WINDOW_S}",
                 "---",
                 "",
                 "# Smoketest Debounce Agent",
@@ -1240,7 +1253,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             ]),
             encoding="utf-8",
         )
-        print(f"  Created: {debounce_name}.md (debounce: 5s)")
+        print(f"  Created: {debounce_name}.md (debounce: {DEBOUNCE_WINDOW_S}s)")
 
         # Activate the watcher
         activate_result = subprocess.run(
@@ -1273,9 +1286,10 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
         # Wait for the quiet window to expire and the agent to complete.
         # Third trigger batches at ~T=6, window expires at T=6 + debounce(5) = T~11.
-        # Plus agent runtime = ~30-60s total from last trigger.
+        # The agent call itself starts only after that, so the wait has to
+        # clear the quiet window on top of the agent's own budget.
         debounce_result_file = repo_root() / FIXTURES_REL / f"{debounce_name}-result.txt"
-        max_wait = 120
+        max_wait = AGENT_RESULT_TIMEOUT_S + DEBOUNCE_WINDOW_S
         poll_interval = 3
         waited = 0
         while waited < max_wait:

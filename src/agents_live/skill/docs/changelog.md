@@ -6,6 +6,21 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the Windows release gate no longer fails on a healthy host.
+  Two budgets in the smoketest path were set below the work they wait
+  for. The scheduler preflight asked schtasks to walk the whole machine
+  task tree, about 2000 lines, measured between 4 and 26 seconds on one
+  host, against a 10 second limit; it now queries the folder this tool
+  registers into, the form the rest of the code already used, and falls
+  back to the root walk with room to finish only when that folder does
+  not exist yet. The smoketest also waited 90 seconds for an agent
+  result, but an agent call gets its own timeout on each attempt and is
+  retried once, so a run that succeeds only on the retry can take both
+  budgets. On a high-latency link that is the ordinary case, and the
+  gate failed work the framework went on to finish. Both waits now
+  derive from the retry-inclusive worst case rather than restating a
+  smaller number.
+
 - fix: the dashboard refuses a port something else is already on. (#174, #175)
   NiceGUI prints its readiness line before uvicorn attempts the bind, so
   a start that could not work announced success and then failed with a
