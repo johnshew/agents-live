@@ -41,6 +41,7 @@ import argparse
 import asyncio
 import json
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -60,7 +61,7 @@ if (SCRIPTS_DIR / "__init__.py").is_file():
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
     from agents_live import (  # noqa: E402
-        cli_spec, headless, hostruntime, ownership, paths, repos)
+        cli_spec, headless, hostruntime, ownership, paths, preflight, repos)
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
@@ -69,6 +70,7 @@ else:
     import hostruntime  # noqa: E402
     import ownership  # noqa: E402
     import paths  # noqa: E402
+    import preflight  # noqa: E402
     import repos  # noqa: E402
     try:
         AGENTS_LIVE_VERSION = version("agents-live")
@@ -1143,6 +1145,45 @@ def build_all_repos_page() -> None:
     ).classes("text-sm text-gray-500")
 
 
+PORT_PROBE_TIMEOUT_S = 0.5
+DASHBOARD_HOST = "127.0.0.1"
+
+
+def port_conflict(host: str, port: int) -> str | None:
+    """Describe what already holds ``host:port``, or None if it is free.
+
+    Asked before the server starts, because NiceGUI prints its readiness
+    line before uvicorn attempts the bind: without this, a start that
+    cannot possibly work announces success first and then fails with a
+    bare errno (#175).
+
+    Two different questions, and both have to be asked. Talking to the
+    port finds a server that is already answering there, which a bind
+    does not: Windows lets a second listener bind an address another
+    process is serving unless that process asked for exclusive use, so
+    two servers coexist and the first one wins every connection. That is
+    how a local dashboard ended up invisible behind a WSL relay while
+    reporting no problem (#174). Binding, with exclusive use where the
+    platform offers it, then finds a holder that is not yet answering.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(PORT_PROBE_TIMEOUT_S)
+        if probe.connect_ex((host, port)) == 0:
+            return (f"another server is already answering on {host}:{port}, "
+                    f"and its connections would be served instead of this one")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as binder:
+        # SO_EXCLUSIVEADDRUSE is Windows-only and is what makes the bind
+        # a real question there; elsewhere a plain bind already answers it.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            binder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            binder.bind((host, port))
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            return f"{host}:{port} is not available ({reason})"
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -1163,13 +1204,28 @@ def main() -> None:
         help="Show a read-only view of all registered repositories")
     args = parser.parse_args()
 
+    # Asked before anything is announced or built, and only by the
+    # process that is going to start a server. Under --dev the reloader
+    # re-imports this module as __mp_main__, where the port is held by
+    # the server the parent already started, and the test harness loads
+    # it under a name of its own to reach the page builders without
+    # serving anything. Neither is in a position to ask.
+    if __name__ == "__main__":
+        conflict = port_conflict(DASHBOARD_HOST, args.port)
+        if conflict is not None:
+            preflight.emit_failure(
+                "dashboard",
+                f"{conflict}; retry with --port <other> or stop what holds it",
+                code="port_unavailable")
+            raise SystemExit(1)
+
     if args.all_repos:
         build_all_repos_page()
     else:
         build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
     ui.run(
-        host="127.0.0.1",
+        host=DASHBOARD_HOST,
         port=args.port,
         title="Agents Live",
         native=args.native,

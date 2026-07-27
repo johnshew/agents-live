@@ -6,8 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: the dashboard finds the one registered project and names what it
-  is showing. (#173)
+- fix: the dashboard refuses a port something else is already on. (#174, #175)
+  NiceGUI prints its readiness line before uvicorn attempts the bind, so
+  a start that could not work announced success and then failed with a
+  bare errno. Worse on Windows, where a second listener may bind an
+  address another process is serving unless that process asked for
+  exclusive use: two servers coexisted, the first one took every
+  connection, and the new dashboard sat unreachable while reporting no
+  problem. The port is now settled before anything is announced, by
+  talking to it as well as binding it, and a conflict is refused through
+  the standard error envelope as `port_unavailable`.
+
+- fix: the dashboard finds its project and names what it shows. (#173)
   Started outside a project with a single repository registered but no
   default selected, the dashboard rendered a complete page whose agent
   table was empty, with no message and no error, and setting a default
@@ -20,8 +30,7 @@ history is retained in the source repository.
   `--all-repos` view shows the host too, and a host where nothing
   resolves gets that explanation in place of an empty table.
 
-- fix: the dashboard Failing filter no longer lists agents that are not
-  running on this host. (#176)
+- fix: the dashboard Failing filter ignores agents from another host. (#176)
   The health flag excluded agents whose state was `inactive`, a value no
   code path produces, so the guard was inert and an old error from a run
   on the owning host marked an agent as failing in this host's view. It

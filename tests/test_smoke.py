@@ -26,6 +26,7 @@ import queue
 import shlex
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -3636,6 +3637,26 @@ class TestCliContract(_TempProject):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--dev", result.stdout)
+
+    def test_dashboard_refuses_a_port_another_server_answers_on(self) -> None:
+        # Silent by construction: Windows lets a second listener bind an
+        # address another process is serving, so before this check the
+        # dashboard announced readiness and then sat unreachable behind
+        # whatever already held the port (#174, #175).
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            port = held.getsockname()[1]
+            result = subprocess.run(
+                ["uv", "run", "--script", str(dashboard), "--port", str(port)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("port_unavailable", result.stderr)
+        self.assertNotIn("ready to go", result.stdout)
 
     def test_dashboard_structured_snapshot_deduplicates_correlated_errors(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")
