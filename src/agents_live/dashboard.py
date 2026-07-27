@@ -663,7 +663,13 @@ def agent_rows() -> list[dict]:
         owner = (ownership.display_owner(owner_value)
                  if owner_value else "-")
         ok_ago, err_ago, last_status = last_runs(name)
-        unhealthy = last_status == "error" and state != "inactive"
+        # A failed last run only makes this host's view unhealthy while
+        # the agent is still registered here. "stopped" means no trigger
+        # is registered on this host - commonly an agent owned by
+        # another host, whose stale error belongs to that host's view.
+        # "unknown" (scheduler unreadable) keeps the flag rather than
+        # hiding a real failure (issue #176).
+        unhealthy = last_status == "error" and state != "stopped"
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
