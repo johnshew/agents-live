@@ -6,8 +6,28 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: the framework smoketest refuses a project it was not asked to
-  act on.
+- fix: the framework smoketest brings its own handlers. (#171)
+  It set its agents' post-processor to the project's own
+  `write-files.sh`, so the gate assumed a project that happened to have
+  that handler and a host with both bash and `jq`. A fresh project or a
+  Windows host failed on the fixture rather than on the framework. The
+  gate now writes its own ephemeral handlers in Python, each carrying a
+  PEP 723 header so `uv` provisions the interpreter and nothing depends
+  on what `python` means in a cron or watcher context.
+
+- fix: a run someone asks for is no longer discarded as not due. (#172)
+  Whether a run came from the clock was inferred from whether the agent
+  had a schedule, so `agents-live run <name>` on a scheduled agent was
+  treated as a clock fire and refused by the Windows dueness gate,
+  reporting success while doing nothing. A run now says how it was
+  invoked: persisted schedule entries pass `--scheduled` and only those
+  are checked for dueness. On a crontab host the gate was always open,
+  so nothing there changes but the recorded trigger. Existing schedule
+  entries predate the flag: Windows tasks are corrected the next time
+  their agent converges, and a crontab line is corrected by
+  re-activating the agent.
+
+- fix: the smoketest refuses a project it was not asked to act on.
   It targeted whatever root resolved, so on a host with a configured
   default it created, activated, ran, and deleted agents inside a real
   project and dispatched an agent runtime there, without ever naming
@@ -25,15 +45,13 @@ history is retained in the source repository.
   in process, and the post-processor check compares paths in a
   normalized form rather than asserting a POSIX-shaped string.
 
-- fix: an agent whose name starts with an underscore can register a
-  Windows task. (#171)
+- fix: an underscore-named agent can register a Windows task. (#171)
   Ephemeral agents are named `_name` so they match the `Agents/_*`
   ignore patterns, but the task-name rule required an alphanumeric first
   character and refused every one of them. A leading dot or dash is
   still refused: one hides the task, the other reads as an option.
 
-- feat: the smoketest serves the dashboard and reads its agent list back
-  over HTTP.
+- feat: the smoketest reads the dashboard's agent list over HTTP.
   The dashboard is where several recent defects lived and nothing
   exercised it outside a browser. A new step starts it against the
   project under test and reads the new `/api/agents` endpoint, which

@@ -26,7 +26,7 @@ help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | 
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | heartbeat | uninstall | repos | completions | dashboard
-run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--boot" ] [ "--quiet" ]
+run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--scheduled" ] [ "--boot" ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--yes" ] [ "--transfer-to" VALUE ] [ "--transfer-here" ] [ "--prune-orphans" ]
 stop         ::= "stop" ( NAME | "--name" NAME )
 status       ::= "status" [ NAME ] [ "--all-repos" ]
@@ -48,7 +48,7 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
-| run | in-process | required |  | yes |  | yes | --name, --changed-files, --boot, --quiet | Execute an agent once. |
+| run | in-process | required |  | yes |  | yes | --name, --changed-files, --scheduled, --boot, --quiet | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --yes, --transfer-to, --transfer-here, --prune-orphans | Activate cron and watcher triggers. |
 | stop | in-process | required | schedule | yes |  | yes | --name | Deactivate triggers and keep configuration. |
 | status | in-process | required |  | yes | yes |  | --all-repos | List agents and runtime state. |
