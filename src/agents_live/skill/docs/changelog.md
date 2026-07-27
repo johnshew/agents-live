@@ -6,6 +6,29 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the dashboard finds the one registered project and names what it
+  is showing. (#173)
+  Started outside a project with a single repository registered but no
+  default selected, the dashboard rendered a complete page whose agent
+  table was empty, with no message and no error, and setting a default
+  made every agent appear. `init` always initializes the host-global
+  workspace, so root resolution reached that empty workspace and stopped
+  there. Resolution now falls back to the sole registered repository
+  before the global workspace, and when several are registered without a
+  default it fails naming the commands that select one. The header shows
+  the project the view is scoped to beside the host label, the
+  `--all-repos` view shows the host too, and a host where nothing
+  resolves gets that explanation in place of an empty table.
+
+- fix: the dashboard Failing filter no longer lists agents that are not
+  running on this host. (#176)
+  The health flag excluded agents whose state was `inactive`, a value no
+  code path produces, so the guard was inert and an old error from a run
+  on the owning host marked an agent as failing in this host's view. It
+  now excludes `stopped`, the state of an agent with no trigger
+  registered here, and keeps flagging `unknown`, where the scheduler
+  could not be read.
+
 ## 5.2.0 - 2026-07-26
 
 - fix: convergence no longer fails on the executable it is running from.
