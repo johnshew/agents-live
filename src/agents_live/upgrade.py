@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from . import __version__, adminlog, init, paths, plugins, preflight, repos
@@ -99,14 +98,14 @@ def _upgrade_runtime(roots: list[Path] | None = None,
                             source=str(source) if source else "pypi") as end:
         # The upgrade rewrites this tool's own executables, and on
         # Windows one of them is the running process.
-        started = time.time()
+        launcher_before = plugins.launcher_stamp()
         with plugins.replaceable_entrypoints() as displaced:
             status = subprocess.run(
                 _install_command(uv, source), check=False,
             ).returncode
         kept_launcher = False
         if status != 0:
-            if not plugins.only_the_launcher_failed(started):
+            if not plugins.only_the_launcher_failed(launcher_before):
                 end["status"] = "error"
                 end["level"] = "error"
                 end["message"] = f"uv install exited {status}"

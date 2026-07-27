@@ -80,7 +80,9 @@ from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
 
 try:
-    REPO_ROOT = headless.repo_root()
+    # Read-only, and useless without a project: the dashboard is the
+    # caller the registry fallback exists for (issue #173).
+    REPO_ROOT = paths.resolve_root(allow_sole_registered=True)
     REPO_ERROR: str | None = None
 except ValueError as exc:
     REPO_ROOT = None

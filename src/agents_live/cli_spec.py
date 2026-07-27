@@ -22,6 +22,12 @@ class Cmd:
     module: str
     dispatch: str
     aliases: tuple[str, ...] = ()
+    # How this command resolves a project root: "required" (one must
+    # resolve), "markerless" (may run without one), "none" (never
+    # resolves one), or "registry" - required, but the sole registered
+    # repository may answer it. "registry" is for read-only commands
+    # only: it is what keeps a host-mutating command from acting on a
+    # project the invocation never named (issue #192).
     root: str = "required"
     probes: tuple[str, ...] = ()
     dynamic_probes: str | None = None
@@ -130,7 +136,7 @@ COMMANDS = (
     ),
     Cmd(
         "status", "List agents and runtime state.", "status", "in-process",
-        json=True, all_repos=True,
+        root="registry", json=True, all_repos=True,
         args=(
             Arg(("name",), "Optional agent name.", kind="positional"),
             Arg(("--all-repos",), "Read every registered repository."),
@@ -138,12 +144,12 @@ COMMANDS = (
     ),
     Cmd(
         "logs", "Query logs and correlated event timelines.", "qlog.py",
-        "subprocess", json=True,
+        "subprocess", root="registry", json=True,
         json_args=("--format", "jsonl"), json_shape="records",
         subcommands=(
             Cmd(
                 "timeline", "Show a correlated event timeline.", "timeline.py",
-                "subprocess", json=True,
+                "subprocess", root="registry", json=True,
                 args=(
                     Arg(("filter",), "Agent or content filter.",
                         kind="positional"),
@@ -306,7 +312,7 @@ Persistent install or repair:
     ),
     Cmd(
         "dashboard", "Open the interactive control panel.", "dashboard.py",
-        "subprocess", all_repos=True,
+        "subprocess", root="registry", all_repos=True,
         args=(
             Arg(("--native",), "Open a desktop window."),
             Arg(("--open",), "Open a browser."),

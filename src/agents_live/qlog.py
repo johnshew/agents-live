@@ -77,7 +77,8 @@ from datetime import datetime, timedelta, timezone
 
 from paths import host_logs_dir, repo_state_dir, resolve_root
 
-REPO = resolve_root()
+# Read-only: the registry fallback is safe here (issue #192).
+REPO = resolve_root(allow_sole_registered=True)
 LOGS_DIR = repo_state_dir(REPO) / "logs"
 DEFAULT_LOG = LOGS_DIR / "agents-live.log"
 ARCHIVE_DIR = LOGS_DIR / "archive"

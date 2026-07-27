@@ -329,8 +329,22 @@ def read_agent_output_from_log(
     return agent_output
 
 
+def _is_agent_run(command: str) -> bool:
+    """Whether *command* is an agent run, in either invocation form.
+
+    Two forms exist (``headless.cli_invocation``): the flat checkout
+    dispatches ``uv run --script .../run.py``, while an installed
+    package dispatches the pinned CLI shim with a ``run`` subcommand and
+    no script path anywhere on the line. Testing for ``run.py`` alone
+    therefore never matches an installed tool - which is the form every
+    user of the released package has, so the cleanup this feeds silently
+    found nothing there (issue #193).
+    """
+    return "run.py" in command or "run" in command.split()
+
+
 def _smoketest_run_pids() -> list[int]:
-    """Find live run.py processes for smoke fixtures by command line.
+    """Find live agent-run processes for smoke fixtures by command line.
 
     ``hostruntime.process_command_lines`` is the host-neutral way to ask
     this: ``/proc`` does not exist on Windows, and a process snapshot
@@ -341,7 +355,7 @@ def _smoketest_run_pids() -> list[int]:
     self_pid = os.getpid()
     matches: list[int] = []
     for pid, command in hostruntime.process_command_lines():
-        if pid == self_pid or "run.py" not in command:
+        if pid == self_pid or not _is_agent_run(command):
             continue
         if any(f"--name {name}" in command for name in SMOKETEST_AGENT_NAMES):
             matches.append(pid)
@@ -349,7 +363,7 @@ def _smoketest_run_pids() -> list[int]:
 
 
 def _stop_smoketest_processes() -> list[int]:
-    """Stop every smoke run.py process and its descendants; return survivors.
+    """Stop every smoke agent run and its descendants; return survivors.
 
     ``hostruntime.terminate`` already enumerates and stops a tree the way
     the host requires - process group on POSIX, parent links on Windows -
