@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a run someone asks for is no longer discarded as not due. (#172)
+  Whether a run came from the clock was inferred from whether the agent
+  had a schedule, so `agents-live run <name>` on a scheduled agent was
+  treated as a clock fire and refused by the Windows dueness gate,
+  reporting success while doing nothing. A run now says how it was
+  invoked: persisted schedule entries pass `--scheduled` and only those
+  are checked for dueness. On a crontab host the gate was always open,
+  so nothing there changes but the recorded trigger. Existing schedule
+  entries predate the flag: Windows tasks are corrected the next time
+  their agent converges, and a crontab line is corrected by
+  re-activating the agent.
+
 - fix: the framework smoketest refuses a project it was not asked to
   act on.
   It targeted whatever root resolved, so on a host with a configured
