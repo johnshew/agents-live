@@ -6,6 +6,32 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the framework smoketest runs on a Task Scheduler host. (#171)
+  It stopped at the first Windows-absent primitive every time, so the
+  release gate could only be run from WSL and Windows regressions
+  reached releases unchallenged. Four assumptions are gone: `SIGHUP` is
+  registered only where it exists, process discovery and teardown go
+  through the host-neutral `hostruntime` helpers instead of reading
+  `/proc`, the `inotifywait` preflight is skipped on a host that watches
+  in process, and the post-processor check compares paths in a
+  normalized form rather than asserting a POSIX-shaped string.
+
+- fix: an agent whose name starts with an underscore can register a
+  Windows task. (#171)
+  Ephemeral agents are named `_name` so they match the `Agents/_*`
+  ignore patterns, but the task-name rule required an alphanumeric first
+  character and refused every one of them. A leading dot or dash is
+  still refused: one hides the task, the other reads as an option.
+
+- feat: the smoketest serves the dashboard and reads its agent list back
+  over HTTP.
+  The dashboard is where several recent defects lived and nothing
+  exercised it outside a browser. A new step starts it against the
+  project under test and reads the new `/api/agents` endpoint, which
+  returns the same row model the table binds to. One assertion now
+  covers the dashboard binding a port, resolving the intended project,
+  and enumerating its agents.
+
 ## 5.2.0 - 2026-07-26
 
 - fix: convergence no longer fails on the executable it is running from.

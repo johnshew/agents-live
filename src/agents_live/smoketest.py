@@ -15,6 +15,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from . import hostruntime, paths, preflight, schedules
@@ -242,116 +244,91 @@ def read_agent_output_from_log(
 
 
 def _smoketest_run_pids() -> list[int]:
-    """Find live run.py processes for smoke fixtures using exact argv tokens."""
+    """Find live run.py processes for smoke fixtures by command line.
+
+    ``hostruntime.process_command_lines`` is the host-neutral way to ask
+    this: ``/proc`` does not exist on Windows, and a process snapshot
+    there carries no arguments, which are what name the agent. The
+    fixture names are distinctive enough (``_smoketest-``) that a
+    substring match cannot reach a real agent.
+    """
+    self_pid = os.getpid()
     matches: list[int] = []
-    proc_root = Path("/proc")
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
+    for pid, command in hostruntime.process_command_lines():
+        if pid == self_pid or "run.py" not in command:
             continue
-        pid = int(entry.name)
-        if pid == os.getpid():
-            continue
-        try:
-            args = [part.decode("utf-8", "replace") for part in
-                    (entry / "cmdline").read_bytes().split(b"\0") if part]
-        except OSError:
-            continue
-        if not any(Path(arg).name == "run.py" for arg in args):
-            continue
-        for index, arg in enumerate(args[:-1]):
-            if arg == "--name" and args[index + 1] in SMOKETEST_AGENT_NAMES:
-                matches.append(pid)
-                break
+        if any(f"--name {name}" in command for name in SMOKETEST_AGENT_NAMES):
+            matches.append(pid)
     return matches
 
 
-def _process_stat(pid: int) -> tuple[str, str] | None:
-    """Return (start ticks, state), distinguishing reused PIDs and zombies."""
+def _stop_smoketest_processes() -> list[int]:
+    """Stop every smoke run.py process and its descendants; return survivors.
+
+    ``hostruntime.terminate`` already enumerates and stops a tree the way
+    the host requires - process group on POSIX, parent links on Windows -
+    so cleanup does not reconstruct one itself.
+    """
+    pids = _smoketest_run_pids()
+    for pid in pids:
+        hostruntime.terminate(pid)
+    return sorted(pid for pid in pids if hostruntime.is_alive(pid))
+
+
+# The dashboard is a separate process with heavier dependencies, so give
+# it room to resolve and start before calling the probe failed.
+DASHBOARD_READY_TIMEOUT_S = 120
+
+
+def _check_dashboard_lists_agents(expected: list[str]) -> None:
+    """Serve the dashboard and read its agent list back over HTTP.
+
+    The page draws over a websocket, so the served HTML never carries an
+    agent name and a GET of ``/`` would prove only that a port was
+    bound. ``/api/agents`` is the row model the table itself binds to,
+    which makes "the dashboard started, resolved this project, and can
+    see its agents" a single assertion from outside the process - the
+    part no in-process check reaches.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    process = subprocess.Popen(
+        [*_module_argv("cli"), "--repo", str(repo_root()),
+         "dashboard", "--port", str(port)],
+        cwd=repo_root(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+    )
+    url = f"http://127.0.0.1:{port}/api/agents"
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    closing_paren = stat.rfind(")")
-    fields = stat[closing_paren + 2:].split()
-    if closing_paren < 0 or len(fields) <= 19:
-        return None
-    return fields[19], fields[0]
-
-
-def _process_identity(pid: int) -> str | None:
-    stat = _process_stat(pid)
-    return stat[0] if stat is not None else None
-
-
-def _smoketest_process_tree() -> dict[int, str]:
-    """Snapshot smoke run.py processes and every live descendant."""
-    proc_root = Path("/proc")
-    parents: dict[int, int] = {}
-    identities: dict[int, str] = {}
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        try:
-            status = (entry / "status").read_text(encoding="utf-8")
-            parent_line = next(line for line in status.splitlines() if line.startswith("PPid:"))
-            identity = _process_identity(pid)
-            if identity is None:
-                continue
-            parents[pid] = int(parent_line.split()[1])
-            identities[pid] = identity
-        except (OSError, StopIteration, ValueError):
-            continue
-
-    selected = set(_smoketest_run_pids())
-    while True:
-        descendants = {pid for pid, parent in parents.items() if parent in selected}
-        expanded = selected | descendants
-        if expanded == selected:
-            break
-        selected = expanded
-    return {pid: identities[pid] for pid in selected if pid in identities}
-
-
-def _identity_is_live(pid: int, identity: str) -> bool:
-    stat = _process_stat(pid)
-    return stat is not None and stat[0] == identity and stat[1] != "Z"
-
-
-def _stop_process_tree(processes: dict[int, str]) -> list[int]:
-    """Stop a process-tree snapshot with TERM then KILL; return survivors."""
-    pending = dict(processes)
-    for pid, identity in pending.items():
-        if not _identity_is_live(pid, identity):
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    deadline = time.monotonic() + 5
-    while pending and time.monotonic() < deadline:
-        pending = {
-            pid: identity for pid, identity in pending.items()
-            if _identity_is_live(pid, identity)
-        }
-        if pending:
-            time.sleep(0.1)
-    for pid, identity in pending.items():
-        if not _identity_is_live(pid, identity):
-            continue
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    deadline = time.monotonic() + 2
-    while pending and time.monotonic() < deadline:
-        pending = {
-            pid: identity for pid, identity in pending.items()
-            if _identity_is_live(pid, identity)
-        }
-        if pending:
-            time.sleep(0.1)
-    return sorted(pending)
+        deadline = time.monotonic() + DASHBOARD_READY_TIMEOUT_S
+        payload = None
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                output = (process.stdout.read() if process.stdout else "") or ""
+                fail(f"Dashboard exited before serving (exit {process.returncode}): "
+                     f"{output.strip()[-500:]}")
+            try:
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except (urllib.error.URLError, OSError, json.JSONDecodeError):
+                time.sleep(1)
+        if payload is None:
+            fail(f"Dashboard did not answer {url} within {DASHBOARD_READY_TIMEOUT_S}s")
+        print(f"  Served: {url}")
+        print(f"  Scope: host={payload.get('host')} repo={payload.get('repo')}")
+        if payload.get("repo") != str(repo_root()):
+            fail(f"Dashboard scoped to {payload.get('repo')!r}, "
+                 f"expected {str(repo_root())!r}")
+        listed = {agent.get("name") for agent in payload.get("agents", [])}
+        missing = [name for name in expected if name not in listed]
+        if missing:
+            fail(f"Dashboard agent list missing {missing}; listed {sorted(listed)}")
+        for name in expected:
+            print(f"  Listed: {name}")
+    finally:
+        hostruntime.terminate(process.pid)
 
 
 def cleanup() -> tuple[list[str], list[str]]:
@@ -369,7 +346,7 @@ def cleanup() -> tuple[list[str], list[str]]:
     # match the `Agents/_*` and `Agents/handlers/_*` gitignore patterns and
     # never get caught by git-sync mid-run. Keep all names in this script in
     # sync with .gitignore.
-    surviving_pids = _stop_process_tree(_smoketest_process_tree())
+    surviving_pids = _stop_smoketest_processes()
     if surviving_pids:
         residue.append(f"smoketest child processes still active: {surviving_pids}")
     for name in SMOKETEST_AGENT_NAMES:
@@ -454,7 +431,12 @@ def main() -> int:
         return SMOKETEST_BUSY_EXIT
     _record_lock_owner(args.runtime, model_for_verdict)
 
-    handled_signals = (signal.SIGTERM, signal.SIGHUP)
+    # Windows has no SIGHUP; SIGTERM exists on both platforms.
+    handled_signals = tuple(
+        getattr(signal, name)
+        for name in ("SIGTERM", "SIGHUP")
+        if hasattr(signal, name)
+    )
     previous_handlers = {signum: signal.getsignal(signum) for signum in handled_signals}
 
     def interrupt_handler(signum: int, _frame: object) -> None:
@@ -546,43 +528,46 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
 
     # Pre-flight: fail fast if environment can't support the smoketest.
     # Avoids burning 90s on watcher timeouts in sandboxed environments.
-    if not shutil.which("inotifywait"):
-        preflight.emit_failure(
-            "smoketest",
-            "inotifywait not found; install it with "
-            "`sudo apt install inotify-tools`",
-            code="dependency_missing")
-        _write_verdict("FAIL", failed_step="preflight", reason="inotifywait missing",
-                       started_at=started_at, runtime=args.runtime, model=model_for_verdict)
-        return 1
-    # Quick inotify syscall check (sandbox may block even if binary exists).
-    # `-t 1` so inotifywait exits cleanly after 1s with code 2; `-t 0` means
-    # wait indefinitely per the manpage, which would just hit our subprocess
-    # timeout and falsely report sandboxing.
-    try:
-        probe = subprocess.run(
-            ["inotifywait", "-t", "1", "-e", "close_write", "/dev/null"],
-            capture_output=True, timeout=5,
-        )
-        # exit code 2 = timeout (expected), 0 = event detected, both fine
-        if probe.returncode not in (0, 1, 2):
-            msg = f"inotifywait unusable (exit {probe.returncode})"
+    # Only a crontab host watches through inotifywait; a Task Scheduler
+    # host watches in-process and has nothing external to probe.
+    if hostruntime.native_scheduler() == hostruntime.CRONTAB:
+        if not shutil.which("inotifywait"):
             preflight.emit_failure(
                 "smoketest",
-                f"{msg}; this smoketest requires unsandboxed execution",
-                code="sandbox_unsupported")
-            _write_verdict("FAIL", failed_step="preflight", reason=msg,
+                "inotifywait not found; install it with "
+                "`sudo apt install inotify-tools`",
+                code="dependency_missing")
+            _write_verdict("FAIL", failed_step="preflight", reason="inotifywait missing",
                            started_at=started_at, runtime=args.runtime, model=model_for_verdict)
             return 1
-    except (subprocess.TimeoutExpired, OSError) as e:
-        preflight.emit_failure(
-            "smoketest",
-            f"inotifywait blocked ({e}); this smoketest requires "
-            "unsandboxed execution",
-            code="sandbox_unsupported")
-        _write_verdict("FAIL", failed_step="preflight", reason=f"inotifywait blocked: {e}",
-                       started_at=started_at, runtime=args.runtime, model=model_for_verdict)
-        return 1
+        # Quick inotify syscall check (sandbox may block even if binary exists).
+        # `-t 1` so inotifywait exits cleanly after 1s with code 2; `-t 0` means
+        # wait indefinitely per the manpage, which would just hit our subprocess
+        # timeout and falsely report sandboxing.
+        try:
+            probe = subprocess.run(
+                ["inotifywait", "-t", "1", "-e", "close_write", "/dev/null"],
+                capture_output=True, timeout=5,
+            )
+            # exit code 2 = timeout (expected), 0 = event detected, both fine
+            if probe.returncode not in (0, 1, 2):
+                msg = f"inotifywait unusable (exit {probe.returncode})"
+                preflight.emit_failure(
+                    "smoketest",
+                    f"{msg}; this smoketest requires unsandboxed execution",
+                    code="sandbox_unsupported")
+                _write_verdict("FAIL", failed_step="preflight", reason=msg,
+                               started_at=started_at, runtime=args.runtime, model=model_for_verdict)
+                return 1
+        except (subprocess.TimeoutExpired, OSError) as e:
+            preflight.emit_failure(
+                "smoketest",
+                f"inotifywait blocked ({e}); this smoketest requires "
+                "unsandboxed execution",
+                code="sandbox_unsupported")
+            _write_verdict("FAIL", failed_step="preflight", reason=f"inotifywait blocked: {e}",
+                           started_at=started_at, runtime=args.runtime, model=model_for_verdict)
+            return 1
 
     model = args.model or ("sonnet" if args.runtime in ("claude", "agency claude") else "claude-haiku-4.5")
 
@@ -595,8 +580,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
     print(f"Using runtime: {args.runtime}, model: {model}")
 
     try:
-        current_step = "1/13 create cron agent"
-        print(f"[1/13] Creating test cron agent \"{cron_name}\"...")
+        current_step = "1/14 create cron agent"
+        print(f"[1/14] Creating test cron agent \"{cron_name}\"...")
         ensure_logs_dir()
         (repo_root() / "Agents" / f"{cron_name}.md").write_text(
             "\n".join(
@@ -634,8 +619,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"  Created: Agents/{cron_name}.md")
 
         print("")
-        current_step = "2/13 create watcher agent"
-        print(f"[2/13] Creating test watcher agent \"{watcher_name}\"...")
+        current_step = "2/14 create watcher agent"
+        print(f"[2/14] Creating test watcher agent \"{watcher_name}\"...")
         trigger_dir.mkdir(parents=True, exist_ok=True)
         (repo_root() / "Agents" / f"{watcher_name}.md").write_text(
             "\n".join(
@@ -670,8 +655,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"  Created: Agents/{watcher_name}.md")
 
         print("")
-        current_step = "3/13 verify status"
-        print("[3/13] Verifying status reads frontmatter correctly...")
+        current_step = "3/14 verify status"
+        print("[3/14] Verifying status reads frontmatter correctly...")
         cron_status = json.loads(run_status("--json", cron_name))
         print("  Cron agent status JSON:")
         print(f"  {json.dumps(cron_status, separators=(',', ':'))}")
@@ -683,8 +668,12 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             fail("Expected mode=plan")
         if cron_status.get("state") != "stopped":
             fail("Expected state=stopped (not yet activated)")
-        if cron_status.get("post-processor") != "Agents/handlers/write-files.sh":
-            fail("Expected post-processor=Agents/handlers/write-files.sh")
+        # Status reports paths in the host's own separator, so compare on a
+        # normalized form rather than asserting a POSIX-shaped string.
+        post_processor = (cron_status.get("post-processor") or "").replace("\\", "/")
+        if post_processor != "Agents/handlers/write-files.sh":
+            fail("Expected post-processor=Agents/handlers/write-files.sh, got "
+                 f"{cron_status.get('post-processor')!r}")
         print("  Cron agent: fields verified")
 
         watcher_status = json.loads(run_status("--json", watcher_name))
@@ -716,14 +705,15 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Status checks: PASS")
 
         print("")
-        current_step = "4/13 activate watcher"
-        print(f"[4/13] Activating watcher via activate.py for \"{watcher_name}\"...")
+        current_step = "4/14 activate watcher"
+        print(f"[4/14] Activating watcher via activate.py for \"{watcher_name}\"...")
         watcher_log = logs_root() / f"{watcher_name}.log"
         try:
             watcher_log_offset = watcher_log.stat().st_size
         except FileNotFoundError:
             watcher_log_offset = 0
-        if not shutil.which("inotifywait"):
+        if (hostruntime.native_scheduler() == hostruntime.CRONTAB
+                and not shutil.which("inotifywait")):
             fail("inotifywait not found. Install with: sudo apt install inotify-tools")
         activate_result = subprocess.run(
             [*_module_argv("activate"), "--name", watcher_name],
@@ -738,8 +728,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print(f"  Watcher confirmed running (pid: {watcher_pid})")
 
         print("")
-        current_step = "5/13 run cron agent"
-        print(f"[5/13] Running cron agent via run.py (simulates cron trigger)...")
+        current_step = "5/14 run cron agent"
+        print(f"[5/14] Running cron agent via run.py (simulates cron trigger)...")
         print(f"  Invoking: run.py --name {cron_name}")
         run_output = run_agent(cron_name)
         for line in run_output.strip().splitlines():
@@ -757,8 +747,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Trigger file verified")
 
         print("")
-        current_step = "6/13 watcher dispatch"
-        print("[6/13] Waiting for watcher to detect change and run agent...")
+        current_step = "6/14 watcher dispatch"
+        print("[6/14] Waiting for watcher to detect change and run agent...")
         # The watcher (started via activate.py) should detect the trigger file
         # written by step 5's handler and automatically invoke run.py.
         max_wait = 90
@@ -794,8 +784,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Watcher confirmed: status=pass, magic=xyzzy")
 
         print("")
-        current_step = "7/13 confirm outputs"
-        print("[7/13] Confirming outputs...")
+        current_step = "7/14 confirm outputs"
+        print("[7/14] Confirming outputs...")
         if not trigger_file.is_file():
             fail("Trigger file missing after run")
         if trigger_file.read_text(encoding="utf-8").strip() != "smoketest-trigger-fired":
@@ -821,8 +811,14 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Output confirmation: PASS")
 
         print("")
-        current_step = "8/13 pre-processor pipeline"
-        print("[8/13] Validating pre-processor -> post-processor pipeline (agent: none)...")
+        current_step = "8/14 dashboard http"
+        print("[8/14] Serving the dashboard and reading its agent list over HTTP...")
+        _check_dashboard_lists_agents([cron_name, watcher_name])
+        print("  Dashboard: PASS")
+
+        print("")
+        current_step = "9/14 pre-processor pipeline"
+        print("[9/14] Validating pre-processor -> post-processor pipeline (agent: none)...")
         preprocessor_name = "_smoketest-preprocessor"
         handlers_dir = repo_root() / "Agents" / "handlers"
         handlers_dir.mkdir(parents=True, exist_ok=True)
@@ -904,8 +900,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  pre-processor -> post-processor (agent: none): PASS")
 
         print("")
-        current_step = "9/13 skip gating"
-        print("[9/13] Validating pre-processor skip gating...")
+        current_step = "10/14 skip gating"
+        print("[10/14] Validating pre-processor skip gating...")
         # Rewrite the pre-processor to output skip: true
         pre_processor_path.write_text(
             'import json\n'
@@ -938,8 +934,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Skip gating: PASS")
 
         print("")
-        current_step = "10/13 pipeline MCP"
-        print("[10/13] Validating mode: pipeline routes agent through PipelineMcp...")
+        current_step = "11/14 pipeline MCP"
+        print("[11/14] Validating mode: pipeline routes agent through PipelineMcp...")
         # mode: pipeline is the framework's in-process MCP side-channel. The
         # agent below has no MCPs of its own; the framework brings up
         # PipelineMcp, injects --mcp-config / --additional-mcp-config, and the
@@ -1025,8 +1021,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  mode: pipeline (PipelineMcp side-channel): PASS")
 
         print("")
-        current_step = "11/13 spawn module"
-        print("[11/13] Validating spawn module (detached dispatch)...")
+        current_step = "12/14 spawn module"
+        print("[12/14] Validating spawn module (detached dispatch)...")
         # Tests the shared spawn utility from its portable location:
         # - find_uv() resolves the binary in any context
         # - spawn_agent() launches a detached child (start_new_session)
@@ -1101,8 +1097,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         print("  Spawn module (detached dispatch): PASS")
 
         print("")
-        current_step = "12/13 debounced dispatch"
-        print("[12/13] Validating debounced watcher dispatch (in-process quiet window)...")
+        current_step = "13/14 debounced dispatch"
+        print("[13/14] Validating debounced watcher dispatch (in-process quiet window)...")
         # This tests the full debounce path: watcher fires, but instead of
         # immediate dispatch, batches accumulate until the in-process quiet
         # window expires. Trigger multiple times, verify only one agent run
@@ -1232,8 +1228,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         debounce_result_file.unlink(missing_ok=True)
 
         print("")
-        current_step = "13/13 stop"
-        print("[13/13] Tearing down test agents...")
+        current_step = "14/14 stop"
+        print("[14/14] Tearing down test agents...")
         stop_watcher(watcher_name)
         subprocess.run([*_module_argv("stop"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
         subprocess.run([*_module_argv("stop"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
