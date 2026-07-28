@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["PyYAML", "mcp[cli]", "jsonschema", "duckdb"]
+# dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema", "duckdb"]
 # ///
 """Export-safe smoke tests for the agents-live package (§5.1 "exported
 test suite", F4).

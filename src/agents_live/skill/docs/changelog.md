@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the mcp dependency is held below 2.0. (#205) That release,
+  published today, removes `mcp.server.fastmcp`, which the pipeline
+  server is written against, and the dependency carried no upper bound,
+  so any new install resolved it and pipeline mode failed at import. The
+  suite went from green to three errors within the hour with no change
+  on this side, which is the signal a user would have got on a fresh
+  install. The bound is lifted by the port to the 2.x server API, not
+  before.
 - fix: an upgrade now names the watchers it left on the previous
   version. (#188) Replacing the runtime does not stop the processes
   already running it - Windows renames a locked shim aside and the
