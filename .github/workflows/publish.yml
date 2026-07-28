@@ -26,7 +26,7 @@ jobs:
       # The release gates (.agents/release.md) all run here too, so a
       # manually dispatched tag can never publish an unaudited artifact.
       - run: uv run --script tools/pre-release-audit.py
-      - run: uv run --with-editable . python -m unittest tests.test_smoke
+      - run: uv run --with-editable . --with duckdb python -m unittest tests.test_smoke
       - run: uv build
       # Attach the exact artifacts going to PyPI before publishing, so a
       # failed upload can be rerun without hitting PyPI's duplicate check.

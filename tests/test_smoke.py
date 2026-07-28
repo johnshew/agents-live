@@ -8263,6 +8263,24 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         # commands that then run.
         self.assertIn(command, module._gate_commands())
 
+    def test_both_workflows_run_the_suite_the_same_way(self) -> None:
+        # Neither workflow uses the PEP 723 script form, so each names
+        # the suite's dependencies itself. test.yml gained duckdb with
+        # the query tests and publish.yml did not, which failed the
+        # release gate after the tag and the GitHub release existed
+        # (#218).
+        root = Path(__file__).resolve().parents[1]
+        commands = {}
+        for name in ("test.yml", "publish.yml"):
+            text = (root / ".github" / "workflows" / name).read_text(
+                encoding="utf-8")
+            runs = [line.split("run:", 1)[1].strip()
+                    for line in text.splitlines()
+                    if "run:" in line and "tests.test_smoke" in line]
+            self.assertEqual(len(runs), 1, name)
+            commands[name] = runs[0]
+        self.assertEqual(commands["test.yml"], commands["publish.yml"])
+
 
 def _catches_value_error(handler: ast.ExceptHandler) -> bool:
     """Whether *handler* would catch a failed root resolution."""
