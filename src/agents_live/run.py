@@ -186,6 +186,13 @@ def main() -> int:
                 and not schedules.claim_due_minute(config.name, config.schedule)):
             slog.event(level="info", phase="skip", status="not-due",
                        trigger=trigger)
+            # Silence read as a completed run to anyone hand-running a
+            # scheduled agent. --quiet is on every persisted scheduled
+            # invocation, so cron and Task Scheduler stay as quiet as
+            # they were.
+            if not args.quiet:
+                print(f"Skipped: '{config.name}' is not due "
+                      f"(schedule: {config.schedule}).")
             return 0
 
         # --- Pre-dispatch ownership check -------------------------------------

@@ -5651,6 +5651,35 @@ class TestDueness(_TempProject):
         return mock.patch.object(hostruntime, "native_scheduler",
                                  return_value=hostruntime.TASK_SCHEDULER)
 
+    def test_a_declined_fire_says_so_on_a_hand_run(self) -> None:
+        # The skip reached the structured log and nothing else, so a
+        # scheduled agent run by hand outside its firing minute printed
+        # nothing and exited 0, which reads as a completed run (#187).
+        code, out = self._decline()
+        self.assertEqual(code, 0)
+        self.assertIn("is not due", out)
+        self.assertIn(TEST_CRON_SCHEDULE, out)
+
+    def test_a_declined_fire_stays_silent_when_quiet(self) -> None:
+        # Every persisted scheduled invocation carries --quiet, so cron
+        # mail and Task Scheduler see exactly what they saw before.
+        code, out = self._decline("--quiet")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+
+    def _decline(self, *extra: str):
+        self.write_agent("demo", AGENT_DEFINITION.replace(
+            "pre-processor: Agents/handlers/prep.py\n", ""))
+        with (
+            mock.patch.object(schedules, "claim_due_minute",
+                              return_value=False),
+            mock.patch.object(
+                sys, "argv",
+                ["run.py", "--name", "demo", "--scheduled", *extra]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            return run.main(), out.getvalue()
+
     def test_a_crontab_host_never_second_guesses_its_own_scheduler(self) -> None:
         # Cron fires only at firing times; asking again would be a way
         # to disagree with it, not a safeguard.
