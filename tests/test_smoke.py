@@ -8204,6 +8204,24 @@ class TestAgreementsAcrossModules(unittest.TestCase):
             smoketest.AGENT_RESULT_TIMEOUT_S,
             headless.HEADLESS_TIMEOUT * (headless.HEADLESS_TIMEOUT_RETRIES + 1))
 
+    def test_the_busy_exit_status_means_the_same_on_both_sides(self) -> None:
+        # smoketest returns this to say "another run holds the lock" and
+        # health_check reads it to tell that apart from a real failure.
+        # Each module spells the number itself, so a change to one side
+        # turns a declined run into a reported failure with nothing
+        # failing.
+        self.assertEqual(smoketest.SMOKETEST_BUSY_EXIT,
+                         health_check.SMOKETEST_BUSY_EXIT)
+
+    def test_smoketest_fixtures_are_exempt_from_ownership(self) -> None:
+        # run.py exempts _-prefixed agents from the ownership gate so
+        # the smoketest passes whatever the registry says. A fixture
+        # renamed without the prefix would be skipped as foreign on any
+        # host that does not own it, and the step would fail for a
+        # reason nothing in it mentions.
+        for name in smoketest.SMOKETEST_AGENT_NAMES:
+            self.assertTrue(name.startswith("_"), name)
+
     def test_every_capability_a_command_declares_can_be_probed(self) -> None:
         # A probe named in the spec but missing here raises KeyError
         # inside the preflight, on that command only, on the host that
