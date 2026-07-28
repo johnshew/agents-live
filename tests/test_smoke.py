@@ -3887,6 +3887,11 @@ class TestCliContract(_TempProject):
             code, output = self._dashboards_main("stop", "--port", "8231")
         self.assertEqual(code, 0, output)
         self.assertIn("Stopped the dashboard on port 8231", output)
+        # A terminated child stays a zombie on POSIX until its parent
+        # reaps it, and a zombie still answers a liveness probe. Only
+        # this test is the parent of the process it stopped; a real
+        # dashboard is reaped by init.
+        served.wait(timeout=30)
         self.assertFalse(hostruntime.is_alive(served.pid))
         self.assertEqual(dashboards.running(), [])
 
