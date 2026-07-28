@@ -6,27 +6,26 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: a credential passed on a command line no longer reaches
-  `admin.log`. (#212) Every administrative event records the invoking
-  argv, so a state change traces back to the cron entry, CLI
-  invocation, or agent that caused it. It was recorded verbatim, which
-  meant a token or password given as an argument was written to a host
-  log in plaintext and printed back by `agents-live logs` on demand.
-  The value after a credential flag, and the value half of a
-  `--flag=value` form, are replaced with a placeholder; the flag stays,
-  because the shape of the invocation is the diagnostic and the value
-  never was.
-- fix: a spawned agent is judged by its exit status rather than by how
-  long it lived. (#211) The dispatcher waited a second and a half and
-  reported any child that had already finished as having died,
-  whatever its status, which its caller reads as a failed dispatch. The
-  runs most likely to finish inside that window finish on purpose: a
-  pre-processor that returns skip, an agent this host does not own. So
-  whether a dispatch counted as successful came down to a race between
-  the host's speed and a sleep, passing on a slow machine and failing
-  on a fast one. Only a non-zero status is a failure now. The log
-  handle opened for the child is also closed in the parent, where it
-  had been leaking for the life of the caller.
+- fix: a credential on a command line no longer reaches `admin.log`.
+  (#212) Every administrative event records the invoking argv, so a
+  state change traces back to the cron entry, CLI invocation, or agent
+  that caused it. It was recorded verbatim, which meant a token or
+  password given as an argument was written to a host log in plaintext
+  and printed back by `agents-live logs` on demand. The value after a
+  credential flag, and the value half of a `--flag=value` form, are
+  replaced with a placeholder; the flag stays, because the shape of the
+  invocation is the diagnostic and the value never was.
+- fix: a spawned agent is judged by its status, not by how long it ran.
+  (#211) The dispatcher waited a second and a half and reported any
+  child that had already finished as having died, whatever its status,
+  which its caller reads as a failed dispatch. The runs most likely to
+  finish inside that window finish on purpose: a pre-processor that
+  returns skip, an agent this host does not own. So whether a dispatch
+  counted as successful came down to a race between the host's speed
+  and a sleep, passing on a slow machine and failing on a fast one.
+  Only a non-zero status is a failure now. The log handle opened for
+  the child is also closed in the parent, where it had been leaking for
+  the life of the caller.
 - fix: the export-clean gate reads path names, not just file contents.
   (#213) It scanned the inside of known text files, so a personal path
   in a name shipped whatever the file held; two files named for
@@ -36,28 +35,28 @@ history is retained in the source repository.
   exclusions compared forward-slashed patterns against a backslashed
   path, so the runtime log and data directories were skipped on POSIX
   only.
-- fix: a scheduled agent that declines a fire says why. (#187) A native
-  trigger can be coarser than the expression it came from, so the
-  dispatcher checks each fire and declines the ones that are not
+- fix: a scheduled agent that declines a fire says why. (#187)
+  A native trigger can be coarser than the expression it came from, so
+  the dispatcher checks each fire and declines the ones that are not
   firing times. The decline reached the structured log and nothing
   else, so running a scheduled agent by hand outside its firing minute
   printed nothing and exited 0, which reads as a completed run. The
   line is subject to `--quiet`, which every persisted scheduled
   invocation carries, so cron mail and Task Scheduler see what they saw
   before.
-- perf: the Windows process table is read in process instead of through
-  PowerShell. (#168) Every question about whether a watcher is running
-  comes back to this one read: `status`, the dashboard, the health
-  loop, `stop`, the orphan sweep, and an upgrade naming what it left
-  behind. Asking CIM for it meant starting PowerShell, which cost
-  seconds and, after #165 made the read happen once per pass rather
-  than once per agent, was most of what a dashboard page build spent
-  its time on. The pids now come from a process snapshot and the
-  arguments from `ntdll` directly. Measured on a host running about 260
-  processes: 35ms against 1.3s warm, and against 3.0s when PowerShell
-  is cold. The two readers were compared live on the same host: 260
-  processes seen by both, with identical text for every one of them,
-  and the same answer for which processes are ours. The direct read
+- perf: the Windows process table is read without PowerShell. (#168)
+  Every question about whether a watcher is running comes back to this
+  one read: `status`, the dashboard, the health loop, `stop`, the
+  orphan sweep, and an upgrade naming what it left behind. Asking CIM
+  for it meant starting PowerShell, which cost seconds and, after #165
+  made the read happen once per pass rather than once per agent, was
+  most of what a dashboard page build spent its time on. The pids now
+  come from a process snapshot and the arguments from `ntdll` directly.
+  Measured on a host running about 260 processes: 35ms against 1.3s
+  warm, and against 3.0s when PowerShell is cold. The two readers were
+  compared live on the same host: 260 processes seen by both, with
+  identical text for every one of them, and the same answer for which
+  processes are ours. The direct read
   also recovers command lines CIM reports as null. `ntdll` is not a
   contract and the interface is Windows 8.1 and later, so the CIM read
   stands as the fallback whenever the direct one is unavailable.
@@ -73,38 +72,38 @@ history is retained in the source repository.
   and a slow machine were indistinguishable. Construction now happens on
   the calling thread, where an import error raises itself, and the
   timeout covers only the bind.
-- fix: the mcp dependency is held below 2.0. (#205) That release,
-  published today, removes `mcp.server.fastmcp`, which the pipeline
-  server is written against, and the dependency carried no upper bound,
-  so any new install resolved it and pipeline mode failed at import. The
-  suite went from green to three errors within the hour with no change
-  on this side, which is the signal a user would have got on a fresh
+- fix: the mcp dependency is held below 2.0. (#205)
+  That release removes `mcp.server.fastmcp`, which the pipeline server
+  is written against, and the dependency carried no upper bound, so any
+  new install resolved it and pipeline mode failed at import. The suite
+  went from green to three errors within the hour with no change on
+  this side, which is the signal a user would have got on a fresh
   install. The bound is lifted by the port to the 2.x server API, not
   before.
-- fix: an upgrade now names the watchers it left on the previous
-  version. (#188) Replacing the runtime does not stop the processes
-  already running it: a running process has its code loaded and keeps
-  executing it, on POSIX because the replaced file keeps its inode for
-  as long as a process holds it, and on Windows because the executable a
-  process is running cannot be replaced at all while it runs. Either way
-  every watcher that was running kept the old release while the upgrade
-  reported success. The
-  upgrade now reads the process table before it installs and, once the
-  install lands, names each watcher still alive by agent, pid, and
-  project, with the restart to run in each project. The count and the
-  agent names go on its admin event, because the symptom turns up days
-  later and to someone else. Restarting them is left to the operator: an
-  upgrade should not interrupt work mid-dispatch on its own.
-- fix: the code that moved this tool's executables aside during an
-  install is gone. (#190) It renamed a locked executable so uv could
-  write the name while the running process carried on from the renamed
-  file. Measured against a real installation, a uv trampoline refuses
-  the rename as well as the write, whether it is the launcher on PATH
-  held by the running command or the tool-environment copy held by a
-  watcher, so the mechanism had no working case on the platform it
-  existed for. #189 had already stopped depending on it. What made the
-  suite miss this is worth saying: every test of it mocked the lock
-  check, so the mechanism was proved against a host that does not exist.
+- fix: an upgrade names the watchers it left on the old version. (#188)
+  Replacing the runtime does not stop the processes already running it:
+  a running process has its code loaded and keeps executing it, on
+  POSIX because the replaced file keeps its inode for as long as a
+  process holds it, and on Windows because the executable a process is
+  running cannot be replaced at all while it runs. Either way every
+  watcher that was running kept the old release while the upgrade
+  reported success. The upgrade now reads the process table before it
+  installs and, once the install lands, names each watcher still alive
+  by agent, pid, and project, with the restart to run in each project.
+  The count and the agent names go on its admin event, because the
+  symptom turns up days later and to someone else. Restarting them is
+  left to the operator: an upgrade should not interrupt work
+  mid-dispatch on its own.
+- fix: the code that moved this tool's executables aside is gone. (#190)
+  It renamed a locked executable so uv could write the name while the
+  running process carried on from the renamed file. Measured against a
+  real installation, a uv trampoline refuses the rename as well as the
+  write, whether it is the launcher on PATH held by the running command
+  or the tool-environment copy held by a watcher, so the mechanism had
+  no working case on the platform it existed for. #189 had already
+  stopped depending on it. What made the suite miss this is worth
+  saying: every test of it mocked the lock check, so the mechanism was
+  proved against a host that does not exist.
 - fix: the log readers no longer resolve a project root while they load.
   (#202) `qlog.py` and `timeline.py` did it at import, so running either
   directly outside a project raised a traceback from the import
@@ -114,43 +113,42 @@ history is retained in the source repository.
   asserts no module resolves a root as it loads, which is the same
   defect fixed in the smoketest in the previous release and guarded
   three different ways across the tree.
-- fix: piped log output is now plain ASCII. (#186) The query tool drew
-  its table with box characters, and a Windows console decodes a
-  captured pipe at its own codepage, so the sanctioned way to read
-  runtime state turned to noise exactly when the reader was a program.
-  A terminal still gets the drawn table; anything else gets column
-  rules, one row per line, and a row count. `--format` says so, and
-  names csv and jsonl as the forms to parse.
-- fix: an agent timeout now records how long the attempt actually ran
-  and how many attempts it took. (#183) The error carried the
-  configured limit, which is what the operator already knew; the
-  elapsed time and the attempt count, which distinguish a slow link
-  from a wedged one, were not written down at all. Both are on every
-  retry warning, on the terminal error, and on the agent phase of a
-  successful run, and the exception carries them for a caller that has
-  to explain itself.
-- fix: the smoketest now says when it stopped at a host limit rather
-  than an assertion. (#185) An agent that exhausted its retries failed
-  the run with the same shape as a broken contract, so a link that was
-  merely slow read as a defect in the tool. The verdict names the
-  limit, carries the attempt count and the timeout it hit, and records
-  a category that the health check reports alongside the reason.
-- feat: a capability probe that refuses or drags is written to the
-  admin log. (#183) Every host-mutating command asks the pre-dispatch
-  gate whether the host can do what it is about to be told to do, and
-  until now the answer left no trace, so a slow probe looked like a
-  slow command. A refusal and any probe over five seconds are recorded
-  with the capability, the operation that needed it, how long it took,
-  and why it said no. A fast pass stays silent, because a row per
-  invocation would bury the interesting one.
-- fix: a refused task query now fails fast instead of walking the whole
-  task store. (#191) Probing the scheduler asked for the tool's own
-  folder and, when that came back empty-handed, fell back to querying
-  every task on the host, which on a managed host is a two-minute wait
-  for an answer already known. The fallback now runs only for the one
-  reply that warrants it - the folder is not registered yet - and any
-  other refusal is reported as it is read, with a timeout on each query
-  so a wedged scheduler stops the probe rather than the command.
+- fix: piped log output is now plain ASCII. (#186)
+  The query tool drew its table with box characters, and a Windows
+  console decodes a captured pipe at its own codepage, so the
+  sanctioned way to read runtime state turned to noise exactly when the
+  reader was a program. A terminal still gets the drawn table; anything
+  else gets column rules, one row per line, and a row count. `--format`
+  says so, and names csv and jsonl as the forms to parse.
+- fix: an agent timeout records the elapsed time and attempt count.
+  (#183) The error carried the configured limit, which is what the
+  operator already knew; the elapsed time and the attempt count, which
+  distinguish a slow link from a wedged one, were not written down at
+  all. Both are on every retry warning, on the terminal error, and on
+  the agent phase of a successful run, and the exception carries them
+  for a caller that has to explain itself.
+- fix: the smoketest says when it stopped at a host limit. (#185)
+  An agent that exhausted its retries failed the run with the same
+  shape as a broken contract, so a link that was merely slow read as a
+  defect in the tool. The verdict names the limit, carries the attempt
+  count and the timeout it hit, and records a category that the health
+  check reports alongside the reason.
+- feat: a capability probe that refuses or drags is logged. (#183)
+  Every host-mutating command asks the pre-dispatch gate whether the
+  host can do what it is about to be told to do, and until now the
+  answer left no trace, so a slow probe looked like a slow command. A
+  refusal and any probe over five seconds are recorded with the
+  capability, the operation that needed it, how long it took, and why
+  it said no. A fast pass stays silent, because a row per invocation
+  would bury the interesting one.
+- fix: a refused task query fails fast instead of walking the store.
+  (#191) Probing the scheduler asked for the tool's own folder and,
+  when that came back empty-handed, fell back to querying every task on
+  the host, which on a managed host is a two-minute wait for an answer
+  already known. The fallback now runs only for the one reply that
+  warrants it - the folder is not registered yet - and any other
+  refusal is reported as it is read, with a timeout on each query so a
+  wedged scheduler stops the probe rather than the command.
 - fix: the smoketest reports a missing project root in its own words.
   (#184) The module resolved the root while being imported, so running
   it outside a project raised a traceback before the command could say
