@@ -321,6 +321,14 @@ convergence remains host-global. `--runtime-only` and `--skills-only` run one
 phase. Unavailable repositories produce warnings and a nonzero final result
 without blocking valid projects.
 
+Replacing the runtime does not stop what is already running it. Watchers that
+were running when the upgrade landed keep the previous version until they are
+restarted, so the upgrade names them - agent, pid, and project - and records
+the count on its `upgrade-runtime` admin event as `stale_watchers`. Restart
+each one in its own project with `agents-live --repo PATH stop NAME` followed
+by `agents-live --repo PATH start NAME`; the upgrade does not do it, because
+interrupting a watcher mid-dispatch is a decision the operator makes.
+
 ### Checks to perform
 
 1. **Platform**: Confirm running on Linux under WSL, not native Windows.
@@ -1014,7 +1022,9 @@ verb. The fields beyond the common set depend on the operation --
 `version_after`; `ownership-set` records `agent`, `owner_from`, and
 `owner_to`; `capability-probe` records the `capability` asked about, the
 `needed_by` operation that asked, and `duration_s`, and is written only
-when the probe refuses or takes at least five seconds. See
+when the probe refuses or takes at least five seconds; `upgrade-runtime`
+records `stale_watchers` and `stale_watcher_agents`, the processes still
+running the version it replaced. See
 [diagnostics.md](diagnostics.md) "Administrative events" for query
 recipes.
 

@@ -6969,6 +6969,10 @@ class TestInstallSkill(_TempProject):
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             mock.patch.object(subprocess, "run", return_value=completed) as run,
             mock.patch.object(plugins, "converge", return_value=False) as converge,
+            # This test is about the command sent to uv; the process
+            # table an upgrade also reads is another test's subject.
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=[]),
         ):
             self.assertEqual(upgrade._upgrade_runtime(), 0)
         run.assert_called_once_with(
@@ -6984,6 +6988,8 @@ class TestInstallSkill(_TempProject):
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             mock.patch.object(subprocess, "run", return_value=completed) as run,
             mock.patch.object(plugins, "converge", return_value=False),
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=[]),
         ):
             self.assertEqual(
                 upgrade._upgrade_runtime(source=Path("/build/al")), 0)
@@ -7023,6 +7029,11 @@ class TestInstallSkill(_TempProject):
             with (
                 mock.patch.object(sys, "prefix", prefix),
                 mock.patch.object(subprocess, "run", side_effect=install),
+                # These tests are about the launcher; the process table
+                # an upgrade also reads is another test's subject, and
+                # the stubbed subprocess.run above cannot serve it.
+                mock.patch.object(hostruntime, "process_command_lines",
+                                  return_value=[]),
             ):
                 yield
 
@@ -8092,6 +8103,122 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         self.assertIn(command, module._gate_commands())
 
 
+def _catches_value_error(handler: ast.ExceptHandler) -> bool:
+    """Whether *handler* would catch a failed root resolution."""
+    if handler.type is None:
+        return True
+    named = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+             else [handler.type])
+    return any(getattr(node, "id", getattr(node, "attr", "")) in
+               ("ValueError", "Exception", "BaseException") for node in named)
+
+
+def _unguarded_root_calls(tree: ast.AST, names: tuple[str, ...]) -> list[int]:
+    """Lines where importing the module would resolve a project root.
+
+    Function bodies are skipped: they run when they are called, which is
+    the point. A call inside a try that handles the failure is not an
+    import-time hazard either - the module has already decided what to
+    do without a root.
+    """
+    found: list[int] = []
+
+    def walk(node: ast.AST, guarded: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            child_guarded = guarded or (
+                isinstance(child, ast.Try)
+                and any(_catches_value_error(handler)
+                        for handler in child.handlers))
+            if (isinstance(child, ast.Call) and not child_guarded
+                    and getattr(child.func, "id",
+                                getattr(child.func, "attr", "")) in names):
+                found.append(child.lineno)
+            walk(child, child_guarded)
+
+    walk(tree, False)
+    return found
+
+
+class TestImportingAModuleNeedsNoProject(unittest.TestCase):
+    """No module may resolve a project root while it is being imported.
+
+    Resolving at import turns a missing root into a traceback from the
+    import statement, before the command that would explain it exists
+    (#202). The tree held three answers to this one question: two
+    modules resolved outright, a third guarded, and the fix for the same
+    defect in the smoketest (#184) had already established which answer
+    is right.
+    """
+
+    #: Resolvers that cannot answer without a project.
+    ROOT_CALLS = ("resolve_root", "repo_root")
+
+    def test_no_module_resolves_a_root_while_it_loads(self) -> None:
+        for path in _package_modules():
+            with self.subTest(module=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    _unguarded_root_calls(tree, self.ROOT_CALLS), [],
+                    f"{path.name} resolves a project root at import; move it "
+                    "into the function that needs the path, or handle the "
+                    "failure here")
+
+    def test_the_check_can_tell_the_two_apart(self) -> None:
+        # An invariant that cannot fail is worse than none: it reads as
+        # coverage while asserting nothing.
+        self.assertEqual(
+            _unguarded_root_calls(
+                ast.parse("REPO = resolve_root()"), self.ROOT_CALLS), [1])
+        self.assertEqual(
+            _unguarded_root_calls(ast.parse(
+                "try:\n REPO = resolve_root()\nexcept ValueError:\n REPO = None"
+            ), self.ROOT_CALLS), [])
+        self.assertEqual(
+            _unguarded_root_calls(
+                ast.parse("def f():\n return resolve_root()"),
+                self.ROOT_CALLS), [])
+
+
+class TestReadingLogsOutsideAProject(_TempProject):
+    """What the log readers do when no project resolves."""
+
+    @contextlib.contextmanager
+    def _no_project(self):
+        os.environ.pop(paths.ENV_VAR, None)
+        saved = Path.cwd()
+        with tempfile.TemporaryDirectory() as outside:
+            try:
+                os.chdir(outside)
+                paths.clear_cache()
+                yield
+            finally:
+                os.chdir(saved)
+                paths.clear_cache()
+
+    def _reports(self, main, argv: list[str]) -> str:
+        stderr = io.StringIO()
+        with (
+            self._no_project(),
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stderr(stderr),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(), 2)
+        return stderr.getvalue()
+
+    def test_the_query_tool_names_the_missing_project(self) -> None:
+        reported = self._reports(_qlog().main, ["qlog.py", "-n", "1"])
+        self.assertIn("no project root found", reported)
+        self.assertIn("agents-live init", reported)
+
+    def test_the_timeline_names_the_missing_project(self) -> None:
+        reported = self._reports(_timeline().main, ["timeline.py"])
+        self.assertIn("no project root found", reported)
+        self.assertIn("agents-live init", reported)
+
+
 class _Relation:
     """What ``qlog.show`` uses of a DuckDB relation."""
 
@@ -8115,16 +8242,21 @@ class _Terminal(io.StringIO):
 
 
 def _qlog():
-    """The query tool, imported late.
-
-    It resolves a project root while being imported, so it can only be
-    imported from inside a test that has one.
-    """
+    """The query tool, imported in whichever layout is installed."""
     try:  # installed package layout, as at the top of this file
         from agents_live import qlog  # type: ignore  # noqa: PLC0415
     except ImportError:  # flat checkout layout
         import qlog  # type: ignore[no-redef]  # noqa: PLC0415
     return qlog
+
+
+def _timeline():
+    """The timeline reader, imported in whichever layout is installed."""
+    try:  # installed package layout, as at the top of this file
+        from agents_live import timeline  # type: ignore  # noqa: PLC0415
+    except ImportError:  # flat checkout layout
+        import timeline  # type: ignore[no-redef]  # noqa: PLC0415
+    return timeline
 
 
 class TestLogsReachTheirReader(_TempProject):
@@ -8274,6 +8406,156 @@ class TestCapabilityProbesAreObservable(_TempProject):
         self.assertEqual(
             [event for event in self._admin_events()
              if event.get("operation") == "capability-probe"], [])
+
+
+class TestUpgradeNamesWhatItLeftRunning(_TempProject):
+    """An upgrade must not leave version skew behind in silence (#188)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._other = tempfile.TemporaryDirectory()
+        self.addCleanup(self._other.cleanup)
+        self.outside = Path(self._other.name).resolve()
+
+    def watcher_command(self, name: str, root: Path,
+                        interpreter: str | None = None) -> str:
+        """A packaged watch loop's command line, joined as its host joins."""
+        argv = [] if interpreter is None else [interpreter]
+        argv += ["agents-live", "--repo", str(root),
+                 "internal", "watch-loop", name]
+        if sys.platform == "win32":
+            return subprocess.list2cmdline(argv)
+        return " ".join(argv)
+
+    def processes(self) -> list[tuple[int, str]]:
+        """Two watchers in different projects, and one process that is not
+        a watcher at all."""
+        return [
+            (1001, self.watcher_command("inbox-triage", self.root)),
+            (1002, self.watcher_command("notes-sync", self.outside)),
+            (1003, f"agents-live --repo {self.outside} status"),
+        ]
+
+    def _watchers(self):
+        with mock.patch.object(hostruntime, "process_command_lines",
+                               return_value=self.processes()):
+            return headless.watchers_on_host()
+
+    def test_every_project_is_enumerated_not_just_this_one(self) -> None:
+        # The per-repo enumeration answers "what is running here", which
+        # is the wrong question for a host-global tool environment.
+        self.assertEqual(
+            self._watchers(),
+            [(1001, "inbox-triage", str(self.root)),
+             (1002, "notes-sync", str(self.outside))])
+
+    def test_a_flat_watcher_is_reported_without_guessing_its_project(
+            self) -> None:
+        # A flat checkout carries a script path at no fixed depth inside
+        # the project, so naming a project from it would be a guess.
+        with mock.patch.object(
+                hostruntime, "process_command_lines",
+                return_value=[(7, "/usr/bin/python3 /srv/x/y/activate.py "
+                                  "watch-loop nightly")]):
+            self.assertEqual(headless.watchers_on_host(),
+                             [(7, "nightly", None)])
+
+    def test_a_project_path_with_a_space_is_named_whole(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("only Windows reads command lines back with quoting")
+        spaced = self.root / "a project"
+        with mock.patch.object(
+                hostruntime, "process_command_lines",
+                return_value=[(11, self.watcher_command("todo", spaced))]):
+            self.assertEqual(headless.watchers_on_host(),
+                             [(11, "todo", str(spaced))])
+
+    def test_the_upgrade_names_the_watchers_it_left_behind(self) -> None:
+        end: dict = {}
+        with (
+            mock.patch.object(hostruntime, "is_alive",
+                              side_effect=lambda pid: pid == 1001),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            upgrade._report_stale_watchers(self._watchers(), end)
+        reported = stderr.getvalue()
+        self.assertIn("inbox-triage", reported)
+        self.assertIn("1001", reported)
+        self.assertIn(str(self.root), reported)
+        # The one that exited during the upgrade is not skew.
+        self.assertNotIn("notes-sync", reported)
+        self.assertIn("agents-live --repo", reported)
+        self.assertEqual(end["stale_watchers"], 1)
+        self.assertEqual(end["stale_watcher_agents"], "inbox-triage")
+
+    def test_one_watcher_is_reported_once_however_many_processes_it_is(
+            self) -> None:
+        # Observed on Windows: a watcher is a shim plus the interpreter
+        # it executes, so the process table shows the same agent two or
+        # three times. Counting processes would tell an operator three
+        # agents are stale when one is.
+        processes = [
+            (2001, self.watcher_command("notes", self.root)),
+            (2002, self.watcher_command("notes", self.root,
+                                        interpreter="python")),
+        ]
+        end: dict = {}
+        with (
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=processes),
+            mock.patch.object(hostruntime, "is_alive", return_value=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            upgrade._report_stale_watchers(headless.watchers_on_host(), end)
+        self.assertEqual(end["stale_watchers"], 1)
+        self.assertEqual(end["stale_watcher_agents"], "notes")
+        reported = stderr.getvalue()
+        self.assertIn("2001, 2002", reported)
+        self.assertEqual(reported.count("notes ("), 1, reported)
+
+    def test_an_upgrade_with_nothing_running_says_nothing(self) -> None:
+        end: dict = {}
+        with (
+            mock.patch.object(hostruntime, "is_alive", return_value=False),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            upgrade._report_stale_watchers(self._watchers(), end)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(end["stale_watchers"], 0)
+
+    def test_the_upgrade_records_the_skew_where_it_can_be_found_later(
+            self) -> None:
+        # The report is on the terminal of whoever ran the upgrade; the
+        # symptom shows up days later, to someone else.
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            mock.patch.object(subprocess, "run", return_value=completed),
+            mock.patch.object(plugins, "converge", return_value=False),
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=self.processes()),
+            mock.patch.object(hostruntime, "is_alive", return_value=True),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(upgrade._upgrade_runtime(), 0)
+        recorded = [json.loads(line) for line
+                    in adminlog.log_path().read_text(
+                        encoding="utf-8").splitlines() if line.strip()]
+        upgrades = [event for event in recorded
+                    if event.get("operation") == "upgrade-runtime"
+                    and event.get("status") != "start"]
+        self.assertEqual(len(upgrades), 1, recorded)
+        self.assertEqual(upgrades[0]["stale_watchers"], 2)
+        self.assertEqual(upgrades[0]["stale_watcher_agents"],
+                         "inbox-triage, notes-sync")
+
+    def test_an_unreadable_process_table_does_not_fail_the_upgrade(
+            self) -> None:
+        # Enumeration is a courtesy. An upgrade that worked must not be
+        # reported as broken because the host would not list processes.
+        with mock.patch.object(headless, "watchers_on_host",
+                               side_effect=OSError("denied")):
+            self.assertEqual(upgrade._running_watchers(), [])
 
 
 if __name__ == "__main__":

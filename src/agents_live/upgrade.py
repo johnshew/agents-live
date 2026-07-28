@@ -12,7 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, adminlog, init, paths, plugins, preflight, repos
+from . import (__version__, adminlog, hostruntime, init, paths, plugins,
+               preflight, repos)
 from .spawn import find_uv
 
 
@@ -99,6 +100,9 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         # The upgrade rewrites this tool's own executables, and on
         # Windows one of them is the running process.
         launcher_before = plugins.launcher_stamp()
+        # Read before the install, so every process named afterwards
+        # demonstrably predates the runtime that replaced it (#188).
+        watchers_before = _running_watchers()
         with plugins.replaceable_entrypoints() as displaced:
             status = subprocess.run(
                 _install_command(uv, source), check=False,
@@ -116,6 +120,7 @@ def _upgrade_runtime(roots: list[Path] | None = None,
                 f"uv install exited {status} after upgrading the runtime; "
                 f"the launcher was in use and was left in place")
         _warn_displaced(displaced)
+        _report_stale_watchers(watchers_before, end)
         if kept_launcher:
             _warn_launcher_kept()
         try:
@@ -152,21 +157,74 @@ def _warn_launcher_kept() -> None:
 
 
 def _warn_displaced(displaced: list[Path]) -> None:
-    """Say that something is still running the version just replaced.
+    """Say that a shim had to be moved aside to be replaced.
 
     A shim only has to be moved aside when a process is executing it,
     and renaming frees the name without stopping that process, so those
-    processes carry on from the renamed image. Reported rather than left
-    silent: the alternative is an agent that behaves like an older
-    release with nothing connecting it to this upgrade. Naming the
-    processes, and deciding whether to restart them, is #188.
+    processes carry on from the renamed image. What is still running is
+    named by :func:`_report_stale_watchers`; this says why the name on
+    disk and the image in memory came apart.
     """
     if not displaced:
         return
-    print(f"warning: {len(displaced)} executable(s) were in use and were "
-          f"replaced in place; processes started before this upgrade "
-          f"(watchers in particular) keep running the previous version "
-          f"until restarted with `agents-live stop` then `agents-live start`",
+    print(f"note: {len(displaced)} executable(s) were in use and were "
+          f"replaced in place; the processes executing them kept the "
+          f"previous image",
+          file=sys.stderr)
+
+
+def _running_watchers() -> list[tuple[int, str, str | None]]:
+    """Every watcher on this host, or nothing if the host will not say."""
+    from .headless import watchers_on_host  # noqa: PLC0415
+
+    try:
+        return watchers_on_host()
+    except OSError:
+        # Enumeration is a courtesy here; an upgrade that worked must
+        # not fail over an unreadable process table.
+        return []
+
+
+def _report_stale_watchers(
+        before: list[tuple[int, str, str | None]], end: dict) -> None:
+    """Name the watchers still running the version just replaced.
+
+    Replacing the runtime does not stop the processes already running
+    it, on any host: Windows renames a locked shim aside and the renamed
+    image keeps executing, and elsewhere the replaced file keeps its
+    inode for as long as a process holds it. Either way the upgrade
+    reports success while every watcher that was running carries on with
+    the previous release, which is version skew with nothing to connect
+    it to its cause (#188).
+
+    Restarting them is deliberately not done here: it would interrupt a
+    watcher mid-dispatch, which is a policy an upgrade should not decide
+    on its own.
+
+    Reported per watcher rather than per process: one watcher is more
+    than one process on Windows (the shim executes an interpreter, which
+    is what the process table shows alongside it), and a count of
+    processes would overstate how many agents are affected.
+    """
+    stale: dict[tuple[str, str | None], list[int]] = {}
+    for pid, name, project in before:
+        if hostruntime.is_alive(pid):
+            stale.setdefault((name, project), []).append(pid)
+    end["stale_watchers"] = len(stale)
+    if not stale:
+        return
+    end["stale_watcher_agents"] = ", ".join(
+        sorted({name for name, _ in stale}))
+    print(f"warning: {len(stale)} watcher(s) are still running the "
+          f"previous version and will until restarted:", file=sys.stderr)
+    for (name, project), pids in sorted(stale.items(),
+                                        key=lambda row: (row[0][0],
+                                                         min(row[1]))):
+        where = project if project else "project not named on the command line"
+        listed = ", ".join(str(pid) for pid in sorted(pids))
+        print(f"  {name} (pid {listed}, {where})", file=sys.stderr)
+    print("restart each one in its own project: `agents-live --repo <path> "
+          "stop <name>` then `agents-live --repo <path> start <name>`",
           file=sys.stderr)
 
 

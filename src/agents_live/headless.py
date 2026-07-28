@@ -2869,6 +2869,35 @@ def _find_watcher_pids_table(name: str) -> list[int]:
     return [pid for pid, watched in _watcher_processes() if watched == name]
 
 
+def watchers_on_host() -> list[tuple[int, str, str | None]]:
+    """``(pid, agent, project)`` for every watcher running on this host.
+
+    The enumeration above scopes to the current project, which is what
+    stopping and reporting one project's agents needs. The runtime is
+    host-global, so what replacing it leaves running can belong to any
+    project, and saying so has to name which (#188).
+
+    A packaged watcher carries ``--repo <root>``; a flat one carries a
+    script path inside its checkout at no fixed depth, so its project is
+    reported as unknown rather than guessed at.
+    """
+    found: list[tuple[int, str, str | None]] = []
+    for pid, command in hostruntime.process_command_lines():
+        args = split_command_line(command)
+        if not _watcher_argv_is_agents_live(args):
+            continue
+        name = next(
+            (second for first, second in zip(args, args[1:])
+             if first in ("watch-loop", "--watch-loop")), None)
+        if not name:
+            continue
+        project = next(
+            (second for first, second in zip(args, args[1:])
+             if first == "--repo"), None)
+        found.append((pid, name, project))
+    return found
+
+
 def find_watcher_pid(name: str) -> int | None:
     pids = _find_all_watcher_pids(name)
     return pids[0] if pids else None

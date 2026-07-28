@@ -202,6 +202,12 @@ stale `_smoketest-*` resources before setup.
   `--format csv` or `--format jsonl`, not the table.
 - File-change events don't mean content changed -- mtime can bump on an
   identical atomic-write.
+- **An upgrade does not restart watchers.** A watcher running when the
+  runtime was replaced keeps the previous version until it is stopped
+  and started again, so an agent can behave like an older release with
+  nothing on the surface to say why. The upgrade names them, and its
+  `upgrade-runtime` admin event carries `stale_watchers` and
+  `stale_watcher_agents` for looking it up afterwards.
 - `agents-live.log` has **multiple agents interleaved**. Filter by
   `--agent` or `"agent_name":"<name>"`.
 - **Every log entry has an `agent_name` field.** Administrative events use

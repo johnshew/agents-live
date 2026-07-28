@@ -258,7 +258,8 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
         return {}, {}
     connection = structured_qlog.duckdb.connect(":memory:")
     try:
-        structured_qlog.build_view(connection, [str(logs_dir / "*.log")])
+        structured_qlog.build_view(connection, [str(logs_dir / "*.log")],
+                                   archives=logs_dir / "archive")
         columns = {
             row[0] for row in connection.sql("DESCRIBE log").fetchall()
         }

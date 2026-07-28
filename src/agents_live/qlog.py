@@ -77,18 +77,34 @@ from datetime import datetime, timedelta, timezone
 
 from paths import host_logs_dir, repo_state_dir, resolve_root
 
-# Read-only: the registry fallback is safe here (issue #192).
-REPO = resolve_root(allow_sole_registered=True)
-LOGS_DIR = repo_state_dir(REPO) / "logs"
-DEFAULT_LOG = LOGS_DIR / "agents-live.log"
-ARCHIVE_DIR = LOGS_DIR / "archive"
-# --all unions this repo's logs with the host-level logs (the built-in
-# health-check loop and other repo-less operations); other repos are a
-# --repo away.
-ALL_LOG_GLOBS = [
-    str(LOGS_DIR / "*.log"),
-    str(host_logs_dir() / "*.log"),
-]
+
+def logs_dir() -> Path:
+    """This repo's log directory, resolved when it is asked for.
+
+    Resolving at import time would make a missing project root a
+    traceback from the import statement instead of this command's own
+    sentence about what is wrong (#202).
+
+    Read-only: the registry fallback is safe here (#192).
+    """
+    return repo_state_dir(resolve_root(allow_sole_registered=True)) / "logs"
+
+
+def default_log() -> Path:
+    return logs_dir() / "agents-live.log"
+
+
+def archive_dir() -> Path:
+    return logs_dir() / "archive"
+
+
+def all_log_globs() -> list[str]:
+    """This repo's logs unioned with the host-level logs.
+
+    The host logs hold the built-in health-check loop and other
+    repo-less operations; other repos are a --repo away.
+    """
+    return [str(logs_dir() / "*.log"), str(host_logs_dir() / "*.log")]
 
 NORMALIZED_COLUMN_TYPES = {
     "duration_s": "DOUBLE",
@@ -166,12 +182,16 @@ def _is_jsonl(path: str) -> bool:
     return False
 
 
-def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str]) -> None:
+def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
+               archives: Path | None = None) -> None:
     """Create a `log` view over the given files plus Parquet archives.
 
     Each file is read separately (read_json_auto infers schema per file)
     and the results are unioned by name so schema drift across files
     doesn't collapse rows into a raw JSON column.
+
+    `archives` is the directory holding monthly Parquet archives; the
+    caller passes it because it knows which repo the patterns came from.
 
     Adds `_src` (filename) for provenance.
     """
@@ -210,8 +230,8 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str]) -> None:
     # Include current unified monthly Parquet archives if any exist.
     # Archives are produced from JSONL sources only, so they are always
     # in scope for schema validation.
-    if ARCHIVE_DIR.is_dir():
-        unified_files = sorted(ARCHIVE_DIR.glob("*.parquet"))
+    if archives is not None and archives.is_dir():
+        unified_files = sorted(archives.glob("*.parquet"))
         if unified_files:
             paths_csv = ", ".join(f"'{p}'" for p in unified_files)
             selects.append(
@@ -368,7 +388,8 @@ def main() -> int:
                          "log directory if that file exists, otherwise used "
                          "as --agent substring filter")
     ap.add_argument("--log", default=None,
-                    help=f"log file or glob (default: {DEFAULT_LOG})")
+                    help="log file or glob (default: this repo's "
+                         "agents-live.log)")
     ap.add_argument("--all", action="store_true",
                     help="union this repo's logs with the host-level logs")
     ap.add_argument("--agent", help="filter by agent name (substring match)")
@@ -417,21 +438,27 @@ def main() -> int:
     # directory, point --log at it; otherwise fall through to an --agent
     # substring filter. With --all there is no single file to prefer, so
     # the name always narrows the union as an agent filter (#89).
-    if args.name and args.log is None:
-        if args.all:
-            if not args.agent:
-                args.agent = args.name
-        else:
-            candidate = DEFAULT_LOG.parent / f"{args.name}.log"
-            if candidate.is_file():
-                args.log = str(candidate)
-            elif not args.agent:
-                args.agent = args.name
-    if args.log is None:
-        args.log = str(DEFAULT_LOG)
+    try:
+        if args.name and args.log is None:
+            if args.all:
+                if not args.agent:
+                    args.agent = args.name
+            else:
+                candidate = logs_dir() / f"{args.name}.log"
+                if candidate.is_file():
+                    args.log = str(candidate)
+                elif not args.agent:
+                    args.agent = args.name
+        if args.log is None:
+            args.log = str(default_log())
+        patterns = all_log_globs() if args.all else [args.log]
+        archives = archive_dir()
+    except ValueError as exc:
+        preflight.emit_failure("logs", str(exc), code="no_project_root")
+        return 2
 
     con = duckdb.connect(":memory:")
-    build_view(con, ALL_LOG_GLOBS if args.all else [args.log])
+    build_view(con, patterns, archives=archives)
 
     if args.check_schema:
         violations = check_schema(con)
