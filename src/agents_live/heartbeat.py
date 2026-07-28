@@ -20,6 +20,17 @@ LEGACY_ACTION_TOKENS = (
     "windows-heartbeat.sh", "site-packages", "python3.", "--repo")
 INVALID_DISTRO_CHARS = ('"', "\n", "\r", "\0")
 LAUNCHER = "wslg.exe"
+# The task actions this one replaced, and what was wrong with each, for
+# a reader who finds one still registered. They live here because this
+# module decides what the action is; `doctor` reports what it finds.
+SUPERSEDED_ACTIONS = {
+    # Launched the distro directly with nothing to keep its console off
+    # the screen, so every five minutes one appeared.
+    "wsl.exe": "directly, showing a console every run",
+    # Hid that console through a packaged VBScript wrapper, on a
+    # scripting host Windows is retiring.
+    "wscript.exe": "through the retired VBScript wrapper",
+}
 # Where WSL puts it: the MSI package first, then the Store package's
 # execution alias. It is deliberately not on PATH in either.
 LAUNCHER_CANDIDATES = (
@@ -27,6 +38,19 @@ LAUNCHER_CANDIDATES = (
     r"$env:LOCALAPPDATA\Microsoft\WindowsApps\wslg.exe",
 )
 _launcher: str | None = None
+
+
+class InteropUnavailable(RuntimeError):
+    """Nothing here can reach the Windows side to ask or to act."""
+
+
+class DistroUnknown(RuntimeError):
+    """Nothing here says which distro this is.
+
+    An sshd, cron, or systemd session inside WSL has no
+    ``WSL_DISTRO_NAME``, so the task cannot be named from there. That is
+    not evidence the task is missing or wrong.
+    """
 
 
 def state_dir() -> Path:
@@ -44,7 +68,7 @@ def task_name(distro: str) -> str:
 def current_distro(distro: str | None = None) -> str:
     selected = (distro or os.environ.get("WSL_DISTRO_NAME", "")).strip()
     if not selected:
-        raise RuntimeError(
+        raise DistroUnknown(
             "cannot determine the WSL distro; pass --distro <name>")
     if any(character in selected for character in INVALID_DISTRO_CHARS):
         raise RuntimeError("invalid WSL distro name")
@@ -134,7 +158,7 @@ def _powershell() -> str:
         "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     if candidate.is_file():
         return str(candidate)
-    raise RuntimeError("Windows PowerShell interop is unavailable")
+    raise InteropUnavailable("Windows PowerShell interop is unavailable")
 
 
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:

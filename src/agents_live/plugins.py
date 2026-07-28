@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
-from . import __version__, adminlog, paths
+from . import __version__, adminlog, hostruntime, paths
 from .spawn import find_uv
 
 # Kernel extension points a declared distribution must provide.
@@ -313,7 +313,7 @@ def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
 # on Windows rather than symlinking them, so the same executable exists
 # in the tool environment and in uv's executable directory, and both are
 # rewritten by an install or an upgrade.
-_SHIM_NAME = "agents-live.exe"
+_SHIM_NAME = hostruntime.executable_filename("agents-live")
 
 # A moved-aside executable is still running, so it cannot be deleted
 # until it exits. The name marks it for the sweep at the start of the
@@ -330,7 +330,7 @@ def _entrypoint_paths() -> list[Path]:
     the tool environment is rewritten too and is not in that list.
     """
     found: list[Path] = []
-    tool_env_copy = Path(sys.prefix) / "Scripts" / _SHIM_NAME
+    tool_env_copy = hostruntime.executable_dir() / _SHIM_NAME
     if tool_env_copy.is_file():
         found.append(tool_env_copy)
     receipt = _receipt_path()
@@ -417,7 +417,7 @@ def replaceable_entrypoints() -> Iterator[list[Path]]:
     began, and still is: renaming frees the name without stopping the
     process (#188). Callers that report to a person should say so.
     """
-    if sys.platform != "win32":
+    if not hostruntime.locks_running_image():
         yield []
         return
     moved: list[tuple[Path, Path]] = []
@@ -546,7 +546,7 @@ def launcher_stamp() -> int | None:
     fractionally behind it and be mistaken for one uv never touched.
     """
     try:
-        return (Path(sys.prefix) / "Scripts" / _SHIM_NAME).stat().st_mtime_ns
+        return (hostruntime.executable_dir() / _SHIM_NAME).stat().st_mtime_ns
     except OSError:
         return None
 
@@ -579,7 +579,7 @@ def only_the_launcher_failed(before: int | None) -> bool:
     has no reason to rewrite the runtime, and its timestamp says
     nothing about whether this install got anywhere.
     """
-    if sys.platform != "win32":
+    if not hostruntime.locks_running_image():
         return False
     after = launcher_stamp()
     return after is not None and after != before

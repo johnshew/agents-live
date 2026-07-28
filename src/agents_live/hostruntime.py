@@ -288,7 +288,7 @@ def find_tool(name: str) -> str | None:
     candidates = [home / ".local" / "bin" / name,
                   home / ".cargo" / "bin" / name,
                   Path("/usr/local/bin") / name]
-    if name == "node":
+    if name in ("node", "npx"):
         candidates.extend(
             sorted((home / ".nvm" / "versions" / "node").glob(f"*/bin/{name}"),
                    reverse=True))
@@ -296,6 +296,33 @@ def find_tool(name: str) -> str | None:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
+
+
+# Where a WSL runtime sees the other side's drives. A program found under
+# it is a Windows build, reached through interop.
+_INTEROP_PREFIX = "/mnt/"
+
+
+def tool_is_native(name: str) -> bool:
+    """Whether *name* resolves to a program belonging to this runtime.
+
+    Only WSL can answer no. It sees the Windows side's programs on its
+    own PATH, and a Windows build keeps its state on the Windows side,
+    where the Linux processes that need it cannot reach it - a Windows
+    ``node`` writes MSAL tokens to the Windows credential store, so a
+    login performed there never populates the Linux cache an MCP reads.
+
+    A PATH lookup that lands outside the interop mount counts, and so
+    does an install this runtime keeps somewhere PATH may not reach
+    (:func:`find_tool`), which is what makes the answer the same for a
+    login shell and for cron.
+    """
+    if id() != WSL:
+        return True
+    found = shutil.which(name)
+    if found is not None and not found.startswith(_INTEROP_PREFIX):
+        return True
+    return find_tool(name) is not None
 
 
 def shell_interpreter() -> list[str] | None:
@@ -346,6 +373,37 @@ def executable_filename(name: str) -> str:
     PATH lookup, needs the difference spelled out.
     """
     return f"{name}.exe" if _IS_WINDOWS else name
+
+
+def executable_dir(prefix: Path | str | None = None) -> Path:
+    """Where an environment keeps the entry points installed into it.
+
+    ``Scripts`` on Windows and ``bin`` elsewhere. *prefix* defaults to
+    the environment this process is running from.
+    """
+    base = Path(sys.prefix if prefix is None else prefix)
+    return base / ("Scripts" if _IS_WINDOWS else "bin")
+
+
+def interpreter_name() -> str:
+    """The name that reaches a Python interpreter on this host.
+
+    ``python3`` is the POSIX spelling and does not exist on Windows,
+    where asking for it reaches the Microsoft Store alias instead of an
+    interpreter.
+    """
+    return "python" if _IS_WINDOWS else "python3"
+
+
+def locks_running_image() -> bool:
+    """Whether this host refuses to overwrite a running executable.
+
+    Windows holds a mandatory lock on the file backing a running image,
+    so replacing one means moving it out of the way first. POSIX
+    replaces the directory entry and leaves the running process on the
+    old inode, so nothing has to move.
+    """
+    return _IS_WINDOWS
 
 
 def pin_executable(name: str, *, path: str | None = None) -> str:

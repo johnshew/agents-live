@@ -6,6 +6,33 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a refused task query now fails fast instead of walking the whole
+  task store. (#191) Probing the scheduler asked for the tool's own
+  folder and, when that came back empty-handed, fell back to querying
+  every task on the host, which on a managed host is a two-minute wait
+  for an answer already known. The fallback now runs only for the one
+  reply that warrants it - the folder is not registered yet - and any
+  other refusal is reported as it is read, with a timeout on each query
+  so a wedged scheduler stops the probe rather than the command.
+- fix: the smoketest reports a missing project root in its own words.
+  (#184) The module resolved the root while being imported, so running
+  it outside a project raised a traceback before the command could say
+  what was wrong. The lock path it needed the root for is resolved when
+  the lock is taken.
+- refactor: platform knowledge lives in the modules that own it.
+  (#191, #184) Windows details had leaked outward: the task folder was
+  spelled in two places that had to agree, the watcher prerequisite
+  check reasoned about the host inline rather than asking the
+  pre-dispatch gate, and the diagnostics read English out of exception
+  messages to decide what a host was missing. Each is now a question
+  answered by the module that owns the mechanism, so a change to one
+  lands in one file. The smoke suite gained an invariants category that
+  asserts the arrangement holds - which modules may name a platform,
+  that the task folder is spelled once, that every capability a command
+  declares can be probed, that the diagnostics describe every mechanism
+  a host may dispatch with, and that the release gate smoketests the
+  checkout being released - so drift fails the suite instead of
+  surviving to a host.
 - feat: a running dashboard can be listed and stopped from the CLI.
   (#198) A dashboard outlives the command that launched it, so a port
   stays held by a server the operator no longer knows about. The port

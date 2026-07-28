@@ -9,7 +9,6 @@ import argparse
 import hashlib
 import os
 import json
-import shutil
 import signal
 import subprocess
 import sys
@@ -193,9 +192,9 @@ def _validate_watcher_prereqs(config: AgentConfig) -> list[Path]:
             print(f"Created missing watch directory: {wp}")
         watch_targets.append(abs_path)
 
-    if (hostruntime.id() != hostruntime.WINDOWS
-            and not shutil.which("inotifywait")):
-        raise AgentsLiveError("inotifywait not found")
+    failure = preflight.check("start", {"watch"})
+    if failure is not None:
+        raise AgentsLiveError(failure.detail)
     return watch_targets
 
 

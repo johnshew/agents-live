@@ -14,6 +14,7 @@ where the assembler ships this file as ``tests/test_smoke.py``).
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import ctypes
 import hashlib
@@ -45,7 +46,7 @@ try:  # installed package layout
         activate, adminlog, agent_adapters, cli, completions, dashboards,
         headless, health_check, heartbeat, hidden, hostruntime, init, migrate,
         ownership, paths, plugins, preflight, doctor, repos, run, schedules,
-        spawn, status, uninstall, update_check, upgrade, triggers,
+        smoketest, spawn, status, uninstall, update_check, upgrade, triggers,
         watchpolicy, watchsource, winwatch, wintasks,
     )
     from agents_live.cli_spec import (
@@ -76,6 +77,7 @@ except ImportError:  # flat checkout layout
     import repos
     import run
     import schedules
+    import smoketest
     import spawn
     import status
     import update_check
@@ -5523,10 +5525,13 @@ class TestWindowsScheduling(unittest.TestCase):
     def test_doctor_names_the_mechanism_this_host_dispatches_with(self) -> None:
         # The capability is the same question on both hosts; only the
         # program that answers it differs, and an apt line helps nobody
-        # on Windows.
+        # on Windows. The row is selected by the mechanism each module
+        # reports, which is the same answer the runtime acts on.
         with (
-            mock.patch.object(hostruntime, "id",
-                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.TASK_SCHEDULER),
+            mock.patch.object(watchsource, "mechanism",
+                              return_value=watchsource.DIRECTORY_CHANGES),
             mock.patch.object(doctor.preflight, "check", return_value=None),
         ):
             schedule = doctor._mechanism_check("schedule")
@@ -5536,8 +5541,10 @@ class TestWindowsScheduling(unittest.TestCase):
         self.assertNotIn("apt", schedule[3])
         self.assertNotIn("apt", watch[3])
         with (
-            mock.patch.object(hostruntime, "id",
-                              return_value=hostruntime.LINUX),
+            mock.patch.object(hostruntime, "native_scheduler",
+                              return_value=hostruntime.CRONTAB),
+            mock.patch.object(watchsource, "mechanism",
+                              return_value=watchsource.INOTIFY),
             mock.patch.object(doctor.preflight, "check", return_value=None),
         ):
             self.assertEqual(doctor._mechanism_check("schedule")[0], "crontab")
@@ -7000,7 +7007,7 @@ class TestInstallSkill(_TempProject):
         its ticks can otherwise carry the same stamp.
         """
         with tempfile.TemporaryDirectory() as prefix:
-            launcher = Path(prefix) / "Scripts" / plugins._SHIM_NAME
+            launcher = hostruntime.executable_dir(prefix) / plugins._SHIM_NAME
             launcher.parent.mkdir(parents=True)
             if preexisting:
                 launcher.write_bytes(b"old trampoline")
@@ -7027,7 +7034,8 @@ class TestInstallSkill(_TempProject):
         # launcher carries no version. Reporting failure would send a
         # person looking for a broken install that is not broken (#179).
         with (
-            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=True),
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             self._failing_install(reached_launcher=True),
             mock.patch.object(plugins, "converge", return_value=False) as converge,
@@ -7043,7 +7051,8 @@ class TestInstallSkill(_TempProject):
         # got as far as the launcher, so it never finished the
         # environment either, so the exit code stands.
         with (
-            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=True),
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             self._failing_install(reached_launcher=False),
             mock.patch.object(plugins, "converge", return_value=False) as converge,
@@ -7058,7 +7067,8 @@ class TestInstallSkill(_TempProject):
         # evidence has to be that this install changed it. An install
         # that stopped earlier leaves it alone and keeps its exit code.
         with (
-            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=True),
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             self._failing_install(reached_launcher=False, preexisting=True),
             mock.patch.object(plugins, "converge", return_value=False) as converge,
@@ -7072,7 +7082,8 @@ class TestInstallSkill(_TempProject):
         # and rewrote it, so the environment behind it is complete even
         # though the command failed publishing it.
         with (
-            mock.patch.object(sys, "platform", "win32"),
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=True),
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             self._failing_install(reached_launcher=True, preexisting=True),
             mock.patch.object(plugins, "converge", return_value=False) as converge,
@@ -7088,7 +7099,8 @@ class TestInstallSkill(_TempProject):
         # failure for a silent one. Same evidence as the Windows case,
         # opposite conclusion, which is what makes this a seam.
         with (
-            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=False),
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             self._failing_install(reached_launcher=True),
             mock.patch.object(plugins, "converge", return_value=False) as converge,
@@ -7904,6 +7916,180 @@ class TestHealthCheckLoop(_TempProject):
             child for child in internal.subcommands if child.name == "maintain")
         self.assertEqual(command.module, "health_check")
         self.assertTrue(command.hidden)
+
+
+# ---------------------------------------------------------------------------
+# Invariants
+# ---------------------------------------------------------------------------
+#
+# Assertions that relate two facts in the tree which have to agree, where
+# the failure mode is drift rather than logic (#184). They patch nothing,
+# so there is no belief about a seam to encode and be wrong about
+# together with the code. Each one is here because the corresponding
+# disagreement shipped at least once through a green suite.
+
+
+def _package_modules() -> list[Path]:
+    """Every module of the package, in either layout."""
+    return sorted(Path(hostruntime.__file__).resolve().parent.glob("*.py"))
+
+
+def _code_strings(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every string literal in *tree* except the docstrings.
+
+    Comments never reach the AST and docstrings are excluded here, so
+    what is left is what the module says to the operating system rather
+    than what it says to a reader.
+    """
+    documentation = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef))
+        and node.body and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return [(node.lineno, node.value) for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in documentation]
+
+
+class TestPlatformSeam(unittest.TestCase):
+    """The platform seam described in docs/windows-support.md.
+
+    The invariant that document states was true when it was written and
+    had quietly stopped being true in five modules by the time anyone
+    looked (#191). Stating it in prose asks every future change to
+    remember it; asserting it here makes the suite remember instead.
+    """
+
+    #: Modules allowed to name a Windows program or bind a Windows API.
+    #: The first five implement the platform; `schedules` and
+    #: `watchsource` choose between the two mechanisms and name both.
+    SEAM = {"hostruntime.py", "wintasks.py", "winwatch.py", "hidden.py",
+            "heartbeat.py", "schedules.py", "watchsource.py"}
+
+    #: Programs and entry points that exist on one platform only. A
+    #: module that names one of these is doing platform-specific work,
+    #: whatever it calls the variable it stores the answer in. What a
+    #: module prints about a platform is not covered: a check label or a
+    #: remedy naming Windows is reporting, not dispatching.
+    PLATFORM_TOKENS = ("win32", "schtasks", "windll", "powershell.exe",
+                       "pythonw", "wscript.exe", "wsl.exe", "wslg.exe",
+                       "readdirectorychangesw")
+
+    def modules_outside_the_seam(self) -> list[Path]:
+        return [path for path in _package_modules()
+                if path.name not in self.SEAM]
+
+    def test_the_seam_is_the_modules_it_names(self) -> None:
+        # A renamed seam module would leave a name here that exempts
+        # nothing, and the scans below would quietly stop covering its
+        # replacement while still passing.
+        present = {path.name for path in _package_modules()}
+        self.assertLessEqual(self.SEAM, present)
+        self.assertGreater(len(self.modules_outside_the_seam()),
+                           len(self.SEAM))
+
+    def test_only_the_seam_names_a_platform(self) -> None:
+        for path in self.modules_outside_the_seam():
+            with self.subTest(module=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for lineno, value in _code_strings(tree):
+                    for token in self.PLATFORM_TOKENS:
+                        self.assertNotIn(
+                            token, value.lower(),
+                            f"{path.name}:{lineno} names {token!r}; ask the "
+                            "host runtime, or move the work into the seam")
+
+    def test_only_the_seam_binds_a_windows_api(self) -> None:
+        # ctypes reaches a Windows entry point by attribute, so the name
+        # never appears as a string.
+        for path in self.modules_outside_the_seam():
+            with self.subTest(module=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Attribute):
+                        continue
+                    self.assertNotIn(
+                        node.attr.lower(), ("windll", "readdirectorychangesw"),
+                        f"{path.name}:{node.lineno} binds {node.attr}")
+
+    def test_the_task_folder_is_named_once(self) -> None:
+        # Two spellings of the folder is how a preflight came to query a
+        # folder the registration never wrote to (#191).
+        named = []
+        for path in _package_modules():
+            for lineno, value in _code_strings(
+                    ast.parse(path.read_text(encoding="utf-8"))):
+                if wintasks.TASK_FOLDER.lower() in value.lower():
+                    named.append(f"{path.name}:{lineno}")
+        self.assertEqual(named, [f"wintasks.py:{_task_folder_lineno()}"])
+
+
+def _task_folder_lineno() -> int:
+    source = Path(wintasks.__file__).resolve()
+    for number, line in enumerate(
+            source.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.startswith("TASK_FOLDER"):
+            return number
+    raise AssertionError("wintasks no longer defines TASK_FOLDER")
+
+
+class TestAgreementsAcrossModules(unittest.TestCase):
+    """Facts held in two places that have to keep saying the same thing."""
+
+    def test_the_smoketest_waits_longer_than_an_agent_may_take(self) -> None:
+        # The framework retries a timed-out agent, so the worst case is
+        # the per-attempt timeout times the attempts. A wait shorter than
+        # that fails a smoketest step over an agent that was still
+        # working (#178), and both budgets were plain literals when it
+        # last happened.
+        self.assertGreaterEqual(
+            smoketest.AGENT_RESULT_TIMEOUT_S,
+            headless.HEADLESS_TIMEOUT * (headless.HEADLESS_TIMEOUT_RETRIES + 1))
+
+    def test_every_capability_a_command_declares_can_be_probed(self) -> None:
+        # A probe named in the spec but missing here raises KeyError
+        # inside the preflight, on that command only, on the host that
+        # runs it.
+        declared = set()
+        for command in COMMANDS:
+            declared.update(command.probes)
+            for child in command.subcommands:
+                declared.update(child.probes)
+        self.assertLessEqual(declared, set(preflight._CAPABILITY_PROBES))
+
+    def test_doctor_describes_every_mechanism_a_host_may_have(self) -> None:
+        # Doctor selects its row by the mechanism the runtime reports, so
+        # a mechanism added on one side and not the other is a KeyError
+        # on the host that has it.
+        self.assertEqual(
+            set(doctor._MECHANISMS["schedule"]),
+            {hostruntime.CRONTAB, hostruntime.TASK_SCHEDULER})
+        self.assertEqual(
+            set(doctor._MECHANISMS["watch"]),
+            {watchsource.INOTIFY, watchsource.DIRECTORY_CHANGES})
+        self.assertIn(hostruntime.native_scheduler(),
+                      doctor._MECHANISMS["schedule"])
+        self.assertIn(watchsource.mechanism(), doctor._MECHANISMS["watch"])
+
+    def test_the_release_gate_smoketests_this_checkout(self) -> None:
+        # Every release to date gated on whatever project root happened
+        # to resolve on the releasing host, through seventeen passing
+        # tests that patched the call instead of reading it (#184).
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "agents_live_release_gate", root / "tools" / "release.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        command = module._smoketest_command()
+        self.assertIn("--repo", command)
+        self.assertEqual(command[command.index("--repo") + 1], str(module.ROOT))
+        # The plan a developer reads before saying yes has to be the
+        # commands that then run.
+        self.assertIn(command, module._gate_commands())
 
 
 if __name__ == "__main__":

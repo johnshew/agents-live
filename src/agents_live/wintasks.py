@@ -43,7 +43,11 @@ from hashlib import sha256
 from math import gcd
 from pathlib import Path, PureWindowsPath
 
-from . import hostruntime, triggers
+try:
+    from . import hostruntime, triggers
+except ImportError:  # flat execution: sibling scripts import this flat
+    import hostruntime  # type: ignore[no-redef]
+    import triggers  # type: ignore[no-redef]
 
 # Every registration this tool makes lives here, so the enumeration a
 # developer runs to confirm teardown is one command with one answer.
@@ -606,7 +610,8 @@ def _schtasks() -> str:
     return found
 
 
-def _run(args: Sequence[str]) -> tuple[int, str, str]:
+def _run(args: Sequence[str], *,
+         timeout: float | None = None) -> tuple[int, str, str]:
     """Run a schtasks command and decode both streams.
 
     Decoded through the console code page, which is what schtasks writes
@@ -615,7 +620,10 @@ def _run(args: Sequence[str]) -> tuple[int, str, str]:
     """
     try:
         completed = subprocess.run([_schtasks(), *args], capture_output=True,
-                                   check=False)
+                                   check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise TaskSchedulerUnavailable(
+            f"schtasks did not answer within {timeout:g}s") from exc
     except OSError as exc:
         raise TaskSchedulerUnavailable(f"schtasks could not be run: {exc}") from exc
     encoding = "oem" if sys.platform == "win32" else "utf-8"
@@ -637,6 +645,47 @@ def current_user_id() -> str:
 # "cannot find the path specified" for a folder that no task has ever
 # been registered into. Both mean the same thing here: not registered.
 _NOT_REGISTERED = "cannot find the "
+
+# How long each half of the probe below may take. Our own folder answers
+# in a fraction of a second once anything has been registered there. The
+# root walks the whole machine's task tree - about 2000 lines on a normal
+# install, measured anywhere from 4 to 26 seconds on the same host - so it
+# gets room to finish, and is only ever reached when our folder is absent.
+_FOLDER_QUERY_TIMEOUT_S = 15
+_ROOT_QUERY_TIMEOUT_S = 120
+
+
+def missing_dependency() -> str | None:
+    """What this host is missing to reach the task store, or None."""
+    try:
+        _schtasks()
+    except TaskSchedulerUnavailable as exc:
+        return str(exc)
+    return None
+
+
+def probe() -> str | None:
+    """Why this user cannot read the task store, or None if they can.
+
+    Side-effect free, and asks about our own folder first: querying the
+    root is slow enough to turn an advisory probe into a hard failure.
+    A refusal is decided there and reported immediately - only "not
+    registered yet" is ambiguous enough to be worth the root walk, and
+    that answer already proves the store was reachable.
+    """
+    for target, timeout in ((TASK_FOLDER + "\\", _FOLDER_QUERY_TIMEOUT_S),
+                            ("\\", _ROOT_QUERY_TIMEOUT_S)):
+        try:
+            code, _out, err = _run(["/Query", "/TN", target, "/FO", "LIST"],
+                                   timeout=timeout)
+        except TaskSchedulerUnavailable as exc:
+            return f"cannot read the task store: {exc}"
+        if code == 0:
+            return None
+        if _NOT_REGISTERED not in err.lower():
+            return (f"schtasks query failed (rc={code}): "
+                    f"{err.strip()[:200]}")
+    return None
 
 
 def read_definition(path: str) -> str | None:
