@@ -7497,6 +7497,43 @@ class TestSpawnInvocation(_TempProject):
         self.assertIsNone(spawn._run_invocation(self.root, "demo"))
 
 
+class TestJudgingASpawnedChild(_TempProject):
+    """The liveness check reads the exit status, not the clock."""
+
+    def _dispatch(self, exit_code: int | None):
+        proc = mock.Mock(pid=4321)
+        proc.poll.return_value = exit_code
+        runtime = mock.Mock()
+        runtime.spawn_detached.return_value = proc
+        with (
+            mock.patch.object(spawn, "_run_invocation",
+                              return_value=["uv", "run", "run.py"]),
+            mock.patch.object(spawn, "_hostruntime", return_value=runtime),
+            mock.patch.object(spawn.time, "sleep"),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = spawn.spawn_agent(self.root, "demo", ["a.md"])
+        return proc, result, stderr.getvalue()
+
+    def test_a_child_still_running_is_a_dispatch(self) -> None:
+        proc, result, stderr = self._dispatch(None)
+        self.assertIs(result, proc)
+        self.assertNotIn("WARNING", stderr)
+
+    def test_a_child_that_finished_cleanly_is_a_dispatch(self) -> None:
+        # The paths that finish inside the sample window finish on
+        # purpose: a pre-processor skip, an agent this host does not own.
+        # Reporting them as deaths made success a race against the host.
+        proc, result, stderr = self._dispatch(0)
+        self.assertIs(result, proc)
+        self.assertNotIn("WARNING", stderr)
+
+    def test_a_child_that_failed_immediately_is_reported(self) -> None:
+        _, result, stderr = self._dispatch(3)
+        self.assertIsNone(result)
+        self.assertIn("exited 3 immediately", stderr)
+
+
 class TestStateHome(_TempProject):
     def test_watcher_dispatch_logs_state_home_captures_without_crashing(self) -> None:
         # Run captures live outside the repository now; rendering them

@@ -118,6 +118,8 @@ def spawn_agent(
 
     Returns:
         The Popen object on success, None on failure (logged to stderr).
+        The child may already have exited; a clean early exit is a
+        completed dispatch, not a failed one.
     """
     agent_cmd = _run_invocation(root, agent_name)
     if agent_cmd is None:
@@ -167,13 +169,16 @@ def spawn_agent(
             file=sys.stderr,
         )
 
-        # Liveness check: wait briefly and verify the child didn't die immediately
+        # Liveness check: wait briefly, then judge the child by what it
+        # did. A run that finished inside the sample is a completed
+        # dispatch, not a death - the paths that finish early do so on
+        # purpose (a pre-processor skip, an agent this host does not own).
         time.sleep(1.5)
         exit_code = proc.poll()
-        if exit_code is not None:
+        if exit_code not in (None, 0):
             print(
-                f"[spawn] WARNING: {agent_name} PID={proc.pid} died immediately "
-                f"(exit={exit_code}). Check spawn-stderr.log.",
+                f"[spawn] WARNING: {agent_name} PID={proc.pid} exited "
+                f"{exit_code} immediately. Check spawn-stderr.log.",
                 file=sys.stderr,
             )
             return None
@@ -182,3 +187,9 @@ def spawn_agent(
     except Exception as exc:
         print(f"[spawn] Failed to spawn {agent_name}: {exc}", file=sys.stderr)
         return None
+    finally:
+        # The child holds its own inherited handle; the parent's copy
+        # would otherwise stay open for the life of the caller, which on
+        # Windows keeps the log file locked.
+        if hasattr(stderr_fh, "close"):
+            stderr_fh.close()
