@@ -38,10 +38,19 @@ try:
 except ImportError:
     import preflight
 
-# Read-only: the registry fallback is safe here (issue #192).
-REPO = resolve_root(allow_sole_registered=True)
-LOGS_DIR = repo_state_dir(REPO) / "logs"
 HOST_LOGS = host_logs_dir()
+
+
+def logs_dir() -> Path:
+    """This repo's log directory, resolved when it is asked for.
+
+    Resolving at import time would make a missing project root a
+    traceback from the import statement instead of this command's own
+    sentence about what is wrong (#202).
+
+    Read-only: the registry fallback is safe here (#192).
+    """
+    return repo_state_dir(resolve_root(allow_sole_registered=True)) / "logs"
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,7 +78,8 @@ def find_log_files(specific: list[str] | None) -> list[Path]:
     """Find all relevant JSONL log files."""
     if specific:
         return [Path(f) for f in specific if Path(f).exists()]
-    files = sorted(LOGS_DIR.glob("*.log")) if LOGS_DIR.exists() else []
+    repo_logs = logs_dir()
+    files = sorted(repo_logs.glob("*.log")) if repo_logs.exists() else []
     if HOST_LOGS.exists():
         files.extend(sorted(HOST_LOGS.glob("*.log")))
     return files
@@ -266,12 +276,17 @@ def print_timeline(events: list[dict]) -> None:
         print(f"  {ts_display}  {icon:<6} {agent_name:<20} {detail}")
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     # --all widens the log set; it must not discard an explicit
     # positional filter (#89).
     text_filter = args.filter
-    log_files = find_log_files(args.logs)
+    try:
+        log_files = find_log_files(args.logs)
+    except ValueError as exc:
+        preflight.emit_failure(
+            "logs timeline", str(exc), code="no_project_root")
+        return 2
 
     # Load all matching entries from all log files
     all_entries: list[dict] = []
@@ -301,7 +316,7 @@ def main() -> None:
 
     if preflight.json_mode():
         print(json.dumps({"ok": True, "events": deduped}))
-        return
+        return 0
 
     # Print header
     filter_desc = f"filter={args.filter}" if args.filter else "all agents"
@@ -321,7 +336,8 @@ def main() -> None:
         total_dur = sum(e.get("duration_s", 0) for e in done_entries if e.get("duration_s"))
         print(f"  Runs: {len(done_entries)} ({ok} ok, {err} error, {skip} skipped) | Total time: {format_duration(total_dur)}")
     print()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

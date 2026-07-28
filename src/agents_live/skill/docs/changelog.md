@@ -6,6 +6,27 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: an upgrade now names the watchers it left on the previous
+  version. (#188) Replacing the runtime does not stop the processes
+  already running it - Windows renames a locked shim aside and the
+  renamed image carries on, and elsewhere the replaced file keeps its
+  inode for as long as a process holds it - so every watcher that was
+  running kept the old release while the upgrade reported success. The
+  upgrade now reads the process table before it installs and, once the
+  install lands, names each watcher still alive by agent, pid, and
+  project, with the restart to run in each project. The count and the
+  agent names go on its admin event, because the symptom turns up days
+  later and to someone else. Restarting them is left to the operator: an
+  upgrade should not interrupt work mid-dispatch on its own.
+- fix: the log readers no longer resolve a project root while they load.
+  (#202) `qlog.py` and `timeline.py` did it at import, so running either
+  directly outside a project raised a traceback from the import
+  statement rather than the sentence the command had ready, and the
+  smoke suite could only import them from inside a project. Each path is
+  now resolved by the function that needs it. An invariant in the suite
+  asserts no module resolves a root as it loads, which is the same
+  defect fixed in the smoketest in the previous release and guarded
+  three different ways across the tree.
 - fix: piped log output is now plain ASCII. (#186) The query tool drew
   its table with box characters, and a Windows console decodes a
   captured pipe at its own codepage, so the sanctioned way to read
