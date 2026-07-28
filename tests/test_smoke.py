@@ -4225,6 +4225,68 @@ class TestPreReleaseAudit(unittest.TestCase):
                 audit.scan_file(shipped, root)[0],
             )
 
+    def test_a_wsl_home_reached_from_windows_is_rejected(self) -> None:
+        # The POSIX home pattern is forward-slashed, so it never saw a
+        # WSL home reached over UNC from the Windows side (#213).
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shipped = root / "README.md"
+            shipped.write_text(
+                r"Run from \\wsl.localhost\Ubuntu\home\jane\project." "\n",
+                encoding="utf-8")
+            self.assertIn(
+                "WSL home directory", audit.scan_file(shipped, root)[0])
+
+    def test_the_wsl_prefix_alone_stays_publishable(self) -> None:
+        # docs/windows-support.md names the namespace repeatedly while
+        # explaining why the tool refuses it. The pattern must not fire
+        # on a prefix carrying no user name.
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shipped = root / "README.md"
+            shipped.write_text(
+                r"It refuses \\wsl.localhost and \\wsl$ repositories." "\n",
+                encoding="utf-8")
+            self.assertEqual(audit.scan_file(shipped, root), [])
+
+    def test_a_personal_path_in_a_name_is_rejected(self) -> None:
+        # Contents are scanned by extension; a name ships whatever the
+        # file holds, and two files named for absolute temp paths once
+        # survived several releases.
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stray = root / "docs" / "Users" / "jane"
+            stray.mkdir(parents=True)
+            (stray / "scratch.bin").write_bytes(b"\x00")
+            findings = audit.scan_names(root)
+            self.assertEqual(len(findings), 1)
+            self.assertIn("macOS user in path", findings[0])
+
+    def test_a_machine_name_in_a_path_is_rejected(self) -> None:
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            (root / "docs" / "PRIVATE-HOST-FIXTURE-setup.md").write_text(
+                "notes\n", encoding="utf-8")
+            findings = audit.scan_names(root, ["private-host-fixture"])
+            self.assertEqual(len(findings), 1)
+            self.assertIn("Known machine name in path", findings[0])
+
+    def test_exclusions_hold_on_a_windows_checkout(self) -> None:
+        # EXCLUDED_PATTERNS is forward-slashed and was compared against
+        # str(relative), which is backslashed on Windows, so the runtime
+        # log and data directories were excluded on POSIX only.
+        audit = self._module()
+        for excluded in ("Agents/logs/an-agent.log",
+                         "Agents/data/state.json",
+                         "src/agents_live/__pycache__/run.pyc"):
+            self.assertTrue(audit.is_excluded(Path(excluded)), excluded)
+        self.assertFalse(audit.is_excluded(Path("src/agents_live/run.py")))
+
 
 class TestHostRuntimeIdentity(unittest.TestCase):
     """The seam member every host-specific branch now reads."""

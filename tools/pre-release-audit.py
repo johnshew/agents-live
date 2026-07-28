@@ -71,6 +71,12 @@ PATH_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # paths through the export-clean gate (issue #195).
     ("Windows user",    re.compile(r"[A-Za-z]:\\Users\\[A-Za-z][A-Za-z0-9_-]+\\")),
     ("macOS user",      re.compile(r"/Users/[A-Za-z][A-Za-z0-9_-]+/")),
+    # A WSL home reached from Windows is backslash-separated, so the
+    # POSIX home pattern above never sees it. Anchored on the \home\
+    # component: the bare \\wsl.localhost prefix is ordinary prose in
+    # the Windows docs and must keep passing.
+    ("WSL home directory", re.compile(
+        r"(?i)\\\\wsl(?:\.localhost|\$)\\[^\\\n]+\\home\\[A-Za-z][A-Za-z0-9_-]+")),
     # Tilde forms bypass the absolute-path patterns above; the
     # maintainer's personal project checkout must never ship.
     ("Personal repo path", re.compile(r"\brepos/life\b")),
@@ -210,21 +216,29 @@ def check_doc_links(root: Path, files: list[Path]) -> list[str]:
     return findings
 
 
-def should_scan(path: Path, root: Path) -> bool:
-    """Return True if the file should be scanned."""
-    relative = path.relative_to(root)
-    rel_str = str(relative)
+def is_excluded(relative: Path) -> bool:
+    """Return True if *relative* lies under an excluded path."""
+    # EXCLUDED_PATTERNS is written with forward slashes, so the
+    # comparison has to be too; str() on Windows yields backslashes and
+    # silently matched nothing there.
+    rel_str = relative.as_posix()
 
-    # Skip excluded directories
     for excluded in EXCLUDED_PATTERNS:
         if rel_str.startswith(excluded) or f"/{excluded}/" in f"/{rel_str}/":
-            return False
+            return True
 
     # Skip hidden files/dirs (except .claude, .agents)
-    parts = relative.parts
-    for part in parts[:-1]:  # Check parent dirs
+    for part in relative.parts[:-1]:  # Check parent dirs
         if part.startswith(".") and part not in {".claude", ".agents"}:
-            return False
+            return True
+
+    return False
+
+
+def should_scan(path: Path, root: Path) -> bool:
+    """Return True if the file's contents should be scanned."""
+    if is_excluded(path.relative_to(root)):
+        return False
 
     # Only scan text files
     return path.suffix.lower() in TEXT_EXTENSIONS
@@ -247,6 +261,44 @@ def collect_files(root: Path) -> list[Path]:
             files.append(full)
 
     return files
+
+
+def scan_names(root: Path, machine_names: list[str] | None = None) -> list[str]:
+    """Scan path names themselves, whatever the file holds.
+
+    Content scanning is limited to text extensions, so a name is the one
+    part of a binary or oddly-suffixed file that still ships in the
+    wheel. Two files whose names were absolute temp paths were once
+    committed and survived several releases (#195).
+    """
+    findings: list[str] = []
+    checks = PATH_PATTERNS + PERSONAL_PATTERNS
+
+    for dir_path in INCLUDED_DIRS:
+        full = root / dir_path
+        if not full.is_dir():
+            continue
+        for path in sorted(full.rglob("*")):
+            relative = path.relative_to(root)
+            if is_excluded(relative):
+                continue
+            # as_posix separates components; a backslash inside a single
+            # component is part of the name and survives, which is the
+            # shape a stray Windows path takes.
+            name = relative.as_posix()
+            folded = name.casefold()
+            for machine in machine_names or []:
+                if machine.casefold() in folded:
+                    findings.append(
+                        f"  {name}: Known machine name in path "
+                        f"({machine!r})")
+            if is_safe_match(name):
+                continue
+            for label, pattern in checks:
+                if pattern.search(name):
+                    findings.append(f"  {name}: {label} in path")
+
+    return findings
 
 
 def load_machine_names(root: Path) -> list[str]:
@@ -324,6 +376,7 @@ def main() -> int:
     all_findings: list[str] = []
     for path in files:
         all_findings.extend(scan_file(path, root, machine_names))
+    all_findings.extend(scan_names(root, machine_names))
 
     # Release-shape-only checks: they validate THE ASSEMBLED EXPORT
     # (adapter resolution against the packaged registry, links against
