@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.4.0 - 2026-07-28
+
 - fix: a credential on a command line no longer reaches `admin.log`.
   (#212) Every administrative event records the invoking argv, so a
   state change traces back to the cron entry, CLI invocation, or agent
