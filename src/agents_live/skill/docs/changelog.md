@@ -6,6 +6,35 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: piped log output is now plain ASCII. (#186) The query tool drew
+  its table with box characters, and a Windows console decodes a
+  captured pipe at its own codepage, so the sanctioned way to read
+  runtime state turned to noise exactly when the reader was a program.
+  A terminal still gets the drawn table; anything else gets column
+  rules, one row per line, and a row count. `--format` says so, and
+  names csv and jsonl as the forms to parse.
+- fix: an agent timeout now records how long the attempt actually ran
+  and how many attempts it took. (#183) The error carried the
+  configured limit, which is what the operator already knew; the
+  elapsed time and the attempt count, which distinguish a slow link
+  from a wedged one, were not written down at all. Both are on every
+  retry warning, on the terminal error, and on the agent phase of a
+  successful run, and the exception carries them for a caller that has
+  to explain itself.
+- fix: the smoketest now says when it stopped at a host limit rather
+  than an assertion. (#185) An agent that exhausted its retries failed
+  the run with the same shape as a broken contract, so a link that was
+  merely slow read as a defect in the tool. The verdict names the
+  limit, carries the attempt count and the timeout it hit, and records
+  a category that the health check reports alongside the reason.
+- feat: a capability probe that refuses or drags is written to the
+  admin log. (#183) Every host-mutating command asks the pre-dispatch
+  gate whether the host can do what it is about to be told to do, and
+  until now the answer left no trace, so a slow probe looked like a
+  slow command. A refusal and any probe over five seconds are recorded
+  with the capability, the operation that needed it, how long it took,
+  and why it said no. A fast pass stays silent, because a row per
+  invocation would bury the interesting one.
 - fix: a refused task query now fails fast instead of walking the whole
   task store. (#191) Probing the scheduler asked for the tool's own
   folder and, when that came back empty-handed, fell back to querying

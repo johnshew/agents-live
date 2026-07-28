@@ -195,8 +195,21 @@ class AgentsLiveError(RuntimeError):
 
 
 class AgentTimeoutError(AgentsLiveError):
-    """Agent subprocess exceeded its timeout (retryable in headless_agent)."""
+    """Agent subprocess exceeded its timeout (retryable in headless_agent).
+
+    ``attempts`` and ``timeout_s`` carry what the message says in prose,
+    so a caller deciding whether a failure is the host or the code reads
+    the numbers rather than parsing the sentence (#183, #185). They
+    default to the single-attempt case for the paths that raise this
+    without a retry budget.
+    """
     category = "timeout"
+
+    def __init__(self, *args: object, attempts: int = 1,
+                 timeout_s: float | None = None) -> None:
+        super().__init__(*args)
+        self.attempts = attempts
+        self.timeout_s = timeout_s
 
 
 class CliCrashError(AgentsLiveError):
@@ -257,6 +270,11 @@ class AgentResult:
     cost_usd: str | None = None
     transcript_path: str | None = None
     structured_output: dict | list | None = None
+    # How many times the agent was invoked to produce this output. A run
+    # rescued by a retry costs every attempt's wall clock, and the
+    # completing row is the only place a reader sees the whole run
+    # (#183).
+    attempts: int = 1
 
 
 @dataclass(frozen=True)
@@ -2075,6 +2093,7 @@ def _agent_result(
     usage: dict[str, str | None],
     transcript_path: str | None,
     structured_output: dict | list | None,
+    attempts: int = 1,
 ) -> AgentResult:
     """Assemble an AgentResult from output plus a _parse_usage_stats-style dict."""
     return AgentResult(
@@ -2089,6 +2108,7 @@ def _agent_result(
         cost_usd=usage.get("cost_usd"),
         transcript_path=transcript_path,
         structured_output=structured_output,
+        attempts=attempts,
     )
 
 
@@ -2132,7 +2152,13 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
     empty_output_attempts = HEADLESS_EMPTY_OUTPUT_RETRIES + 1
     timeout_count = 0
     empty_count = 0
+    # Every invocation, however it ended. An attempt that times out is
+    # killed before the runtime reports anything, so its wall clock is
+    # recorded here or nowhere (#183).
+    attempts = 0
     while True:
+        attempts += 1
+        attempt_started = time.monotonic()
         try:
             if adapter.use_pty and hostruntime.supports_pty():
                 raw_output, stderr_text = _run_copilot_with_pty(command, env, stream=stream, timeout=timeout)
@@ -2174,6 +2200,7 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
             # stderr happens to contain "timed out" is no longer retried
             # on the timeout budget.
             timeout_count += 1
+            attempt_s = round(time.monotonic() - attempt_started, 1)
             partial_stdout = ""
             partial_stderr = ""
             if isinstance(exc, subprocess.TimeoutExpired):
@@ -2189,7 +2216,9 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                 # Log warning and retry
                 log_event(config.agent_log, phase="agent", level="warning",
                           message=f"agent timed out after {timeout}s (timeout attempt {timeout_count}/{HEADLESS_TIMEOUT_RETRIES + 1}); retrying",
-                          error_category="timeout", timeout_s=timeout, attempt=timeout_count)
+                          error_category="timeout", timeout_s=timeout,
+                          attempt=timeout_count, attempts=attempts,
+                          duration_s=attempt_s)
                 continue
 
             # Final timeout attempt - log and raise
@@ -2198,8 +2227,11 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                    else f"agent timed out after {timeout}s")
             log_event(config.agent_log, phase="agent", level="error",
                       message=msg,
-                      error_category="timeout", timeout_s=timeout, attempt=timeout_count)
-            raise AgentTimeoutError(msg) from exc
+                      error_category="timeout", timeout_s=timeout,
+                      attempt=timeout_count, attempts=attempts,
+                      duration_s=attempt_s)
+            raise AgentTimeoutError(msg, attempts=attempts,
+                                    timeout_s=timeout) from exc
         except FileNotFoundError as exc:
             log_event(config.agent_log, phase="agent", level="error",
                       message=f"required command not found: {exc.filename}",
@@ -2257,7 +2289,8 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                     t_path = str(t_log)
             # Always persist full run output
             _persist_run_output(config, raw_output, stderr_text)
-            return _agent_result(stripped, stderr_text, usage, t_path, parsed)
+            return _agent_result(stripped, stderr_text, usage, t_path, parsed,
+                                 attempts=attempts)
 
         # --- Empty output diagnostics ---
         # Determine why output is empty: truly no stdout, or content that

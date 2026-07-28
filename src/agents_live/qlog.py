@@ -321,6 +321,46 @@ def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
     return violations
 
 
+MAX_CELL_WIDTH = 80
+
+
+def show(rel: duckdb.DuckDBPyRelation) -> None:
+    """Print a result set as a table, in a form its reader can read.
+
+    DuckDB draws its table in box-drawing characters. Written to a
+    console those are decoded as the UTF-8 they are; captured into a
+    pipe by a shell whose console codepage is the Windows default, they
+    are decoded as OEM bytes and every line becomes noise. Nothing
+    reports it, so the sanctioned way to read runtime state degrades
+    silently in the one case - a pipe - where the reader is a program
+    (#186). Off a terminal the same rows are printed with ASCII rules,
+    which no codepage rewrites.
+    """
+    if sys.stdout.isatty():
+        rel.show(max_col_width=MAX_CELL_WIDTH, max_width=500)
+        return
+    columns = list(rel.columns)
+    rows = [[_cell(value) for value in row] for row in rel.fetchall()]
+    widths = [
+        max(len(column), *(len(row[index]) for row in rows)) if rows
+        else len(column)
+        for index, column in enumerate(columns)
+    ]
+    print(" | ".join(name.ljust(width)
+                     for name, width in zip(columns, widths, strict=True)))
+    print("-+-".join("-" * width for width in widths))
+    for row in rows:
+        print(" | ".join(cell.ljust(width)
+                         for cell, width in zip(row, widths, strict=True)))
+    print(f"({len(rows)} row{'' if len(rows) == 1 else 's'})")
+
+
+def _cell(value: object) -> str:
+    """One value as a single line, cut to the column cap."""
+    text = "" if value is None else str(value).replace("\n", " ")
+    return text if len(text) <= MAX_CELL_WIDTH else text[:MAX_CELL_WIDTH - 3] + "..."
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", nargs="?",
@@ -359,7 +399,9 @@ def main() -> int:
                     "Mutually exclusive with filter flags (--agent, --since, "
                     "--until, --phase, --status, --trigger, --slow, --errors); "
                     "put those conditions in your WHERE clause.")
-    ap.add_argument("--format", choices=["table", "jsonl", "csv"], default="table")
+    ap.add_argument("--format", choices=["table", "jsonl", "csv"], default="table",
+                    help="table (default; ASCII rules when not a terminal), "
+                         "or csv/jsonl, which are the forms to parse")
     ap.add_argument("--check-schema", action="store_true",
                     help="validate normalized live-plus-archive column types")
     args = ap.parse_args()
@@ -461,9 +503,9 @@ def main() -> int:
                 print(",".join("" if v is None else str(v).replace(",", ";") for v in row))
         else:
             # Widen display so columns aren't hidden or truncated.
-            # max_width=500 lets the table exceed terminal width (wraps naturally).
-            # max_col_width=80 keeps individual columns readable.
-            rel.show(max_col_width=80, max_width=500)
+            # max_width=500 lets the table exceed terminal width (wraps
+            # naturally) when there is a terminal to wrap in.
+            show(rel)
     except duckdb.Error as exc:
         preflight.emit_failure(
             "logs", f"{exc}; sql: {q}", code="query_error")

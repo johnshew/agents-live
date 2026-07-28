@@ -24,4 +24,7 @@ jobs:
       # check - and this is the host a release is cut on.
       - if: runner.os == 'Linux'
         run: uv run --script tools/pre-release-audit.py
-      - run: uv run --with-editable . python -m unittest tests.test_smoke
+      # duckdb is the query tool's own dependency, provisioned by its
+      # PEP 723 header at runtime; the suite needs it to assert what
+      # `agents-live logs` prints.
+      - run: uv run --with-editable . --with duckdb python -m unittest tests.test_smoke
