@@ -6,6 +6,24 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: a running dashboard can be listed and stopped from the CLI.
+  (#198) A dashboard outlives the command that launched it, so a port
+  stays held by a server the operator no longer knows about. The port
+  guard added in 5.3.0 says the port is taken; until now nothing said
+  what took it, and recovery meant hunting through the process table by
+  hand. Every dashboard now records its port and pid before it serves
+  and drops the entry when it exits, which gives `agents-live dashboard
+  list` and `agents-live dashboard stop --port P | --all` something to
+  act on, and lets the conflict message point at them. The registry
+  describes only dashboards this host started: a listener that is a
+  relay to another host, or one from an earlier release, answers the
+  port probe and is absent from the registry, and the messages say so
+  rather than reporting a missing entry. A subcommand's declared root
+  kind is now what the pre-dispatch gate reads, so `dashboard list`
+  reports on this host from anywhere while `dashboard` still resolves a
+  project. Every other subcommand in the spec already declared the same
+  kind as its parent, so nothing else changes.
+
 ## 5.3.0 - 2026-07-27
 
 - fix: a host-mutating command no longer acts on an unnamed project.

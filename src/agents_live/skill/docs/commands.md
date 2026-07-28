@@ -41,7 +41,9 @@ heartbeat    ::= "heartbeat" [ ( "install" [ "--distro" VALUE ] | "uninstall" [ 
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
 completions  ::= "completions" ( "bash" | "zsh" | "--update" )
-dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
+dashboard    ::= "dashboard" ( dashboard_query | "list" | "stop" stop_args )
+dashboard_query ::= [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
+stop_args ::= [ "--port" VALUE ] [ "--all" ]
 ```
 
 ## CLI command and flag table
@@ -69,6 +71,8 @@ dashboard    ::= "dashboard" [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" 
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
 | completions | in-process | none |  |  |  |  | --update | Generate shell completion scripts. |
 | dashboard | subprocess | registry |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
+| dashboard list | subprocess | none |  |  |  |  |  | List dashboards this host is running. |
+| dashboard stop | subprocess | none |  |  |  |  | --port, --all | Stop a dashboard this host is running. |
 <!-- END GENERATED CLI -->
 
 ## Review the command surface

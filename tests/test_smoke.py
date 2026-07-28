@@ -42,11 +42,11 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, adminlog, agent_adapters, cli, completions, headless,
-        health_check, heartbeat, hidden, hostruntime, init, migrate, ownership,
-        paths, plugins, preflight, doctor, repos, run, schedules, spawn,
-        status, uninstall, update_check, upgrade, triggers, watchpolicy,
-        watchsource, winwatch, wintasks,
+        activate, adminlog, agent_adapters, cli, completions, dashboards,
+        headless, health_check, heartbeat, hidden, hostruntime, init, migrate,
+        ownership, paths, plugins, preflight, doctor, repos, run, schedules,
+        spawn, status, uninstall, update_check, upgrade, triggers,
+        watchpolicy, watchsource, winwatch, wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -60,6 +60,7 @@ except ImportError:  # flat checkout layout
     import agent_adapters
     import cli
     import completions
+    import dashboards
     import headless
     import health_check
     import heartbeat
@@ -3834,6 +3835,115 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("port_unavailable", result.stderr)
         self.assertNotIn("ready to go", result.stdout)
+
+    def _dashboards_main(self, *argv: str) -> tuple[int, str]:
+        """Run the dashboard registry command and capture what it printed."""
+        saved = sys.argv
+        sys.argv = ["agents-live dashboard", *argv]
+        try:
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                code = dashboards.main()
+        finally:
+            sys.argv = saved
+        return code, stdout.getvalue()
+
+    def test_dashboards_script_imports_in_packaged_layout(self) -> None:
+        # Dispatched as a loose script, so its own imports have to resolve
+        # without the package being installed (#198).
+        script = Path(headless.__file__).with_name("dashboards.py")
+        result = subprocess.run(
+            ["uv", "run", "--script", str(script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("stop", result.stdout)
+
+    def test_dashboard_list_reports_a_host_running_nothing(self) -> None:
+        code, output = self._dashboards_main("list")
+        self.assertEqual(code, 0)
+        self.assertIn("No dashboard started by this host is running", output)
+
+    def test_the_registry_drops_a_dashboard_whose_process_is_gone(self) -> None:
+        # A killed dashboard never runs its exit hook, so the entry it
+        # left behind would name a port nothing holds.
+        gone = subprocess.Popen([sys.executable, "-c", ""])
+        gone.wait()
+        dashboards.record(8231, gone.pid, self.root)
+        self.assertEqual(dashboards.running(), [])
+        self.assertNotIn(
+            str(gone.pid),
+            dashboards.registry_path().read_text(encoding="utf-8"))
+
+    def test_dashboard_stop_terminates_the_process_it_recorded(self) -> None:
+        served = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(served.kill)
+        dashboards.record(8231, served.pid, self.root)
+        # The port probe is not what this test is about, and a real one
+        # would depend on what else the host happens to be listening on.
+        with mock.patch.object(dashboards, "port_answers", return_value=False):
+            code, output = self._dashboards_main("stop", "--port", "8231")
+        self.assertEqual(code, 0, output)
+        self.assertIn("Stopped the dashboard on port 8231", output)
+        # A terminated child stays a zombie on POSIX until its parent
+        # reaps it, and a zombie still answers a liveness probe. Only
+        # this test is the parent of the process it stopped; a real
+        # dashboard is reaped by init.
+        served.wait(timeout=30)
+        self.assertFalse(hostruntime.is_alive(served.pid))
+        self.assertEqual(dashboards.running(), [])
+
+    def test_dashboard_stop_separates_a_relay_from_a_missing_entry(self) -> None:
+        # Both cases are "not in the registry", and they need different
+        # answers: something is holding the port that this host did not
+        # start, or nothing is there at all.
+        with mock.patch.object(dashboards, "port_answers", return_value=True):
+            code, answering = self._dashboards_main("stop", "--port", "8231")
+        self.assertEqual(code, 1)
+        self.assertIn("not_found", answering)
+        self.assertIn("this host did not start it", answering)
+        with mock.patch.object(dashboards, "port_answers", return_value=False):
+            _, silent = self._dashboards_main("stop", "--port", "8231")
+        self.assertIn("nothing answers there", silent)
+
+    def test_an_unreadable_registry_reads_as_an_empty_one(self) -> None:
+        path = dashboards.registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ truncated", encoding="utf-8")
+        self.assertEqual(dashboards.running(), [])
+
+    def test_a_host_scoped_subcommand_needs_no_project_root(self) -> None:
+        # `dashboard` resolves a root; `dashboard list` reports on this
+        # host and must run from anywhere, so the gate reads the child's
+        # declared kind rather than its parent's (#198).
+        with (
+            mock.patch.object(paths, "resolve_root",
+                              side_effect=ValueError("no project root")),
+            mock.patch.object(cli.subprocess, "run",
+                              return_value=subprocess.CompletedProcess(
+                                  [], 0)) as dispatched,
+        ):
+            self.assertEqual(cli.main(["dashboard", "list"]), 0)
+            self.assertEqual(cli.main(["dashboard"]), 2)
+        self.assertIn("dashboards.py", " ".join(dispatched.call_args[0][0]))
+
+    def test_only_a_shared_script_is_told_which_action_ran(self) -> None:
+        # `logs timeline` has a script to itself, so the token would be
+        # an unrecognized argument; `dashboard list` and `dashboard stop`
+        # share one, where the token is the only thing distinguishing
+        # them.
+        with mock.patch.object(
+            cli.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as dispatched:
+            cli.main(["dashboard", "stop", "--all"])
+            shared = dispatched.call_args[0][0]
+            cli.main(["logs", "timeline"])
+            sole = dispatched.call_args[0][0]
+        self.assertIn("stop", shared)
+        self.assertNotIn("timeline", sole)
 
     def test_dashboard_structured_snapshot_deduplicates_correlated_errors(self) -> None:
         dashboard = Path(headless.__file__).with_name("dashboard.py")

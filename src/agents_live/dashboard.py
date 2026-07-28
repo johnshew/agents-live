@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import json
+import os
 import re
 import socket
 import subprocess
@@ -61,11 +63,13 @@ if (SCRIPTS_DIR / "__init__.py").is_file():
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
     from agents_live import (  # noqa: E402
-        cli_spec, headless, hostruntime, ownership, paths, preflight, repos)
+        cli_spec, dashboards, headless, hostruntime, ownership, paths,
+        preflight, repos)
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
     import cli_spec  # noqa: E402
+    import dashboards  # noqa: E402
     import headless  # noqa: E402
     import hostruntime  # noqa: E402
     import ownership  # noqa: E402
@@ -1234,9 +1238,17 @@ def main() -> None:
         if conflict is not None:
             preflight.emit_failure(
                 "dashboard",
-                f"{conflict}; retry with --port <other> or stop what holds it",
+                f"{conflict}; `agents-live dashboard list` shows what this "
+                f"host started, `agents-live dashboard stop --port "
+                f"{args.port}` stops it, or retry with --port <other>",
                 code="port_unavailable")
             raise SystemExit(1)
+        # Recorded by the launching process, not the server: under --dev
+        # the reloader child holds the socket but comes and goes, while
+        # this process owns the port for the whole run. Stopping it takes
+        # the child with it, because termination covers descendants.
+        dashboards.record(args.port, os.getpid(), REPO_ROOT)
+        atexit.register(dashboards.forget, args.port, os.getpid())
 
     if args.all_repos:
         build_all_repos_page()

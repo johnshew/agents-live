@@ -348,14 +348,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
-    # delegated module.
-    if command.root != "none" and not all_repos:
+    # delegated module. A named subcommand answers for itself: a
+    # host-scoped one can sit under a project-scoped parent, as
+    # `dashboard list` does under `dashboard` (#198). Every other pair in
+    # the spec declares the same kind as its parent, so consulting the
+    # child leaves them as they were.
+    active_root = command.root
+    if command.subcommands and rest:
+        child = next(
+            (item for item in command.subcommands if item.name == rest[0]),
+            None,
+        )
+        if child is not None:
+            active_root = child.root
+    if active_root != "none" and not all_repos:
         try:
             paths.resolve_root(
-                allow_sole_registered=command.root == "registry")
+                allow_sole_registered=active_root == "registry")
         except ValueError as exc:
             allow_markerless_invocation = (
-                command.root == "markerless"
+                active_root == "markerless"
                 and not os.environ.get(paths.ENV_VAR, "").strip()
             )
             if not allow_markerless_invocation:
@@ -392,7 +404,16 @@ def main(argv: list[str] | None = None) -> int:
                 None,
             )
             if subcommand is not None:
-                active, script, rest = subcommand, subcommand.module, rest[1:]
+                # The action token survives when the target script serves
+                # more than one command, because then it is the only
+                # thing that says which action was asked for. `logs
+                # timeline` has a script to itself and does not need it;
+                # `dashboard list` and `dashboard stop` share one and do.
+                serving = [item for item in (command, *command.subcommands)
+                           if item.module == subcommand.module]
+                active, script = subcommand, subcommand.module
+                if len(serving) == 1:
+                    rest = rest[1:]
         if capture and active.json_args:
             lead = active.json_args[0]
             required = active.json_args[1] if len(active.json_args) > 1 else None

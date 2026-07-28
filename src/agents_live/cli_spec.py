@@ -313,6 +313,22 @@ Persistent install or repair:
     Cmd(
         "dashboard", "Open the interactive control panel.", "dashboard.py",
         "subprocess", root="registry", all_repos=True,
+        subcommands=(
+            Cmd(
+                "list", "List dashboards this host is running.",
+                "dashboards.py", "subprocess", root="none",
+            ),
+            Cmd(
+                "stop", "Stop a dashboard this host is running.",
+                "dashboards.py", "subprocess", root="none",
+                mutually_exclusive=(("--port", "--all"),),
+                requires_one_of=("--port", "--all"),
+                args=(
+                    Arg(("--port",), "Dashboard port.", kind="value"),
+                    Arg(("--all",), "Stop every dashboard on this host."),
+                ),
+            ),
+        ),
         args=(
             Arg(("--native",), "Open a desktop window."),
             Arg(("--open",), "Open a browser."),
@@ -479,16 +495,22 @@ def _ebnf_command(command: Cmd) -> list[str]:
         # Own query flags OR a subcommand: render the query and each
         # subcommand's flags as named productions.
         query = f"{command.name}_query"
-        alternatives = [query] + [
-            f'"{child.name}" {child.name}_args'
-            for child in command.subcommands if not child.hidden
-        ]
-        lines = [f'{prefix} ( {" | ".join(alternatives)} )']
-        lines.append(f"{query:<12} ::= {_ebnf_flags(command)}")
+        alternatives = [query]
+        productions = []
         for child in command.subcommands:
             if child.hidden:
                 continue
-            lines.append(f"{child.name}_args ::= {_ebnf_flags(child)}")
+            # A subcommand with no flags of its own is spelled inline: a
+            # named production for it would be an empty right-hand side.
+            suffix = _ebnf_flags(child)
+            if suffix:
+                alternatives.append(f'"{child.name}" {child.name}_args')
+                productions.append(f"{child.name}_args ::= {suffix}")
+            else:
+                alternatives.append(f'"{child.name}"')
+        lines = [f'{prefix} ( {" | ".join(alternatives)} )']
+        lines.append(f"{query:<12} ::= {_ebnf_flags(command)}")
+        lines.extend(productions)
         return lines
     if command.subcommands:
         alternatives = []
