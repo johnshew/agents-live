@@ -1471,6 +1471,24 @@ class TestAdminLog(_TempProject):
                 side_effect=OSError("state home is gone")):
             adminlog.record("repo-register", repo="alpha")  # must not raise
 
+    def test_a_credential_on_the_command_line_never_reaches_the_log(self) -> None:
+        # `agents-live logs` prints this field back, so a secret passed
+        # as an argument would be readable long after the command ran.
+        argv = ["/usr/bin/agents-live", "repos", "add", "--token", "s3cr3t",
+                "--api-key=hunter2", "--github-token", "ghp_xyz",
+                "--name", "alpha"]
+        with mock.patch.object(sys, "argv", argv):
+            adminlog.record("repo-register", repo="alpha")
+        (event,) = self.events()
+        self.assertNotIn("s3cr3t", event["command"])
+        self.assertNotIn("hunter2", event["command"])
+        self.assertNotIn("ghp_xyz", event["command"])
+        # The shape of the invocation is the diagnostic and survives.
+        self.assertEqual(
+            event["command"],
+            "agents-live repos add --token *** --api-key=*** "
+            "--github-token *** --name alpha")
+
     def test_operation_pairs_start_and_end_and_records_failure(self) -> None:
         with adminlog.operation("upgrade-runtime", version_before="1.0") as end:
             end["version_after"] = "1.1"
