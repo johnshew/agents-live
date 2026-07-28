@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: the pipeline server is built before its start timeout begins.
+  (#207) The five-second budget was meant to cover binding a socket, but
+  the work it actually enclosed was importing uvicorn and the mcp SDK
+  inside the server thread, over a second warm and much more on a first
+  run reading those packages off disk for the first time, which is where
+  a cold start ran out of budget and failed once in the smoke test.
+  Worse, a failure while building the app was not caught: the thread
+  died, nothing signalled readiness, and the caller waited out the full
+  timeout and reported what read like a bind failure, so a missing SDK
+  and a slow machine were indistinguishable. Construction now happens on
+  the calling thread, where an import error raises itself, and the
+  timeout covers only the bind.
 - fix: the mcp dependency is held below 2.0. (#205) That release,
   published today, removes `mcp.server.fastmcp`, which the pipeline
   server is written against, and the dependency carried no upper bound,

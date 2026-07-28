@@ -6321,6 +6321,82 @@ class TestPipelineMcpStore(unittest.TestCase):
             self.assertEqual(parsed.utcoffset(), timedelta(0))
 
 
+class TestStartingThePipelineServer(unittest.TestCase):
+    """start() must time the bind, not the import of the mcp SDK (#207)."""
+
+    def _cls(self):
+        try:  # installed package layout
+            from agents_live.pipeline_mcp import PipelineMcp
+        except ImportError:  # flat checkout layout
+            from pipeline_mcp import PipelineMcp
+        return PipelineMcp
+
+    def test_the_app_is_built_before_the_clock_starts(self) -> None:
+        # Importing uvicorn and the mcp SDK costs over a second warm and
+        # far more on a cold first run. Doing it inside the server thread
+        # spent the caller's timeout on imports, so a slow machine failed
+        # a budget meant to cover binding a socket.
+        server = self._cls()(require_token=False)
+        built_on: list[str] = []
+        real_build = server._build_app
+
+        def _record():
+            built_on.append(threading.current_thread().name)
+            return real_build()
+
+        server._build_app = _record  # type: ignore[method-assign]
+        try:
+            server.start(timeout=10.0)
+        finally:
+            server.shutdown()
+
+        self.assertEqual(built_on, [threading.current_thread().name])
+
+    def test_a_build_failure_raises_itself_instead_of_a_timeout(self) -> None:
+        # A broken or incompatible mcp SDK used to kill the server thread
+        # silently: nothing set the readiness event, so the caller waited
+        # out the full timeout and reported what read like a bind
+        # failure. The real cause has to reach the caller.
+        server = self._cls()(require_token=False)
+
+        def _explode():
+            raise ImportError("No module named 'mcp.server.fastmcp'")
+
+        server._build_app = _explode  # type: ignore[method-assign]
+        started = time.monotonic()
+        with self.assertRaises(ImportError) as caught:
+            server.start(timeout=30.0)
+
+        self.assertIn("mcp.server.fastmcp", str(caught.exception))
+        self.assertLess(time.monotonic() - started, 30.0)
+        self.assertIsNone(server._thread)  # nothing left running
+
+    def test_a_taken_port_is_reported_as_a_failed_bind(self) -> None:
+        # The one thing the timeout is now for. The message has to say
+        # bind, because that is the only thing left inside the window.
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(blocker.close)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        server = self._cls()(port=blocker.getsockname()[1], require_token=False)
+
+        with self.assertRaises(RuntimeError) as caught:
+            server.start(timeout=2.0)
+
+        self.assertIn("failed to bind", str(caught.exception))
+        self.assertIn(server.url, str(caught.exception))
+
+    def test_starting_twice_is_refused(self) -> None:
+        server = self._cls()(require_token=False)
+        server.start(timeout=10.0)
+        self.addCleanup(server.shutdown)
+
+        with self.assertRaises(RuntimeError) as caught:
+            server.start()
+
+        self.assertIn("called twice", str(caught.exception))
+
+
 class TestReleaseTool(unittest.TestCase):
     def _load_tool(self):
         root = Path(__file__).resolve().parents[1]
