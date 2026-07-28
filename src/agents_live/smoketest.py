@@ -47,7 +47,19 @@ def _module_argv(module: str) -> list[str]:
     if __package__:
         return [sys.executable, "-m", f"{__package__}.{module}"]
     return [sys.executable, str(SCRIPT_DIR / f"{module}.py")]
-SMOKETEST_LOCK_PATH = paths.repo_state_dir(repo_root()) / "smoketest-framework.lock"
+
+
+def lock_path() -> Path:
+    """Where the framework smoketest's exclusive lock lives.
+
+    Resolved on use rather than at import: the module has to be
+    importable outside a project - the suite imports it to check the
+    timeouts agree - while resolving a root there raises, and the
+    command that needs the lock reports a missing root in its own
+    words.
+    """
+    return paths.repo_state_dir(repo_root()) / "smoketest-framework.lock"
+
 # Ephemeral fixture files the smoketest's agents and handlers write via
 # repo-relative paths. These must stay inside the repository (watch
 # paths are validated to; the write-files handler writes relative to
@@ -170,7 +182,7 @@ def _record_lock_owner(runtime: str, model: str) -> None:
         "model": model,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    with SMOKETEST_LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
+    with lock_path().open("r+", encoding="utf-8") as lock_file:
         lock_file.seek(0)
         lock_file.truncate()
         lock_file.write(json.dumps(owner, separators=(",", ":")) + "\n")
@@ -180,7 +192,7 @@ def _record_lock_owner(runtime: str, model: str) -> None:
 
 def _report_lock_busy() -> None:
     try:
-        owner = SMOKETEST_LOCK_PATH.read_text(encoding="utf-8").strip()
+        owner = lock_path().read_text(encoding="utf-8").strip()
     except OSError:
         owner = ""
     preflight.emit_failure(
@@ -547,7 +559,7 @@ def main() -> int:
     smoketest_lock = contextlib.ExitStack()
     try:
         smoketest_lock.enter_context(
-            hostruntime.exclusive_lock(SMOKETEST_LOCK_PATH))
+            hostruntime.exclusive_lock(lock_path()))
     except hostruntime.LockBusy:
         _report_lock_busy()
         return SMOKETEST_BUSY_EXIT

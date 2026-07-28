@@ -14,6 +14,11 @@ history is retained in the source repository.
   reply that warrants it - the folder is not registered yet - and any
   other refusal is reported as it is read, with a timeout on each query
   so a wedged scheduler stops the probe rather than the command.
+- fix: the smoketest reports a missing project root in its own words.
+  (#184) The module resolved the root while being imported, so running
+  it outside a project raised a traceback before the command could say
+  what was wrong. The lock path it needed the root for is resolved when
+  the lock is taken.
 - refactor: platform knowledge lives in the modules that own it.
   (#191, #184) Windows details had leaked outward: the task folder was
   spelled in two places that had to agree, the watcher prerequisite
