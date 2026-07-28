@@ -6,6 +6,45 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a credential passed on a command line no longer reaches
+  `admin.log`. (#212) Every administrative event records the invoking
+  argv, so a state change traces back to the cron entry, CLI
+  invocation, or agent that caused it. It was recorded verbatim, which
+  meant a token or password given as an argument was written to a host
+  log in plaintext and printed back by `agents-live logs` on demand.
+  The value after a credential flag, and the value half of a
+  `--flag=value` form, are replaced with a placeholder; the flag stays,
+  because the shape of the invocation is the diagnostic and the value
+  never was.
+- fix: a spawned agent is judged by its exit status rather than by how
+  long it lived. (#211) The dispatcher waited a second and a half and
+  reported any child that had already finished as having died,
+  whatever its status, which its caller reads as a failed dispatch. The
+  runs most likely to finish inside that window finish on purpose: a
+  pre-processor that returns skip, an agent this host does not own. So
+  whether a dispatch counted as successful came down to a race between
+  the host's speed and a sleep, passing on a slow machine and failing
+  on a fast one. Only a non-zero status is a failure now. The log
+  handle opened for the child is also closed in the parent, where it
+  had been leaking for the life of the caller.
+- fix: the export-clean gate reads path names, not just file contents.
+  (#213) It scanned the inside of known text files, so a personal path
+  in a name shipped whatever the file held; two files named for
+  absolute temp paths once survived several releases that way. It also
+  could not see a WSL home reached from Windows, because that form is
+  backslash-separated and the pattern was written for POSIX, and its
+  exclusions compared forward-slashed patterns against a backslashed
+  path, so the runtime log and data directories were skipped on POSIX
+  only.
+- fix: a scheduled agent that declines a fire says why. (#187) A native
+  trigger can be coarser than the expression it came from, so the
+  dispatcher checks each fire and declines the ones that are not
+  firing times. The decline reached the structured log and nothing
+  else, so running a scheduled agent by hand outside its firing minute
+  printed nothing and exited 0, which reads as a completed run. The
+  line is subject to `--quiet`, which every persisted scheduled
+  invocation carries, so cron mail and Task Scheduler see what they saw
+  before.
 - perf: the Windows process table is read in process instead of through
   PowerShell. (#168) Every question about whether a watcher is running
   comes back to this one read: `status`, the dashboard, the health
