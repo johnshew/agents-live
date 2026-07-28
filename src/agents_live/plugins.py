@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-import os
 import re
 import subprocess
 import sys
 import tomllib
 import zipfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
@@ -306,7 +303,7 @@ def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
 
 
 # ---------------------------------------------------------------------------
-# Replacing our own executables while one of them is running
+# Replacing our own executable while one of them is running
 # ---------------------------------------------------------------------------
 
 # What a uv tool install writes for this package. uv copies entry points
@@ -314,151 +311,6 @@ def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
 # in the tool environment and in uv's executable directory, and both are
 # rewritten by an install or an upgrade.
 _SHIM_NAME = hostruntime.executable_filename("agents-live")
-
-# A moved-aside executable is still running, so it cannot be deleted
-# until it exits. The name marks it for the sweep at the start of the
-# next convergence rather than leaving a mystery file behind.
-_ASIDE_SUFFIX = ".replaced"
-
-
-def _entrypoint_paths() -> list[Path]:
-    """Every copy of this tool's executable a uv install would rewrite.
-
-    uv records where it installed each entry point in the same receipt
-    that records the requirements, so this is uv's own answer rather
-    than a reconstruction of where it would have put them. The copy in
-    the tool environment is rewritten too and is not in that list.
-    """
-    found: list[Path] = []
-    tool_env_copy = hostruntime.executable_dir() / _SHIM_NAME
-    if tool_env_copy.is_file():
-        found.append(tool_env_copy)
-    receipt = _receipt_path()
-    if receipt is None:
-        return found
-    try:
-        with receipt.open("rb") as handle:
-            entrypoints = tomllib.load(handle)["tool"]["entrypoints"]
-    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
-        return found
-    for entrypoint in entrypoints:
-        install_path = entrypoint.get("install-path") if isinstance(
-            entrypoint, dict) else None
-        if not isinstance(install_path, str):
-            continue
-        shim = Path(install_path)
-        if shim.is_file() and shim not in found:
-            found.append(shim)
-    return found
-
-
-def _sweep_aside(directory: Path) -> None:
-    """Delete executables moved aside by an earlier run, if they have exited."""
-    try:
-        leftovers = list(directory.glob(f"{_SHIM_NAME}.*{_ASIDE_SUFFIX}"))
-    except OSError:
-        return
-    for leftover in leftovers:
-        try:
-            leftover.unlink()
-        except OSError:
-            # Still running, or not ours to remove. Either way the next
-            # sweep gets it; nothing depends on it being gone.
-            continue
-
-
-def _is_locked(path: Path) -> bool:
-    """Whether *path* cannot be written where it is.
-
-    Windows denies write access to the file backing a running image, so
-    this is the difference between the executable this process is
-    running from and the copies that merely exist. Only a locked one has
-    to be moved, which keeps a convergence started some other way from
-    disturbing files it could have replaced in place.
-    """
-    try:
-        with path.open("r+b"):
-            return False
-    except OSError:
-        return True
-
-
-@contextmanager
-def replaceable_entrypoints() -> Iterator[list[Path]]:
-    """Let uv rewrite this tool's executables while one of them runs.
-
-    Windows holds a mandatory lock on a running image, so uv cannot
-    delete or overwrite ``agents-live.exe`` during a convergence that
-    was itself started through it; it fails with "Failed to install
-    entrypoint ... os error 32" (astral-sh/uv#11930), and the obvious
-    retry re-enters through the same executable and fails the same way.
-    The lock is not only the caller's own: any running watcher holds the
-    same shim, which is what blocks a plain ``uv tool install --force``
-    on a host that is actually running agents (#179).
-
-    A locked image can often still be renamed, and moving it aside
-    frees the name for uv to write while the running process keeps
-    executing from the renamed file - the move ``uv self update`` makes
-    to replace itself. It is not always available. A uv trampoline
-    holds its own file in a way that refuses the rename as well as the
-    write, so the shim this process was started through generally
-    cannot be moved; the rename is attempted and the failure accepted.
-    Nothing is renamed on POSIX, where replacing a running executable
-    was never a problem.
-
-    This is therefore best effort, and not on its own enough to let uv
-    replace an entry point that something is running. What makes that
-    survivable is that uv rebuilds the environment before it installs
-    launchers, so the runtime is upgraded even when the launcher is
-    not; ``upgrade`` checks for that rather than trusting the exit code.
-
-    Yields the shims that had to be moved. A non-empty list is proof
-    that some process was executing the old image when the replacement
-    began, and still is: renaming frees the name without stopping the
-    process (#188). Callers that report to a person should say so.
-    """
-    if not hostruntime.locks_running_image():
-        yield []
-        return
-    moved: list[tuple[Path, Path]] = []
-    for shim in _entrypoint_paths():
-        _sweep_aside(shim.parent)
-        if not _is_locked(shim):
-            continue
-        aside = shim.with_name(f"{shim.name}.{os.getpid()}{_ASIDE_SUFFIX}")
-        try:
-            shim.rename(aside)
-        except OSError:
-            # Not movable: let uv run and report what it finds rather
-            # than turning a possible success into a failure here.
-            continue
-        moved.append((shim, aside))
-    try:
-        yield [shim for shim, _aside in moved]
-    except BaseException:
-        _restore(moved)
-        raise
-    for shim, aside in moved:
-        if not shim.exists():
-            # uv did not write the executable it was asked to write.
-            # Leaving the name empty would uninstall the tool.
-            _restore([(shim, aside)])
-            continue
-        try:
-            aside.unlink()
-        except OSError:
-            continue  # still running: the next sweep removes it
-
-
-def _restore(moved: list[tuple[Path, Path]]) -> None:
-    """Put moved-aside executables back, where the name is still free."""
-    for shim, aside in moved:
-        if shim.exists() or not aside.exists():
-            continue
-        try:
-            aside.rename(shim)
-        except OSError:
-            continue
 
 
 def converge(roots: list[Path], *, trigger: str = "unspecified",
@@ -524,8 +376,7 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
             pending=sorted(plugin.name for plugin in pending.values()),
     ) as end:
         launcher_before = launcher_stamp()
-        with replaceable_entrypoints():
-            completed = subprocess.run(command, check=False)
+        completed = subprocess.run(command, check=False)
         if (completed.returncode
                 and not only_the_launcher_failed(launcher_before)):
             raise PluginError(
