@@ -16,16 +16,28 @@ history is retained in the source repository.
   before.
 - fix: an upgrade now names the watchers it left on the previous
   version. (#188) Replacing the runtime does not stop the processes
-  already running it - Windows renames a locked shim aside and the
-  renamed image carries on, and elsewhere the replaced file keeps its
-  inode for as long as a process holds it - so every watcher that was
-  running kept the old release while the upgrade reported success. The
+  already running it: a running process has its code loaded and keeps
+  executing it, on POSIX because the replaced file keeps its inode for
+  as long as a process holds it, and on Windows because the executable a
+  process is running cannot be replaced at all while it runs. Either way
+  every watcher that was running kept the old release while the upgrade
+  reported success. The
   upgrade now reads the process table before it installs and, once the
   install lands, names each watcher still alive by agent, pid, and
   project, with the restart to run in each project. The count and the
   agent names go on its admin event, because the symptom turns up days
   later and to someone else. Restarting them is left to the operator: an
   upgrade should not interrupt work mid-dispatch on its own.
+- fix: the code that moved this tool's executables aside during an
+  install is gone. (#190) It renamed a locked executable so uv could
+  write the name while the running process carried on from the renamed
+  file. Measured against a real installation, a uv trampoline refuses
+  the rename as well as the write, whether it is the launcher on PATH
+  held by the running command or the tool-environment copy held by a
+  watcher, so the mechanism had no working case on the platform it
+  existed for. #189 had already stopped depending on it. What made the
+  suite miss this is worth saying: every test of it mocked the lock
+  check, so the mechanism was proved against a host that does not exist.
 - fix: the log readers no longer resolve a project root while they load.
   (#202) `qlog.py` and `timeline.py` did it at import, so running either
   directly outside a project raised a traceback from the import

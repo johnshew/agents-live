@@ -103,10 +103,9 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         # Read before the install, so every process named afterwards
         # demonstrably predates the runtime that replaced it (#188).
         watchers_before = _running_watchers()
-        with plugins.replaceable_entrypoints() as displaced:
-            status = subprocess.run(
-                _install_command(uv, source), check=False,
-            ).returncode
+        status = subprocess.run(
+            _install_command(uv, source), check=False,
+        ).returncode
         kept_launcher = False
         if status != 0:
             if not plugins.only_the_launcher_failed(launcher_before):
@@ -119,7 +118,6 @@ def _upgrade_runtime(roots: list[Path] | None = None,
             end["message"] = (
                 f"uv install exited {status} after upgrading the runtime; "
                 f"the launcher was in use and was left in place")
-        _warn_displaced(displaced)
         _report_stale_watchers(watchers_before, end)
         if kept_launcher:
             _warn_launcher_kept()
@@ -156,23 +154,6 @@ def _warn_launcher_kept() -> None:
           file=sys.stderr)
 
 
-def _warn_displaced(displaced: list[Path]) -> None:
-    """Say that a shim had to be moved aside to be replaced.
-
-    A shim only has to be moved aside when a process is executing it,
-    and renaming frees the name without stopping that process, so those
-    processes carry on from the renamed image. What is still running is
-    named by :func:`_report_stale_watchers`; this says why the name on
-    disk and the image in memory came apart.
-    """
-    if not displaced:
-        return
-    print(f"note: {len(displaced)} executable(s) were in use and were "
-          f"replaced in place; the processes executing them kept the "
-          f"previous image",
-          file=sys.stderr)
-
-
 def _running_watchers() -> list[tuple[int, str, str | None]]:
     """Every watcher on this host, or nothing if the host will not say."""
     from .headless import watchers_on_host  # noqa: PLC0415
@@ -190,12 +171,14 @@ def _report_stale_watchers(
     """Name the watchers still running the version just replaced.
 
     Replacing the runtime does not stop the processes already running
-    it, on any host: Windows renames a locked shim aside and the renamed
-    image keeps executing, and elsewhere the replaced file keeps its
-    inode for as long as a process holds it. Either way the upgrade
-    reports success while every watcher that was running carries on with
-    the previous release, which is version skew with nothing to connect
-    it to its cause (#188).
+    it, on any host. A running process has its code loaded and keeps
+    executing it however the files underneath change: on POSIX the
+    replaced file keeps its inode for as long as a process holds it, and
+    on Windows the executable a process is running cannot be replaced at
+    all while it runs, so uv rebuilds the environment around it. Either
+    way the upgrade reports success while every watcher that was running
+    carries on with the previous release, which is version skew with
+    nothing to connect it to its cause (#188).
 
     Restarting them is deliberately not done here: it would interrupt a
     watcher mid-dispatch, which is a policy an upgrade should not decide
