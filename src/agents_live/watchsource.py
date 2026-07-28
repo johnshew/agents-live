@@ -32,6 +32,13 @@ else:
     WindowsEventSource = None
 
 
+# What a host is told about file changes with, named for the mechanism
+# rather than the platform. `mechanism` decides which one this host has;
+# everything that reports on watching takes the name from here.
+INOTIFY = "inotifywait"
+DIRECTORY_CHANGES = "ReadDirectoryChangesW"
+
+
 class EventSource(Protocol):
     """A stream of changed paths, in batches, that can be stopped."""
 
@@ -144,5 +151,5 @@ def open_source(directories, *, cwd: Path) -> EventSource:
 
 def mechanism() -> str:
     """What this host watches files with, for the watcher's own log."""
-    return ("ReadDirectoryChangesW" if hostruntime.id() == hostruntime.WINDOWS
-            else "inotifywait")
+    return (DIRECTORY_CHANGES if hostruntime.id() == hostruntime.WINDOWS
+            else INOTIFY)

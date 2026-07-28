@@ -42,6 +42,8 @@ from . import preflight
 from . import update_check
 from . import repos
 from . import hostruntime
+from . import watchsource
+from . import wintasks
 from .paths import resolve_root
 
 try:
@@ -66,34 +68,43 @@ def _fix(posix: str, windows: str) -> str:
 # What each host dispatches with, named by the tool the developer would
 # go looking for. Doctor reports the mechanism, not the Linux tool: the
 # capability is the same question on both hosts and only the answer to
-# "which program" differs.
+# "which program" differs. Keyed by the mechanism each module reports,
+# so the row is selected by the same answer the runtime acts on.
 _MECHANISMS = {
     "schedule": {
-        "posix": ("crontab", "sudo apt install cron", ""),
-        "windows": ("Task Scheduler", "no install needed; the task store "
-                    "ships with Windows, so a failure here is a permission "
-                    "or policy problem",
-                    "agents-live registers one task per agent under "
-                    "\\AgentsLive"),
+        hostruntime.CRONTAB: ("crontab", "sudo apt install cron", ""),
+        hostruntime.TASK_SCHEDULER: (
+            "Task Scheduler", "no install needed; the task store "
+            "ships with Windows, so a failure here is a permission "
+            "or policy problem",
+            "agents-live registers one task per agent under "
+            f"{wintasks.TASK_FOLDER}"),
     },
     "watch": {
-        "posix": ("inotifywait", "sudo apt install inotify-tools",
-                  "required for file-watcher agents "
-                  "(note-index, todo-index, ...)"),
-        "windows": ("directory change notification",
-                    "no install needed; the notifications come from the "
-                    "Windows kernel",
-                    "required for file-watcher agents "
-                    "(note-index, todo-index, ...)"),
+        watchsource.INOTIFY: (
+            "inotifywait", "sudo apt install inotify-tools",
+            "required for file-watcher agents "
+            "(note-index, todo-index, ...)"),
+        watchsource.DIRECTORY_CHANGES: (
+            "directory change notification",
+            "no install needed; the notifications come from the "
+            "Windows kernel",
+            "required for file-watcher agents "
+            "(note-index, todo-index, ...)"),
     },
 }
 
 
+def _mechanism_of(capability: str) -> str:
+    """What this host serves *capability* with, asked of its owner."""
+    if capability == "schedule":
+        return hostruntime.native_scheduler()
+    return watchsource.mechanism()
+
+
 def _mechanism_check(capability: str) -> tuple[str, bool, bool, str, str]:
     """A required check for one dispatch mechanism on this host."""
-    entry = _MECHANISMS[capability]
-    name, fix, note = entry["windows" if hostruntime.id() == hostruntime.WINDOWS
-                            else "posix"]
+    name, fix, note = _MECHANISMS[capability][_mechanism_of(capability)]
     failure = preflight.check("doctor", {capability})
     if failure is not None and failure.detail:
         note = f"{note}; {failure.detail}" if note else failure.detail
@@ -173,46 +184,27 @@ def _agent_cli_needed_by_host() -> dict[str, dict[str, list[str]]]:
 
 
 def _node_is_wsl_native() -> bool:
-    """True when a Linux-native node/npx is available (not only the Windows
-    interop build under /mnt/).
+    """True when a node this runtime owns is available.
 
-    The Windows node (e.g. /mnt/c/nvm4w/nodejs) writes MSAL tokens to the
-    Windows keychain, so `npx ... --login` for the MS365/Graph MCPs never
-    populates the Linux ~/.config/ms365-mcp cache that msgraph_mcp.py reads.
-
-    Mirrors build_stdio_params() in Agents/lib/mcp_config.py: a PATH lookup
-    that lands outside /mnt counts, and so does an nvm install (the runtime
-    falls back to globbing ~/.nvm/versions/node/*/bin). We only fail when the
-    *sole* resolution is the Windows build with no nvm node to fall back to.
-    PATH here is the checker process's PATH, not cron's or the login shell's,
-    so the nvm fallback is what makes this reliable.
+    The Windows node reached through interop writes MSAL tokens to the
+    Windows credential store, so `npx ... --login` for the MS365/Graph
+    MCPs never populates the Linux cache the MCP launcher reads. Either
+    program answering is enough: they ship together, and a project
+    launcher may reach for either.
     """
-    import glob
-
-    for cmd in ("npx", "node"):
-        p = shutil.which(cmd)
-        if p and not p.startswith("/mnt/"):
-            return True
-    home = Path.home()
-    for cmd in ("npx", "node"):
-        for cand in glob.glob(str(home / ".nvm/versions/node/*/bin" / cmd)):
-            if os.access(cand, os.X_OK):
-                return True
-    return False
+    return any(hostruntime.tool_is_native(command)
+               for command in ("npx", "node"))
 
 
 def _python_312_resolvable() -> bool:
     """True when `uv run` resolves an interpreter >= 3.12 (scripts need 3.12).
 
-    The interpreter is asked for by the name the host uses. ``python3`` is
-    the POSIX spelling and does not exist on Windows, where asking for it
-    reaches the Microsoft Store alias instead of an interpreter.
+    The interpreter is asked for by the name the host uses, which is not
+    the same on both: see :func:`hostruntime.interpreter_name`.
     """
-    interpreter = ("python" if hostruntime.id() == hostruntime.WINDOWS
-                   else "python3")
     try:
         result = subprocess.run(
-            ["uv", "run", interpreter, "-c",
+            ["uv", "run", hostruntime.interpreter_name(), "-c",
              "import sys; print(1 if sys.version_info >= (3, 12) else 0)"],
             cwd=REPO, capture_output=True, text=True, timeout=120,
         )
@@ -223,18 +215,15 @@ def _python_312_resolvable() -> bool:
 
 def _windows_heartbeat_config() -> tuple[bool, str] | None:
     """Validate the Windows Task Scheduler heartbeat when interop is available."""
+    from . import heartbeat  # noqa: PLC0415
     try:
-        from . import heartbeat
         task, legacy = heartbeat.task_configuration()
         distro = heartbeat.current_distro()
+    except (heartbeat.InteropUnavailable, heartbeat.DistroUnknown):
+        # Neither says anything about how the task is configured: one
+        # host cannot ask the other side, the other cannot name itself.
+        return None
     except RuntimeError as exc:
-        if "PowerShell interop is unavailable" in str(exc):
-            return None
-        if "cannot determine the WSL distro" in str(exc):
-            # sshd/cron/systemd sessions inside WSL have no
-            # WSL_DISTRO_NAME; the task cannot be probed from here, which
-            # is not evidence it is misconfigured.
-            return None
         return False, str(exc)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -258,14 +247,8 @@ def _windows_heartbeat_config() -> tuple[bool, str] | None:
     if task.get("Enabled") is not True:
         problems.append("task disabled")
     if execute != expected_execute:
-        superseded = {
-            # Launched wsl.exe with nothing to keep its console off the
-            # screen, so every five minutes one appeared.
-            "wsl.exe": "directly, showing a console every run",
-            # Hid that console through a packaged VBScript wrapper, on a
-            # scripting host Windows is retiring.
-            "wscript.exe": "through the retired VBScript wrapper",
-        }.get(execute.rsplit("/", 1)[-1])
+        superseded = heartbeat.SUPERSEDED_ACTIONS.get(
+            execute.rsplit("/", 1)[-1])
         if superseded:
             problems.append(
                 f"task launches the heartbeat {superseded}; re-run "

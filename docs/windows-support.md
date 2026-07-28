@@ -44,12 +44,16 @@ stays an open product question; the engineering question is settled.
 | `ReadDirectoryChangesW` | [winwatch.py](../src/agents_live/winwatch.py) | Windows only |
 | Debounce, ignores, cascade guard, fire-rate breaker | [watchpolicy.py](../src/agents_live/watchpolicy.py) | Shared, pure over a batch |
 | Windowless task action | [hidden.py](../src/agents_live/hidden.py) | Windows only |
+| Windows-side heartbeat for a WSL runtime | [heartbeat.py](../src/agents_live/heartbeat.py) | WSL only, drives PowerShell across the interop boundary |
 | Ownership | [ownership.py](../src/agents_live/ownership.py) | Shared, asks the seam for identity |
 
-Nothing outside `hostruntime.py`, `wintasks.py`, `winwatch.py`, and
-`hidden.py` names a platform. `activate`, `stop`, `status`, `doctor`,
-`migrate`, `uninstall`, and `smoketest` ask `schedules.py` or the host
-runtime and get an answer.
+Nothing outside `hostruntime.py`, `wintasks.py`, `winwatch.py`,
+`hidden.py`, and `heartbeat.py` calls a Windows API or runs a Windows
+program. `activate`, `stop`, `status`, `doctor`, `migrate`, `uninstall`,
+and `smoketest` ask `schedules.py`, `watchsource.py`, or the host
+runtime and get an answer. `TestPlatformSeam` in the smoke suite asserts
+this, so a module that starts naming a platform fails the suite rather
+than the invariant quietly going stale (#191).
 
 ## Invoking the Copilot CLI on Windows
 

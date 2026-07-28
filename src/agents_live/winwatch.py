@@ -107,6 +107,20 @@ def _kernel32():
     return k32
 
 
+def probe() -> str | None:
+    """Why this host cannot be told a file changed, or None if it can.
+
+    Nothing to install: the notifications come from the kernel. What can
+    fail is reaching it, so that is what is probed, and the answer says
+    so rather than naming a dependency nobody can act on.
+    """
+    try:
+        _kernel32().ReadDirectoryChangesW
+    except (OSError, AttributeError, ValueError) as exc:
+        return f"directory change notifications are unavailable: {exc}"
+    return None
+
+
 class DirectoryWatch:
     """One recursive watch on one directory, read on its own thread."""
 

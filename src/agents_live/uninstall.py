@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
 import subprocess
 import sys
@@ -23,9 +22,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             heartbeat.uninstall(args.distro, retain_state=args.retain_state)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            selected = (
-                args.distro or os.environ.get("WSL_DISTRO_NAME")
-                or "<your-distro-name>")
+            # The runtime name is the distro name on WSL, except where
+            # the distro did not say what it is called.
+            named = hostruntime.runtime_name()
+            selected = args.distro or (
+                "<your-distro-name>" if named == hostruntime.WSL else named)
             preflight.emit_failure(
                 "uninstall",
                 "host cleanup failed; agents-live remains installed: "

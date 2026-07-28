@@ -93,47 +93,26 @@ def _probe_schedule(operation: str) -> CapabilityFailure | None:
     return _probe_crontab(operation)
 
 
-# Mirrors wintasks.TASK_FOLDER, with the trailing separator schtasks
-# wants when /TN names a folder rather than a single task. This module
-# stays stdlib-only so sibling scripts can import it flat, so the value
-# is repeated rather than imported; the two must agree.
-_TASK_FOLDER_QUERY = "\\AgentsLive\\"
-
+# The two leaves below are imported where they are used rather than at
+# module scope: this module has to stay importable by the scripts that
+# run flat, and neither leaf is reachable on the hosts they run on. What
+# each mechanism costs to probe, and what a refusal from it looks like,
+# belongs to the leaf that drives it, not here.
 
 def _probe_task_scheduler(operation: str) -> CapabilityFailure | None:
-    if shutil.which("schtasks") is None:
+    try:
+        from . import wintasks  # noqa: PLC0415
+    except ImportError:  # flat execution, as at the top of this module
+        import wintasks  # type: ignore[no-redef]  # noqa: PLC0415
+
+    missing = wintasks.missing_dependency()
+    if missing is not None:
         return CapabilityFailure(
-            "dependency_missing", "schedule", operation,
-            "schtasks was not found on this host")
-    # Ask about our own folder first. Querying the root walks the whole
-    # machine's task tree - about 2000 lines on a normal install, and
-    # measured anywhere from 4 to 26 seconds on the same host - which is
-    # slow enough to time out and turn this advisory probe into a hard
-    # failure. Our folder answers the same question ("can this user
-    # reach the task store") in a fraction of a second once anything has
-    # been registered here. Fall back to the root only when that folder
-    # is not there yet, and give the walk room to finish.
-    for target, timeout in ((_TASK_FOLDER_QUERY, 15), ("\\", 120)):
-        try:
-            completed = subprocess.run(
-                ["schtasks", "/Query", "/TN", target, "/FO", "LIST"],
-                capture_output=True, text=True, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return CapabilityFailure(
-                "host_permission_required", "schedule", operation,
-                f"cannot read the task store: {exc}")
-        if completed.returncode == 0:
-            return None
-        # A missing folder is a normal answer and proves the store was
-        # reachable, but only the root query can distinguish that from a
-        # refusal, so retry there before deciding.
-        if target != "\\":
-            continue
-        if "cannot find the file" not in (completed.stderr or "").lower():
-            return CapabilityFailure(
-                "host_permission_required", "schedule", operation,
-                f"schtasks query failed (rc={completed.returncode}): "
-                f"{completed.stderr.strip()[:200]}")
+            "dependency_missing", "schedule", operation, missing)
+    reason = wintasks.probe()
+    if reason is not None:
+        return CapabilityFailure(
+            "host_permission_required", "schedule", operation, reason)
     return None
 
 
@@ -167,18 +146,15 @@ def _probe_watch(operation: str) -> CapabilityFailure | None:
 
 
 def _probe_directory_changes(operation: str) -> CapabilityFailure | None:
-    # Nothing to install on Windows: the change notifications come from
-    # the kernel. What can fail is reaching it, so probe that and say so
-    # rather than reporting a capability nobody can act on.
     try:
-        import ctypes
+        from . import winwatch  # noqa: PLC0415
+    except ImportError:  # flat execution, as at the top of this module
+        import winwatch  # type: ignore[no-redef]  # noqa: PLC0415
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.ReadDirectoryChangesW
-    except (OSError, AttributeError, ValueError) as exc:
+    reason = winwatch.probe()
+    if reason is not None:
         return CapabilityFailure(
-            "dependency_missing", "watch", operation,
-            f"directory change notifications are unavailable: {exc}")
+            "dependency_missing", "watch", operation, reason)
     return None
 
 

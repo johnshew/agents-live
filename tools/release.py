@@ -507,6 +507,34 @@ def _check_release_diff() -> None:
     _run(["git", "diff", "--check"])
 
 
+def _smoketest_command() -> list[str]:
+    """The end-to-end gate, pinned to this checkout.
+
+    The framework smoketest exercises the real trigger/run/status loop,
+    catching breaks the unit suite cannot (e.g. module argv contract
+    drift). ``--repo`` is what makes "this checkout" true: without it the
+    smoketest acts on whatever root resolves, which on a host with a
+    configured default is some other project entirely.
+    """
+    return ["uv", "run", "--with-editable", ".", "agents-live",
+            "--repo", str(ROOT), "smoketest"]
+
+
+def _gate_commands() -> list[list[str]]:
+    """Everything a release has to pass, in order.
+
+    One list, run by both ``prepare`` and ``publish`` and printed by the
+    plan, so the three cannot describe different releases.
+    """
+    return [
+        ["uv", "run", "--script", "tools/pre-release-audit.py"],
+        ["uv", "run", "--with-editable", ".", "--script",
+         "tests/test_smoke.py"],
+        _smoketest_command(),
+        ["uv", "build"],
+    ]
+
+
 def _print_plan(current: str, target: str, minimum_bump: str) -> None:
     tag = f"v{target}"
     print(f"Release plan: {current} -> {target}")
@@ -516,10 +544,7 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         print(f"  {path.relative_to(ROOT)}")
     print("Commands:")
     commands = (
-        "uv run --script tools/pre-release-audit.py",
-        "uv run --with-editable . --script tests/test_smoke.py",
-        "uv run --with-editable . agents-live --repo . smoketest",
-        "uv build",
+        *(shlex.join(command) for command in _gate_commands()),
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
         f"git push --atomic origin main {tag}",
@@ -550,17 +575,8 @@ def prepare(bump: str) -> None:
     try:
         _update_versions(current, target)
         _check_release_diff()
-        _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
-        _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
-        # End-to-end gate: the framework smoketest exercises the real
-        # trigger/run/status loop in this checkout, catching breaks the
-        # unit suite cannot (e.g. module argv contract drift). --repo is
-        # what makes "this checkout" true: without it the smoketest acts
-        # on whatever root resolves, which on a host with a configured
-        # default is some other project entirely.
-        _run(["uv", "run", "--with-editable", ".", "agents-live",
-              "--repo", str(ROOT), "smoketest"])
-        _run(["uv", "build"])
+        for command in _gate_commands():
+            _run(command)
         _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
         message = f"chore(build): bump version to v{target}"
         _run(["git", "commit", "-m", message])
@@ -601,11 +617,8 @@ def publish() -> None:
         print(f"  Rerun the notes with: --notes {tag} --yes")
         return
     notes = _release_notes(version)
-    _run(["uv", "run", "--script", "tools/pre-release-audit.py"])
-    _run(["uv", "run", "--with-editable", ".", "--script", "tests/test_smoke.py"])
-    _run(["uv", "run", "--with-editable", ".", "agents-live",
-          "--repo", str(ROOT), "smoketest"])
-    _run(["uv", "build"])
+    for command in _gate_commands():
+        _run(command)
     if needs_push:
         _run(["git", "push", "--atomic", "origin", "main", tag])
     _write_release_notes(tag, notes, create=True)
