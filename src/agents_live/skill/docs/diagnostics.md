@@ -197,7 +197,9 @@ stale `_smoketest-*` resources before setup.
 - `tail -N` / `cat` on 200k-line logs overflows context. Always filter
   first with `agents-live logs` / `agents-live logs timeline`.
 - **Table display caps columns at 80 chars.** Use `--format jsonl` for
-  full values.
+  full values. The table is drawn for a terminal and printed as plain
+  ASCII when the output is captured, so a pipe stays readable; parse
+  `--format csv` or `--format jsonl`, not the table.
 - File-change events don't mean content changed -- mtime can bump on an
   identical atomic-write.
 - `agents-live.log` has **multiple agents interleaved**. Filter by

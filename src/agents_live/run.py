@@ -379,6 +379,7 @@ def main() -> int:
                 }
                 end_fields.update(
                     output=output[:MAX_LOG_FIELD_LENGTH],
+                    attempts=result.attempts,
                     **usage_fields,
                 )
             if args.quiet:

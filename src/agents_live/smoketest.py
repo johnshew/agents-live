@@ -22,6 +22,7 @@ from pathlib import Path
 from . import hostruntime, paths, preflight, schedules
 from .headless import (
     AgentsLiveError,
+    AgentTimeoutError,
     HEADLESS_TIMEOUT,
     HEADLESS_TIMEOUT_RETRIES,
     ensure_logs_dir,
@@ -237,7 +238,8 @@ def _in_vscode_sandbox() -> tuple[bool, str]:
 
 
 def _write_verdict(verdict: str, failed_step: str | None,
-                   reason: str | None, started_at: float, runtime: str, model: str) -> None:
+                   reason: str | None, started_at: float, runtime: str,
+                   model: str, category: str | None = None) -> None:
     """Persist a single-line summary of the smoketest run."""
     try:
         path = logs_root() / "smoketest-framework-result.json"
@@ -250,12 +252,59 @@ def _write_verdict(verdict: str, failed_step: str | None,
             "duration_s": round(time.time() - started_at, 1),
             "failed_step": failed_step,
             "reason": reason,
+            "category": category,
         }
         tmp_path = path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp_path, path)
     except OSError:
         pass
+
+
+# A failure category, carried in the verdict so a reader does not have
+# to interpret the reason text.
+ENVIRONMENT_LIMIT = "environment"
+ASSERTION_FAILURE = "assertion"
+
+
+def exhausted_retries(started_at: float) -> str | None:
+    """What a fixture agent gave up on for want of time, or None.
+
+    A step whose agent exhausted its retry budget on timeout failed
+    because of the host or the link, not because the framework did the
+    wrong thing. No wait budget can rescue it, since the framework has
+    already stopped trying. Reported identically to a real defect it
+    costs an investigation, or it teaches the reflex of re-running the
+    gate until it passes, which is worse (#185). The evidence is the
+    terminal timeout row the retry loop writes (#183).
+    """
+    since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started_at))
+    for name in SMOKETEST_AGENT_NAMES:
+        log_path = logs_root() / f"{name}.log"
+        if not log_path.is_file():
+            continue
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for raw_line in reversed(lines):
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("ts", "")) < since:
+                break
+            if (entry.get("level") == "error"
+                    and entry.get("error_category") == AgentTimeoutError.category):
+                attempts = entry.get("attempts") or entry.get("attempt") or "all"
+                timeout_s = entry.get("timeout_s")
+                budget = f" of {timeout_s}s each" if timeout_s else ""
+                return (f"{name} exhausted {attempts} attempts{budget}; "
+                        f"this is a host or link limit, not a smoketest "
+                        f"assertion failure")
+    return None
 
 
 def fail(message: str) -> None:
@@ -1406,9 +1455,16 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
                        started_at=started_at, runtime=args.runtime, model=model_for_verdict)
         return 0
     except (SmokeFailure, AgentsLiveError, json.JSONDecodeError) as exc:
-        preflight.emit_failure("smoketest", str(exc))
-        _write_verdict("FAIL", failed_step=current_step, reason=str(exc)[:500],
-                       started_at=started_at, runtime=args.runtime, model=model_for_verdict)
+        environmental = exhausted_retries(started_at)
+        reason = str(exc)
+        if environmental:
+            reason = f"{reason} - {environmental}"
+        preflight.emit_failure("smoketest", reason)
+        _write_verdict("FAIL", failed_step=current_step, reason=reason[:500],
+                       started_at=started_at, runtime=args.runtime,
+                       model=model_for_verdict,
+                       category=ENVIRONMENT_LIMIT if environmental
+                       else ASSERTION_FAILURE)
         return 1
 
 

@@ -1012,8 +1012,11 @@ single legible track in `logs timeline`, and the `operation` names the
 verb. The fields beyond the common set depend on the operation --
 `plugin-converge` records its `trigger`, `version_before`, and
 `version_after`; `ownership-set` records `agent`, `owner_from`, and
-`owner_to`. See [diagnostics.md](diagnostics.md) "Administrative events"
-for query recipes.
+`owner_to`; `capability-probe` records the `capability` asked about, the
+`needed_by` operation that asked, and `duration_s`, and is written only
+when the probe refuses or takes at least five seconds. See
+[diagnostics.md](diagnostics.md) "Administrative events" for query
+recipes.
 
 Writing is best-effort: an unwritable state directory never fails the
 operation being recorded.

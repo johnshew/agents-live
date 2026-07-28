@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["PyYAML", "mcp[cli]", "jsonschema"]
+# dependencies = ["PyYAML", "mcp[cli]", "jsonschema", "duckdb"]
 # ///
 """Export-safe smoke tests for the agents-live package (§5.1 "exported
 test suite", F4).
@@ -8090,6 +8090,190 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         # The plan a developer reads before saying yes has to be the
         # commands that then run.
         self.assertIn(command, module._gate_commands())
+
+
+class _Relation:
+    """What ``qlog.show`` uses of a DuckDB relation."""
+
+    def __init__(self, columns: list[str], rows: list[tuple]) -> None:
+        self.columns = columns
+        self._rows = rows
+        self.shown = False
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+    def show(self, **kwargs) -> None:
+        self.shown = True
+
+
+class _Terminal(io.StringIO):
+    """A captured stream that claims to be a console."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _qlog():
+    """The query tool, imported late.
+
+    It resolves a project root while being imported, so it can only be
+    imported from inside a test that has one.
+    """
+    try:  # installed package layout, as at the top of this file
+        from agents_live import qlog  # type: ignore  # noqa: PLC0415
+    except ImportError:  # flat checkout layout
+        import qlog  # type: ignore[no-redef]  # noqa: PLC0415
+    return qlog
+
+
+class TestLogsReachTheirReader(_TempProject):
+    """What the logs have to carry for a person to reach a conclusion."""
+
+    def _render(self, relation: _Relation) -> str:
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            _qlog().show(relation)
+        return captured.getvalue()
+
+    def test_a_piped_table_survives_the_shell_that_captures_it(self) -> None:
+        # DuckDB's box drawing is UTF-8, and a Windows console at its
+        # default codepage decodes a captured pipe as OEM bytes, so the
+        # sanctioned way to read runtime state turns to noise exactly
+        # when the reader is a program (#186). unittest replaces stdout
+        # with a buffer, so this is the piped case by construction.
+        relation = _Relation(["phase", "n"], [("one", 2), ("two", 3)])
+        rendered = self._render(relation)
+        self.assertFalse(relation.shown)
+        self.assertTrue(rendered.isascii(), rendered)
+        self.assertIn("phase", rendered)
+        self.assertIn("(2 rows)", rendered)
+
+    def test_a_terminal_still_gets_the_drawn_table(self) -> None:
+        # The box-drawn table is better to look at, and it renders
+        # correctly when it is written to a console rather than decoded
+        # from one.
+        relation = _Relation(["phase"], [("one",)])
+        with contextlib.redirect_stdout(_Terminal()):
+            _qlog().show(relation)
+        self.assertTrue(relation.shown)
+
+    def test_a_cell_cannot_break_the_row_it_is_in(self) -> None:
+        # Messages carry tracebacks and agent output. A newline inside a
+        # cell would put one row on several lines, which is unreadable
+        # by eye and unparseable by anything else.
+        rendered = self._render(_Relation(["message"], [("a\nb",), (None,)]))
+        self.assertEqual(len(rendered.splitlines()), 5)  # 2 head, 2 rows, count
+
+    def test_an_abandoned_attempt_records_the_time_it_spent(self) -> None:
+        # A run rescued by a retry reports one aggregate duration, and
+        # reading it as one slow call produced a wrong timeout budget
+        # (#183). The numbers ride on the exception too, so a caller
+        # deciding whether a failure is the host or the code does not
+        # parse the sentence.
+        error = headless.AgentTimeoutError(
+            "agent timed out", attempts=2, timeout_s=120)
+        self.assertEqual(error.attempts, 2)
+        self.assertEqual(error.timeout_s, 120)
+        self.assertEqual(error.category, "timeout")
+        self.assertEqual(headless.AgentTimeoutError("x").attempts, 1)
+
+    def test_a_completed_run_says_how_many_attempts_it_took(self) -> None:
+        # The count is on the warning row and was missing from the row
+        # that completes the run, so a finished run did not say whether
+        # it took one call or two.
+        result = headless._agent_result(
+            "output", "", {}, None, None, attempts=2)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(headless.AgentResult("out", "").attempts, 1)
+
+    def test_an_exhausted_retry_is_named_as_a_host_limit(self) -> None:
+        # No wait budget can rescue a run the framework has stopped
+        # retrying, so the gate correctly fails - and then reports the
+        # link the same way it reports a defect (#185).
+        started = time.time()
+        name = smoketest.SMOKETEST_AGENT_NAMES[0]
+        headless.log_event(
+            headless.logs_root() / f"{name}.log",
+            phase="agent", level="error",
+            message="agent timed out after 120s on retry; giving up",
+            error_category=headless.AgentTimeoutError.category,
+            timeout_s=120, attempt=2, attempts=2, duration_s=120.0)
+        reason = smoketest.exhausted_retries(started)
+        self.assertIsNotNone(reason)
+        self.assertIn(name, reason)
+        self.assertIn("2 attempts", reason)
+        self.assertIn("120s", reason)
+
+    def test_an_older_timeout_does_not_condemn_this_run(self) -> None:
+        # The classifier reads a log that outlives any one run, so a
+        # timeout from an earlier session must not excuse a real failure
+        # in this one.
+        name = smoketest.SMOKETEST_AGENT_NAMES[0]
+        headless.log_event(
+            headless.logs_root() / f"{name}.log",
+            phase="agent", level="error", message="agent timed out",
+            error_category=headless.AgentTimeoutError.category,
+            timeout_s=120, attempts=2)
+        self.assertIsNone(smoketest.exhausted_retries(time.time() + 60))
+
+    def test_a_clean_log_leaves_the_failure_where_it_was(self) -> None:
+        self.assertIsNone(smoketest.exhausted_retries(time.time() - 60))
+
+
+class TestCapabilityProbesAreObservable(_TempProject):
+    """A probe that refuses or dawdles has to leave a trace."""
+
+    def _admin_events(self) -> list[dict]:
+        path = adminlog.log_path()
+        if not path.is_file():
+            return []
+        return [json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+
+    def test_a_refused_probe_is_written_down(self) -> None:
+        # The preflight ran two minutes of task-store queries on a
+        # managed host and nothing recorded it, because this module
+        # writes no events at all (#191). A refusal is now a row with
+        # the capability, the code, and what it cost.
+        refusal = preflight.CapabilityFailure(
+            "host_permission_required", "schedule", "start", "no")
+        with mock.patch.dict(preflight._CAPABILITY_PROBES,
+                             {"schedule": lambda operation: refusal}):
+            self.assertIs(preflight.check("start", {"schedule"}), refusal)
+        recorded = [event for event in self._admin_events()
+                    if event.get("operation") == "capability-probe"]
+        self.assertEqual(len(recorded), 1, recorded)
+        self.assertEqual(recorded[0]["capability"], "schedule")
+        self.assertEqual(recorded[0]["needed_by"], "start")
+        self.assertEqual(recorded[0]["error_category"],
+                         "host_permission_required")
+        self.assertIn("duration_s", recorded[0])
+
+    def test_a_slow_probe_is_written_down_even_when_it_passes(self) -> None:
+        def slow(operation: str) -> None:
+            return None
+
+        with (
+            mock.patch.dict(preflight._CAPABILITY_PROBES, {"watch": slow}),
+            mock.patch.object(preflight, "SLOW_PROBE_S", 0.0),
+        ):
+            self.assertIsNone(preflight.check("start", {"watch"}))
+        recorded = [event for event in self._admin_events()
+                    if event.get("operation") == "capability-probe"]
+        self.assertEqual(len(recorded), 1, recorded)
+        self.assertEqual(recorded[0]["status"], "ok")
+
+    def test_an_ordinary_dispatch_stays_silent(self) -> None:
+        # Every host-mutating command runs this. A row per invocation
+        # would bury the one that matters.
+        with mock.patch.dict(preflight._CAPABILITY_PROBES,
+                             {"watch": lambda operation: None}):
+            self.assertIsNone(preflight.check("start", {"watch"}))
+        self.assertEqual(
+            [event for event in self._admin_events()
+             if event.get("operation") == "capability-probe"], [])
 
 
 if __name__ == "__main__":

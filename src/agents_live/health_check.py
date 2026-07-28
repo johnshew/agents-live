@@ -661,7 +661,8 @@ def _run_smoketest(root: Path, runtime: str) -> dict:
         except (OSError, json.JSONDecodeError):
             persisted = {}
         detail = {key: persisted[key]
-                  for key in ("runtime", "model", "failed_step", "reason")
+                  for key in ("runtime", "model", "failed_step", "reason",
+                              "category")
                   if persisted.get(key) is not None}
         if process.returncode == 0:
             return {"status": "pass", "duration_s": duration,

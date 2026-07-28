@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, asdict
 
 try:
@@ -171,6 +172,42 @@ _CAPABILITY_PROBES = {
     "watch": _probe_watch,
 }
 
+# A probe asks the host a question it should answer immediately. Longer
+# than this and the answer is itself a finding: the two-minute task
+# store walk that blocked a release gate was invisible because nothing
+# here writes anything down (#191).
+SLOW_PROBE_S = 5.0
+
+
+def _record_probe(capability: str, operation: str, elapsed: float,
+                  failure: CapabilityFailure | None) -> None:
+    """Write down a probe that refused or was slow. Never raises.
+
+    Silent when the host answers promptly, which is every ordinary
+    dispatch: this stream is read by a person asking why a command was
+    slow or refused, and a row per invocation would bury that. Imported
+    here rather than at module scope because this module is imported by
+    scripts that run flat and must not pay for the log writer.
+    """
+    try:
+        try:
+            from . import adminlog  # noqa: PLC0415
+        except ImportError:  # flat execution, as at the top of this module
+            import adminlog  # type: ignore[no-redef]  # noqa: PLC0415
+        adminlog.record(
+            "capability-probe",
+            status="error" if failure is not None else "ok",
+            level="error" if failure is not None else "warning",
+            capability=capability,
+            needed_by=operation,
+            duration_s=round(elapsed, 1),
+            error_category=failure.code if failure is not None else None,
+            message=(failure.detail if failure is not None
+                     else f"{capability} probe took {elapsed:.1f}s"),
+        )
+    except Exception:  # never fail a command for want of a log line
+        pass
+
 
 def check(operation: str,
           capabilities: frozenset[str] | set[str],
@@ -179,9 +216,12 @@ def check(operation: str,
 
     ``capabilities`` is declared by the command spec and may be narrowed to
     what the selected work actually needs. An empty set runs nothing."""
-    probes = tuple(_CAPABILITY_PROBES[c] for c in sorted(capabilities))
-    for probe in probes:
-        failure = probe(operation)
+    for capability in sorted(capabilities):
+        started = time.monotonic()
+        failure = _CAPABILITY_PROBES[capability](operation)
+        elapsed = time.monotonic() - started
+        if failure is not None or elapsed >= SLOW_PROBE_S:
+            _record_probe(capability, operation, elapsed, failure)
         if failure is not None:
             return failure
     return None
