@@ -139,7 +139,7 @@ class PipelineMcp:
         self._puts = 0
         self._gets = 0
         self._thread: threading.Thread | None = None
-        self._server: Any = None  # uvicorn.Server, set in start()
+        self._server: Any = None  # uvicorn.Server, set by _build_server()
         self._started = threading.Event()
 
     # ------------------------------------------------------------------ public
@@ -206,9 +206,22 @@ class PipelineMcp:
             self._log_event(op="seed", path=path, ok=True)
 
     def start(self, *, timeout: float = 5.0) -> None:
-        """Start the HTTP server in a daemon thread and wait for readiness."""
+        """Start the HTTP server in a daemon thread and wait for readiness.
+
+        The server is built here, on the calling thread, before the clock
+        starts: importing uvicorn and the mcp SDK is the slow part, and
+        on a cold first run it can eat most of a timeout meant to cover
+        binding a socket. Building here also means a construction
+        failure (a missing or incompatible SDK, say) raises its own
+        exception in the caller instead of killing the daemon thread and
+        surfacing ``timeout`` seconds later as what looks like a bind
+        failure.
+
+        ``timeout`` therefore covers only the bind.
+        """
         if self._thread is not None:
             raise RuntimeError("PipelineMcp.start() called twice")
+        self._build_server()
         self._thread = threading.Thread(
             target=self._serve_forever,
             name=f"pipeline-mcp:{self._port}",
@@ -217,7 +230,7 @@ class PipelineMcp:
         self._thread.start()
         if not self._started.wait(timeout=timeout):
             raise RuntimeError(
-                f"pipeline-mcp failed to start within {timeout}s on {self.url}"
+                f"pipeline-mcp failed to bind {self.url} within {timeout}s"
             )
 
     def shutdown(self) -> None:
@@ -495,8 +508,13 @@ class PipelineMcp:
 
         return fastmcp
 
-    def _serve_forever(self) -> None:
-        """Run the streamable-HTTP server.  Called inside the daemon thread."""
+    def _build_server(self) -> None:
+        """Construct the uvicorn server.  Called on the calling thread by start().
+
+        Safe to do off the serving thread: nothing in the FastMCP app or
+        uvicorn's config binds to the constructing thread's event loop --
+        the loop is created by ``Server.run()``.
+        """
         try:
             import uvicorn
         except ImportError as exc:  # pragma: no cover - mcp pulls in uvicorn
@@ -531,6 +549,8 @@ class PipelineMcp:
 
         self._server.startup = _startup  # type: ignore[assignment]
 
+    def _serve_forever(self) -> None:
+        """Run the streamable-HTTP server.  Called inside the daemon thread."""
         try:
             self._server.run()
         except Exception as exc:  # pragma: no cover - last-resort guard
