@@ -6,6 +6,22 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- perf: the Windows process table is read in process instead of through
+  PowerShell. (#168) Every question about whether a watcher is running
+  comes back to this one read: `status`, the dashboard, the health
+  loop, `stop`, the orphan sweep, and an upgrade naming what it left
+  behind. Asking CIM for it meant starting PowerShell, which cost
+  seconds and, after #165 made the read happen once per pass rather
+  than once per agent, was most of what a dashboard page build spent
+  its time on. The pids now come from a process snapshot and the
+  arguments from `ntdll` directly. Measured on a host running about 260
+  processes: 35ms against 1.3s warm, and against 3.0s when PowerShell
+  is cold. The two readers were compared live on the same host: 260
+  processes seen by both, with identical text for every one of them,
+  and the same answer for which processes are ours. The direct read
+  also recovers command lines CIM reports as null. `ntdll` is not a
+  contract and the interface is Windows 8.1 and later, so the CIM read
+  stands as the fallback whenever the direct one is unavailable.
 - fix: the pipeline server is built before its start timeout begins.
   (#207) The five-second budget was meant to cover binding a socket, but
   the work it actually enclosed was importing uvicorn and the mcp SDK

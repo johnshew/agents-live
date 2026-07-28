@@ -473,6 +473,8 @@ if _IS_WINDOWS:
     TH32CS_SNAPPROCESS = 0x00000002
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     PROCESS_TERMINATE = 0x0001
+    PROCESS_COMMAND_LINE_INFORMATION = 60  # ProcessCommandLineInformation
+    STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
     STILL_ACTIVE = 259
     CREATE_NEW_PROCESS_GROUP = 0x00000200
     CREATE_NO_WINDOW = 0x08000000
@@ -500,6 +502,31 @@ if _IS_WINDOWS:
             ("dwFlags", wintypes.DWORD),
             ("szExeFile", wintypes.WCHAR * 260),
         ]
+
+    class _UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", ctypes.c_void_p),
+        ]
+
+    def _bind_ntdll():
+        """Bind ``NtQueryInformationProcess``, or ``None`` if unavailable.
+
+        This is the one undocumented interface in the module, so it is
+        bound defensively and every caller has a supported fallback.
+        """
+        try:
+            ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+            query = ntdll.NtQueryInformationProcess
+        except (OSError, AttributeError):  # pragma: no cover - always present
+            return None
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                          wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)]
+        query.restype = ctypes.c_long
+        return query
+
+    _nt_query_process = _bind_ntdll()
 
     _kernel32.LockFileEx.argtypes = [
         wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
@@ -638,15 +665,67 @@ if _IS_WINDOWS:
                 return
             time.sleep(0.05)
 
-    def process_command_lines() -> list[tuple[int, str]]:
-        """Every visible process as ``(pid, command line)``.
+    def _command_line(pid: int) -> str | None:
+        """*pid*'s command line, or ``None`` if it cannot be read.
 
-        A process snapshot carries the executable name but not the
-        arguments, and the arguments are what say which agent a watcher
-        belongs to. CIM is the supported way to ask for them; when it
-        cannot be reached the answer is "nothing found", which reads as
-        "no watcher is running" - visibly wrong rather than silently
-        stopping the wrong process.
+        ``PROCESS_QUERY_LIMITED_INFORMATION`` needs no elevation and is
+        simply refused for processes owned by someone else, which is the
+        same answer CIM gives, so a refusal here is ordinary rather than
+        an error.
+        """
+        if _nt_query_process is None:
+            return None
+        handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                       False, pid)
+        if not handle:
+            return None
+        try:
+            needed = wintypes.ULONG(0)
+            # Sizing call: the expected answer is the length mismatch.
+            status = _nt_query_process(handle, PROCESS_COMMAND_LINE_INFORMATION,
+                                       None, 0, ctypes.byref(needed))
+            if status & 0xFFFFFFFF != STATUS_INFO_LENGTH_MISMATCH:
+                return None
+            if not needed.value:
+                return None
+            buffer = ctypes.create_string_buffer(needed.value)
+            status = _nt_query_process(handle, PROCESS_COMMAND_LINE_INFORMATION,
+                                       buffer, needed.value,
+                                       ctypes.byref(needed))
+            if status:  # anything but STATUS_SUCCESS
+                return None
+            text = ctypes.cast(buffer,
+                               ctypes.POINTER(_UNICODE_STRING)).contents
+            if not text.Buffer or not text.Length:
+                return None
+            return ctypes.wstring_at(text.Buffer, text.Length // 2)
+        except OSError:  # pragma: no cover - the process died mid-read
+            return None
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    def _command_lines_in_process() -> list[tuple[int, str]]:
+        """Every readable process as ``(pid, command line)``, read directly.
+
+        A process snapshot supplies the pids; ``ntdll`` supplies the
+        arguments, which is what a snapshot omits and what says which
+        agent a watcher belongs to. Empty means the mechanism did not
+        work at all - this process is always readable by itself - so the
+        caller can tell "nothing to report" apart from "ask another way".
+        """
+        found: list[tuple[int, str]] = []
+        for pid, _parent in _process_table():
+            text = _command_line(pid)
+            if text:
+                found.append((pid, text))
+        return found
+
+    def _command_lines_via_cim() -> list[tuple[int, str]]:
+        """Every visible process as ``(pid, command line)``, via CIM.
+
+        The supported fallback for hosts where the direct read is
+        unavailable: ``ProcessCommandLineInformation`` is Windows 8.1 and
+        later, and ``ntdll`` is not a contract.
         """
         shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
         if shell is None:
@@ -668,6 +747,22 @@ if _IS_WINDOWS:
             if pid_text.isdigit() and command:
                 found.append((int(pid_text), command))
         return found
+
+    def process_command_lines() -> list[tuple[int, str]]:
+        """Every visible process as ``(pid, command line)``.
+
+        A process snapshot carries the executable name but not the
+        arguments, and the arguments are what say which agent a watcher
+        belongs to. Reading them directly costs milliseconds where
+        starting PowerShell to ask CIM costs seconds, and this read is
+        behind every question about whether a watcher is running -
+        ``status``, the dashboard, the health loop, ``stop``, the orphan
+        sweep, and an upgrade naming what it left behind. CIM stands as
+        the fallback; when neither can be reached the answer is "nothing
+        found", which reads as "no watcher is running" - visibly wrong
+        rather than silently stopping the wrong process.
+        """
+        return _command_lines_in_process() or _command_lines_via_cim()
 
     def _detached_popen_kwargs() -> dict:
         """Flags for a child that outlives us and stays out of sight.

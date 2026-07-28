@@ -4398,6 +4398,67 @@ class TestHostRuntimeProcesses(unittest.TestCase):
         self.assertEqual(console_window, "0")
 
 
+class TestReadingTheProcessTable(unittest.TestCase):
+    """Where the command lines come from, and what happens when they don't."""
+
+    def _windows_only(self) -> None:
+        if hostruntime.id() != hostruntime.WINDOWS:
+            self.skipTest("the direct read is a Windows-only path")
+
+    def test_the_reader_names_this_process_and_its_arguments(self) -> None:
+        # The contract every caller depends on: the arguments, not just
+        # the executable, because the arguments say which agent a
+        # watcher belongs to.
+        table = dict(hostruntime.process_command_lines())
+        self.assertIn(os.getpid(), table)
+        self.assertIn(Path(sys.executable).stem,
+                      table[os.getpid()].replace("\\", "/"))
+
+    def test_the_direct_read_names_this_process(self) -> None:
+        self._windows_only()
+        table = dict(hostruntime._command_lines_in_process())
+        self.assertGreater(len(table), 1)  # a host runs more than us
+        self.assertIn(os.getpid(), table)
+        self.assertIn(Path(sys.executable).stem,
+                      table[os.getpid()].replace("\\", "/"))
+
+    def test_a_dead_pid_reads_as_nothing_rather_than_raising(self) -> None:
+        self._windows_only()
+        self.assertIsNone(hostruntime._command_line(0x7FFFFFFE))
+
+    def test_cim_takes_over_when_the_direct_read_comes_back_empty(self) -> None:
+        # Empty is the signal, because this process is always readable
+        # by itself: a direct read that finds nothing did not work at
+        # all. ProcessCommandLineInformation is Windows 8.1 and later
+        # and ntdll is not a contract, so the supported read has to
+        # stand behind it.
+        self._windows_only()
+        with (
+            mock.patch.object(hostruntime, "_command_lines_in_process",
+                              return_value=[]),
+            mock.patch.object(hostruntime, "_command_lines_via_cim",
+                              return_value=[(7, "agents-live watch-loop x")]),
+        ):
+            self.assertEqual(hostruntime.process_command_lines(),
+                             [(7, "agents-live watch-loop x")])
+
+    def test_an_unbound_ntdll_reads_as_empty(self) -> None:
+        self._windows_only()
+        with mock.patch.object(hostruntime, "_nt_query_process", None):
+            self.assertEqual(hostruntime._command_lines_in_process(), [])
+
+    def test_cim_is_not_paid_for_when_the_direct_read_works(self) -> None:
+        self._windows_only()
+        with (
+            mock.patch.object(hostruntime, "_command_lines_in_process",
+                              return_value=[(7, "agents-live watch-loop x")]),
+            mock.patch.object(hostruntime, "_command_lines_via_cim") as cim,
+        ):
+            self.assertEqual(hostruntime.process_command_lines(),
+                             [(7, "agents-live watch-loop x")])
+        cim.assert_not_called()
+
+
 class TestEnumerationPasses(_TempProject):
     """Asking the host once for what answers about the whole host.
 
