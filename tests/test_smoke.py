@@ -1471,6 +1471,24 @@ class TestAdminLog(_TempProject):
                 side_effect=OSError("state home is gone")):
             adminlog.record("repo-register", repo="alpha")  # must not raise
 
+    def test_a_credential_on_the_command_line_never_reaches_the_log(self) -> None:
+        # `agents-live logs` prints this field back, so a secret passed
+        # as an argument would be readable long after the command ran.
+        argv = ["/usr/bin/agents-live", "repos", "add", "--token", "s3cr3t",
+                "--api-key=hunter2", "--github-token", "ghp_xyz",
+                "--name", "alpha"]
+        with mock.patch.object(sys, "argv", argv):
+            adminlog.record("repo-register", repo="alpha")
+        (event,) = self.events()
+        self.assertNotIn("s3cr3t", event["command"])
+        self.assertNotIn("hunter2", event["command"])
+        self.assertNotIn("ghp_xyz", event["command"])
+        # The shape of the invocation is the diagnostic and survives.
+        self.assertEqual(
+            event["command"],
+            "agents-live repos add --token *** --api-key=*** "
+            "--github-token *** --name alpha")
+
     def test_operation_pairs_start_and_end_and_records_failure(self) -> None:
         with adminlog.operation("upgrade-runtime", version_before="1.0") as end:
             end["version_after"] = "1.1"
@@ -4225,6 +4243,68 @@ class TestPreReleaseAudit(unittest.TestCase):
                 audit.scan_file(shipped, root)[0],
             )
 
+    def test_a_wsl_home_reached_from_windows_is_rejected(self) -> None:
+        # The POSIX home pattern is forward-slashed, so it never saw a
+        # WSL home reached over UNC from the Windows side (#213).
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shipped = root / "README.md"
+            shipped.write_text(
+                r"Run from \\wsl.localhost\Ubuntu\home\jane\project." "\n",
+                encoding="utf-8")
+            self.assertIn(
+                "WSL home directory", audit.scan_file(shipped, root)[0])
+
+    def test_the_wsl_prefix_alone_stays_publishable(self) -> None:
+        # docs/windows-support.md names the namespace repeatedly while
+        # explaining why the tool refuses it. The pattern must not fire
+        # on a prefix carrying no user name.
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shipped = root / "README.md"
+            shipped.write_text(
+                r"It refuses \\wsl.localhost and \\wsl$ repositories." "\n",
+                encoding="utf-8")
+            self.assertEqual(audit.scan_file(shipped, root), [])
+
+    def test_a_personal_path_in_a_name_is_rejected(self) -> None:
+        # Contents are scanned by extension; a name ships whatever the
+        # file holds, and two files named for absolute temp paths once
+        # survived several releases.
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stray = root / "docs" / "Users" / "jane"
+            stray.mkdir(parents=True)
+            (stray / "scratch.bin").write_bytes(b"\x00")
+            findings = audit.scan_names(root)
+            self.assertEqual(len(findings), 1)
+            self.assertIn("macOS user in path", findings[0])
+
+    def test_a_machine_name_in_a_path_is_rejected(self) -> None:
+        audit = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            (root / "docs" / "PRIVATE-HOST-FIXTURE-setup.md").write_text(
+                "notes\n", encoding="utf-8")
+            findings = audit.scan_names(root, ["private-host-fixture"])
+            self.assertEqual(len(findings), 1)
+            self.assertIn("Known machine name in path", findings[0])
+
+    def test_exclusions_hold_on_a_windows_checkout(self) -> None:
+        # EXCLUDED_PATTERNS is forward-slashed and was compared against
+        # str(relative), which is backslashed on Windows, so the runtime
+        # log and data directories were excluded on POSIX only.
+        audit = self._module()
+        for excluded in ("Agents/logs/an-agent.log",
+                         "Agents/data/state.json",
+                         "src/agents_live/__pycache__/run.pyc"):
+            self.assertTrue(audit.is_excluded(Path(excluded)), excluded)
+        self.assertFalse(audit.is_excluded(Path("src/agents_live/run.py")))
+
 
 class TestHostRuntimeIdentity(unittest.TestCase):
     """The seam member every host-specific branch now reads."""
@@ -5570,6 +5650,35 @@ class TestDueness(_TempProject):
     def _windows(self):
         return mock.patch.object(hostruntime, "native_scheduler",
                                  return_value=hostruntime.TASK_SCHEDULER)
+
+    def test_a_declined_fire_says_so_on_a_hand_run(self) -> None:
+        # The skip reached the structured log and nothing else, so a
+        # scheduled agent run by hand outside its firing minute printed
+        # nothing and exited 0, which reads as a completed run (#187).
+        code, out = self._decline()
+        self.assertEqual(code, 0)
+        self.assertIn("is not due", out)
+        self.assertIn(TEST_CRON_SCHEDULE, out)
+
+    def test_a_declined_fire_stays_silent_when_quiet(self) -> None:
+        # Every persisted scheduled invocation carries --quiet, so cron
+        # mail and Task Scheduler see exactly what they saw before.
+        code, out = self._decline("--quiet")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+
+    def _decline(self, *extra: str):
+        self.write_agent("demo", AGENT_DEFINITION.replace(
+            "pre-processor: Agents/handlers/prep.py\n", ""))
+        with (
+            mock.patch.object(schedules, "claim_due_minute",
+                              return_value=False),
+            mock.patch.object(
+                sys, "argv",
+                ["run.py", "--name", "demo", "--scheduled", *extra]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            return run.main(), out.getvalue()
 
     def test_a_crontab_host_never_second_guesses_its_own_scheduler(self) -> None:
         # Cron fires only at firing times; asking again would be a way
@@ -7417,6 +7526,43 @@ class TestSpawnInvocation(_TempProject):
         self.assertIsNone(spawn._run_invocation(self.root, "demo"))
 
 
+class TestJudgingASpawnedChild(_TempProject):
+    """The liveness check reads the exit status, not the clock."""
+
+    def _dispatch(self, exit_code: int | None):
+        proc = mock.Mock(pid=4321)
+        proc.poll.return_value = exit_code
+        runtime = mock.Mock()
+        runtime.spawn_detached.return_value = proc
+        with (
+            mock.patch.object(spawn, "_run_invocation",
+                              return_value=["uv", "run", "run.py"]),
+            mock.patch.object(spawn, "_hostruntime", return_value=runtime),
+            mock.patch.object(spawn.time, "sleep"),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            result = spawn.spawn_agent(self.root, "demo", ["a.md"])
+        return proc, result, stderr.getvalue()
+
+    def test_a_child_still_running_is_a_dispatch(self) -> None:
+        proc, result, stderr = self._dispatch(None)
+        self.assertIs(result, proc)
+        self.assertNotIn("WARNING", stderr)
+
+    def test_a_child_that_finished_cleanly_is_a_dispatch(self) -> None:
+        # The paths that finish inside the sample window finish on
+        # purpose: a pre-processor skip, an agent this host does not own.
+        # Reporting them as deaths made success a race against the host.
+        proc, result, stderr = self._dispatch(0)
+        self.assertIs(result, proc)
+        self.assertNotIn("WARNING", stderr)
+
+    def test_a_child_that_failed_immediately_is_reported(self) -> None:
+        _, result, stderr = self._dispatch(3)
+        self.assertIsNone(result)
+        self.assertIn("exited 3 immediately", stderr)
+
+
 class TestStateHome(_TempProject):
     def test_watcher_dispatch_logs_state_home_captures_without_crashing(self) -> None:
         # Run captures live outside the repository now; rendering them
@@ -8057,6 +8203,24 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         self.assertGreaterEqual(
             smoketest.AGENT_RESULT_TIMEOUT_S,
             headless.HEADLESS_TIMEOUT * (headless.HEADLESS_TIMEOUT_RETRIES + 1))
+
+    def test_the_busy_exit_status_means_the_same_on_both_sides(self) -> None:
+        # smoketest returns this to say "another run holds the lock" and
+        # health_check reads it to tell that apart from a real failure.
+        # Each module spells the number itself, so a change to one side
+        # turns a declined run into a reported failure with nothing
+        # failing.
+        self.assertEqual(smoketest.SMOKETEST_BUSY_EXIT,
+                         health_check.SMOKETEST_BUSY_EXIT)
+
+    def test_smoketest_fixtures_are_exempt_from_ownership(self) -> None:
+        # run.py exempts _-prefixed agents from the ownership gate so
+        # the smoketest passes whatever the registry says. A fixture
+        # renamed without the prefix would be skipped as foreign on any
+        # host that does not own it, and the step would fail for a
+        # reason nothing in it mentions.
+        for name in smoketest.SMOKETEST_AGENT_NAMES:
+            self.assertTrue(name.startswith("_"), name)
 
     def test_every_capability_a_command_declares_can_be_probed(self) -> None:
         # A probe named in the spec but missing here raises KeyError

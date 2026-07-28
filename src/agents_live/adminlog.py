@@ -16,9 +16,9 @@ still separate administration from agent activity::
     agents-live logs --all --sql "select * from logs where scope = 'host'"
 
 Every event also records ``operation`` (the administrative verb),
-``command`` (the invoking argv), and ``interactive`` (whether a terminal was
-attached), so a state change traces back to a cron entry, a CLI invocation,
-or an agent.
+``command`` (the invoking argv, with credential values redacted), and
+``interactive`` (whether a terminal was attached), so a state change
+traces back to a cron entry, a CLI invocation, or an agent.
 
 Writing is best-effort: an unwritable state directory must never fail the
 operation being recorded.
@@ -26,6 +26,7 @@ operation being recorded.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -41,16 +42,48 @@ SCOPE = "host"
 AGENT_NAME = "admin"
 PHASE = "admin"
 MAX_COMMAND_LENGTH = 512
+REDACTED = "***"
+
+# Flags whose value is a credential. The recorded command line is read
+# back by `agents-live logs`, so a value passed here must never reach
+# the log in the first place.
+_SECRET_FLAG = re.compile(
+    r"^--?(?:[\w-]+-)?(?:token|key|secret|password|passwd|api[-_]?key)$",
+    re.IGNORECASE)
+_SECRET_ASSIGNMENT = re.compile(
+    r"^(--?(?:[\w-]+-)?(?:token|key|secret|password|passwd|api[-_]?key))=.*$",
+    re.IGNORECASE)
 
 
 def log_path() -> Path:
     return paths.host_logs_dir() / "admin.log"
 
 
+def _redact(argv: list[str]) -> list[str]:
+    """Replace credential values with a placeholder, keeping the flags.
+
+    The shape of the invocation is the diagnostic; the value never is.
+    """
+    safe: list[str] = []
+    take_next = False
+    for arg in argv:
+        if take_next:
+            safe.append(REDACTED)
+            take_next = False
+            continue
+        assignment = _SECRET_ASSIGNMENT.match(arg)
+        if assignment:
+            safe.append(f"{assignment.group(1)}={REDACTED}")
+            continue
+        safe.append(arg)
+        take_next = bool(_SECRET_FLAG.match(arg))
+    return safe
+
+
 def _command() -> str:
     argv = list(sys.argv) or [""]
     argv[0] = os.path.basename(argv[0]) or argv[0]
-    return " ".join(argv)[:MAX_COMMAND_LENGTH]
+    return " ".join(_redact(argv))[:MAX_COMMAND_LENGTH]
 
 
 def _interactive() -> bool:
