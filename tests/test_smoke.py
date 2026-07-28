@@ -7029,6 +7029,11 @@ class TestInstallSkill(_TempProject):
             with (
                 mock.patch.object(sys, "prefix", prefix),
                 mock.patch.object(subprocess, "run", side_effect=install),
+                # These tests are about the launcher; the process table
+                # an upgrade also reads is another test's subject, and
+                # the stubbed subprocess.run above cannot serve it.
+                mock.patch.object(hostruntime, "process_command_lines",
+                                  return_value=[]),
             ):
                 yield
 
@@ -8406,21 +8411,34 @@ class TestCapabilityProbesAreObservable(_TempProject):
 class TestUpgradeNamesWhatItLeftRunning(_TempProject):
     """An upgrade must not leave version skew behind in silence (#188)."""
 
-    #: A packaged watcher, as Windows reports it: the repo path has a
-    #: space in it, which is why the command line is parsed rather than
-    #: split. The second belongs to another project, which the host-wide
-    #: enumeration must still report; the third is not a watcher.
-    PROCESSES = [
-        (1001, r'"C:\tools\agents-live.exe" --repo "D:\my project" '
-               r'internal watch-loop inbox-triage'),
-        (1002, r'"C:\tools\agents-live.exe" --repo D:\other '
-               r'internal watch-loop notes-sync'),
-        (1003, r'"C:\tools\agents-live.exe" --repo D:\other status'),
-    ]
+    def setUp(self) -> None:
+        super().setUp()
+        self._other = tempfile.TemporaryDirectory()
+        self.addCleanup(self._other.cleanup)
+        self.outside = Path(self._other.name).resolve()
+
+    def watcher_command(self, name: str, root: Path,
+                        interpreter: str | None = None) -> str:
+        """A packaged watch loop's command line, joined as its host joins."""
+        argv = [] if interpreter is None else [interpreter]
+        argv += ["agents-live", "--repo", str(root),
+                 "internal", "watch-loop", name]
+        if sys.platform == "win32":
+            return subprocess.list2cmdline(argv)
+        return " ".join(argv)
+
+    def processes(self) -> list[tuple[int, str]]:
+        """Two watchers in different projects, and one process that is not
+        a watcher at all."""
+        return [
+            (1001, self.watcher_command("inbox-triage", self.root)),
+            (1002, self.watcher_command("notes-sync", self.outside)),
+            (1003, f"agents-live --repo {self.outside} status"),
+        ]
 
     def _watchers(self):
         with mock.patch.object(hostruntime, "process_command_lines",
-                               return_value=self.PROCESSES):
+                               return_value=self.processes()):
             return headless.watchers_on_host()
 
     def test_every_project_is_enumerated_not_just_this_one(self) -> None:
@@ -8428,8 +8446,8 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
         # is the wrong question for a host-global tool environment.
         self.assertEqual(
             self._watchers(),
-            [(1001, "inbox-triage", r"D:\my project"),
-             (1002, "notes-sync", r"D:\other")])
+            [(1001, "inbox-triage", str(self.root)),
+             (1002, "notes-sync", str(self.outside))])
 
     def test_a_flat_watcher_is_reported_without_guessing_its_project(
             self) -> None:
@@ -8442,6 +8460,16 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
             self.assertEqual(headless.watchers_on_host(),
                              [(7, "nightly", None)])
 
+    def test_a_project_path_with_a_space_is_named_whole(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("only Windows reads command lines back with quoting")
+        spaced = self.root / "a project"
+        with mock.patch.object(
+                hostruntime, "process_command_lines",
+                return_value=[(11, self.watcher_command("todo", spaced))]):
+            self.assertEqual(headless.watchers_on_host(),
+                             [(11, "todo", str(spaced))])
+
     def test_the_upgrade_names_the_watchers_it_left_behind(self) -> None:
         end: dict = {}
         with (
@@ -8453,7 +8481,7 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
         reported = stderr.getvalue()
         self.assertIn("inbox-triage", reported)
         self.assertIn("1001", reported)
-        self.assertIn(r"D:\my project", reported)
+        self.assertIn(str(self.root), reported)
         # The one that exited during the upgrade is not skew.
         self.assertNotIn("notes-sync", reported)
         self.assertIn("agents-live --repo", reported)
@@ -8467,10 +8495,9 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
         # three times. Counting processes would tell an operator three
         # agents are stale when one is.
         processes = [
-            (2001, r'"C:\tools\agents-live.exe" --repo D:\p '
-                   r'internal watch-loop notes'),
-            (2002, r'"C:\tools\python.exe" "C:\tools\agents-live" '
-                   r'--repo D:\p internal watch-loop notes'),
+            (2001, self.watcher_command("notes", self.root)),
+            (2002, self.watcher_command("notes", self.root,
+                                        interpreter="python")),
         ]
         end: dict = {}
         with (
@@ -8506,7 +8533,7 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
             mock.patch.object(subprocess, "run", return_value=completed),
             mock.patch.object(plugins, "converge", return_value=False),
             mock.patch.object(hostruntime, "process_command_lines",
-                              return_value=self.PROCESSES),
+                              return_value=self.processes()),
             mock.patch.object(hostruntime, "is_alive", return_value=True),
             contextlib.redirect_stderr(io.StringIO()),
         ):
