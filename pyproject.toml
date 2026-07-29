@@ -27,3 +27,7 @@ Homepage = "https://github.com/johnshew/agents-live"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents_live"]
+include = [
+    "src/agents_live/skill/**",
+    "src/agents_live/windows-heartbeat.sh",
+]

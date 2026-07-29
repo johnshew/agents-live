@@ -12,6 +12,10 @@ history is retained in the source repository.
   coarse Task Scheduler wake into an agent run. The first ambiguous invocation
   now rewrites that task and skips once. A manual command explains the repair
   and can be repeated immediately; quiet scheduled invocations remain silent.
+- fix: wheel metadata explicitly declares every packaged runtime asset. (#214)
+  The skill payload and Windows heartbeat script no longer reach the wheel
+  only as a side effect of being tracked by Git. The obsolete line-ending rule
+  for the removed Windows Script Host launcher is also gone.
 - fix: `uninstall` removes the tool without stranding host state. (#219)
   Three things outlived it. A running watcher holds the executables uv
   has to delete, so the removal failed on Windows, and it failed after
