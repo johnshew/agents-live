@@ -6,27 +6,23 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: `uninstall` withdraws the triggers it installed on this host.
-  (#219) Activating an agent registers a scheduled task or a crontab
-  entry that outlives the command which made it. Nothing withdrew them,
-  so after uninstalling, every one of them kept firing on schedule at an
-  executable that was no longer there, failing forever and reachable
-  only by hand. Uninstall now sweeps them host-wide, including agents in
-  projects it was not run from, which is the only way to reach entries
-  pinned to a project that has since been deleted. As with the watchers,
-  a trigger is withdrawn only when it runs out of the installation being
-  removed: one aimed at a source checkout still works afterwards and is
-  left registered.
-
 - fix: `uninstall` removes the tool without stranding host state. (#219)
-  Running watchers are stopped before cleanup because they hold the tool
-  environment open; a watcher from a source checkout is left alone. Every
-  scheduled trigger pinned to the removed environment is withdrawn across
-  projects, so the host does not keep firing commands that no longer exist.
-  On Windows, removal is handed to an external helper that waits for both
-  the Python process and its launcher to exit before asking uv to delete the
-  environment, avoiding the file-in-use failure caused by the uninstalling
-  command itself.
+  Three things outlived it. A running watcher holds the executables uv
+  has to delete, so the removal failed on Windows, and it failed after
+  the heartbeat, the check-and-repair loop, and the completions were
+  already gone. Per-agent triggers were never withdrawn at all, so every
+  scheduled task and crontab entry kept firing on schedule at an
+  executable that was no longer there. And the uninstalling command is
+  itself running out of the environment being deleted. Uninstall now
+  stops its own watchers first and refuses to remove anything if one
+  survives, so a failure leaves a working installation to retry from; it
+  sweeps the triggers host-wide across every project, which is the only
+  way to reach entries pinned to a project that has since been deleted;
+  and on Windows it hands the final removal to a helper that waits for
+  both this process and its launcher to exit. Throughout, a watcher or a
+  trigger is claimed only when it runs out of the installation being
+  removed: anything aimed at a source checkout still works afterwards
+  and is left alone.
 
 ## 5.4.0 - 2026-07-28
 
