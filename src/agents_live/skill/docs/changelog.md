@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: `uninstall` stops its own watchers before it removes anything.
+  (#219) A running watcher holds the executables in the tool
+  environment, so `uv tool uninstall` fails on Windows with a
+  file-in-use error. That failure came last, after the heartbeat, the
+  health loop, and the completions were already gone, leaving a host
+  stripped of its supporting state and a tool environment neither
+  installed nor removed. Uninstall now stops those watchers first and
+  refuses to remove anything if one survives, so a failure leaves a
+  working installation to retry from. A watcher is stopped only when
+  it is running out of the environment being removed: one started from
+  a source checkout is somebody's working tree and is left alone.
+
 ## 5.4.0 - 2026-07-28
 
 - fix: a credential on a command line no longer reaches `admin.log`.

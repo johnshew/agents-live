@@ -2869,7 +2869,8 @@ def _find_watcher_pids_table(name: str) -> list[int]:
     return [pid for pid, watched in _watcher_processes() if watched == name]
 
 
-def watchers_on_host() -> list[tuple[int, str, str | None]]:
+def watchers_on_host(
+        *, under: Path | None = None) -> list[tuple[int, str, str | None]]:
     """``(pid, agent, project)`` for every watcher running on this host.
 
     The enumeration above scopes to the current project, which is what
@@ -2880,11 +2881,19 @@ def watchers_on_host() -> list[tuple[int, str, str | None]]:
     A packaged watcher carries ``--repo <root>``; a flat one carries a
     script path inside its checkout at no fixed depth, so its project is
     reported as unknown rather than guessed at.
+
+    *under* keeps only the watchers running out of that directory. That
+    is how uninstall tells the processes belonging to the installation it
+    is removing from a developer's watcher run out of a checkout, which
+    it has no business stopping (#219).
     """
     found: list[tuple[int, str, str | None]] = []
     for pid, command in hostruntime.process_command_lines():
         args = split_command_line(command)
         if not _watcher_argv_is_agents_live(args):
+            continue
+        if under is not None and not any(
+                _within_path(arg, under) for arg in args):
             continue
         name = next(
             (second for first, second in zip(args, args[1:])

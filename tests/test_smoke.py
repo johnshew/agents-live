@@ -5860,6 +5860,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
 
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.WSL),
             mock.patch.object(
@@ -5874,6 +5875,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_tool_uninstall_skips_host_cleanup_off_wsl(self) -> None:
         completed = subprocess.CompletedProcess(["uv"], 0)
         with (
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.LINUX),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
@@ -5892,9 +5894,100 @@ class TestWindowsHeartbeat(unittest.TestCase):
         uv_uninstall.assert_called_once_with(
             ["/usr/bin/uv", "tool", "uninstall", "agents-live"], check=False)
 
+    def test_windows_tool_uninstall_waits_until_its_own_processes_exit(
+            self) -> None:
+        environment = Path(r"C:\uv\tools\agents-live")
+        with (
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(uninstall.health_check,
+                              "remove_health_cron_lines",
+                              return_value=False),
+            mock.patch.object(uninstall.completions, "remove",
+                              return_value=[]),
+            mock.patch.object(uninstall, "find_uv", return_value="uv.exe"),
+            mock.patch.object(uninstall, "_tool_environment",
+                              return_value=environment),
+            mock.patch.object(uninstall, "_handoff_windows_uninstall",
+                              return_value=True) as handoff,
+            mock.patch.object(uninstall.subprocess, "run") as direct_uninstall,
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(uninstall.main([]), 0)
+        handoff.assert_called_once_with("uv.exe", environment)
+        direct_uninstall.assert_not_called()
+
+    def test_windows_uninstall_helper_waits_for_the_tool_environment(
+            self) -> None:
+        environment = Path(r"C:\uv tools\agents-live")
+        with (
+            mock.patch.object(uninstall.shutil, "which",
+                              return_value=r"C:\Windows\powershell.exe"),
+            mock.patch.object(hostruntime, "spawn_detached") as spawn,
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertTrue(uninstall._handoff_windows_uninstall(
+                r"C:\uv\uv.exe", environment))
+        command = spawn.call_args.args[0]
+        self.assertEqual(command[:4], [
+            r"C:\Windows\powershell.exe", "-NoProfile", "-NonInteractive",
+            "-Command"])
+        self.assertIn(str(environment), command[4])
+        self.assertIn(r"C:\uv\uv.exe", command[4])
+        self.assertIn("Get-Process", command[4])
+        spawn.assert_called_once_with(
+            command, stdin=subprocess.DEVNULL, stdout=None, stderr=None)
+
     def test_install_refuses_cross_distro_target(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             heartbeat.install("Debian")
+
+    def test_uninstall_stops_only_the_watchers_it_owns(self) -> None:
+        # A watcher holds the executables uv deletes, so it fails the
+        # removal after the host cleanup has already run (#219). Only
+        # the ones running out of the tool environment are ours; a
+        # watcher run from a checkout is somebody's working tree.
+        environment = Path(self.home) / "uv" / "tools" / "agents-live"
+        (environment / "Scripts").mkdir(parents=True)
+        ours = str(environment / "Scripts" / "agents-live.exe")
+        theirs = str(Path(self.home) / "src" / "agents-live" / "agents-live")
+        listed = [
+            (11, f"{ours} --repo /p internal watch-loop mine"),
+            (22, f"{theirs} --repo /p internal watch-loop dev"),
+        ]
+        stopped: list[int] = []
+        with (
+            mock.patch.object(uninstall, "_tool_environment",
+                              return_value=environment),
+            mock.patch.object(headless.hostruntime, "process_command_lines",
+                              return_value=listed),
+            mock.patch.object(uninstall.hostruntime, "terminate",
+                              side_effect=lambda pid, **kw: stopped.append(pid)),
+            mock.patch.object(uninstall.hostruntime, "is_alive",
+                              return_value=False),
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            self.assertEqual(uninstall._stop_own_watchers(), [])
+        self.assertEqual(stopped, [11])
+
+    def test_uninstall_removes_nothing_while_a_watcher_survives(self) -> None:
+        # The point of checking first: what the removal cannot do must
+        # leave a working installation, not a stripped host (#219).
+        with (
+            mock.patch.object(uninstall, "_stop_own_watchers",
+                              return_value=[(11, "mine", "/p")]),
+            mock.patch.object(heartbeat, "uninstall") as host_cleanup,
+            mock.patch.object(uninstall.health_check,
+                              "remove_health_cron_lines") as remove_loop,
+            mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
+            mock.patch("sys.stderr", io.StringIO()) as stderr,
+        ):
+            self.assertEqual(uninstall.main([]), 1)
+        host_cleanup.assert_not_called()
+        remove_loop.assert_not_called()
+        uv_uninstall.assert_not_called()
+        self.assertIn("mine (pid 11)", stderr.getvalue())
 
     def test_uninstall_removes_crontab_lock(self) -> None:
         directory = heartbeat.state_dir()
