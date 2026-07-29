@@ -5695,6 +5695,37 @@ class TestDueness(_TempProject):
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
 
+    def test_a_legacy_windows_task_repairs_and_skips_before_dispatch(
+            self) -> None:
+        self.write_agent("demo", AGENT_DEFINITION.replace(
+            "pre-processor: Agents/handlers/prep.py\n", ""))
+        with (
+            mock.patch.object(schedules, "repair_legacy_clock",
+                              return_value=True),
+            mock.patch.object(headless, "headless_agent") as dispatch,
+            mock.patch.object(sys, "argv", ["run.py", "--name", "demo"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            self.assertEqual(run.main(), 0)
+        dispatch.assert_not_called()
+        self.assertIn("repaired the legacy scheduled task", out.getvalue())
+
+    def test_repairing_a_legacy_clock_rewrites_the_registered_action(
+            self) -> None:
+        self.write_agent("demo", AGENT_DEFINITION.replace(
+            "pre-processor: Agents/handlers/prep.py\n", ""))
+        old = (r"C:\tools\agents-live.exe",
+               "--repo C:\\project run --name demo --quiet", [])
+        with (
+            self._windows(),
+            mock.patch.object(wintasks, "registered_form", return_value=old),
+            mock.patch.object(wintasks, "install",
+                              return_value="registered") as install,
+        ):
+            self.assertTrue(schedules.repair_legacy_clock("demo"))
+        spec = install.call_args.args[0]
+        self.assertIn("--scheduled", spec.command)
+
     def _decline(self, *extra: str):
         self.write_agent("demo", AGENT_DEFINITION.replace(
             "pre-processor: Agents/handlers/prep.py\n", ""))

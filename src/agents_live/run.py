@@ -175,6 +175,20 @@ def main() -> int:
                    else "cron" if scheduled else "manual")
         os.environ["AGENTS_LIVE_TRIGGER"] = trigger
 
+        # A Windows clock task written before --scheduled is
+        # indistinguishable from a manual run and therefore bypasses the
+        # dueness and duplicate-fire guard. Repair it and decline this one
+        # ambiguous invocation; the next task fire identifies itself, and a
+        # person can repeat the command immediately (#194).
+        if (not scheduled and not changed_files and config.schedule
+                and schedules.repair_legacy_clock(config.name)):
+            slog.event(level="warning", phase="skip",
+                       status="legacy-schedule-repaired", trigger=trigger)
+            if not args.quiet:
+                print(f"Skipped once: repaired the legacy scheduled task for "
+                      f"'{config.name}'. Run the command again.")
+            return 0
+
         # --- Dueness ----------------------------------------------------------
         # A native trigger may be coarser than the expression it came
         # from, so a clock fire has to be checked before it becomes a run
