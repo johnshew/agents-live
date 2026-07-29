@@ -1229,12 +1229,12 @@ def main() -> None:
     args = parser.parse_args()
 
     # Asked before anything is announced or built, and only by the
-    # process that is going to start a server. Under --dev the reloader
-    # re-imports this module as __mp_main__, where the port is held by
-    # the server the parent already started, and the test harness loads
-    # it under a name of its own to reach the page builders without
-    # serving anything. Neither is in a position to ask.
-    if __name__ == "__main__":
+    # process that is going to start a server. NiceGUI re-executes this
+    # script as __main__ to build the root page after the app has started;
+    # that request must not mistake its own server for a conflict.
+    # Under --dev the reloader imports this module as __mp_main__, and
+    # the test harness uses a name of its own. Neither starts this server.
+    if __name__ == "__main__" and not app.is_started:
         conflict = port_conflict(DASHBOARD_HOST, args.port)
         if conflict is not None:
             preflight.emit_failure(

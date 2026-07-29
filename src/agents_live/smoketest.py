@@ -445,11 +445,10 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
     """Serve the dashboard and read its agent list back over HTTP.
 
     The page draws over a websocket, so the served HTML never carries an
-    agent name and a GET of ``/`` would prove only that a port was
-    bound. ``/api/agents`` is the row model the table itself binds to,
-    which makes "the dashboard started, resolved this project, and can
-    see its agents" a single assertion from outside the process - the
-    part no in-process check reaches.
+    agent name. A GET of ``/`` exercises NiceGUI's script-mode page
+    builder, while ``/api/agents`` is the row model the table itself
+    binds to. Together they prove the page renders and the dashboard
+    resolved this project and can see its agents from outside the process.
     """
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -460,7 +459,8 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
         cwd=repo_root(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True,
     )
-    url = f"http://127.0.0.1:{port}/api/agents"
+    page_url = f"http://127.0.0.1:{port}/"
+    agents_url = f"http://127.0.0.1:{port}/api/agents"
     try:
         deadline = time.monotonic() + DASHBOARD_READY_TIMEOUT_S
         payload = None
@@ -470,14 +470,17 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
                 fail(f"Dashboard exited before serving (exit {process.returncode}): "
                      f"{output.strip()[-500:]}")
             try:
-                with urllib.request.urlopen(url, timeout=5) as response:
+                with urllib.request.urlopen(page_url, timeout=5):
+                    pass
+                with urllib.request.urlopen(agents_url, timeout=5) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 break
             except (urllib.error.URLError, OSError, json.JSONDecodeError):
                 time.sleep(1)
         if payload is None:
-            fail(f"Dashboard did not answer {url} within {DASHBOARD_READY_TIMEOUT_S}s")
-        print(f"  Served: {url}")
+            fail(f"Dashboard did not answer {page_url} and {agents_url} "
+                 f"within {DASHBOARD_READY_TIMEOUT_S}s")
+        print(f"  Served: {page_url} and {agents_url}")
         print(f"  Scope: host={payload.get('host')} repo={payload.get('repo')}")
         if payload.get("repo") != str(repo_root()):
             fail(f"Dashboard scoped to {payload.get('repo')!r}, "
