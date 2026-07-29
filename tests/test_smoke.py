@@ -5956,22 +5956,16 @@ class TestWindowsHeartbeat(unittest.TestCase):
             self) -> None:
         environment = Path(r"C:\uv tools\agents-live")
         with (
-            mock.patch.object(uninstall.shutil, "which",
-                              return_value=r"C:\Windows\powershell.exe"),
-            mock.patch.object(hostruntime, "spawn_detached") as spawn,
+            mock.patch.object(
+                hostruntime, "defer_until_environment_exits",
+                return_value=True) as defer,
             mock.patch("sys.stdout", io.StringIO()),
         ):
             self.assertTrue(uninstall._handoff_windows_uninstall(
                 r"C:\uv\uv.exe", environment))
-        command = spawn.call_args.args[0]
-        self.assertEqual(command[:4], [
-            r"C:\Windows\powershell.exe", "-NoProfile", "-NonInteractive",
-            "-Command"])
-        self.assertIn(str(environment), command[4])
-        self.assertIn(r"C:\uv\uv.exe", command[4])
-        self.assertIn("Get-Process", command[4])
-        spawn.assert_called_once_with(
-            command, stdin=subprocess.DEVNULL, stdout=None, stderr=None)
+        defer.assert_called_once_with(
+            [r"C:\uv\uv.exe", "tool", "uninstall", "agents-live"],
+            environment)
 
     def test_install_refuses_cross_distro_target(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "does not match"):

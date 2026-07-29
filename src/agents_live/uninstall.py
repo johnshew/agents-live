@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,30 +25,8 @@ def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
     directory has to outlive both of them; waiting only for this PID races
     the shim's own exit.
     """
-    powershell = (shutil.which("powershell.exe")
-                  or shutil.which("pwsh.exe"))
-    if powershell is None:
-        return False
-    escaped_environment = str(environment).replace("'", "''")
-    escaped_uv = uv.replace("'", "''")
-    script = (
-        f"$root = '{escaped_environment}'; "
-        "do { "
-        "$running = @(Get-Process -ErrorAction SilentlyContinue | "
-        "Where-Object { try { $_.Path -and "
-        "$_.Path.StartsWith($root, "
-        "[System.StringComparison]::OrdinalIgnoreCase) } "
-        "catch { $false } }); "
-        "if ($running.Count) { Start-Sleep -Milliseconds 100 } "
-        "} while ($running.Count); "
-        f"& '{escaped_uv}' tool uninstall agents-live; "
-        "exit $LASTEXITCODE"
-    )
-    try:
-        hostruntime.spawn_detached(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            stdin=subprocess.DEVNULL, stdout=None, stderr=None)
-    except OSError:
+    if not hostruntime.defer_until_environment_exits(
+            [uv, "tool", "uninstall", "agents-live"], environment):
         return False
     print("Uninstall will complete after this command exits")
     return True
