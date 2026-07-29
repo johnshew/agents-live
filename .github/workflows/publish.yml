@@ -23,11 +23,12 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - uses: astral-sh/setup-uv@v5
-      # The release gates (.agents/release.md) all run here too, so a
-      # manually dispatched tag can never publish an unaudited artifact.
-      - run: uv run --script tools/pre-release-audit.py
-      - run: uv run --with-editable . --with duckdb python -m unittest tests.test_smoke
-      - run: uv build
+      # The gates are declared once, in release.py, and run from there so
+      # a manually dispatched tag cannot publish an unaudited artifact and
+      # this file cannot drift from what a local release runs (#218). The
+      # audit, the suite, and the build all run; the framework smoketest
+      # is skipped because it needs a live agent CLI.
+      - run: uv run --script tools/release.py --gates
       # Attach the exact artifacts going to PyPI before publishing, so a
       # failed upload can be rerun without hitting PyPI's duplicate check.
       - run: gh release upload "$TAG" dist/* --clobber

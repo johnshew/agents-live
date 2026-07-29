@@ -8263,23 +8263,31 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         # commands that then run.
         self.assertIn(command, module._gate_commands())
 
-    def test_both_workflows_run_the_suite_the_same_way(self) -> None:
-        # Neither workflow uses the PEP 723 script form, so each names
-        # the suite's dependencies itself. test.yml gained duckdb with
-        # the query tests and publish.yml did not, which failed the
-        # release gate after the tag and the GitHub release existed
-        # (#218).
+    def test_the_publish_workflow_runs_the_declared_gates(self) -> None:
+        # The gates were spelled out again in YAML, one of them lost a
+        # dependency the local run kept, and the release failed after the
+        # tag and the GitHub release existed (#218). The workflow now
+        # runs the list release.py declares, and everything in that list
+        # but the smoketest, which needs a live agent CLI.
         root = Path(__file__).resolve().parents[1]
-        commands = {}
-        for name in ("test.yml", "publish.yml"):
-            text = (root / ".github" / "workflows" / name).read_text(
-                encoding="utf-8")
-            runs = [line.split("run:", 1)[1].strip()
-                    for line in text.splitlines()
-                    if "run:" in line and "tests.test_smoke" in line]
-            self.assertEqual(len(runs), 1, name)
-            commands[name] = runs[0]
-        self.assertEqual(commands["test.yml"], commands["publish.yml"])
+        workflow = (root / ".github" / "workflows" / "publish.yml").read_text(
+            encoding="utf-8")
+        self.assertIn("tools/release.py --gates", workflow)
+        restated = [line.strip() for line in workflow.splitlines()
+                    if "run:" in line
+                    and any(gate in line for gate in
+                            ("pre-release-audit", "test_smoke", "uv build"))]
+        self.assertEqual(restated, [])
+        spec = importlib.util.spec_from_file_location(
+            "agents_live_release_gates", root / "tools" / "release.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        ran: list[list[str]] = []
+        with mock.patch.object(module, "_run", lambda argv, **kw: ran.append(argv)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            module.gates()
+        self.assertEqual(ran, [command for command in module._gate_commands()
+                               if command != module._smoketest_command()])
 
 
 def _catches_value_error(handler: ast.ExceptHandler) -> bool:

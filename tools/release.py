@@ -535,6 +535,22 @@ def _gate_commands() -> list[list[str]]:
     ]
 
 
+def gates() -> None:
+    """Run every gate that does not need a live agent CLI.
+
+    The publish workflow calls this instead of restating the list in
+    YAML, where a gate once lost a dependency the local run kept and
+    failed the release after the tag was pushed (#218).
+    """
+    smoketest = _smoketest_command()
+    for command in _gate_commands():
+        if command == smoketest:
+            print("+ skipped: the framework smoketest needs a live agent CLI",
+                  flush=True)
+            continue
+        _run(command)
+
+
 def _print_plan(current: str, target: str, minimum_bump: str) -> None:
     tag = f"v{target}"
     print(f"Release plan: {current} -> {target}")
@@ -649,6 +665,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Verify and publish a prepared release",
     )
     parser.add_argument(
+        "--gates",
+        action="store_true",
+        help="Run the release gates that do not need a live agent CLI",
+    )
+    parser.add_argument(
         "--notes",
         metavar="TAG",
         help="Rebuild the notes on an already published release",
@@ -659,19 +680,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Confirm commit, tag, push, and GitHub release creation",
     )
     args = parser.parse_args(argv)
-    selected = sum((args.dry_run, args.prepare, args.publish, args.notes is not None))
+    selected = sum((args.dry_run, args.prepare, args.publish, args.gates,
+                    args.notes is not None))
     if selected != 1:
         parser.error(
-            "choose exactly one of --dry-run, --prepare, --publish, or --notes")
+            "choose exactly one of --dry-run, --prepare, --publish, --gates, "
+            "or --notes")
     if (args.prepare or args.publish) and not args.yes:
         parser.error("--prepare and --publish require --yes")
-    if (args.publish or args.notes) and args.bump != "patch":
+    if (args.publish or args.gates or args.notes) and args.bump != "patch":
         parser.error("--bump applies to --dry-run and --prepare only")
     try:
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:
             prepare(args.bump)
+        elif args.gates:
+            gates()
         elif args.notes:
             notes(args.notes, apply=args.yes)
         else:
