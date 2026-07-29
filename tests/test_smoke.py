@@ -6534,6 +6534,7 @@ class TestUpdateCheck(unittest.TestCase):
             update_check.launch_if_stale(now=100)
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args.args[0][2], update_check.__name__)
+        self.assertEqual(spawn.call_args.kwargs["cwd"], Path.home())
 
         update_check.refresh(
             now=100,

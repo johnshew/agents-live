@@ -6,6 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: detached update checks no longer lock the invoking directory. (#224)
+  Interactive commands can start a background PyPI version check. On Windows,
+  that child inherited the project as its working directory and could briefly
+  prevent a temporary or disposable project from being removed after the
+  command finished. The host-scoped check now runs from the user home.
+- fix: release publication runs the canonical gates with complete dependencies. (#218)
+  The publish workflow now delegates its audit, suite, and build commands to
+  the release tool instead of maintaining a second copy that can drift. This
+  prevents a tagged release from passing locally but failing before PyPI when
+  a test dependency is added to only one workflow.
 - fix: legacy Windows clock tasks repair themselves before over-firing. (#194)
   A task written before scheduled invocations carried `--scheduled` could
   bypass both the dueness check and the duplicate-fire claim, turning every
