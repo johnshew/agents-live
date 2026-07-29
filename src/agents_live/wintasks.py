@@ -1075,6 +1075,16 @@ def registered_form(root: Path | str, agent: str,
     return command, arguments, _definition_signature(document)
 
 
+def clock_task_predates_scheduled_flag(root: Path | str, agent: str) -> bool:
+    """Whether the registered clock action can over-fire as a manual run."""
+    registered = registered_form(root, agent, kind=CLOCK)
+    if registered is None:
+        return False
+    _command, arguments, _signature = registered
+    args = parse_command_line(f"{_PROGRAM_TOKEN} {arguments}")[1:]
+    return "--scheduled" not in args
+
+
 def delete(root: Path | str, agent: str, *, kind: str) -> bool:
     path = task_path(root, agent, kind=kind)
     existing = read_definition(path)

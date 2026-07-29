@@ -153,6 +153,24 @@ def watcher_respawn_names() -> list[str]:
     return headless.list_reboot_watcher_agent_names()
 
 
+def repair_legacy_clock(name: str) -> bool:
+    """Rewrite a Windows clock task that predates ``--scheduled``.
+
+    Its current invocation is ambiguous: it may be this stale task firing,
+    or a person running the scheduled agent by hand. The caller skips that
+    invocation once; the rewritten task identifies every later clock fire,
+    while a repeated manual command runs normally (#194).
+    """
+    if hostruntime.native_scheduler() != hostruntime.TASK_SCHEDULER:
+        return False
+    spec = headless.schedule_spec(name)
+    if not _windows(lambda: wintasks.clock_task_predates_scheduled_flag(
+            spec.root, spec.name)):
+        return False
+    install(spec)
+    return True
+
+
 def current_form(spec: triggers.TriggerSpec) -> tuple[list[str], list[str]]:
     """(what is registered for *spec* here, what *spec* asks for).
 
