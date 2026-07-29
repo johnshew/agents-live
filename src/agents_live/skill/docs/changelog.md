@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: `uninstall` withdraws the triggers it installed on this host.
+  (#219) Activating an agent registers a scheduled task or a crontab
+  entry that outlives the command which made it. Nothing withdrew them,
+  so after uninstalling, every one of them kept firing on schedule at an
+  executable that was no longer there, failing forever and reachable
+  only by hand. Uninstall now sweeps them host-wide, including agents in
+  projects it was not run from, which is the only way to reach entries
+  pinned to a project that has since been deleted. As with the watchers,
+  a trigger is withdrawn only when it runs out of the installation being
+  removed: one aimed at a source checkout still works afterwards and is
+  left registered.
+
 - fix: `uninstall` stops its own watchers before it removes anything.
   (#219) A running watcher holds the executables in the tool
   environment, so `uv tool uninstall` fails on Windows with a

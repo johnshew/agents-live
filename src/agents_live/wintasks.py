@@ -1098,6 +1098,29 @@ def remove(root: Path | str, agent: str) -> bool:
     return removed
 
 
+def remove_under(environment: Path | str) -> int:
+    """Delete every registered task that runs a program inside *environment*.
+
+    Ownership is decided by what the action finally executes, read back
+    through the windowless wrapper, rather than by the repository the
+    name digests: uninstall has to reach tasks whose project it was
+    never run from, including ones pinned to a root nobody can name any
+    more. A task a developer pointed at a source checkout keeps working
+    after the tool goes, so it is left alone (#219).
+    """
+    removed = 0
+    for task in registered_tasks():
+        program = _action_program(task["command"], task["arguments"])
+        if not triggers.within(program, environment):
+            continue
+        path = f"{TASK_FOLDER}\\{task['name']}"
+        code, _out, err = _run(["/Delete", "/TN", path, "/F"])
+        if code != 0:
+            raise TaskError(err.strip() or f"schtasks refused to delete {path}")
+        removed += 1
+    return removed
+
+
 def is_active(root: Path | str, agent: str) -> bool | None:
     """True if *agent* has a task registered, None if nothing reads.
 

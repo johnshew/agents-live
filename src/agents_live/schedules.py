@@ -64,6 +64,24 @@ def remove(name: str) -> bool:
     return removed
 
 
+def remove_all_under(environment: Path) -> int:
+    """Withdraw every trigger on this host that runs out of *environment*.
+
+    Uninstall's counterpart to the per-agent removals above. It asks the
+    host-wide question those cannot: a trigger belongs to the
+    installation being removed, whatever project asked for it, and after
+    the removal it would fire at an executable that is no longer there.
+    """
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        removed = _windows(lambda: wintasks.remove_under(environment))
+    else:
+        removed = headless.remove_cron_entries_under(environment)
+    if removed:
+        adminlog.record("schedule-sweep", count=removed,
+                        scheduler=hostruntime.native_scheduler())
+    return removed
+
+
 def _logged_root() -> str | None:
     """The project root as an audit field, or None when there is none.
 

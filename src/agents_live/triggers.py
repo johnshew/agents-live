@@ -207,6 +207,27 @@ def belongs_to_root(line: str, root: Path | str) -> bool:
     )
 
 
+def within(candidate: str, root: Path | str) -> bool:
+    """Whether *candidate* names something inside *root*.
+
+    Containment is decided with :class:`Path` parents rather than string
+    prefixes, so the separator and the case a path happens to be spelled
+    with do not change the answer.
+    """
+    return bool(candidate) and Path(root) in Path(candidate).parents
+
+
+def runs_within(line: str, root: Path | str) -> bool:
+    """Whether a persisted line executes a program inside *root*.
+
+    The root-agnostic ownership question, asked when the installation is
+    what matters and the repository is not: uninstall withdraws entries
+    for projects it was never run from, and a root nobody can name can
+    still have entries pinned to it (#219).
+    """
+    return any(within(token, root) for token in tokens(line))
+
+
 def matches(line: str, *, root: Path | str, name: str, kind: str) -> bool:
     """Whether *line* is this project's *kind* trigger for *name*.
 
