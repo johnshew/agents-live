@@ -5523,6 +5523,34 @@ class TestWindowsScheduling(unittest.TestCase):
         self.assertEqual([str(root) for root in roots],
                          [str(self.ROOT), "C:\\repo\\gone"])
 
+    def test_the_task_sweep_takes_only_the_installation_being_removed(
+            self) -> None:
+        # Uninstall reaches tasks for projects it was never run from, so
+        # ownership is what the action runs, not the root the name
+        # digests. A task aimed at a source checkout keeps working after
+        # the tool goes and is left registered (#219).
+        environment = Path("C:\\uv\\tools\\agents-live")
+        shim = "C:\\uv\\tools\\agents-live\\Scripts\\agents-live.exe"
+        tasks = [
+            {"name": "todo@abc", "command": shim, "arguments": "run",
+             "working_dir": "C:\\repo\\a"},
+            {"name": "gone@def", "command": shim, "arguments": "watch",
+             "working_dir": "C:\\repo\\gone"},
+            {"name": "dev@ghi", "command": "C:\\src\\agents-live.exe",
+             "arguments": "run", "working_dir": "C:\\src"},
+        ]
+        calls: list[list[str]] = []
+        with (
+            mock.patch.object(wintasks, "registered_tasks", return_value=tasks),
+            mock.patch.object(wintasks, "_run",
+                              side_effect=lambda args, **kw: (
+                                  calls.append(list(args)) or (0, "", ""))),
+        ):
+            removed = wintasks.remove_under(environment)
+        self.assertEqual(removed, 2)
+        self.assertEqual([call[2] for call in calls],
+                         ["\\AgentsLive\\todo@abc", "\\AgentsLive\\gone@def"])
+
     def test_doctor_names_the_mechanism_this_host_dispatches_with(self) -> None:
         # The capability is the same question on both hosts; only the
         # program that answers it differs, and an apt line helps nobody
@@ -5861,6 +5889,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
             mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(uninstall, "_tool_environment",
+                              return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.WSL),
             mock.patch.object(
@@ -5876,6 +5906,8 @@ class TestWindowsHeartbeat(unittest.TestCase):
         completed = subprocess.CompletedProcess(["uv"], 0)
         with (
             mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(uninstall, "_tool_environment",
+                              return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.LINUX),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
@@ -5887,6 +5919,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
             mock.patch.object(uninstall.subprocess, "run",
                               return_value=completed) as uv_uninstall,
             mock.patch("sys.stdout", io.StringIO()),
+            mock.patch("sys.stderr", io.StringIO()),
         ):
             self.assertEqual(uninstall.main([]), 0)
         host_cleanup.assert_not_called()
@@ -5901,6 +5934,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
             mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.WINDOWS),
+            mock.patch.object(uninstall, "_sweep_triggers"),
             mock.patch.object(uninstall.health_check,
                               "remove_health_cron_lines",
                               return_value=False),
@@ -5922,22 +5956,16 @@ class TestWindowsHeartbeat(unittest.TestCase):
             self) -> None:
         environment = Path(r"C:\uv tools\agents-live")
         with (
-            mock.patch.object(uninstall.shutil, "which",
-                              return_value=r"C:\Windows\powershell.exe"),
-            mock.patch.object(hostruntime, "spawn_detached") as spawn,
+            mock.patch.object(
+                hostruntime, "defer_until_environment_exits",
+                return_value=True) as defer,
             mock.patch("sys.stdout", io.StringIO()),
         ):
             self.assertTrue(uninstall._handoff_windows_uninstall(
                 r"C:\uv\uv.exe", environment))
-        command = spawn.call_args.args[0]
-        self.assertEqual(command[:4], [
-            r"C:\Windows\powershell.exe", "-NoProfile", "-NonInteractive",
-            "-Command"])
-        self.assertIn(str(environment), command[4])
-        self.assertIn(r"C:\uv\uv.exe", command[4])
-        self.assertIn("Get-Process", command[4])
-        spawn.assert_called_once_with(
-            command, stdin=subprocess.DEVNULL, stdout=None, stderr=None)
+        defer.assert_called_once_with(
+            [r"C:\uv\uv.exe", "tool", "uninstall", "agents-live"],
+            environment)
 
     def test_install_refuses_cross_distro_target(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "does not match"):
@@ -5958,8 +5986,6 @@ class TestWindowsHeartbeat(unittest.TestCase):
         ]
         stopped: list[int] = []
         with (
-            mock.patch.object(uninstall, "_tool_environment",
-                              return_value=environment),
             mock.patch.object(headless.hostruntime, "process_command_lines",
                               return_value=listed),
             mock.patch.object(uninstall.hostruntime, "terminate",
@@ -5968,7 +5994,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
                               return_value=False),
             mock.patch("sys.stdout", io.StringIO()),
         ):
-            self.assertEqual(uninstall._stop_own_watchers(), [])
+            self.assertEqual(uninstall._stop_own_watchers(environment), [])
         self.assertEqual(stopped, [11])
 
     def test_uninstall_removes_nothing_while_a_watcher_survives(self) -> None:
@@ -5977,17 +6003,83 @@ class TestWindowsHeartbeat(unittest.TestCase):
         with (
             mock.patch.object(uninstall, "_stop_own_watchers",
                               return_value=[(11, "mine", "/p")]),
+            mock.patch.object(uninstall, "_tool_environment",
+                              return_value=None),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
             mock.patch.object(uninstall.health_check,
                               "remove_health_cron_lines") as remove_loop,
+            mock.patch.object(uninstall, "_sweep_triggers") as sweep,
             mock.patch.object(uninstall.subprocess, "run") as uv_uninstall,
             mock.patch("sys.stderr", io.StringIO()) as stderr,
         ):
             self.assertEqual(uninstall.main([]), 1)
         host_cleanup.assert_not_called()
         remove_loop.assert_not_called()
+        sweep.assert_not_called()
         uv_uninstall.assert_not_called()
         self.assertIn("mine (pid 11)", stderr.getvalue())
+
+    def test_cron_sweep_takes_only_entries_from_the_installation(self) -> None:
+        # Root-agnostic on purpose: uninstall withdraws entries for
+        # projects it was never run from. The executable is what proves
+        # ownership, so a developer's checkout entry and an unrelated
+        # user entry both survive (#219).
+        # Text, not Path: a crontab is POSIX and its lines are parsed
+        # with shlex, which would eat the backslashes a Windows Path
+        # renders when this test runs there.
+        where = "/home/dev/.local/share/uv/tools/agents-live"
+        shim = f"{where}/bin/agents-live"
+        checkout = "/home/dev/src/agents-live/agents-live"
+        environment = Path(where)
+        lines = [
+            f"*/5 * * * * cd /a && {shim} --repo /a internal run --name one",
+            f"0 * * * * cd /b && {shim} --repo /b internal run --name two",
+            f"*/5 * * * * cd /c && {checkout} --repo /c internal run --name dev",
+            "0 3 * * * /usr/bin/backup --nightly",
+        ]
+        written: list[list[str]] = []
+        with (
+            mock.patch.object(headless, "crontab_lock",
+                              contextlib.nullcontext),
+            mock.patch.object(headless, "current_crontab_lines",
+                              return_value=lines),
+            mock.patch.object(headless, "install_crontab",
+                              side_effect=written.append),
+        ):
+            removed = headless.remove_cron_entries_under(environment)
+        self.assertEqual(removed, 2)
+        self.assertEqual(written, [[lines[2], lines[3]]])
+
+    def test_cron_sweep_leaves_the_crontab_alone_when_nothing_is_ours(
+            self) -> None:
+        environment = Path("/home/dev/.local/share/uv/tools/agents-live")
+        with (
+            mock.patch.object(headless, "crontab_lock",
+                              contextlib.nullcontext),
+            mock.patch.object(headless, "current_crontab_lines",
+                              return_value=["0 3 * * * /usr/bin/backup"]),
+            mock.patch.object(headless, "install_crontab") as install,
+        ):
+            self.assertEqual(
+                headless.remove_cron_entries_under(environment), 0)
+        install.assert_not_called()
+
+    def test_task_sweep_reads_task_actions_as_windows_paths(self) -> None:
+        environment = Path(r"C:\uv\tools\agents-live")
+        tasks = [{
+            "name": "demo@12345678",
+            "command": r"c:\UV\TOOLS\AGENTS-LIVE\Scripts\agents-live.exe",
+            "arguments": "--repo C:\\project run --name demo --scheduled",
+        }]
+        with (
+            mock.patch.object(wintasks, "registered_tasks",
+                              return_value=tasks),
+            mock.patch.object(wintasks, "_run",
+                              return_value=(0, "", "")) as delete,
+        ):
+            self.assertEqual(wintasks.remove_under(environment), 1)
+        delete.assert_called_once_with([
+            "/Delete", "/TN", r"\AgentsLive\demo@12345678", "/F"])
 
     def test_uninstall_removes_crontab_lock(self) -> None:
         directory = heartbeat.state_dir()

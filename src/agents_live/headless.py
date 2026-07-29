@@ -2707,6 +2707,27 @@ def remove_cron_entries(name: str) -> bool:
         return True
 
 
+def remove_cron_entries_under(environment: Path) -> int:
+    """Drop every entry that runs a program inside *environment*.
+
+    Host-wide and root-agnostic, because the entries uninstall has to
+    withdraw outlive the projects that installed them and cannot be
+    reached by name. Pinning on the executable is what keeps the sweep
+    honest: an entry running out of a source checkout is a developer's
+    own and is left alone (#219).
+    """
+    with crontab_lock():
+        lines = current_crontab_lines()
+        if lines is None:
+            raise AgentsLiveError("crontab is not accessible")
+        kept = [line for line in lines
+                if not triggers.runs_within(line, environment)]
+        if len(kept) == len(lines):
+            return 0
+        install_crontab(kept)
+        return len(lines) - len(kept)
+
+
 def cron_is_active(name: str) -> bool | None:
     """Return True if active, False if inactive, None if crontab unavailable."""
     lines = current_crontab_lines()
@@ -2807,7 +2828,7 @@ def _same_path(candidate: str, root: Path) -> bool:
 
 def _within_path(candidate: str, root: Path) -> bool:
     """Whether *candidate* names something under *root*."""
-    return bool(candidate) and root in Path(candidate).parents
+    return triggers.within(candidate, root)
 
 
 def _is_watcher_cmdline(args: list[str], name: str) -> bool:

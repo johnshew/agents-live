@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import argparse
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from . import (adminlog, completions, health_check, heartbeat, hostruntime,
-               preflight)
+               preflight, schedules)
 from .spawn import find_uv
 
 # Long enough for a watcher to finish the dispatch it is in, short enough
@@ -26,30 +25,8 @@ def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
     directory has to outlive both of them; waiting only for this PID races
     the shim's own exit.
     """
-    powershell = (shutil.which("powershell.exe")
-                  or shutil.which("pwsh.exe"))
-    if powershell is None:
-        return False
-    escaped_environment = str(environment).replace("'", "''")
-    escaped_uv = uv.replace("'", "''")
-    script = (
-        f"$root = '{escaped_environment}'; "
-        "do { "
-        "$running = @(Get-Process -ErrorAction SilentlyContinue | "
-        "Where-Object { try { $_.Path -and "
-        "$_.Path.StartsWith($root, "
-        "[System.StringComparison]::OrdinalIgnoreCase) } "
-        "catch { $false } }); "
-        "if ($running.Count) { Start-Sleep -Milliseconds 100 } "
-        "} while ($running.Count); "
-        f"& '{escaped_uv}' tool uninstall agents-live; "
-        "exit $LASTEXITCODE"
-    )
-    try:
-        hostruntime.spawn_detached(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
-            stdin=subprocess.DEVNULL, stdout=None, stderr=None)
-    except OSError:
+    if not hostruntime.defer_until_environment_exits(
+            [uv, "tool", "uninstall", "agents-live"], environment):
         return False
     print("Uninstall will complete after this command exits")
     return True
@@ -73,7 +50,8 @@ def _tool_environment() -> Path | None:
     return environment if environment.is_dir() else None
 
 
-def _stop_own_watchers() -> list[tuple[int, str, str | None]]:
+def _stop_own_watchers(environment: Path | None
+                       ) -> list[tuple[int, str, str | None]]:
     """Stop the watchers running out of this installation; name survivors.
 
     A watcher holds the executables uv has to delete, so on Windows it
@@ -85,7 +63,6 @@ def _stop_own_watchers() -> list[tuple[int, str, str | None]]:
     """
     from .headless import watchers_on_host  # noqa: PLC0415
 
-    environment = _tool_environment()
     if environment is None:
         return []
     try:
@@ -102,6 +79,33 @@ def _stop_own_watchers() -> list[tuple[int, str, str | None]]:
             if hostruntime.is_alive(watcher[0])]
 
 
+def _sweep_triggers(environment: Path | None) -> None:
+    """Withdraw every host trigger that fires out of this installation.
+
+    Per-agent triggers outlive the command that made them and are not
+    addressed to the project uninstall happens to be run from, so
+    nothing else withdraws them: left behind, they keep firing at an
+    executable that is gone, failing on schedule forever (#219).
+
+    A failure here is reported and not fatal. The triggers are inert
+    once the tool goes, and refusing to finish would leave the worse
+    state: an installation half removed.
+    """
+    if environment is None:
+        print("warning: could not locate this installation, so its scheduled "
+              "triggers were left in place; remove them with `agents-live "
+              "stop --all` before uninstalling", file=sys.stderr)
+        return
+    try:
+        removed = schedules.remove_all_under(environment)
+    except Exception as exc:
+        print(f"warning: could not withdraw scheduled triggers: {exc}",
+              file=sys.stderr)
+        return
+    if removed:
+        print(f"Withdrew {removed} scheduled trigger(s) from this host")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Uninstall agents-live safely")
     parser.add_argument("--distro")
@@ -109,9 +113,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
+    environment = _tool_environment()
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
-    survivors = _stop_own_watchers()
+    survivors = _stop_own_watchers(environment)
     if survivors:
         named = ", ".join(f"{name} (pid {pid})" for pid, name, _ in survivors)
         preflight.emit_failure(
@@ -147,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"warning: could not remove the check-and-repair loop: "
               f"{exc}", file=sys.stderr)
+    _sweep_triggers(environment)
     try:
         for path in completions.remove():
             print(f"Removed shell completions: {path}")
@@ -161,9 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             "host cleanup succeeded, but uv was not found; restore or install "
             "uv, then run `uv tool uninstall agents-live`")
         return 1
-    environment = (_tool_environment()
-                   if hostruntime.id() == hostruntime.WINDOWS else None)
-    if environment is not None:
+    if environment is not None and hostruntime.id() == hostruntime.WINDOWS:
         if not _handoff_windows_uninstall(uv, environment):
             preflight.emit_failure(
                 "uninstall",

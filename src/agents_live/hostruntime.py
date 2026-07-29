@@ -886,3 +886,41 @@ def spawn_detached(
         text=text,
         **_detached_popen_kwargs(),
     )
+
+
+def defer_until_environment_exits(
+        argv: Sequence[str], environment: Path | str) -> bool:
+    """Start *argv* after no process executes from *environment*.
+
+    Windows will not remove an executable while it is running. The helper
+    itself must therefore live outside the environment being removed. Other
+    hosts do not need this handoff and return ``False``.
+    """
+    if not _IS_WINDOWS:
+        return False
+    powershell = (shutil.which("powershell.exe")
+                  or shutil.which("pwsh.exe"))
+    if powershell is None:
+        return False
+    escaped_environment = str(environment).replace("'", "''")
+    command = subprocess.list2cmdline(list(argv)).replace("'", "''")
+    script = (
+        f"$root = '{escaped_environment}'; "
+        "do { "
+        "$running = @(Get-Process -ErrorAction SilentlyContinue | "
+        "Where-Object { try { $_.Path -and "
+        "$_.Path.StartsWith($root, "
+        "[System.StringComparison]::OrdinalIgnoreCase) } "
+        "catch { $false } }); "
+        "if ($running.Count) { Start-Sleep -Milliseconds 100 } "
+        "} while ($running.Count); "
+        f"& ([scriptblock]::Create('{command}')); "
+        "exit $LASTEXITCODE"
+    )
+    try:
+        spawn_detached(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            stdin=subprocess.DEVNULL, stdout=None, stderr=None)
+    except OSError:
+        return False
+    return True
