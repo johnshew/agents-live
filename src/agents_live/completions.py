@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import paths, preflight
+from . import hostruntime, paths, preflight
 from .cli_spec import (
     COMMANDS,
     GLOBAL_ARGS,
@@ -157,21 +157,100 @@ compdef _agents_live agents-live
 """
 
 
-def destinations() -> tuple[Path, Path]:
-    """Return the Bash and Zsh user completion destinations."""
+def _powershell_array(values: list[str]) -> str:
+    return "@(" + ", ".join(f"'{value}'" for value in values) + ")"
+
+
+def powershell() -> str:
+    command_values = []
+    for command in COMMANDS:
+        if command.hidden:
+            continue
+        values = [
+            *(child.name for child in command.subcommands if not child.hidden),
+            *_values(command),
+        ]
+        for name in (command.name, *command.aliases):
+            command_values.append(
+                f"    '{name}' = {_powershell_array(values)}")
+    command_values.append(
+        "    'help' = "
+        + _powershell_array(["--all", *_command_words()]))
+    top_level = _powershell_array([
+        *_command_words(),
+        *(flag for argument in (*GLOBAL_ARGS, HELP_ARG)
+          for flag in argument.flags),
+    ])
+    agent_commands = _powershell_array([
+        name
+        for command in COMMANDS
+        if not command.hidden and command.name_sugar
+        for name in (command.name, *command.aliases)
+    ])
+    return f"""# PowerShell completion for agents-live
+$script:AgentsLiveTopLevel = {top_level}
+$script:AgentsLiveCommandValues = @{{
+{chr(10).join(command_values)}
+}}
+$script:AgentsLiveAgentCommands = {agent_commands}
+
+Register-ArgumentCompleter -Native -CommandName agents-live -ScriptBlock {{
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $elements = @($commandAst.CommandElements | ForEach-Object {{
+        $_.Extent.Text
+    }})
+    if ($elements.Count -lt 2 -or
+            ($elements.Count -eq 2 -and $wordToComplete)) {{
+        $candidates = $script:AgentsLiveTopLevel
+    }} else {{
+        $command = $elements[1]
+        $candidates = @($script:AgentsLiveCommandValues[$command])
+        if ($script:AgentsLiveAgentCommands -contains $command) {{
+            try {{
+                $payload = agents-live status --json 2>$null |
+                    ConvertFrom-Json
+                $candidates += @($payload.agents | ForEach-Object {{
+                    $_.name
+                }})
+            }} catch {{
+                # Completion remains useful when status is unavailable.
+            }}
+        }}
+    }}
+
+    $candidates |
+        Where-Object {{ $_ -like "$wordToComplete*" }} |
+        Sort-Object -Unique |
+        ForEach-Object {{
+            [System.Management.Automation.CompletionResult]::new(
+                $_, $_, 'ParameterValue', $_)
+        }}
+}}
+"""
+
+
+def destinations() -> tuple[Path, ...]:
+    """Return completion destinations owned by the current runtime."""
     data_home = paths.xdg_data_home()
-    return (
+    destinations = (
         data_home / "bash-completion" / "completions" / "agents-live",
         data_home / "zsh" / "site-functions" / "_agents-live",
     )
+    if hostruntime.id() == hostruntime.WINDOWS:
+        return (*destinations,
+                data_home / "powershell" / "agents-live-completion.ps1")
+    return destinations
 
 
-def update() -> tuple[Path, Path]:
-    """Install both generated completion scripts for the current user."""
-    bash_path, zsh_path = destinations()
-    paths.atomic_write_text(bash_path, bash())
-    paths.atomic_write_text(zsh_path, zsh())
-    return bash_path, zsh_path
+def update() -> tuple[Path, ...]:
+    """Install generated completion scripts for the current runtime."""
+    scripts = (bash(), zsh(), powershell())
+    installed = destinations()
+    for destination, script in zip(
+            installed, scripts[:len(installed)], strict=True):
+        paths.atomic_write_text(destination, script)
+    return installed
 
 
 def remove() -> tuple[Path, ...]:
@@ -202,26 +281,34 @@ def update_best_effort(operation: str) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("shell", nargs="?", choices=("bash", "zsh"))
+    parser.add_argument(
+        "shell", nargs="?", choices=("bash", "zsh", "powershell"))
     parser.add_argument(
         "--update", action="store_true",
-        help="Install or refresh completions for both shells",
+        help="Install or refresh completions for this runtime",
     )
     args = parser.parse_args()
     if args.update:
         if args.shell is not None:
             parser.error("--update cannot be combined with a shell")
         try:
-            bash_path, zsh_path = update()
+            installed = update()
         except OSError as exc:
             preflight.emit_failure("completions", str(exc))
             return 1
-        print(f"Installed Bash completions: {bash_path}")
-        print(f"Installed Zsh completions: {zsh_path}")
+        labels = ("Bash", "Zsh", "PowerShell")
+        for label, destination in zip(
+            labels[:len(installed)], installed, strict=True):
+            print(f"Installed {label} completions: {destination}")
         return 0
     if args.shell is None:
         parser.error("a shell or --update is required")
-    print(bash() if args.shell == "bash" else zsh(), end="")
+    generators = {
+        "bash": bash,
+        "zsh": zsh,
+        "powershell": powershell,
+    }
+    print(generators[args.shell](), end="")
     return 0
 
 

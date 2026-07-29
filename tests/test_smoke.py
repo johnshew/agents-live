@@ -3311,7 +3311,11 @@ class TestCliContract(_TempProject):
         self.assertEqual(scripts, ["qlog.py", "timeline.py", "dashboard.py"])
 
     def test_completion_scripts_follow_public_spec(self) -> None:
-        scripts = {"bash": completions.bash(), "zsh": completions.zsh()}
+        scripts = {
+            "bash": completions.bash(),
+            "zsh": completions.zsh(),
+            "powershell": completions.powershell(),
+        }
         for shell, script in scripts.items():
             with self.subTest(shell=shell):
                 for command in COMMANDS:
@@ -3339,12 +3343,16 @@ class TestCliContract(_TempProject):
                           for flag in argument.flags),
                     )))
                     names = "|".join((command.name, *command.aliases))
-                    expected_case = (
-                        f"    {names}) opts={' '.join(values)!r} ;;"
-                        if shell == "bash"
-                        else f"    {names}) values=({' '.join(values)}) ;;"
-                    )
-                    self.assertIn(expected_case, script)
+                    if shell == "bash":
+                        expected = f"    {names}) opts={' '.join(values)!r} ;;"
+                        self.assertIn(expected, script)
+                    elif shell == "zsh":
+                        expected = (
+                            f"    {names}) values=({' '.join(values)}) ;;")
+                        self.assertIn(expected, script)
+                    else:
+                        for name in (command.name, *command.aliases):
+                            self.assertIn(f"    '{name}' = @(", script)
                 self.assertIn("agents-live status --json", script)
                 self.assertIn("-h", script)
                 self.assertIn("--help", script)
@@ -3411,7 +3419,8 @@ class TestCliContract(_TempProject):
 
     def test_completions_command_prints_selected_shell(self) -> None:
         for shell, marker in (("bash", "complete -F"),
-                              ("zsh", "#compdef agents-live")):
+                              ("zsh", "#compdef agents-live"),
+                              ("powershell", "Register-ArgumentCompleter")):
             with (
                 self.subTest(shell=shell),
                 mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
@@ -3419,7 +3428,28 @@ class TestCliContract(_TempProject):
                 self.assertEqual(cli.main(["completions", shell]), 0)
                 self.assertIn(marker, stdout.getvalue())
 
-    def test_completion_update_writes_both_xdg_scripts(self) -> None:
+    @unittest.skipUnless(
+        sys.platform == "win32" and shutil.which("pwsh"),
+        "requires PowerShell on native Windows",
+    )
+    def test_powershell_completion_runs_in_native_engine(self) -> None:
+        script_path = self.root / "agents-live-completion.ps1"
+        script_path.write_text(completions.powershell(), encoding="utf-8")
+        command = (
+            f". '{script_path}'; "
+            "$top = (TabExpansion2 'agents-live comp' 16)."
+            "CompletionMatches.CompletionText; "
+            "$shells = (TabExpansion2 'agents-live completions ' 24)."
+            "CompletionMatches.CompletionText; "
+            "if ($top -notcontains 'completions' -or "
+            "$shells -notcontains 'powershell') { exit 1 }"
+        )
+        subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_completion_update_writes_runtime_local_scripts(self) -> None:
         bash_path = (
             self.root / "xdg-data" / "bash-completion" / "completions"
             / "agents-live")
@@ -3429,17 +3459,49 @@ class TestCliContract(_TempProject):
         bash_path.parent.mkdir(parents=True)
         bash_path.write_text("stale\n", encoding="utf-8")
 
-        self.assertEqual(completions.update(), (bash_path, zsh_path))
+        powershell_path = (
+            self.root / "xdg-data" / "powershell"
+            / "agents-live-completion.ps1")
+
+        expected = (bash_path, zsh_path, powershell_path)
+        self.assertEqual(completions.update(), expected)
 
         self.assertEqual(bash_path.read_text(encoding="utf-8"), completions.bash())
         self.assertEqual(zsh_path.read_text(encoding="utf-8"), completions.zsh())
+        self.assertEqual(
+            powershell_path.read_text(encoding="utf-8"),
+            completions.powershell(),
+        )
 
-    def test_completions_update_cli_reports_both_destinations(self) -> None:
+    def test_posix_completion_destinations_stay_in_posix_data_home(self) -> None:
+        with mock.patch.object(
+                completions.hostruntime, "id",
+                return_value=completions.hostruntime.LINUX):
+            destinations = completions.destinations()
+        self.assertEqual(len(destinations), 2)
+        self.assertTrue(all(self.root / "xdg-data" in path.parents
+                            for path in destinations))
+        self.assertNotIn("powershell", " ".join(map(str, destinations)).lower())
+
+    def test_posix_completion_update_writes_only_posix_scripts(self) -> None:
+        with mock.patch.object(
+                completions.hostruntime, "id",
+                return_value=completions.hostruntime.LINUX):
+            installed = completions.update()
+        self.assertEqual(installed, completions.destinations()[:2])
+        self.assertEqual(len(installed), 2)
+        self.assertTrue(all(path.is_file() for path in installed))
+        powershell_path = (
+            self.root / "xdg-data" / "powershell"
+            / "agents-live-completion.ps1")
+        self.assertFalse(powershell_path.exists())
+
+    def test_completions_update_cli_reports_runtime_destinations(self) -> None:
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
             self.assertEqual(cli.main(["completions", "--update"]), 0)
         output = stdout.getvalue()
-        self.assertIn(str(completions.destinations()[0]), output)
-        self.assertIn(str(completions.destinations()[1]), output)
+        for destination in completions.destinations():
+            self.assertIn(str(destination), output)
 
     def test_completions_requires_one_mode(self) -> None:
         for argv in (["completions"],
@@ -3482,6 +3544,7 @@ class TestCliContract(_TempProject):
 
         self.assertFalse(completions.destinations()[0].exists())
         self.assertFalse(completions.destinations()[1].exists())
+        self.assertFalse(completions.destinations()[2].exists())
         self.assertTrue(sibling.is_file())
 
     def test_completions_help_explains_installation(self) -> None:
@@ -3497,6 +3560,9 @@ class TestCliContract(_TempProject):
                 self.assertIn("agents-live completions --update", output)
                 self.assertIn("bash-completion", output)
                 self.assertIn("fpath", output)
+                self.assertIn("Invoke-Expression", output)
+                self.assertIn("Windows-local user data", output)
+                self.assertIn("Windows/WSL", output)
 
     def test_repos_list_exposes_structured_results(self) -> None:
         config_home = self.root / "contract-config"
