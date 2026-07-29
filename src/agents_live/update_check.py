@@ -108,7 +108,8 @@ def launch_if_stale(*, now: float | None = None) -> None:
     if _is_fresh(_read_cache(), current):
         return
     try:
-        hostruntime.spawn_detached([sys.executable, "-m", __name__])
+        hostruntime.spawn_detached(
+            [sys.executable, "-m", __name__], cwd=Path.home())
     except OSError:
         pass
 
