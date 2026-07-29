@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-07-25
+ms.date: 2026-07-29
 ms.topic: concept
 ---
 
@@ -27,6 +27,41 @@ only infrastructure state. Escalating that from existing log data comes
 before any richer export.
 ([#123](https://github.com/johnshew/agents-live/issues/123))
 
+## Host changes that cannot half-finish
+
+Several commands mutate host state that they may not be able to finish
+mutating. `init` registers a repository before plugin convergence can
+fail ([#226](https://github.com/johnshew/agents-live/issues/226));
+`upgrade` lets uv remove a plugin before discovering that a running
+process locks the launcher it has to replace
+([#231](https://github.com/johnshew/agents-live/issues/231)). Both leave
+the host in a state the operator did not ask for and cannot easily read.
+
+`uninstall` already sets the precedent. It detects the processes running
+from the tool environment before touching anything, refuses outright
+while one survives, and hands the last step to a helper that waits
+outside the environment being removed. The direction is to hold every
+host-mutating command to that shape: know the blockers before the first
+write, and leave the prior state intact when you cannot proceed.
+
+Whether an upgrade should go further and restart the watchers it makes
+stale is a separate policy question, still open
+([#204](https://github.com/johnshew/agents-live/issues/204)).
+
+## Confidence in the test suite
+
+Every defect found in the week of 2026-07-27 shipped through a green
+suite. That is a measured fact, and it points at structure rather than
+at missing coverage: the mock-driven population of the suite cannot
+execute the paths that keep breaking
+([#184](https://github.com/johnshew/agents-live/issues/184)), and the
+policy never required that anything assert the user-visible claim
+([#180](https://github.com/johnshew/agents-live/issues/180)).
+
+These are complements, not duplicates: one rebalances what the suite
+executes, the other changes what counts as coverage before a fix is
+called done.
+
 ## Safer execution modes in practice
 
 `plan` and `pipeline` are documented as the safe defaults, but the
@@ -48,8 +83,14 @@ seam, is implemented and covered by CI on `windows-latest`.
 [windows-support.md](windows-support.md) is the architecture guide: what
 the seam is, why it is functions rather than a protocol object, and what
 the spikes contradicted. Whether the Windows half earns its keep in the
-long run stays an open product question; the engineering question is
-settled.
+long run stays an open product question; the seam itself is settled.
+
+What is not settled is process and file lifecycle on that platform.
+Windows will not delete or replace a running executable, and the defects
+that follow from it keep arriving through the seam rather than in it:
+locked launchers during upgrade, deferred self-removal during uninstall,
+and detached processes that outlive the run that started them. Those are
+tracked under the theme above rather than here.
 
 ## Maintaining this file
 
