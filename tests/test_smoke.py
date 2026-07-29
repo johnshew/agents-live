@@ -6064,6 +6064,23 @@ class TestWindowsHeartbeat(unittest.TestCase):
                 headless.remove_cron_entries_under(environment), 0)
         install.assert_not_called()
 
+    def test_task_sweep_reads_task_actions_as_windows_paths(self) -> None:
+        environment = Path(r"C:\uv\tools\agents-live")
+        tasks = [{
+            "name": "demo@12345678",
+            "command": r"c:\UV\TOOLS\AGENTS-LIVE\Scripts\agents-live.exe",
+            "arguments": "--repo C:\\project run --name demo --scheduled",
+        }]
+        with (
+            mock.patch.object(wintasks, "registered_tasks",
+                              return_value=tasks),
+            mock.patch.object(wintasks, "_run",
+                              return_value=(0, "", "")) as delete,
+        ):
+            self.assertEqual(wintasks.remove_under(environment), 1)
+        delete.assert_called_once_with([
+            "/Delete", "/TN", r"\AgentsLive\demo@12345678", "/F"])
+
     def test_uninstall_removes_crontab_lock(self) -> None:
         directory = heartbeat.state_dir()
         directory.mkdir(parents=True)

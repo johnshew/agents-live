@@ -1111,7 +1111,7 @@ def remove_under(environment: Path | str) -> int:
     removed = 0
     for task in registered_tasks():
         program = _action_program(task["command"], task["arguments"])
-        if not triggers.within(program, environment):
+        if not _within(program, environment):
             continue
         path = f"{TASK_FOLDER}\\{task['name']}"
         code, _out, err = _run(["/Delete", "/TN", path, "/F"])
@@ -1119,6 +1119,18 @@ def remove_under(environment: Path | str) -> int:
             raise TaskError(err.strip() or f"schtasks refused to delete {path}")
         removed += 1
     return removed
+
+
+def _within(candidate: str, root: Path | str) -> bool:
+    """Whether *candidate* names something inside *root*.
+
+    Read as a Windows path for the same reason as :func:`_path_key`: a
+    task store holds Windows paths whatever host is asking about them.
+    """
+    if not candidate:
+        return False
+    key = _path_key(root)
+    return _path_key(candidate).startswith(f"{key}/")
 
 
 def is_active(root: Path | str, agent: str) -> bool | None:
