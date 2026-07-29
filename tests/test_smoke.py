@@ -35,6 +35,8 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -3715,6 +3717,39 @@ class TestCliContract(_TempProject):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("port_unavailable", result.stderr)
         self.assertNotIn("ready to go", result.stdout)
+
+    def test_dashboard_root_request_does_not_conflict_with_its_server(self) -> None:
+        dashboard = Path(headless.__file__).with_name("dashboard.py")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as available:
+            available.bind(("127.0.0.1", 0))
+            port = available.getsockname()[1]
+        process = subprocess.Popen(
+            ["uv", "run", "--script", str(dashboard), "--port", str(port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 180
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    output = process.stdout.read() if process.stdout else ""
+                    self.fail(f"dashboard exited before serving: {output}")
+                try:
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/", timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                    break
+                except (urllib.error.URLError, OSError):
+                    time.sleep(0.2)
+            else:
+                self.fail("dashboard did not serve its root page")
+            self.assertIsNone(process.poll())
+        finally:
+            hostruntime.terminate(process.pid)
+            output = process.communicate(timeout=30)[0]
+        self.assertNotIn("port_unavailable", output)
+        self.assertNotIn("CancelledError", output)
 
     def _dashboards_main(self, *argv: str) -> tuple[int, str]:
         """Run the dashboard registry command and capture what it printed."""

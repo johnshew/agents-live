@@ -6,6 +6,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: native dashboards no longer reject their own loopback server. (#228)
+  NiceGUI re-executes the dashboard script to build the root page after its
+  server starts. That page execution now skips launch-only port checks and
+  registry writes, preventing the false conflict and its shutdown traceback.
+  The framework smoketest now requests the rendered root page as well as the
+  agent API so this script-mode path stays covered.
+
 ## 5.4.1 - 2026-07-29
 
 - fix: detached update checks no longer lock the invoking directory. (#224)
