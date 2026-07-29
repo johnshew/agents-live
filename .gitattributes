@@ -4,6 +4,3 @@
 # core.autocrlf=true, and a CRLF checkout breaks bash scripts and would ship
 # CRLF files inside a wheel built from that tree.
 * text=auto eol=lf
-
-# Windows Script Host reads this one; keep it CRLF.
-*.vbs text eol=crlf
