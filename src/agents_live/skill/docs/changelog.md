@@ -18,17 +18,15 @@ history is retained in the source repository.
   removed: one aimed at a source checkout still works afterwards and is
   left registered.
 
-- fix: `uninstall` stops its own watchers before it removes anything.
-  (#219) A running watcher holds the executables in the tool
-  environment, so `uv tool uninstall` fails on Windows with a
-  file-in-use error. That failure came last, after the heartbeat, the
-  health loop, and the completions were already gone, leaving a host
-  stripped of its supporting state and a tool environment neither
-  installed nor removed. Uninstall now stops those watchers first and
-  refuses to remove anything if one survives, so a failure leaves a
-  working installation to retry from. A watcher is stopped only when
-  it is running out of the environment being removed: one started from
-  a source checkout is somebody's working tree and is left alone.
+- fix: `uninstall` removes the tool without stranding host state. (#219)
+  Running watchers are stopped before cleanup because they hold the tool
+  environment open; a watcher from a source checkout is left alone. Every
+  scheduled trigger pinned to the removed environment is withdrawn across
+  projects, so the host does not keep firing commands that no longer exist.
+  On Windows, removal is handed to an external helper that waits for both
+  the Python process and its launcher to exit before asking uv to delete the
+  environment, avoiding the file-in-use failure caused by the uninstalling
+  command itself.
 
 ## 5.4.0 - 2026-07-28
 
