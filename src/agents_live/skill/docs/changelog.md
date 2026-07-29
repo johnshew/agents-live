@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.4.1 - 2026-07-29
+
 - fix: detached update checks no longer lock the invoking directory. (#224)
   Interactive commands can start a background PyPI version check. On Windows,
   that child inherited the project as its working directory and could briefly
