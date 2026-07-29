@@ -6,6 +6,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: legacy Windows clock tasks repair themselves before over-firing. (#194)
+  A task written before scheduled invocations carried `--scheduled` could
+  bypass both the dueness check and the duplicate-fire claim, turning every
+  coarse Task Scheduler wake into an agent run. The first ambiguous invocation
+  now rewrites that task and skips once. A manual command explains the repair
+  and can be repeated immediately; quiet scheduled invocations remain silent.
 - fix: `uninstall` removes the tool without stranding host state. (#219)
   Three things outlived it. A running watcher holds the executables uv
   has to delete, so the removal failed on Windows, and it failed after
