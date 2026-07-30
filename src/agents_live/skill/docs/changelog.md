@@ -6,6 +6,21 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: native Windows Copilot runs resolve the installed CLI and decode its output reliably. (#238, #241)
+  Executable pinning continues past refused PowerShell and batch shims to the
+  first native executable on PATH, and every framework-smoketest text capture
+  decodes UTF-8 explicitly.
+- fix: timed-out framework smoketests leave maintenance and the next run usable. (#232)
+  Recovery has one bounded cleanup budget, cannot block on inherited output
+  handles, removes detached fixtures and watchers, and reports the last stage
+  reached before timeout.
+- fix: Copilot pipeline mode keeps its independently resolved MCP bridge compatible. (#240)
+  The bridge now shares the package's MCP 1.x constraint and starts in a fresh
+  uv script environment instead of failing behind an agent timeout.
+- fix: shipped handler examples run on every supported host. (#239)
+  A dependency-free Python `write-files` template replaces the Bash and jq
+  default, while Windows documentation states that shell handlers remain a
+  POSIX-only capability.
 - feat: native Windows installs generate PowerShell completion. (#233)
   It sits alongside the Windows-local Bash and Zsh files. Linux and WSL
   continue to install only Bash and Zsh completion in their own XDG data
