@@ -27,7 +27,7 @@ history is retained in the source repository.
   A dependency-free Python `write-files` template replaces the Bash and jq
   default, while Windows documentation states that shell handlers remain a
   POSIX-only capability.
-- refactor: the crontab is a trigger store beside Task Scheduler, not a special case. (#184)
+- refactor: the crontab is a trigger store beside Task Scheduler, not a special case.
   Crontab mechanics moved out of `headless` into a `crontasks` module that
   answers the same questions as `wintasks` with the same signatures, so the
   scheduling dispatch point chooses a store once instead of branching on the
