@@ -252,11 +252,14 @@ contracts:
   checkout or `agents-live internal watch-loop <name>` when packaged.
   Matching uses the adjacent `watch-loop <name>` action/name pair.
 
-`headless.py` exposes both the per-name lookup (`cron_line_matches`,
-watcher cmdline matching) and the reverse, enumerate-all lookup
-(`_list_active_cron_agent_names`, `_list_active_watcher_agent_names`,
-`list_active_agent_names`). The reverse lookup is what makes a deleted agent
-file a complete decommission:
+`schedules.py` is the one place that chooses between the two trigger
+stores - `crontasks.py` for the user crontab, `wintasks.py` for Task
+Scheduler - and they answer the same questions with the same
+signatures, so nothing above it knows there are two. Each store exposes
+the per-name lookup and the reverse, enumerate-all lookup
+(`installed_names`); `headless.py` keeps the watcher-process side
+(`list_active_agent_names`). The reverse lookup is what makes a deleted
+agent file a complete decommission:
 
 - `activate.py --prune-orphans` enumerates everything live on the host and
   tears down (cron + watcher + desired-state entries) any name with no backing

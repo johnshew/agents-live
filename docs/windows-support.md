@@ -112,9 +112,9 @@ What does not, and what replaces it:
 
 | Dependency | Where | Windows equivalent |
 |---|---|---|
-| `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows) |
+| `crontab -l` / `crontab -` | [crontasks.py](../src/agents_live/crontasks.py), behind the store seam in [schedules.py](../src/agents_live/schedules.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows). [wintasks.py](../src/agents_live/wintasks.py) answers the same questions with the same signatures, so the dispatch point selects a store rather than branching per operation |
 | `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW` through `ctypes`, behind the `EventSource` seam in [watchsource.py](../src/agents_live/watchsource.py) |
-| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | A `Win32_Process` snapshot of pid and command line, so a watcher is still found by what it runs rather than by a remembered pid |
+| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | A `Win32_Process` snapshot of pid and command line, so a watcher is still found by what it runs rather than by a remembered pid. Reading one back is `hostruntime.split_command_line`, beside the enumeration that produced it: Windows joined the arguments by quoting rules, not by spaces, and a repo root routinely has one |
 | `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | `OpenProcess` for liveness and `TerminateProcess` over a snapshot-derived process tree; identity verification before forced termination |
 | `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex |
 | `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `CREATE_NEW_PROCESS_GROUP` plus `CREATE_NO_WINDOW`, and never `DETACHED_PROCESS`: a detached child allocates a console of its own, which the desktop then draws (see the decision log). Termination walks the tree |
@@ -123,6 +123,7 @@ What does not, and what replaces it:
 | `env -i` plus `HOME` and `PATH` as the whole agent environment | [headless.py](../src/agents_live/headless.py) | A Windows child needs `SystemRoot` to load at all, plus the profile, temp, and processor variables; `base_env` supplies that floor, and PATH is inherited rather than constructed (see the decision log) |
 | Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
 | ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
+| Locale-decoded child output | every module that captures a subprocess | The same legacy code page decodes captured bytes, so `text=True` alone reads mojibake on Windows and correctly on Linux; `hostruntime.CHILD_TEXT` states UTF-8 for every child this tool configures, and a child that writes something else decodes itself (`schtasks` is read as `oem` in [wintasks.py](../src/agents_live/wintasks.py)) |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
 | `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | Nothing platform-specific. Every runtime, Windows and POSIX alike, owns under a generated `hostname/runtime/uuid` identity, because one machine hosts several runtimes and a hostname names all of them |
 | `os.fchmod` when writing state atomically | [paths.py](../src/agents_live/paths.py) | `os.chmod` on the temporary file: Windows grew `os.fchmod` only in Python 3.13, and has no POSIX mode bits to narrow in any version |
@@ -703,6 +704,50 @@ failure settled it. Superseded planning content - the implementation
 order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
+
+### 2026-07-30: the trigger track gets the seam the watcher track had
+
+The watcher track has had the right shape since it landed: an
+`EventSource` protocol, two implementations, and `watchpolicy` holding
+every rule and knowing about neither. The trigger track only looked the
+same. `wintasks` was a real store, but the crontab half never left
+`headless`, so `schedules` had no POSIX module to name and repeated
+`if native_scheduler() == TASK_SCHEDULER` sixteen times, once per
+operation, reaching into private `headless` members on the other branch.
+
+Extracting `crontasks` as the peer of `wintasks` removed all sixteen.
+The two stores now answer the same questions with the same signatures,
+`schedules` chooses once in `_store()`, and what a stored trigger looks
+like - a crontab line, a registered task - never leaves the store. The
+store-level questions that had accumulated in the dispatch point
+(`current_form`, the maintenance trio, `persisted_roots`) moved into
+both stores, because each was already a question about what the store
+holds.
+
+Nothing about the crontab lines changed in the move. The measurable
+result is that adding a third store, or changing what one stores, is now
+one module rather than an edit at every branch.
+
+### 2026-07-30: decoding a child's output is a seam member, not a habit
+
+`use_utf8_io` had covered this process's own streams since the console
+work, but nothing covered the other direction. Around forty subprocess
+captures across fifteen modules passed `text=True` and inherited the
+locale encoding, which is UTF-8 on POSIX and the ANSI code page on
+Windows: the same call reads correctly on one host and mojibake on the
+other, and that is what made passing smoketest steps report failure.
+
+The first fix was a file-local mapping in `smoketest.py`, which repaired
+the harness and left the product alone. The rule that replaced it is that
+no capture may rely on the locale: `hostruntime.CHILD_TEXT` states UTF-8
+for every child this tool launches and configures, and a child that
+writes something else decodes itself - `wintasks` already read `schtasks`
+as `oem`, which is why the rule is "state it" rather than "always UTF-8".
+
+An `ast` walk in the suite enforces it across the package: a
+`subprocess.run` or `Popen` with `text=` and no `encoding=` fails. That
+is one assertion for a whole class of defect, and it runs on Linux where
+the defect cannot be observed.
 
 ### 2026-07-28: an owner value names a runtime three ways, and matches on one
 

@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-07-29
+ms.date: 2026-07-30
 ms.topic: concept
 ---
 
@@ -62,6 +62,15 @@ These are complements, not duplicates: one rebalances what the suite
 executes, the other changes what counts as coverage before a fix is
 called done.
 
+The slices done so far point at one shape worth repeating. An invariant
+that states a rule about the whole package - no subprocess capture may
+rely on the platform locale - costs less than the mock tests it replaces,
+cannot drift as the package grows, and runs on hosts where the defect it
+guards cannot be reproduced. That last property matters most on Windows,
+where the platform receiving the most change is the one CI sees least.
+An assertion about a literal in one file is the anti-pattern: it breaks
+on unrelated edits and proves nothing.
+
 ## Safer execution modes in practice
 
 `plan` and `pipeline` are documented as the safe defaults, but the
@@ -85,12 +94,26 @@ the seam is, why it is functions rather than a protocol object, and what
 the spikes contradicted. Whether the Windows half earns its keep in the
 long run stays an open product question; the seam itself is settled.
 
+The direction for keeping it settled is that a Windows defect is fixed at
+the seam, not at the call site. Two rounds of that have now landed:
+child-output decoding became a host-runtime member instead of a habit
+repeated in every module, and the crontab became a trigger store beside
+Task Scheduler instead of mechanics inside `headless` that forced the
+dispatch point to branch per operation. Both removed code. The test for
+any future platform fix is whether it leaves common code with one more
+special case or one fewer.
+
 What is not settled is process and file lifecycle on that platform.
 Windows will not delete or replace a running executable, and the defects
 that follow from it keep arriving through the seam rather than in it:
 locked launchers during upgrade, deferred self-removal during uninstall,
 and detached processes that outlive the run that started them. Those are
 tracked under the theme above rather than here.
+
+Installation and first-run readiness on native Windows is the remaining
+gap before the platform is releasable from an installed artifact
+([#243](https://github.com/johnshew/agents-live/issues/243),
+[#244](https://github.com/johnshew/agents-live/issues/244)).
 
 ## Maintaining this file
 

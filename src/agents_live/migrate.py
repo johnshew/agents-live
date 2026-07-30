@@ -35,11 +35,11 @@ import shlex
 import sys
 from pathlib import Path
 
-from . import adminlog, headless, hostruntime, preflight, triggers
+from . import adminlog, crontasks, hostruntime, preflight, triggers
 from .headless import (
     AgentsLiveError,
-    cron_line_matches,
     find_watcher_pid,
+    repo_root,
     schedule_spec,
     stop_watcher,
     watcher_spec,
@@ -68,7 +68,7 @@ def plan_migration(lines: list[str]) -> dict:
     schedule_names: set[str] = set()
     watcher_names: set[str] = set()
     for line in lines:
-        if not headless.crontab_line_belongs_to_repo(line):
+        if not crontasks.belongs_to_root(line, repo_root()):
             continue
         name = _token_pair_value(line, "--name")
         if name:
@@ -85,7 +85,8 @@ def plan_migration(lines: list[str]) -> dict:
         if not agent_file_exists(name):
             plan["missing"].append(name)
             continue
-        old = [l for l in lines if cron_line_matches(l, name)]
+        old = [l for l in lines
+               if crontasks.matches(l, repo_root(), name)]
         try:
             spec = schedule_spec(name)
         except AgentsLiveError:
@@ -101,7 +102,8 @@ def plan_migration(lines: list[str]) -> dict:
                 plan["missing"].append(name)
             continue
         old = [l for l in lines
-               if headless._reboot_watcher_line_agent_name(l) == name]
+               if crontasks.agent_of_line(l, repo_root(),
+                                          kind=crontasks.WATCH) == name]
         spec = watcher_spec(name)
         if not triggers.is_canonical(old, spec):
             plan["watcher"][name] = (old, triggers.render(spec))
@@ -261,19 +263,19 @@ def main() -> int:
                 f"cannot adopt {old_root}: the old project root still exists; "
                 "move or remove it before adopting its triggers")
         if args.dry_run:
-            lines = headless.current_crontab_lines()
+            lines = crontasks.lines()
             if lines is None:
                 raise AgentsLiveError("crontab is not accessible")
             plan = plan_adoption(lines, old_root)
         else:
-            with headless.crontab_lock():
-                lines = headless.current_crontab_lines()
+            with crontasks.lock():
+                lines = crontasks.lines()
                 if lines is None:
                     raise AgentsLiveError("crontab is not accessible")
                 plan = plan_adoption(lines, old_root)
                 rewritten = _apply_adoption(lines, plan)
                 if rewritten != lines:
-                    headless.install_crontab(rewritten)
+                    crontasks.write(rewritten)
         rewrites = _print_adoption(plan, dry_run=args.dry_run, say=say)
         if not args.dry_run and rewrites:
             adminlog.record("trigger-adopt", old_root=str(old_root),
@@ -294,7 +296,7 @@ def main() -> int:
     if tasks:
         plan = plan_task_migration()
     else:
-        lines = headless.current_crontab_lines()
+        lines = crontasks.lines()
         if lines is None:
             raise AgentsLiveError("crontab is not accessible")
         plan = plan_migration(lines)

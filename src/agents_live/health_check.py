@@ -67,9 +67,10 @@ SWEEP_TIMEOUT_S = 300
 SMOKETEST_RUNTIME = "agency copilot"
 SMOKETEST_TIMEOUT_S = 360
 SMOKETEST_BUSY_EXIT = 75
-SMOKETEST_TERMINATE_GRACE_S = 15
-SMOKETEST_EXIT_WAIT_TIMEOUT_S = 5
-SMOKETEST_CLEANUP_TIMEOUT_S = 60
+# How long the recovery cleanup child may take. Its own worst case is
+# one `CLEANUP_COMMAND_TIMEOUT_S` per smoketest agent, and the suite
+# holds this above that sum so a bounded cleanup is never cut short.
+SMOKETEST_CLEANUP_TIMEOUT_S = 120
 # Smoke-relevant repo content: executable support code, not agent
 # prompts or docs (the smoketest makes a real agent call, so it only
 # re-runs when something that could break it changed).
@@ -230,7 +231,7 @@ def _lifecycle(subcommand: str, name: str) -> bool:
     so the full activation/teardown semantics apply."""
     result = subprocess.run(
         _self_argv(subcommand, "--name", name, root=repo_root()),
-        capture_output=True, text=True, check=False,
+        capture_output=True, **hostruntime.CHILD_TEXT, check=False,
     )
     if result.returncode == 0:
         return True
@@ -249,7 +250,7 @@ def _origin_main_synced(root: Path) -> bool:
         try:
             return subprocess.run(
                 ["git", *args], cwd=root,
-                capture_output=True, text=True, timeout=timeout)
+                capture_output=True, **hostruntime.CHILD_TEXT, timeout=timeout)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return None
     fetched = _git("fetch", "--quiet", "origin", "main", timeout=30)
@@ -286,7 +287,8 @@ def _agent_definition_exists(name: str, root: Path) -> bool:
             try:
                 probe = subprocess.run(
                     ["git", "cat-file", "-e", f"HEAD:{d}/{filename}"],
-                    cwd=root, capture_output=True, text=True, timeout=10,
+                    cwd=root, capture_output=True, timeout=10,
+                    **hostruntime.CHILD_TEXT,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return True
@@ -536,7 +538,8 @@ def plan_sweep() -> list[dict]:
     try:
         remote = subprocess.run(
             ["git", "ls-remote", "origin", "refs/heads/main"], cwd=repo_root(),
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, check=False, timeout=10,
+            **hostruntime.CHILD_TEXT,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         remote = None
@@ -564,7 +567,8 @@ def _git_head(root: Path) -> str | None:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root,
-            capture_output=True, text=True, check=True, timeout=5,
+            capture_output=True, check=True, timeout=5,
+            **hostruntime.CHILD_TEXT,
         ).stdout.strip()
         return out or None
     except (subprocess.CalledProcessError, FileNotFoundError,
@@ -649,6 +653,7 @@ def _load_smoketest_result(result_path: Path, started: float) -> dict:
 
 
 def _cleanup_timed_out_smoketest(root: Path) -> bool:
+    """Remove what the killed run owned. True when nothing survived."""
     process = hostruntime.spawn_detached(
         _self_argv("smoketest", "--cleanup-only", root=root),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -656,8 +661,7 @@ def _cleanup_timed_out_smoketest(root: Path) -> bool:
     try:
         return process.wait(timeout=SMOKETEST_CLEANUP_TIMEOUT_S) == 0
     except subprocess.TimeoutExpired:
-        hostruntime.terminate(
-            process.pid, grace_s=SMOKETEST_TERMINATE_GRACE_S)
+        hostruntime.terminate(process.pid)
         return False
 
 
@@ -666,6 +670,10 @@ def _run_smoketest(root: Path, runtime: str) -> dict:
     result_path = paths.repo_state_dir(root) / "logs" / \
         "smoketest-framework-result.json"
     try:
+        # Temporary files rather than pipes: a detached descendant can
+        # inherit the write handles and hold a pipe open long after the
+        # run is killed, which is what left maintenance waiting forever
+        # on `communicate()` (#232).
         with (tempfile.TemporaryFile() as stdout_file,
               tempfile.TemporaryFile() as stderr_file):
             process = hostruntime.spawn_detached(
@@ -675,12 +683,9 @@ def _run_smoketest(root: Path, runtime: str) -> dict:
             try:
                 process.wait(timeout=SMOKETEST_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                hostruntime.terminate(
-                    process.pid, grace_s=SMOKETEST_TERMINATE_GRACE_S)
-                try:
-                    process.wait(timeout=SMOKETEST_EXIT_WAIT_TIMEOUT_S)
-                except subprocess.TimeoutExpired:
-                    pass
+                hostruntime.terminate(process.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=hostruntime.TERMINATE_GRACE_S)
                 persisted = _load_smoketest_result(result_path, started)
                 cleanup_ok = _cleanup_timed_out_smoketest(root)
                 failed_step = persisted.get("failed_step")
@@ -876,7 +881,8 @@ def run_host_loop(quiet: bool) -> int:
         try:
             result = subprocess.run(
                 _self_argv("internal", "maintain", "--sweep", root=root),
-                capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S,
+                capture_output=True, timeout=SWEEP_TIMEOUT_S,
+                **hostruntime.CHILD_TEXT,
             )
         except subprocess.TimeoutExpired:
             sweeps[alias] = {"repo": str(root), "status": "error",
@@ -1004,7 +1010,7 @@ def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
         completed = subprocess.run(
             _self_argv(
                 "--json", "internal", "migrate", "--dry-run", root=root),
-            capture_output=True, text=True, check=False,
+            capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if completed.returncode != 0:
             preflight.emit_failure(
@@ -1036,7 +1042,7 @@ def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
         completed = subprocess.run(
             _self_argv(
                 "internal", "maintain", "--sweep", "--dry-run", root=root),
-            capture_output=True, text=True, check=False,
+            capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if completed.returncode != 0:
             preflight.emit_failure(

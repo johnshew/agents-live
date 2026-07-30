@@ -33,7 +33,7 @@ agents-live-release/
 │   └── agents-live.md
 ├── Agents/
 │   ├── handlers/
-│   │   └── write-files.sh
+│   │   └── write-files.py
 │   └── logs/
 ├── src/
 │   └── agents_live/

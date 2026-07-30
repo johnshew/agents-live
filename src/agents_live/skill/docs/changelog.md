@@ -8,12 +8,13 @@ history is retained in the source repository.
 
 - fix: native Windows Copilot runs resolve the installed CLI and decode its output reliably. (#238, #241)
   Executable pinning continues past refused PowerShell and batch shims to the
-  first native executable on PATH, and every framework-smoketest text capture
-  decodes UTF-8 explicitly.
+  first native executable on PATH. Captured subprocess output is decoded UTF-8
+  through one host-runtime member instead of the platform locale, which on
+  Windows was the ANSI code page and made successful steps report failure.
 - fix: timed-out framework smoketests leave maintenance and the next run usable. (#232)
-  Recovery has one bounded cleanup budget, cannot block on inherited output
-  handles, removes detached fixtures and watchers, and reports the last stage
-  reached before timeout.
+  Recovery cannot block on output handles a detached descendant inherited, it
+  removes the fixtures and watchers a killed run left behind, and it reports
+  the last stage reached before the timeout.
 - fix: Copilot pipeline mode keeps its independently resolved MCP bridge compatible. (#240)
   The bridge now shares the package's MCP 1.x constraint and starts in a fresh
   uv script environment instead of failing behind an agent timeout.
@@ -21,6 +22,11 @@ history is retained in the source repository.
   A dependency-free Python `write-files` template replaces the Bash and jq
   default, while Windows documentation states that shell handlers remain a
   POSIX-only capability.
+- refactor: the crontab is a trigger store beside Task Scheduler, not a special case. (#184)
+  Crontab mechanics moved out of `headless` into a `crontasks` module that
+  answers the same questions as `wintasks` with the same signatures, so the
+  scheduling dispatch point chooses a store once instead of branching on the
+  platform in every operation. No trigger changes form.
 - feat: native Windows installs generate PowerShell completion. (#233)
   It sits alongside the Windows-local Bash and Zsh files. Linux and WSL
   continue to install only Bash and Zsh completion in their own XDG data

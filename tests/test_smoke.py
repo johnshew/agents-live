@@ -46,11 +46,11 @@ from unittest import mock
 
 try:  # installed package layout
     from agents_live import (  # type: ignore
-        activate, adminlog, agent_adapters, cli, completions, dashboards,
-        headless, health_check, heartbeat, hidden, hostruntime, init, migrate,
-        ownership, paths, plugins, preflight, doctor, repos, run, schedules,
-        smoketest, spawn, status, uninstall, update_check, upgrade, triggers,
-        watchpolicy, watchsource, winwatch, wintasks,
+        activate, adminlog, agent_adapters, cli, completions, crontasks,
+        dashboards, headless, health_check, heartbeat, hidden, hostruntime,
+        init, migrate, ownership, paths, plugins, preflight, doctor, repos,
+        run, schedules, smoketest, spawn, status, uninstall, update_check,
+        upgrade, triggers, watchpolicy, watchsource, winwatch, wintasks,
     )
     from agents_live.cli_spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
@@ -64,6 +64,7 @@ except ImportError:  # flat checkout layout
     import agent_adapters
     import cli
     import completions
+    import crontasks
     import dashboards
     import headless
     import health_check
@@ -1530,9 +1531,9 @@ class TestAdminLog(_TempProject):
             schedules=("0 * * * *",), command=("echo", "alpha"),
             path="/usr/bin")
         with (
-            mock.patch.object(headless, "crontab_lock", contextlib.nullcontext),
-            mock.patch.object(headless, "current_crontab_lines", return_value=[]),
-            mock.patch.object(headless, "install_crontab"),
+            mock.patch.object(crontasks, "lock", contextlib.nullcontext),
+            mock.patch.object(crontasks, "lines", return_value=[]),
+            mock.patch.object(crontasks, "write"),
         ):
             schedules.install(spec)
         (installed,) = self.only("schedule-install")
@@ -1540,28 +1541,27 @@ class TestAdminLog(_TempProject):
         self.assertEqual(installed["scheduler"], hostruntime.CRONTAB)
 
         with mock.patch.object(
-                headless, "remove_cron_entries", return_value=False):
+                crontasks, "remove", return_value=False):
             schedules.remove("alpha")
         self.assertEqual(self.only("schedule-remove"), [])
         with mock.patch.object(
-                headless, "remove_cron_entries", return_value=True):
+                crontasks, "remove", return_value=True):
             schedules.remove("alpha")
         (removed,) = self.only("schedule-remove")
         self.assertEqual(removed["agent"], "alpha")
 
     def test_an_audit_field_never_fails_the_operation_it_records(self) -> None:
-        # A crontab removal needs no project root to do its work, so
-        # resolving one for the record must not be able to fail it.
+        # The host-wide sweep runs where there may be no project at all,
+        # so it records no root rather than resolving one it does not
+        # need; resolving for the record must never fail the operation.
         with (
             mock.patch.object(
                 schedules, "_root",
                 side_effect=ValueError("no project root found")),
-            mock.patch.object(
-                headless, "remove_cron_entries", return_value=True),
+            mock.patch.object(crontasks, "remove_under", return_value=2),
         ):
-            self.assertTrue(schedules.remove("alpha"))
-        (removed,) = self.only("schedule-remove")
-        self.assertEqual(removed["agent"], "alpha")
+            self.assertEqual(schedules.remove_all_under(Path("/env")), 2)
+        (removed,) = self.only("schedule-sweep")
         self.assertNotIn("root", removed)
 
         # Same rule for the owner an ownership write is about to replace.
@@ -1811,32 +1811,33 @@ class TestInvocationForms(_TempProject):
         prompt.write_text(AGENT_DEFINITION, encoding="utf-8")
         lines = schedule_lines(str(prompt))
         self.assertIn(str(prompt), lines[0])
-        self.assertTrue(headless.cron_line_matches(lines[0], str(prompt)))
+        self.assertTrue(crontasks.matches(lines[0], self.root, str(prompt)))
 
     def test_run_invocation_carries_name_token(self) -> None:
         line = f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && " + (
             shlex.join(headless.run_invocation("t")))
-        self.assertTrue(headless.cron_line_matches(line, "t"))
+        self.assertTrue(crontasks.matches(line, self.root, "t"))
 
     def test_trigger_matching_is_scoped_to_current_repo(self) -> None:
         cron = (f"{TEST_CRON_SCHEDULE} cd {cron_root(self.root)} && "
                 "agents-live run --name shared --quiet")
         watcher = watcher_reboot_line("shared")
-        self.assertTrue(headless.cron_line_matches(cron, "shared"))
-        self.assertFalse(headless.cron_line_matches(
-            cron.replace(str(self.root), FOREIGN_REPO), "shared"))
+        self.assertTrue(crontasks.matches(cron, self.root, "shared"))
+        self.assertFalse(crontasks.matches(
+            cron.replace(str(self.root), FOREIGN_REPO), self.root, "shared"))
         with mock.patch.object(
-                headless, "current_crontab_lines",
+                crontasks, "lines",
                 return_value=[watcher.replace(str(self.root), FOREIGN_REPO)]):
-            self.assertEqual(headless.list_reboot_watcher_agent_names(), [])
+            self.assertEqual(
+                crontasks.installed_names(self.root, kind=crontasks.WATCH), [])
 
     def test_crontab_lock_fails_fast_when_busy(self) -> None:
         with mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}):
-            with headless.crontab_lock():
+            with crontasks.lock():
                 with self.assertRaisesRegex(
                         headless.AgentsLiveError, "crontab is busy"):
-                    with headless.crontab_lock():
+                    with crontasks.lock():
                         self.fail("contended lock was acquired")
 
     def test_removal_preserves_foreign_same_named_entries(self) -> None:
@@ -1849,12 +1850,13 @@ class TestInvocationForms(_TempProject):
             mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
             mock.patch.object(
-                headless, "current_crontab_lines",
+                crontasks, "lines",
                 side_effect=[[foreign_cron, cron], [foreign_watcher, watcher]]),
-            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch.object(crontasks, "write") as install,
         ):
-            self.assertTrue(headless.remove_cron_entries("shared"))
-            self.assertTrue(headless.remove_watcher_reboot_line("shared"))
+            self.assertTrue(crontasks.remove(self.root, "shared"))
+            self.assertTrue(crontasks.delete(self.root, "shared",
+                                            kind=crontasks.WATCH))
         self.assertEqual(
             install.call_args_list,
             [mock.call([foreign_cron]), mock.call([foreign_watcher])])
@@ -1871,23 +1873,22 @@ class TestInvocationForms(_TempProject):
         for line in [*cron_lines, watcher_line]:
             self.assertIn("PATH=", line)
         self.assertTrue(
-            headless.cron_line_matches(cron_lines[0], "smoke-fixture"))
-        self.assertTrue(headless._watcher_reboot_line_matches(
-            watcher_line, "smoke-fixture"))
+            crontasks.matches(cron_lines[0], self.root, "smoke-fixture"))
+        self.assertTrue(crontasks.matches(
+            watcher_line, self.root, "smoke-fixture", kind=crontasks.WATCH))
 
     def test_install_refuses_unreadable_crontab(self) -> None:
         self.write_agent("smoke-fixture", AGENT_DEFINITION)
         with (
             mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
-            mock.patch.object(headless, "current_crontab_lines",
-                              return_value=None),
-            mock.patch.object(headless, "install_crontab") as h_install,
+            mock.patch.object(crontasks, "lines", return_value=None),
+            mock.patch.object(crontasks, "write") as h_install,
             mock.patch.object(activate, "_validate_handler_paths"),
         ):
             with self.assertRaisesRegex(
                     headless.AgentsLiveError, "not accessible"):
-                headless.install_watcher_reboot_line("smoke-fixture")
+                schedules.install_watcher_respawn("smoke-fixture")
             with self.assertRaisesRegex(
                     headless.AgentsLiveError, "not accessible"):
                 activate.install_cron_agent("smoke-fixture")
@@ -1918,9 +1919,10 @@ class TestInvocationForms(_TempProject):
                 f"{cron_root(self.root / 'scripts' / 'run.py')} "
                 "--name bar --quiet 2>&1")
         unrelated = f"{TEST_CRON_SCHEDULE} cd {root} && /usr/bin/backup"
-        self.assertEqual(headless._cron_line_agent_name(packaged), "foo")
-        self.assertEqual(headless._cron_line_agent_name(flat), "bar")
-        self.assertIsNone(headless._cron_line_agent_name(unrelated))
+        self.assertEqual(
+            crontasks.agent_of_line(packaged, self.root), "foo")
+        self.assertEqual(crontasks.agent_of_line(flat, self.root), "bar")
+        self.assertIsNone(crontasks.agent_of_line(unrelated, self.root))
 
     def test_interrupted_payload_refresh_is_recoverable(self) -> None:
         source = self.root / "payload-src"
@@ -2038,9 +2040,9 @@ class TestInvocationForms(_TempProject):
         with (
             mock.patch.dict(
                 os.environ, {"XDG_STATE_HOME": str(self.root / "state")}),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=[user_path, foreign]),
-            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch.object(crontasks, "write") as install,
             mock.patch.object(activate, "_validate_handler_paths"),
         ):
             activate.install_cron_agent("smoke-fixture")
@@ -2143,8 +2145,8 @@ class TestMigratePlanning(_TempProject):
             "--name smoke-fixture --quiet 2>&1")
         with (
             mock.patch.object(
-                headless, "current_crontab_lines", return_value=[old_line]),
-            mock.patch.object(headless, "install_crontab") as install,
+                crontasks, "lines", return_value=[old_line]),
+            mock.patch.object(crontasks, "write") as install,
             mock.patch("sys.argv", ["agents-live migrate", "--adopt",
                                     str(old_root), "--dry-run"]),
             mock.patch("sys.stdout", new_callable=io.StringIO),
@@ -2154,11 +2156,11 @@ class TestMigratePlanning(_TempProject):
 
         with (
             mock.patch.object(
-                headless, "current_crontab_lines", return_value=[old_line]),
+                crontasks, "lines", return_value=[old_line]),
             mock.patch.object(
-                headless, "crontab_lock",
+                crontasks, "lock",
                 return_value=contextlib.nullcontext()) as lock,
-            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch.object(crontasks, "write") as install,
             mock.patch("sys.argv", ["agents-live migrate", "--adopt",
                                     str(old_root)]),
             mock.patch("sys.stdout", new_callable=io.StringIO),
@@ -2322,9 +2324,9 @@ else:
     def test_removal_takes_only_this_repos_entries(self) -> None:
         self.seed([self.USER_LINE, self.foreign_line])
         activate.install_cron_agent("smoke-fixture")
-        headless.install_watcher_reboot_line("smoke-fixture")
-        self.assertTrue(headless.remove_cron_entries("smoke-fixture"))
-        self.assertTrue(headless.remove_watcher_reboot_line("smoke-fixture"))
+        schedules.install_watcher_respawn("smoke-fixture")
+        self.assertTrue(schedules.remove("smoke-fixture"))
+        self.assertTrue(schedules.remove_watcher_respawn("smoke-fixture"))
         self.assertEqual(
             self.installed_lines(), [self.USER_LINE, self.foreign_line])
 
@@ -6220,14 +6222,12 @@ class TestWindowsHeartbeat(unittest.TestCase):
         ]
         written: list[list[str]] = []
         with (
-            mock.patch.object(headless, "crontab_lock",
-                              contextlib.nullcontext),
-            mock.patch.object(headless, "current_crontab_lines",
-                              return_value=lines),
-            mock.patch.object(headless, "install_crontab",
+            mock.patch.object(crontasks, "lock", contextlib.nullcontext),
+            mock.patch.object(crontasks, "lines", return_value=lines),
+            mock.patch.object(crontasks, "write",
                               side_effect=written.append),
         ):
-            removed = headless.remove_cron_entries_under(environment)
+            removed = crontasks.remove_under(environment)
         self.assertEqual(removed, 2)
         self.assertEqual(written, [[lines[2], lines[3]]])
 
@@ -6235,14 +6235,12 @@ class TestWindowsHeartbeat(unittest.TestCase):
             self) -> None:
         environment = Path("/home/dev/.local/share/uv/tools/agents-live")
         with (
-            mock.patch.object(headless, "crontab_lock",
-                              contextlib.nullcontext),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lock", contextlib.nullcontext),
+            mock.patch.object(crontasks, "lines",
                               return_value=["0 3 * * * /usr/bin/backup"]),
-            mock.patch.object(headless, "install_crontab") as install,
+            mock.patch.object(crontasks, "write") as install,
         ):
-            self.assertEqual(
-                headless.remove_cron_entries_under(environment), 0)
+            self.assertEqual(crontasks.remove_under(environment), 0)
         install.assert_not_called()
 
     def test_task_sweep_reads_task_actions_as_windows_paths(self) -> None:
@@ -6820,10 +6818,34 @@ class TestPipelineDependencyContract(unittest.TestCase):
 class TestSmoketestSubprocessEncoding(unittest.TestCase):
     """Captured child output must not fall back to the Windows ANSI page."""
 
-    def test_every_text_capture_uses_the_utf8_mapping(self) -> None:
-        source = Path(smoketest.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("text=True", source)
-        self.assertEqual(source.count("**_UTF8_TEXT"), 12)
+    def test_no_module_captures_child_text_without_saying_how(self) -> None:
+        # #241: `text=True` alone decodes with the locale encoding, which
+        # is the ANSI code page on Windows, so a call that reads right on
+        # Linux reads mojibake there. Every capture has to name an
+        # encoding - `hostruntime.CHILD_TEXT` for children this tool
+        # configures, an explicit decode for the ones it does not.
+        offenders: list[str] = []
+        package = Path(hostruntime.__file__).resolve().parent
+        for module in sorted(package.glob("*.py")):
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "attr", None) not in ("run", "Popen"):
+                    continue
+                named = {keyword.arg for keyword in node.keywords}
+                if "text" in named and "encoding" not in named:
+                    offenders.append(f"{module.name}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
+    def test_the_two_shipped_write_files_handlers_are_one_file(self) -> None:
+        package = Path(hostruntime.__file__).resolve().parent
+        template = package / "skill" / "templates" / "write-files.py"
+        fixture = (package.parents[1] / "Agents" / "handlers"
+                   / "write-files.py")
+        if not fixture.is_file():
+            self.skipTest("no runtime Agents/ directory beside the package")
+        self.assertEqual(template.read_bytes(), fixture.read_bytes())
 
 
 class TestSmoketestCleanupBudget(unittest.TestCase):
@@ -6855,8 +6877,7 @@ class TestSmoketestCleanupBudget(unittest.TestCase):
                 mock.patch.object(smoketest, "find_watcher_pid",
                                   return_value=None),
             ):
-                residue, diagnostics = smoketest.cleanup(
-                    deadline=time.monotonic() + 20)
+                residue, diagnostics = smoketest.cleanup()
 
             self.assertEqual(run.call_count,
                              len(smoketest.SMOKETEST_AGENT_NAMES))
@@ -8110,7 +8131,7 @@ class TestHealthCheckLoop(_TempProject):
             # crontab makes the result depend on their machine, and on a
             # host without the command at all it is an outright crash.
             mock.patch.object(
-                headless, "current_crontab_lines", return_value=[]),
+                crontasks, "lines", return_value=[]),
             mock.patch.object(
                 schedules, "watcher_respawn_names",
                 return_value=[str(prompt)]),
@@ -8124,7 +8145,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=canonical),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[]),
@@ -8137,7 +8158,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=[]),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[]),
@@ -8170,7 +8191,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -8271,7 +8292,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("global", self.root)]),
@@ -8298,7 +8319,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -8339,7 +8360,7 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=self._canonical_lines()),
             mock.patch.object(health_check, "_registered_roots",
                               return_value=[("project", self.root)]),
@@ -8413,9 +8434,9 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=[foreign]),
-            mock.patch.object(headless, "install_crontab", fake_install),
+            mock.patch.object(crontasks, "write", fake_install),
         ):
             # Not installed + install=False: never adds maintenance.
             self.assertFalse(
@@ -8429,9 +8450,9 @@ class TestHealthCheckLoop(_TempProject):
         with (
             mock.patch.object(health_check, "cli_shim_path",
                               return_value=_HEALTH_SHIM),
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=[stale, foreign]),
-            mock.patch.object(headless, "install_crontab", fake_install),
+            mock.patch.object(crontasks, "write", fake_install),
         ):
             # Present but stale: converged even with install=False (an
             # upgrade re-homes the pinned shim path).
@@ -8444,14 +8465,14 @@ class TestHealthCheckLoop(_TempProject):
         installed: dict[str, list[str]] = {}
         foreign = "0 1 * * * /usr/bin/foreign-job 2>&1"
         with (
-            mock.patch.object(headless, "current_crontab_lines",
+            mock.patch.object(crontasks, "lines",
                               return_value=[foreign] + self._canonical_lines()),
-            mock.patch.object(headless, "install_crontab",
+            mock.patch.object(crontasks, "write",
                               lambda lines: installed.update(lines=list(lines))),
         ):
             self.assertTrue(health_check.remove_health_cron_lines())
             self.assertEqual(installed["lines"], [foreign])
-        with mock.patch.object(headless, "current_crontab_lines",
+        with mock.patch.object(crontasks, "lines",
                                return_value=[foreign]):
             self.assertFalse(health_check.remove_health_cron_lines())
 
@@ -8460,7 +8481,7 @@ class TestHealthCheckLoop(_TempProject):
         # degrade the sweep, never kill the loop.
         with (
             mock.patch.object(
-                headless, "current_crontab_lines", return_value=[]),
+                crontasks, "lines", return_value=[]),
             mock.patch.object(
                 health_check.ownership, "load_owners",
                 side_effect=health_check.ownership.OwnershipUnavailableError(
@@ -8485,7 +8506,7 @@ class TestHealthCheckLoop(_TempProject):
 
         with (
             mock.patch.object(
-                headless, "current_crontab_lines", return_value=[]),
+                crontasks, "lines", return_value=[]),
             mock.patch.object(activate, "prune_orphans", noisy_prune),
             mock.patch.object(health_check, "_converge_triggers",
                               return_value=True),
@@ -8639,25 +8660,17 @@ def _task_folder_lineno() -> int:
 @unittest.skipUnless(hostruntime.id() == hostruntime.WINDOWS,
                      "Windows inherited-handle regression")
 class TestTimedOutSmoketestCleanup(unittest.TestCase):
-    def test_timeout_cleans_an_escaped_descendant_and_reports_the_stage(
-            self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "repo"
-            state = Path(tmp) / "state"
-            root.mkdir()
-            result_path = state / "logs" / "smoketest-framework-result.json"
-            result_path.parent.mkdir(parents=True)
-            pid_path = Path(tmp) / "detached.pid"
-            residue = Path(tmp) / "watcher.residue"
-            fixture = Path(tmp) / "timeout_fixture.py"
-            fixture.write_text(
-                """import json
+    # The fixture stands in for a smoketest that hangs after leaving a
+    # detached descendant holding the inherited output handles. It
+    # reaches that state and reports it before the timeout can fire, so
+    # the test measures recovery rather than racing process startup.
+    FIXTURE = """import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-mode, result_name, pid_name, residue_name = sys.argv[1:]
+mode, result_name, pid_name, residue_name, ready_name = sys.argv[1:]
 pid_path = Path(pid_name)
 residue = Path(residue_name)
 if mode == "cleanup":
@@ -8671,44 +8684,60 @@ Path(result_name).write_text(json.dumps({
     "status": "RUNNING", "failed_step": "11/14 pipeline"
 }), encoding="utf-8")
 residue.write_text("active", encoding="utf-8")
+# An intermediate that spawns the sleeper and exits, so by the time this
+# process is terminated the sleeper's parent link is gone and only its
+# inherited handles connect it to us.
 child_code = (
-    "import subprocess,sys,time; from pathlib import Path; "
-    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'], "
+    "import subprocess,sys; from pathlib import Path; "
+    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'], "
     "stdout=sys.stdout, stderr=sys.stderr); "
     "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')"
 )
 subprocess.run([sys.executable, "-c", child_code, str(pid_path)],
                stdout=sys.stdout, stderr=sys.stderr, check=True)
-time.sleep(30)
-""",
-                encoding="utf-8",
-            )
+Path(ready_name).write_text("ready", encoding="utf-8")
+time.sleep(120)
+"""
+
+    def test_timeout_cleans_an_escaped_descendant_and_reports_the_stage(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            state = Path(tmp) / "state"
+            root.mkdir()
+            result_path = state / "logs" / "smoketest-framework-result.json"
+            result_path.parent.mkdir(parents=True)
+            pid_path = Path(tmp) / "detached.pid"
+            residue = Path(tmp) / "watcher.residue"
+            ready = Path(tmp) / "fixture.ready"
+            fixture = Path(tmp) / "timeout_fixture.py"
+            fixture.write_text(self.FIXTURE, encoding="utf-8")
 
             def fixture_argv(*args: str, root: Path | None = None) -> list[str]:
                 mode = "cleanup" if "--cleanup-only" in args else "run"
-                return [sys.executable, str(fixture), mode,
-                        str(result_path), str(pid_path), str(residue)]
+                return [sys.executable, str(fixture), mode, str(result_path),
+                        str(pid_path), str(residue), str(ready)]
 
+            # Long enough that two interpreter starts always finish first,
+            # so what expires is the hang and never the setup.
             started = time.monotonic()
             with (
                 mock.patch.object(health_check, "_self_argv",
                                   side_effect=fixture_argv),
                 mock.patch.object(health_check.paths, "repo_state_dir",
                                   return_value=state),
-                mock.patch.object(health_check, "SMOKETEST_TIMEOUT_S", 0.5),
+                mock.patch.object(health_check, "SMOKETEST_TIMEOUT_S", 15),
                 mock.patch.object(health_check,
-                                  "SMOKETEST_TERMINATE_GRACE_S", 0.5),
-                mock.patch.object(health_check,
-                                  "SMOKETEST_EXIT_WAIT_TIMEOUT_S", 0.5),
-                mock.patch.object(health_check,
-                                  "SMOKETEST_CLEANUP_TIMEOUT_S", 5),
+                                  "SMOKETEST_CLEANUP_TIMEOUT_S", 30),
             ):
                 verdict = health_check._run_smoketest(root, "copilot")
             elapsed = time.monotonic() - started
 
+            self.assertTrue(ready.exists(),
+                            "the fixture never reached its hang")
             detached_pid = int(pid_path.read_text(encoding="utf-8"))
             self.addCleanup(hostruntime.terminate, detached_pid, grace_s=1)
-            self.assertLess(elapsed, 8)
+            self.assertLess(elapsed, 45)
             self.assertEqual(verdict["status"], "fail")
             self.assertEqual(verdict["failed_step"], "11/14 pipeline")
             self.assertIn("during 11/14 pipeline", verdict["reason"])
@@ -8739,8 +8768,14 @@ class TestAgreementsAcrossModules(unittest.TestCase):
                          health_check.SMOKETEST_BUSY_EXIT)
 
     def test_timeout_cleanup_has_headroom_inside_the_parent_wait(self) -> None:
-        self.assertLess(smoketest.CLEANUP_TOTAL_TIMEOUT_S,
-                        health_check.SMOKETEST_CLEANUP_TIMEOUT_S)
+        # The recovery child stops every smoketest agent in turn, each
+        # bounded by CLEANUP_COMMAND_TIMEOUT_S, and the parent kills it
+        # at SMOKETEST_CLEANUP_TIMEOUT_S. The parent's bound has to clear
+        # the child's worst case or a slow cleanup is cut off mid-pass.
+        self.assertGreaterEqual(
+            health_check.SMOKETEST_CLEANUP_TIMEOUT_S,
+            smoketest.CLEANUP_COMMAND_TIMEOUT_S
+            * len(smoketest.SMOKETEST_AGENT_NAMES))
 
     def test_smoketest_fixtures_are_exempt_from_ownership(self) -> None:
         # run.py exempts _-prefixed agents from the ownership gate so

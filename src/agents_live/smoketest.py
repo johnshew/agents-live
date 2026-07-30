@@ -36,7 +36,6 @@ from .headless import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-_UTF8_TEXT = {"text": True, "encoding": "utf-8"}
 
 
 def _module_argv(module: str) -> list[str]:
@@ -69,8 +68,6 @@ def lock_path() -> Path:
 FIXTURES_REL = "Agents/_smoketest-tmp"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
-CLEANUP_TOTAL_TIMEOUT_S = 50
-CLEANUP_FINALIZE_RESERVE_S = 10
 # An agent call gets HEADLESS_TIMEOUT per attempt and is retried, so a
 # run that succeeds only on the retry can legitimately take every
 # attempt's budget. On a high-latency link that is the common case, not
@@ -326,7 +323,7 @@ def run_status(*args: str) -> str:
         [*_module_argv("status"), *argv],
         cwd=repo_root(),
         capture_output=True,
-        **_UTF8_TEXT,
+        **hostruntime.CHILD_TEXT,
         check=False,
         env=env,
     )
@@ -341,7 +338,7 @@ def run_agent(name: str, changed_files: list[str] | None = None) -> str:
     if changed_files:
         cmd.extend(["--changed-files", json.dumps(changed_files)])
     completed = subprocess.run(
-        cmd, cwd=repo_root(), capture_output=True, **_UTF8_TEXT, check=False,
+        cmd, cwd=repo_root(), capture_output=True, **hostruntime.CHILD_TEXT, check=False,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -426,7 +423,7 @@ def _smoketest_run_pids() -> list[int]:
     return matches
 
 
-def _stop_smoketest_processes(deadline: float | None = None) -> list[int]:
+def _stop_smoketest_processes() -> list[int]:
     """Stop every smoke agent run and its descendants; return survivors.
 
     ``hostruntime.terminate`` already enumerates and stops a tree the way
@@ -434,12 +431,8 @@ def _stop_smoketest_processes(deadline: float | None = None) -> list[int]:
     so cleanup does not reconstruct one itself.
     """
     pids = _smoketest_run_pids()
-    for index, pid in enumerate(pids):
-        grace_s = hostruntime.TERMINATE_GRACE_S
-        if deadline is not None:
-            remaining = max(0.0, deadline - time.monotonic())
-            grace_s = min(grace_s, remaining / max(1, len(pids) - index))
-        hostruntime.terminate(pid, grace_s=grace_s)
+    for pid in pids:
+        hostruntime.terminate(pid)
     return sorted(pid for pid in pids if hostruntime.is_alive(pid))
 
 
@@ -464,7 +457,7 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
         [*_module_argv("cli"), "--repo", str(repo_root()),
          "dashboard", "--port", str(port)],
         cwd=repo_root(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        **_UTF8_TEXT,
+        **hostruntime.CHILD_TEXT,
     )
     page_url = f"http://127.0.0.1:{port}/"
     agents_url = f"http://127.0.0.1:{port}/api/agents"
@@ -502,7 +495,7 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
         hostruntime.terminate(process.pid)
 
 
-def cleanup(*, deadline: float | None = None) -> tuple[list[str], list[str]]:
+def cleanup() -> tuple[list[str], list[str]]:
     """Idempotently remove every host resource a framework smoketest can own.
 
     Returns ``(residue, diagnostics)``. ``residue`` lists resources verified
@@ -510,6 +503,11 @@ def cleanup(*, deadline: float | None = None) -> tuple[list[str], list[str]]:
     the only thing that should fail a verdict. ``diagnostics`` records cleanup
     commands that errored or timed out on the way; when the residue checks
     come back clean those carry no information about system state.
+
+    Every wait here is bounded by ``CLEANUP_COMMAND_TIMEOUT_S`` per
+    command, so the whole pass has a worst case a caller can wait for;
+    ``health_check.SMOKETEST_CLEANUP_TIMEOUT_S`` is that bound and the
+    suite holds the two together.
     """
     residue: list[str] = []
     diagnostics: list[str] = []
@@ -517,28 +515,15 @@ def cleanup(*, deadline: float | None = None) -> tuple[list[str], list[str]]:
     # match the `Agents/_*` and `Agents/handlers/_*` gitignore patterns and
     # never get caught by git-sync mid-run. Keep all names in this script in
     # sync with .gitignore.
-    operation_deadline = (
-        deadline - CLEANUP_FINALIZE_RESERVE_S if deadline is not None else None)
-    surviving_pids = _stop_smoketest_processes(operation_deadline)
+    surviving_pids = _stop_smoketest_processes()
     if surviving_pids:
         residue.append(f"smoketest child processes still active: {surviving_pids}")
-    for index, name in enumerate(SMOKETEST_AGENT_NAMES):
-        timeout = CLEANUP_COMMAND_TIMEOUT_S
-        if operation_deadline is not None:
-            remaining = max(0.0, operation_deadline - time.monotonic())
-            if remaining <= 0:
-                diagnostics.append(
-                    f"stop {name}: skipped after cleanup wait budget expired")
-                continue
-            timeout = min(
-                timeout,
-                max(0.1, remaining / (len(SMOKETEST_AGENT_NAMES) - index)),
-            )
+    for name in SMOKETEST_AGENT_NAMES:
         try:
             result = subprocess.run(
                 [*_module_argv("stop"), "--name", name],
-                cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT,
-                timeout=timeout,
+                cwd=repo_root(), check=False, capture_output=True,
+                timeout=CLEANUP_COMMAND_TIMEOUT_S, **hostruntime.CHILD_TEXT,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             diagnostics.append(f"stop {name}: {exc}")
@@ -638,9 +623,14 @@ def main() -> int:
         _report_lock_busy()
         return SMOKETEST_BUSY_EXIT
     if args.cleanup_only:
+        # A run this process started and killed cannot clean up after
+        # itself: Windows terminates a tree outright, so the `finally`
+        # below never executes. Waiting for the next run's preflight
+        # cleanup is not enough either, because a detached watcher the
+        # dead run left behind stays registered, and the maintenance
+        # sweep restarts it and spends tokens until then (#232).
         try:
-            deadline = time.monotonic() + CLEANUP_TOTAL_TIMEOUT_S
-            residue, diagnostics = cleanup(deadline=deadline)
+            residue, diagnostics = cleanup()
             for diagnostic in diagnostics:
                 print(f"WARNING: cleanup: {diagnostic}", file=sys.stderr)
             if residue:
@@ -940,7 +930,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             fail("inotifywait not found. Install with: sudo apt install inotify-tools")
         activate_result = subprocess.run(
             [*_module_argv("activate"), "--name", watcher_name],
-            cwd=repo_root(), capture_output=True, **_UTF8_TEXT, check=False,
+            cwd=repo_root(), capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if activate_result.returncode != 0:
             fail(f"activate.py failed: {activate_result.stderr.strip() or activate_result.stdout.strip()}")
@@ -1239,7 +1229,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Cleanup pipeline test artifacts
         subprocess.run(
             [*_module_argv("stop"), "--name", pipeline_name],
-            cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT,
+            cwd=repo_root(), check=False, capture_output=True, **hostruntime.CHILD_TEXT,
         )
         (agents_dir() / f"{pipeline_name}.md").unlink(missing_ok=True)
         print("  mode: pipeline (PipelineMcp side-channel): PASS")
@@ -1317,7 +1307,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         spawn_result_file.unlink(missing_ok=True)
         subprocess.run([*_module_argv("stop"), "--name", spawn_agent_name],
                        cwd=repo_root(), check=False, capture_output=True,
-                       **_UTF8_TEXT)
+                       **hostruntime.CHILD_TEXT)
         (agents_dir() / f"{spawn_agent_name}.md").unlink(missing_ok=True)
         print("  Spawn module (detached dispatch): PASS")
 
@@ -1372,7 +1362,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Activate the watcher
         activate_result = subprocess.run(
             [*_module_argv("activate"), "--name", debounce_name],
-            cwd=repo_root(), capture_output=True, **_UTF8_TEXT, check=False,
+            cwd=repo_root(), capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if activate_result.returncode != 0:
             fail(f"activate.py failed for debounce agent: {activate_result.stderr.strip()[:200]}")
@@ -1448,7 +1438,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         stop_watcher(debounce_name)
         subprocess.run([*_module_argv("stop"), "--name", debounce_name],
                        cwd=repo_root(), check=False, capture_output=True,
-                       **_UTF8_TEXT)
+                       **hostruntime.CHILD_TEXT)
         (agents_dir() / f"{debounce_name}.md").unlink(missing_ok=True)
         debounce_trigger.unlink(missing_ok=True)
         debounce_result_file.unlink(missing_ok=True)
@@ -1457,9 +1447,9 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         current_step = "14/14 stop"
         print("[14/14] Tearing down test agents...")
         stop_watcher(watcher_name)
-        subprocess.run([*_module_argv("stop"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT)
-        subprocess.run([*_module_argv("stop"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT)
-        subprocess.run([*_module_argv("stop"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT)
+        subprocess.run([*_module_argv("stop"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, **hostruntime.CHILD_TEXT)
+        subprocess.run([*_module_argv("stop"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, **hostruntime.CHILD_TEXT)
+        subprocess.run([*_module_argv("stop"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, **hostruntime.CHILD_TEXT)
         # Teardown only stops scheduling; remove smoketest files ourselves
         for name in (cron_name, watcher_name, preprocessor_name):
             prompt = agents_dir() / f"{name}.md"

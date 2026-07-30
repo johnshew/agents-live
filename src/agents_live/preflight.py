@@ -124,7 +124,8 @@ def _probe_crontab(operation: str) -> CapabilityFailure | None:
             "crontab binary not found (install cron)")
     try:
         completed = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            ["crontab", "-l"], capture_output=True, timeout=10,
+            **hostruntime.CHILD_TEXT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return CapabilityFailure(
             "host_permission_required", "crontab", operation,

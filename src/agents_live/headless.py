@@ -40,12 +40,11 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import yaml
 
@@ -149,23 +148,13 @@ __all__ = [
     "resolve_agent_command",
     "run_pre_processor",
     "run_post_processor",
-    # host trigger state (cron + watchers)
-    "current_crontab_lines",
-    "install_crontab",
-    "crontab_lock",
-    "crontab_line_belongs_to_repo",
-    "cron_line_matches",
-    "remove_cron_entries",
-    "cron_is_active",
+    # host trigger state (watchers; the stores own the persisted form)
     "packaged_execution",
     "cli_shim_path",
     "run_invocation",
     "ensure_watcher_invocation",
     "schedule_spec",
     "watcher_spec",
-    "install_watcher_reboot_line",
-    "remove_watcher_reboot_line",
-    "list_reboot_watcher_agent_names",
     "find_watcher_pid",
     "stop_watcher",
     "list_active_agent_names",
@@ -735,74 +724,6 @@ def cli_invocation(subcommand: str, *args: str, flat_script: Path) -> list[str]:
                 subcommand, *args]
     uv = shutil.which("uv") or "uv"
     return [uv, "run", "--script", str(flat_script), *args]
-
-
-def _watcher_reboot_line_matches(line: str, name: str) -> bool:
-    """Return True if a crontab line is the @reboot watcher respawn for
-    name. Legacy flag-form lines remain recognizable so `migrate` and
-    lifecycle operations can replace or remove them."""
-    return triggers.matches(line, root=repo_root(), name=name,
-                            kind=triggers.WATCHER)
-
-
-def _reboot_watcher_line_agent_name(line: str) -> str | None:
-    """Return the agent name carried by a watcher @reboot line, else None."""
-    return triggers.agent_name(line, root=repo_root(),
-                               kind=triggers.WATCHER)
-
-
-def list_reboot_watcher_agent_names() -> list[str]:
-    """Every watcher with an @reboot respawn line installed in this crontab.
-
-    This is the durable "intended watchers" set: the reverse of
-    :func:`install_watcher_reboot_line`. The presence of a line means the
-    watcher is meant to be running; a deliberate stop removes it. Returns
-    ``[]`` when the crontab is empty or unavailable.
-    """
-    lines = current_crontab_lines() or []
-    names: list[str] = []
-    for line in lines:
-        if not crontab_line_belongs_to_repo(line):
-            continue
-        agent_name = _reboot_watcher_line_agent_name(line)
-        if agent_name is not None:
-            names.append(agent_name)
-    return sorted(set(names))
-
-
-def install_watcher_reboot_line(name: str) -> str:
-    """Install the @reboot respawn line for a watcher (idempotent).
-
-    Replaces any existing line for this agent and leaves every other entry
-    (including the agent's own run.py schedule lines and any user-authored
-    ``PATH=`` line) untouched.
-    """
-    new_line = triggers.render(watcher_spec(name))[0]
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            # Never treat an unreadable crontab as empty: install_crontab
-            # replaces the whole table, which would wipe every entry the
-            # read failed to see.
-            raise AgentsLiveError("crontab is not accessible")
-        lines = [line for line in lines
-                 if not _watcher_reboot_line_matches(line, name)]
-        lines.append(new_line)
-        install_crontab(lines)
-    return new_line
-
-
-def remove_watcher_reboot_line(name: str) -> bool:
-    """Remove the @reboot respawn line for a watcher. Returns True if removed."""
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        filtered = [line for line in lines if not _watcher_reboot_line_matches(line, name)]
-        if len(filtered) == len(lines):
-            return False
-        install_crontab(filtered)
-        return True
 
 
 def ensure_logs_dir() -> Path:
@@ -1465,7 +1386,7 @@ def _runtime_supported_flags(runtime: str) -> frozenset[str]:
         completed = subprocess.run(
             [*_runtime_binary(runtime), "--help"],
             capture_output=True,
-            text=True,
+            **hostruntime.CHILD_TEXT,
             check=False,
             env={**hostruntime.base_env(), "PATH": clean_path()},
             timeout=AGENT_HELP_TIMEOUT,
@@ -2170,7 +2091,7 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                     cwd=repo_root(),
                     env=env,
                     capture_output=True,
-                    text=True,
+                    **hostruntime.CHILD_TEXT,
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
@@ -2391,7 +2312,7 @@ def _run_agent_streaming(command: list[str], env: dict[str, str], config: AgentC
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        **hostruntime.CHILD_TEXT,
         encoding="utf-8",
         errors="replace",
     )
@@ -2455,7 +2376,7 @@ def _run_copilot_with_pty(command: list[str], env: dict[str, str], *, stream: bo
                 ["script", "-qc", command_string, str(transcript_path)],
                 cwd=repo_root(),
                 stderr=subprocess.PIPE,
-                text=True,
+                **hostruntime.CHILD_TEXT,
                 timeout=timeout,
                 check=False,
             )
@@ -2464,7 +2385,7 @@ def _run_copilot_with_pty(command: list[str], env: dict[str, str], *, stream: bo
                 ["script", "-qc", command_string, str(transcript_path)],
                 cwd=repo_root(),
                 capture_output=True,
-                text=True,
+                **hostruntime.CHILD_TEXT,
                 timeout=timeout,
                 check=False,
             )
@@ -2535,9 +2456,9 @@ def _run_handler(config: AgentConfig, input_text: str | None, *, changed_files: 
     run_kwargs: dict[str, Any] = {
         "cwd": repo_root(),
         "capture_output": True,
-        "text": True,
         "env": env,
         "check": False,
+        **hostruntime.CHILD_TEXT,
     }
     # Match the old shell behavior: handler-only runs should see closed stdin.
     if input_text is None:
@@ -2581,7 +2502,7 @@ def run_pre_processor(config: AgentConfig, *, changed_files: list[str] | None = 
 
     cmd = _build_handler_command(config.pre_processor_path)
     completed = subprocess.run(
-        cmd, cwd=repo_root(), capture_output=True, text=True,
+        cmd, cwd=repo_root(), capture_output=True, **hostruntime.CHILD_TEXT,
         env=env, check=False, stdin=subprocess.DEVNULL,
     )
     stderr_text = completed.stderr.strip() if completed.stderr else ""
@@ -2606,183 +2527,11 @@ def run_pre_processor(config: AgentConfig, *, changed_files: list[str] | None = 
         log_event(config.agent_log, phase="pre-processor", level="info", message=stderr_text)
     return PreProcessorResult(output=output, skip=skip, stderr=stderr_text)
 
-
-def current_crontab_lines() -> list[str] | None:
-    """Return crontab lines, or None if crontab is unavailable (e.g. sandbox).
-
-    A user with no crontab yet (``crontab -l`` exits 1 with ``no crontab
-    for <user>`` on stderr) is an empty crontab, not an unavailable one,
-    and returns ``[]``.
-    """
-    # The crontab is host-global; the cwd only guards against a deleted
-    # process CWD. Host-scoped callers (health-check loop, uninstall)
-    # legitimately run with no project root.
-    try:
-        cwd = repo_root()
-    except ValueError:
-        cwd = Path.home()
-    try:
-        completed = subprocess.run(
-            ["crontab", "-l"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise CliCrashError("crontab command not found") from exc
-    if completed.returncode != 0:
-        if "no crontab for" in (completed.stderr or ""):
-            return []
-        return None
-    return [line for line in completed.stdout.splitlines() if line.strip()]
-
-
-def install_crontab(lines: list[str]) -> None:
-    payload = "\n".join(lines) + "\n" if lines else ""
-    # Root-optional for the same reason as current_crontab_lines: the
-    # crontab is host-global and host-scoped callers may have no project.
-    try:
-        cwd = repo_root()
-    except ValueError:
-        cwd = Path.home()
-    try:
-        subprocess.run(
-            ["crontab", "-"],
-            cwd=cwd,
-            input=payload,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-    except FileNotFoundError as exc:
-        raise CliCrashError("crontab command not found") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.strip() if exc.stderr else "failed to update crontab"
-        raise AgentsLiveError(stderr) from exc
-
-
-@contextmanager
-def crontab_lock() -> Iterator[None]:
-    """Fail fast if another agents-live process is mutating the user crontab."""
-    from .heartbeat import state_dir  # noqa: PLC0415 - stdlib-only module
-
-    # One resolver for the host state dir: heartbeat.state_dir() applies
-    # expanduser() to XDG_STATE_HOME, and heartbeat.uninstall cleans up
-    # this lock file - a second inline resolution here would drift.
-    lock = ExitStack()
-    try:
-        lock.enter_context(
-            hostruntime.exclusive_lock(state_dir() / "crontab.lock"))
-    except hostruntime.LockBusy as exc:
-        raise AgentsLiveError(
-            "crontab is busy; another agents-live process is updating it; retry"
-        ) from exc
-    try:
-        yield
-    finally:
-        lock.close()
-
-
-def crontab_line_belongs_to_repo(line: str) -> bool:
-    """Return whether a persisted trigger line names the current repo root."""
-    return triggers.belongs_to_root(line, repo_root())
-
-
-def cron_line_matches(line: str, name: str) -> bool:
-    """Return whether a current-repo line is *name*'s schedule trigger."""
-    return triggers.matches(line, root=repo_root(), name=name,
-                            kind=triggers.SCHEDULE)
-
-
-def remove_cron_entries(name: str) -> bool:
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        filtered = [line for line in lines if not cron_line_matches(line, name)]
-        if len(filtered) == len(lines):
-            return False
-        install_crontab(filtered)
-        return True
-
-
-def remove_cron_entries_under(environment: Path) -> int:
-    """Drop every entry that runs a program inside *environment*.
-
-    Host-wide and root-agnostic, because the entries uninstall has to
-    withdraw outlive the projects that installed them and cannot be
-    reached by name. Pinning on the executable is what keeps the sweep
-    honest: an entry running out of a source checkout is a developer's
-    own and is left alone (#219).
-    """
-    with crontab_lock():
-        lines = current_crontab_lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        kept = [line for line in lines
-                if not triggers.runs_within(line, environment)]
-        if len(kept) == len(lines):
-            return 0
-        install_crontab(kept)
-        return len(lines) - len(kept)
-
-
-def cron_is_active(name: str) -> bool | None:
-    """Return True if active, False if inactive, None if crontab unavailable."""
-    lines = current_crontab_lines()
-    if lines is None:
-        return None
-    return any(cron_line_matches(line, name) for line in lines)
-
-
-def _cron_line_agent_name(line: str) -> str | None:
-    """Return the agent name carried by an Agents Live cron line, else None.
-
-    The inverse of :func:`cron_line_matches`: extracts the ``--name`` token
-    without knowing the name in advance. Only lines that invoke agents-live
-    qualify - the flat ``run.py`` script form or the packaged shim form
-    (basename ``agents-live``, never substring) - so unrelated crontab
-    entries are ignored.
-    """
-    return triggers.agent_name(line, root=repo_root(),
-                               kind=triggers.SCHEDULE)
-
-
-def _list_active_cron_agent_names() -> list[str]:
-    """Every Agents Live agent currently installed in this host's crontab.
-
-    Runtime-is-truth enumeration (the reverse of :func:`cron_line_matches`):
-    used to find orphans whose agent file was deleted. Returns ``[]`` when the
-    crontab is empty or unavailable.
-    """
-    lines = current_crontab_lines() or []
-    return [name for line in lines if (name := _cron_line_agent_name(line))]
-
-
 def _find_all_watcher_pids(name: str) -> list[int]:
     proc_dir = Path("/proc")
     if proc_dir.is_dir():
         return _find_watcher_pids_proc(name, proc_dir)
     return _find_watcher_pids_table(name)
-
-
-def split_command_line(text: str) -> list[str]:
-    """A process's command line as the argument list it was built from.
-
-    On Windows that is not a split on spaces: the arguments were joined
-    by quoting rules, and the repo root a watcher carries routinely has
-    a space in it. The same parser that writes those command lines
-    reads them back.
-    """
-    if hostruntime.id() == hostruntime.WINDOWS:
-        from . import wintasks  # noqa: PLC0415 - Windows leaf
-
-        try:
-            return wintasks.parse_command_line(text)
-        except wintasks.TaskError:
-            return text.split()
-    return text.split()
 
 
 def _watcher_argv_is_agents_live(args: list[str]) -> bool:
@@ -2877,7 +2626,8 @@ def _watcher_processes() -> list[tuple[int, str]]:
     def read() -> list[tuple[int, str]]:
         found: list[tuple[int, str]] = []
         for pid, command in hostruntime.process_command_lines():
-            name = _watcher_cmdline_agent_name(split_command_line(command))
+            name = _watcher_cmdline_agent_name(
+                hostruntime.split_command_line(command))
             if name:
                 found.append((pid, name))
         return found
@@ -2910,7 +2660,7 @@ def watchers_on_host(
     """
     found: list[tuple[int, str, str | None]] = []
     for pid, command in hostruntime.process_command_lines():
-        args = split_command_line(command)
+        args = hostruntime.split_command_line(command)
         if not _watcher_argv_is_agents_live(args):
             continue
         if under is not None and not any(

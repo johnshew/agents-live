@@ -1225,3 +1225,80 @@ def installed_names(root: Path | str, *, kind: str | None = None) -> list[str]:
         if agent and agent not in names:
             names.append(agent)
     return names
+
+
+# --- The store-level questions `schedules` asks of either store --------------
+#
+# Their crontab peers are in `crontasks`; the two answer with the same
+# signatures so the dispatch point selects a module instead of branching
+# per operation. What a registered trigger looks like stays in here.
+
+def _task_line(spec: triggers.TriggerSpec, kind: str,
+               form: tuple[str, str, list[tuple]]) -> str:
+    command, arguments, signature = form
+    fires = " ".join(":".join(str(part) for part in entry)
+                     for entry in signature)
+    path = task_path(spec.root, spec.name, kind=kind)
+    return f"{path} [{fires}]: {command} {arguments}".rstrip()
+
+
+def current_form(spec: triggers.TriggerSpec) -> tuple[list[str], list[str]]:
+    """(what is registered for *spec* here, what *spec* asks for).
+
+    One display line per task, because a spec that fires two ways
+    registers two tasks and a repair plan has to name each.
+    """
+    current: list[str] = []
+    desired: list[str] = []
+    for kind in kinds(spec):
+        registered = registered_form(spec.root, spec.name, kind=kind)
+        wanted = desired_form(spec, kind=kind)
+        if registered is not None:
+            current.append(_task_line(spec, kind, registered))
+        if wanted is not None:
+            desired.append(_task_line(spec, kind, wanted))
+    return current, desired
+
+
+def install_maintenance(spec: triggers.TriggerSpec, *,
+                        create: bool = True) -> bool:
+    """Persist the check-and-repair loop's own trigger. True when changed.
+
+    ``create=False`` converges a loop that is already registered after an
+    upgrade re-homes the pinned shim path, but never adds one to a host
+    that has not asked for it.
+    """
+    current, desired = current_form(spec)
+    if current == desired or (not current and not create):
+        return False
+    install(spec)
+    return True
+
+
+def remove_maintenance(spec: triggers.TriggerSpec) -> bool:
+    """Withdraw the loop from this host. True when there was one."""
+    return delete(spec.root, spec.name, kind=HOST)
+
+
+def maintenance_change(spec: triggers.TriggerSpec
+                       ) -> tuple[list[str], list[str]] | None:
+    """(registered, desired) for the loop, or None when nothing reads."""
+    return current_form(spec)
+
+
+def persisted_roots() -> list[Path]:
+    """Every existing repository this host has a trigger registered for."""
+    roots: list[Path] = []
+    for task in registered_tasks():
+        # The loop's own task is pinned to the tool's state directory,
+        # which is not a project and has nothing to sweep. On a crontab
+        # host it names no repository at all; here the kind says it.
+        if kind_of_task_name(task["name"]) == HOST:
+            continue
+        directory = task["working_dir"]
+        if not directory:
+            continue
+        root = Path(directory).expanduser()
+        if root.is_dir() and root not in roots:
+            roots.append(root)
+    return roots

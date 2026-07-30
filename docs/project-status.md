@@ -59,7 +59,18 @@ performance fixes have shipped.
 | [#238](https://github.com/johnshew/agents-live/issues/238) | High | Windows | Executable pinning continues past refused PATH shims to a native CLI. |
 | [#240](https://github.com/johnshew/agents-live/issues/240) | High | Shared | The independently resolved pipeline bridge shares the package's MCP bound. |
 | [#239](https://github.com/johnshew/agents-live/issues/239) | Medium | Windows | The shipped generic handler and active examples are portable Python. |
-| [#241](https://github.com/johnshew/agents-live/issues/241) | Medium | Windows | Every smoketest text capture decodes UTF-8 explicitly. |
+| [#241](https://github.com/johnshew/agents-live/issues/241) | Medium | Windows | Captured child output states its encoding instead of taking the locale's. |
+
+### Windows seam work completed alongside those fixes
+
+The defects above were symptoms of two seams that were incomplete rather than
+absent, so each fix landed at the seam instead of at the call site.
+
+| Seam | Was | Now |
+|---|---|---|
+| Child text decoding | ~40 captures across 15 modules inherited the platform locale, which is the ANSI code page on Windows | One `hostruntime.CHILD_TEXT` member states UTF-8; a child that writes something else decodes itself, and an `ast` invariant refuses a capture that names no encoding |
+| Trigger store | `wintasks` was a real store; the crontab half lived inside `headless`, so `schedules` repeated a platform branch 16 times | `crontasks` is the peer of `wintasks` with matching signatures, and `schedules` chooses a store once |
+| Command-line parsing | `headless` imported the Windows leaf inline to read back a command line | `hostruntime.split_command_line` sits beside the enumeration that produced the string |
 
 ### P1 reliability work
 
@@ -95,9 +106,15 @@ exact defect.
 |---|---|
 | #238 | Test PATH plus PATHEXT enumeration with a refused shim before a real executable, then prove the native Copilot runtime starts. |
 | #240 | Assert that package and inline bridge dependency constraints agree, then start the bridge in a fresh uv script environment. |
-| #232 | Exercise timeout cleanup with a descendant retaining pipe handles and a detached watcher; assert bounded exit and complete cleanup. |
-| #241 | Assert every captured text subprocess in the smoketest uses explicit UTF-8, then run the native Copilot smoketest through the affected step. |
-| #239 | Add a host-capability contract test and an end-to-end Windows example using the chosen portable handler path. |
+| #232 | Exercise timeout cleanup with a descendant retaining pipe handles and a detached watcher; assert bounded exit and complete cleanup, and relate the parent's cleanup bound to the child's worst case. |
+| #241 | Walk the package AST and refuse any subprocess capture that names no encoding. This runs on every host, including the ones where the defect cannot be observed. |
+| #239 | Run the shipped handler through the real dispatcher and assert both containment and that the two shipped copies are one file. |
+
+The #241 slice is the shape to repeat. The first version of it asserted that a
+literal appeared twelve times in one file: it would have broken on any
+unrelated edit and proved nothing about decoding. Replacing it with a rule
+about the whole package cost fewer lines, cannot drift, and closed the defect
+class rather than one file's instance of it.
 
 After these fixes, review what remains of #184. Convert additional
 mock-driven classes only where the P1 work identifies another concrete
@@ -111,12 +128,11 @@ primary validation platform and Linux and WSL CI as the shared-code regression
 gate for the remaining sequence.
 
 1. Resolve #243, then #244 in the same installation-readiness pass. Verify the
-  documented native installation path, clean first-run health, platform-aware
-  doctor guidance, and the explicit PowerShell completion profile step from
-  an installed artifact.
+   documented native installation path, clean first-run health, platform-aware
+   doctor guidance, and the explicit PowerShell completion profile step from
+   an installed artifact.
 2. Run the full native Windows Copilot smoketest from that installed artifact
-   and make the outcome part of
-   the release gate.
+   and make the outcome part of the release gate.
 3. Complete the targeted #184 and #180 policy updates based on the tests added
    above.
 4. Implement #123 so sustained agent failure becomes visible in status,
@@ -131,7 +147,7 @@ The next stabilization milestone is reached when:
 - the native Windows Copilot smoketest passes end to end from an installed
   artifact;
 - the documented native Windows installation and first-run path ends in an
-   accurate healthy state and makes PowerShell completion activation explicit;
+  accurate healthy state and makes PowerShell completion activation explicit;
 - timeout cleanup is bounded and leaves no watcher, fixture, trigger, pipe, or
   lock residue;
 - the same release candidate passes Linux and WSL regression checks;
