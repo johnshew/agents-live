@@ -6,10 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- feat: native Windows installs generated PowerShell completion alongside its
-  Windows-local Bash and Zsh files. (#233) Linux and WSL continue to install
-  only Bash and Zsh completion in their own XDG data home. Neither runtime
-  probes or writes the other runtime's files.
+- feat: native Windows installs generate PowerShell completion. (#233)
+  It sits alongside the Windows-local Bash and Zsh files. Linux and WSL
+  continue to install only Bash and Zsh completion in their own XDG data
+  home. Neither runtime probes or writes the other runtime's files.
+- fix: an upgrade refuses rather than half-rebuilding an installation in use. (#231)
+  Windows will not let uv replace a file another process holds open, and uv
+  discovers that only part way through rebuilding the tool environment, which
+  removed a plugin and left the runtime on the previous version. The upgrade
+  now names the watchers and dashboards running out of the installation and
+  changes nothing until they stop.
 
 ## 5.4.2 - 2026-07-29
 

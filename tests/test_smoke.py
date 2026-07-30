@@ -6023,7 +6023,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
     def test_tool_uninstall_stops_when_host_cleanup_fails(self) -> None:
         with (
             mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
-            mock.patch.object(uninstall, "_tool_environment",
+            mock.patch.object(plugins, "tool_environment",
                               return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.WSL),
@@ -6040,7 +6040,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         completed = subprocess.CompletedProcess(["uv"], 0)
         with (
             mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
-            mock.patch.object(uninstall, "_tool_environment",
+            mock.patch.object(plugins, "tool_environment",
                               return_value=None),
             mock.patch.object(hostruntime, "id",
                               return_value=hostruntime.LINUX),
@@ -6075,7 +6075,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
             mock.patch.object(uninstall.completions, "remove",
                               return_value=[]),
             mock.patch.object(uninstall, "find_uv", return_value="uv.exe"),
-            mock.patch.object(uninstall, "_tool_environment",
+            mock.patch.object(plugins, "tool_environment",
                               return_value=environment),
             mock.patch.object(uninstall, "_handoff_windows_uninstall",
                               return_value=True) as handoff,
@@ -6137,7 +6137,7 @@ class TestWindowsHeartbeat(unittest.TestCase):
         with (
             mock.patch.object(uninstall, "_stop_own_watchers",
                               return_value=[(11, "mine", "/p")]),
-            mock.patch.object(uninstall, "_tool_environment",
+            mock.patch.object(plugins, "tool_environment",
                               return_value=None),
             mock.patch.object(heartbeat, "uninstall") as host_cleanup,
             mock.patch.object(uninstall.health_check,
@@ -9034,7 +9034,10 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
             self) -> None:
         # The report is on the terminal of whoever ran the upgrade; the
         # symptom shows up days later, to someone else.
-        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        # Empty stdout stands in for `uv tool dir`, which shares this
+        # mock: no tool directory means nothing can be holding one.
+        completed = subprocess.CompletedProcess(args=[], returncode=0,
+                                                stdout="")
         with (
             mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
             mock.patch.object(subprocess, "run", return_value=completed),
@@ -9063,6 +9066,139 @@ class TestUpgradeNamesWhatItLeftRunning(_TempProject):
         with mock.patch.object(headless, "watchers_on_host",
                                side_effect=OSError("denied")):
             self.assertEqual(upgrade._running_watchers(), [])
+
+
+class TestUpgradeRefusesWhileTheInstallationIsInUse(_TempProject):
+    """An upgrade it cannot finish must change nothing at all (#231).
+
+    uv rebuilds the tool environment and publishes the launcher last, so
+    a launcher it cannot replace fails the command over an environment it
+    has already torn down: the observed run removed a plugin dependency
+    and left the runtime on the previous version.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.environment = self.root / "uv-tools" / "agents-live"
+        (self.environment / "Scripts").mkdir(parents=True)
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+
+    def watcher_command(self, name: str, launcher_dir: Path) -> str:
+        argv = [str(launcher_dir / "agents-live"), "--repo", str(self.root),
+                "internal", "watch-loop", name]
+        if sys.platform == "win32":
+            return subprocess.list2cmdline(argv)
+        return " ".join(argv)
+
+    @contextlib.contextmanager
+    def _host(self, *, processes, locks=True, running_dashboards=()):
+        with (
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=locks),
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=processes),
+            mock.patch.object(plugins, "tool_environment",
+                              return_value=self.environment),
+            mock.patch.object(dashboards, "running",
+                              return_value=list(running_dashboards)),
+        ):
+            yield
+
+    def _run_upgrade(self, **host):
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            self._host(**host),
+            mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+            mock.patch.object(subprocess, "run",
+                              return_value=completed) as run,
+            mock.patch.object(plugins, "converge", return_value=False),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            status = upgrade._upgrade_runtime()
+        return status, run, stderr.getvalue()
+
+    def test_a_watcher_from_this_installation_stops_the_upgrade(self) -> None:
+        # The point of the refusal: uv is never invoked, so the previous
+        # runtime and every plugin beside it are still there afterwards.
+        status, run, reported = self._run_upgrade(processes=[
+            (1001, self.watcher_command("inbox-triage",
+                                        self.environment / "Scripts")),
+        ])
+        self.assertEqual(status, 1)
+        run.assert_not_called()
+        self.assertIn("inbox-triage", reported)
+        self.assertIn("1001", reported)
+        self.assertIn("nothing was changed", reported)
+
+    def test_a_watcher_run_from_a_checkout_is_not_this_installation(
+            self) -> None:
+        # Somebody's working tree. It holds no file uv is about to
+        # replace, and refusing over it would block every upgrade on a
+        # developer's host.
+        status, run, _ = self._run_upgrade(processes=[
+            (1001, self.watcher_command("inbox-triage", self.checkout)),
+        ])
+        self.assertEqual(status, 0)
+        run.assert_called_once()
+
+    def test_a_host_that_replaces_a_running_image_does_not_refuse(
+            self) -> None:
+        # POSIX keeps the inode alive for whoever holds it, so the
+        # install completes and #188's skew report is the right response.
+        status, run, _ = self._run_upgrade(
+            locks=False,
+            processes=[(1001, self.watcher_command(
+                "inbox-triage", self.environment / "Scripts"))])
+        self.assertEqual(status, 0)
+        run.assert_called_once()
+
+    def test_a_dashboard_holding_the_installation_is_named_by_its_port(
+            self) -> None:
+        # A dashboard is not a watcher and nothing else enumerates it,
+        # but it holds the environment exactly as firmly.
+        command = subprocess.list2cmdline(
+            [str(self.environment / "Scripts" / "agents-live"), "dashboard"]
+        ) if sys.platform == "win32" else (
+            f"{self.environment / 'Scripts' / 'agents-live'} dashboard")
+        status, run, reported = self._run_upgrade(
+            processes=[(2002, command)],
+            running_dashboards=[{"port": 8899, "pid": 2002,
+                                 "repo": str(self.root), "started": ""}])
+        self.assertEqual(status, 1)
+        run.assert_not_called()
+        self.assertIn("8899", reported)
+        self.assertIn("2002", reported)
+
+    def test_the_refusal_is_recorded_where_it_can_be_found_later(self) -> None:
+        # The operator sees the message; whoever investigates the host
+        # days later sees only the log.
+        self._run_upgrade(processes=[
+            (1001, self.watcher_command("inbox-triage",
+                                        self.environment / "Scripts")),
+        ])
+        recorded = [json.loads(line) for line
+                    in adminlog.log_path().read_text(
+                        encoding="utf-8").splitlines() if line.strip()]
+        refusals = [event for event in recorded
+                    if event.get("operation") == "upgrade-runtime"
+                    and event.get("status") == "error"]
+        self.assertEqual(len(refusals), 1, recorded)
+        self.assertEqual(refusals[0]["held_by"], 1)
+
+    def test_an_idle_host_is_not_charged_for_locating_the_tool(self) -> None:
+        # `uv tool dir` starts a process. Nothing running means nothing
+        # can hold the installation, which is answer enough.
+        with (
+            mock.patch.object(hostruntime, "locks_running_image",
+                              return_value=True),
+            mock.patch.object(hostruntime, "process_command_lines",
+                              return_value=[]),
+            mock.patch.object(dashboards, "running", return_value=[]),
+            mock.patch.object(plugins, "tool_environment") as locate,
+        ):
+            self.assertFalse(upgrade._refuse_while_held({}))
+        locate.assert_not_called()
 
 
 if __name__ == "__main__":
