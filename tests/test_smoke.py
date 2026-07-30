@@ -8786,7 +8786,12 @@ class TestFixturesAreNeverAdopted(unittest.TestCase):
             self) -> None:
         leftover = smoketest.SMOKETEST_AGENT_NAMES[1]
         self.assertTrue(headless.is_ephemeral(leftover), leftover)
+        # A temp root, never this checkout: the sweep resolves one, and
+        # CI runs from a tree with no project marker.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         with (
+            mock.patch.object(health_check, "repo_root", return_value=root),
             mock.patch.object(health_check.schedules, "watcher_respawn_names",
                               return_value=[leftover, "real-agent"]),
             mock.patch.object(health_check, "_agent_states",
