@@ -55,6 +55,7 @@ from .headless import (
     agent_file_exists,
     clean_path,
     cli_shim_path,
+    is_ephemeral,
     list_agents,
     load_agent_config,
     packaged_execution,
@@ -67,10 +68,6 @@ SWEEP_TIMEOUT_S = 300
 SMOKETEST_RUNTIME = "agency copilot"
 SMOKETEST_TIMEOUT_S = 360
 SMOKETEST_BUSY_EXIT = 75
-# How long the recovery cleanup child may take. Its own worst case is
-# one `CLEANUP_COMMAND_TIMEOUT_S` per smoketest agent, and the suite
-# holds this above that sum so a bounded cleanup is never cut short.
-SMOKETEST_CLEANUP_TIMEOUT_S = 120
 # Smoke-relevant repo content: executable support code, not agent
 # prompts or docs (the smoketest makes a real agent call, so it only
 # re-runs when something that could break it changed).
@@ -314,8 +311,8 @@ def _prune_registry_orphans(root: Path, events: list[dict[str, str]]) -> dict:
                 "degraded": True}
     pruned: list[str] = []
     for name in sorted(owners):
-        if name.startswith("_"):
-            continue  # ephemeral fixtures are never registered or pruned
+        if is_ephemeral(name):
+            continue  # fixtures are never registered or pruned
         if _agent_definition_exists(name, root):
             continue
         if ownership.remove_owner(name):
@@ -419,8 +416,15 @@ def sweep() -> dict:
     # intent for. A deliberate stop removes that intent, so a stopped
     # agent is invisible here and is not restarted ("owned but stopped"
     # is durable).
+    #
+    # A fixture is never intended. Its run owns it start to finish, so a
+    # respawn entry outliving that run is residue, not intent, and
+    # restarting it would revive a fixture with no run behind it - and,
+    # when the restart failed, mark this sweep failed and suppress the
+    # very smoketest whose cleanup removes the residue (#232).
     intended = [name for name in schedules.watcher_respawn_names()
-                if name not in ownership_deactivated]
+                if name not in ownership_deactivated
+                and not is_ephemeral(name)]
 
     dead: list[str] = []
     restarted: list[str] = []
@@ -550,7 +554,7 @@ def plan_sweep() -> list[dict]:
     )
     if head and remote_sha == head:
         for name in sorted(owners):
-            if not name.startswith("_") and not _agent_definition_exists(
+            if not is_ephemeral(name) and not _agent_definition_exists(
                     name, repo_root()):
                 actions.append({
                     "action": "prune-ownership-record", "agent": name})
@@ -652,19 +656,6 @@ def _load_smoketest_result(result_path: Path, started: float) -> dict:
     return {}
 
 
-def _cleanup_timed_out_smoketest(root: Path) -> bool:
-    """Remove what the killed run owned. True when nothing survived."""
-    process = hostruntime.spawn_detached(
-        _self_argv("smoketest", "--cleanup-only", root=root),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    try:
-        return process.wait(timeout=SMOKETEST_CLEANUP_TIMEOUT_S) == 0
-    except subprocess.TimeoutExpired:
-        hostruntime.terminate(process.pid)
-        return False
-
-
 def _run_smoketest(root: Path, runtime: str) -> dict:
     started = time.time()
     result_path = paths.repo_state_dir(root) / "logs" / \
@@ -686,14 +677,14 @@ def _run_smoketest(root: Path, runtime: str) -> dict:
                 hostruntime.terminate(process.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=hostruntime.TERMINATE_GRACE_S)
+                # What the killed run leaves behind is inert: fixtures
+                # are never restarted or adopted, and the next run's
+                # preflight cleanup removes them.
                 persisted = _load_smoketest_result(result_path, started)
-                cleanup_ok = _cleanup_timed_out_smoketest(root)
                 failed_step = persisted.get("failed_step")
                 reason = f"timeout after {SMOKETEST_TIMEOUT_S}s"
                 if failed_step:
                     reason += f" during {failed_step}"
-                if not cleanup_ok:
-                    reason += "; cleanup did not complete"
                 return {"status": "fail",
                         "duration_s": round(time.time() - started, 1),
                         "runtime": runtime,

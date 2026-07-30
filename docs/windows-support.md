@@ -123,7 +123,7 @@ What does not, and what replaces it:
 | `env -i` plus `HOME` and `PATH` as the whole agent environment | [headless.py](../src/agents_live/headless.py) | A Windows child needs `SystemRoot` to load at all, plus the profile, temp, and processor variables; `base_env` supplies that floor, and PATH is inherited rather than constructed (see the decision log) |
 | Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
 | ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
-| Locale-decoded child output | every module that captures a subprocess | The same legacy code page decodes captured bytes, so `text=True` alone reads mojibake on Windows and correctly on Linux; `hostruntime.CHILD_TEXT` states UTF-8 for every child this tool configures, and a child that writes something else decodes itself (`schtasks` is read as `oem` in [wintasks.py](../src/agents_live/wintasks.py)) |
+| Locale-decoded child output | every module that captures a subprocess | The same legacy code page decodes captured bytes, so `text=True` alone reads mojibake on Windows and correctly on Linux; `hostruntime.CHILD_TEXT` states UTF-8 for every child this tool configures. Children that write something else settle it themselves: `schtasks` is read as `oem` in [wintasks.py](../src/agents_live/wintasks.py), and PowerShell writes the OEM page into a pipe whatever the host, so `powershell_argv` tells it to write UTF-8 instead |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
 | `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | Nothing platform-specific. Every runtime, Windows and POSIX alike, owns under a generated `hostname/runtime/uuid` identity, because one machine hosts several runtimes and a hostname names all of them |
 | `os.fchmod` when writing state atomically | [paths.py](../src/agents_live/paths.py) | `os.chmod` on the temporary file: Windows grew `os.fchmod` only in Python 3.13, and has no POSIX mode bits to narrow in any version |
@@ -705,6 +705,40 @@ order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
 
+### 2026-07-30: a fixture belongs to its run, and the sweep must not adopt one
+
+The first fix for #232 gave the smoketest a hidden `--cleanup-only` mode
+so a timed-out run could be cleaned up by the process that killed it.
+The reasoning behind it did not survive being checked. A timeout writes
+a `fail` verdict, and the smoketest gate only skips on a previous
+`pass`, so the next hourly maintenance pass re-runs it and its preflight
+cleanup removes the residue anyway. The cleanup mode was buying about an
+hour of tidiness for a new CLI surface, a detached spawn, and a test.
+
+What was actually wrong sat one layer up. Underscore-prefixed fixtures
+are ephemeral by construction, and five places in the tree already knew
+it - the ownership gate, registry pruning, the sweep's ownership-record
+prune, and two `doctor` orphan reports. The watcher restart sweep was
+the one place that did not, so a respawn entry a killed run left behind
+read as durable intent. The sweep tried to restart a fixture whose
+fixture directory was already half-removed, the restart failed, the
+failure set `infra_ok` false, and `infra_ok` gates the smoketest. The
+residue was suppressing the run whose preflight cleanup would have
+removed it. That is not an hour, it is permanent, and it matches what
+#232 observed: a beacon stuck at the prior failed verdict.
+
+So the mode came out and `headless.is_ephemeral` went in, named once and
+used at all six sites including the restart sweep. The rule is that a
+fixture belongs to the run that created it: nothing host-scoped adopts
+one, so residue is inert until the next run clears it. What remains of
+the original fix is the part that was always right - temporary files
+instead of pipes, so the wait ends on the process rather than on handles
+a detached descendant inherited.
+
+The general form, worth applying to the next platform defect: when a
+fix needs a new mode to compensate for behavior elsewhere, check whether
+the behavior elsewhere is the defect.
+
 ### 2026-07-30: the trigger track gets the seam the watcher track had
 
 The watcher track has had the right shape since it landed: an
@@ -748,6 +782,17 @@ An `ast` walk in the suite enforces it across the package: a
 `subprocess.run` or `Popen` with `text=` and no `encoding=` fails. That
 is one assertion for a whole class of defect, and it runs on Linux where
 the defect cannot be observed.
+
+The review that followed found the rule's first real exception, and it
+was not on the Windows side of the tree. PowerShell writes the console
+OEM code page into a pipe: `café` came back as two undecodable bytes and
+an em dash was flattened to `-` inside the child, before any decoder
+could have helped. That affected the WSL heartbeat, which reaches
+`powershell.exe` over interop, and the process enumeration fallback.
+Decoding as `oem` is not available to fix it, because the codec is
+Windows-only and the heartbeat runs from WSL. Telling the child what to
+write is, so `powershell_argv` prefixes every invocation with an output
+encoding and is the only place that builds a PowerShell command line.
 
 ### 2026-07-28: an owner value names a runtime three ways, and matches on one
 

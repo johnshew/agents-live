@@ -11,10 +11,15 @@ history is retained in the source repository.
   first native executable on PATH. Captured subprocess output is decoded UTF-8
   through one host-runtime member instead of the platform locale, which on
   Windows was the ANSI code page and made successful steps report failure.
+  PowerShell is told to write UTF-8 rather than assumed to: it emits the
+  console OEM code page into a pipe, so a non-ASCII path in the WSL heartbeat
+  or in an enumerated command line was corrupted before anything decoded it.
 - fix: timed-out framework smoketests leave maintenance and the next run usable. (#232)
-  Recovery cannot block on output handles a detached descendant inherited, it
-  removes the fixtures and watchers a killed run left behind, and it reports
-  the last stage reached before the timeout.
+  Recovery cannot block on output handles a detached descendant inherited, and
+  it reports the last stage reached before the timeout. Smoketest fixtures are
+  also never adopted by host maintenance: the sweep used to try to restart a
+  fixture watcher a killed run left behind, and a failed restart suppressed the
+  next smoketest, which is what would have cleaned the residue up.
 - fix: Copilot pipeline mode keeps its independently resolved MCP bridge compatible. (#240)
   The bridge now shares the package's MCP 1.x constraint and starts in a fresh
   uv script environment instead of failing behind an agent timeout.

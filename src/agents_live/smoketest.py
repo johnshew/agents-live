@@ -588,8 +588,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", default="claude")
     parser.add_argument("--model", default=None, help="Model to use (default: sonnet for claude, claude-haiku-4.5 for copilot)")
-    parser.add_argument("--cleanup-only", action="store_true",
-                        help=argparse.SUPPRESS)
     args = parser.parse_args()
     started_at = time.time()
     model_for_verdict = args.model or ("sonnet" if args.runtime in ("claude", "agency claude") else "claude-haiku-4.5")
@@ -622,24 +620,6 @@ def main() -> int:
     except hostruntime.LockBusy:
         _report_lock_busy()
         return SMOKETEST_BUSY_EXIT
-    if args.cleanup_only:
-        # A run this process started and killed cannot clean up after
-        # itself: Windows terminates a tree outright, so the `finally`
-        # below never executes. Waiting for the next run's preflight
-        # cleanup is not enough either, because a detached watcher the
-        # dead run left behind stays registered, and the maintenance
-        # sweep restarts it and spends tokens until then (#232).
-        try:
-            residue, diagnostics = cleanup()
-            for diagnostic in diagnostics:
-                print(f"WARNING: cleanup: {diagnostic}", file=sys.stderr)
-            if residue:
-                preflight.emit_failure(
-                    "smoketest", "; ".join(residue), code="cleanup_failed")
-                return 1
-            return 0
-        finally:
-            smoketest_lock.close()
     _record_lock_owner(args.runtime, model_for_verdict)
 
     # Windows has no SIGHUP; SIGTERM exists on both platforms.

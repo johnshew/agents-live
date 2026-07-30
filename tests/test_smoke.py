@@ -6847,6 +6847,44 @@ class TestSmoketestSubprocessEncoding(unittest.TestCase):
             self.skipTest("no runtime Agents/ directory beside the package")
         self.assertEqual(template.read_bytes(), fixture.read_bytes())
 
+    def test_powershell_output_survives_the_round_trip(self) -> None:
+        # PowerShell writes the console OEM code page into a pipe, so a
+        # non-ASCII path or task name came back as replacement
+        # characters, and an em dash was flattened before any decoder
+        # saw it. The seam tells PowerShell what to write.
+        shell = (shutil.which("powershell.exe") or shutil.which("pwsh.exe"))
+        if shell is None:
+            self.skipTest("no PowerShell on this host")
+        subject = "caf\u00e9 \u2014 \u00fcber"
+        completed = subprocess.run(
+            hostruntime.powershell_argv(shell, f"'{subject}'"),
+            capture_output=True, timeout=60, **hostruntime.CHILD_TEXT)
+        self.assertEqual(completed.stdout.strip(), subject)
+
+    def test_no_captured_powershell_call_bypasses_the_seam(self) -> None:
+        # Building the argv anywhere else means deciding the encoding
+        # anywhere else, which is how the WSL heartbeat and the process
+        # enumeration each ended up assuming UTF-8 from a child that
+        # writes the OEM code page.
+        package = Path(hostruntime.__file__).resolve().parent
+        seam = next(
+            node for node in ast.walk(
+                ast.parse(Path(hostruntime.__file__).read_text(
+                    encoding="utf-8")))
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "powershell_argv")
+        offenders: list[str] = []
+        for module in sorted(package.glob("*.py")):
+            for number, line in enumerate(
+                    module.read_text(encoding="utf-8").splitlines(), 1):
+                if '"-NoProfile"' not in line:
+                    continue
+                if (module.name == "hostruntime.py"
+                        and seam.lineno <= number <= seam.end_lineno):
+                    continue
+                offenders.append(f"{module.name}:{number}")
+        self.assertEqual(offenders, [])
+
 
 class TestSmoketestCleanupBudget(unittest.TestCase):
     def test_stop_timeouts_do_not_prevent_file_finalization(self) -> None:
@@ -8659,31 +8697,23 @@ def _task_folder_lineno() -> int:
 
 @unittest.skipUnless(hostruntime.id() == hostruntime.WINDOWS,
                      "Windows inherited-handle regression")
-class TestTimedOutSmoketestCleanup(unittest.TestCase):
+class TestTimedOutSmoketest(unittest.TestCase):
     # The fixture stands in for a smoketest that hangs after leaving a
-    # detached descendant holding the inherited output handles. It
-    # reaches that state and reports it before the timeout can fire, so
-    # the test measures recovery rather than racing process startup.
+    # detached descendant holding the inherited output handles: the
+    # shape that used to leave maintenance waiting forever on
+    # `communicate()` (#232). It reaches that state and says so before
+    # the timeout can fire, so the test measures recovery rather than
+    # racing process startup.
     FIXTURE = """import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-mode, result_name, pid_name, residue_name, ready_name = sys.argv[1:]
-pid_path = Path(pid_name)
-residue = Path(residue_name)
-if mode == "cleanup":
-    if pid_path.exists():
-        subprocess.run(["taskkill", "/PID", pid_path.read_text(), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    residue.unlink(missing_ok=True)
-    raise SystemExit(0)
-
+result_name, pid_name, ready_name = sys.argv[1:]
 Path(result_name).write_text(json.dumps({
     "status": "RUNNING", "failed_step": "11/14 pipeline"
 }), encoding="utf-8")
-residue.write_text("active", encoding="utf-8")
 # An intermediate that spawns the sleeper and exits, so by the time this
 # process is terminated the sleeper's parent link is gone and only its
 # inherited handles connect it to us.
@@ -8693,13 +8723,13 @@ child_code = (
     "stdout=sys.stdout, stderr=sys.stderr); "
     "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')"
 )
-subprocess.run([sys.executable, "-c", child_code, str(pid_path)],
+subprocess.run([sys.executable, "-c", child_code, str(pid_name)],
                stdout=sys.stdout, stderr=sys.stderr, check=True)
 Path(ready_name).write_text("ready", encoding="utf-8")
 time.sleep(120)
 """
 
-    def test_timeout_cleans_an_escaped_descendant_and_reports_the_stage(
+    def test_a_hung_run_ends_bounded_and_reports_the_stage_it_reached(
             self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -8708,27 +8738,23 @@ time.sleep(120)
             result_path = state / "logs" / "smoketest-framework-result.json"
             result_path.parent.mkdir(parents=True)
             pid_path = Path(tmp) / "detached.pid"
-            residue = Path(tmp) / "watcher.residue"
             ready = Path(tmp) / "fixture.ready"
             fixture = Path(tmp) / "timeout_fixture.py"
             fixture.write_text(self.FIXTURE, encoding="utf-8")
 
             def fixture_argv(*args: str, root: Path | None = None) -> list[str]:
-                mode = "cleanup" if "--cleanup-only" in args else "run"
-                return [sys.executable, str(fixture), mode, str(result_path),
-                        str(pid_path), str(residue), str(ready)]
+                return [sys.executable, str(fixture), str(result_path),
+                        str(pid_path), str(ready)]
 
-            # Long enough that two interpreter starts always finish first,
-            # so what expires is the hang and never the setup.
+            # Long enough that two interpreter starts always finish
+            # first, so what expires is the hang and never the setup.
             started = time.monotonic()
             with (
                 mock.patch.object(health_check, "_self_argv",
                                   side_effect=fixture_argv),
                 mock.patch.object(health_check.paths, "repo_state_dir",
                                   return_value=state),
-                mock.patch.object(health_check, "SMOKETEST_TIMEOUT_S", 15),
-                mock.patch.object(health_check,
-                                  "SMOKETEST_CLEANUP_TIMEOUT_S", 30),
+                mock.patch.object(health_check, "SMOKETEST_TIMEOUT_S", 20),
             ):
                 verdict = health_check._run_smoketest(root, "copilot")
             elapsed = time.monotonic() - started
@@ -8737,12 +8763,52 @@ time.sleep(120)
                             "the fixture never reached its hang")
             detached_pid = int(pid_path.read_text(encoding="utf-8"))
             self.addCleanup(hostruntime.terminate, detached_pid, grace_s=1)
-            self.assertLess(elapsed, 45)
+            # The descendant still holds the output handles, so the wait
+            # has to end on the process. The bound is the fixture's own
+            # sleep: anything near it means we waited on the pipes.
+            self.assertLess(elapsed, 100)
             self.assertEqual(verdict["status"], "fail")
             self.assertEqual(verdict["failed_step"], "11/14 pipeline")
             self.assertIn("during 11/14 pipeline", verdict["reason"])
-            self.assertFalse(residue.exists())
-            self.assertFalse(hostruntime.is_alive(detached_pid))
+
+
+class TestFixturesAreNeverAdopted(unittest.TestCase):
+    """Residue from a killed smoketest must stay inert (#232).
+
+    A fixture belongs to the run that made it. If the sweep treated a
+    leftover respawn entry as intent it would revive a fixture with no
+    run behind it, and a failed revival would mark the sweep failed -
+    which suppresses the smoketest whose preflight cleanup is what
+    removes the residue.
+    """
+
+    def test_the_sweep_never_restarts_a_leftover_fixture_watcher(
+            self) -> None:
+        leftover = smoketest.SMOKETEST_AGENT_NAMES[1]
+        self.assertTrue(headless.is_ephemeral(leftover), leftover)
+        with (
+            mock.patch.object(health_check.schedules, "watcher_respawn_names",
+                              return_value=[leftover, "real-agent"]),
+            mock.patch.object(health_check, "_agent_states",
+                              return_value={"real-agent": {
+                                  "state": "active",
+                                  "triggerStates": {"watcher": "active"}}}),
+            mock.patch.object(health_check, "_add_persisted_agent_states"),
+            mock.patch.object(health_check, "_enforce_ownership",
+                              return_value=(set(), False)),
+            mock.patch.object(health_check, "_prune_registry_orphans",
+                              return_value={"pruned": [], "abstained": False}),
+            mock.patch.object(activate, "prune_orphans", return_value=[]),
+            mock.patch.object(health_check, "_lifecycle") as lifecycle,
+            mock.patch.object(health_check, "_converge_triggers",
+                              return_value=True),
+        ):
+            summary = health_check.sweep()
+
+        lifecycle.assert_not_called()
+        # A fixture the sweep ignores cannot fail it, and a sweep that
+        # does not fail is what lets the next smoketest run at all.
+        self.assertEqual(summary.get("failed", []), [])
 
 
 class TestAgreementsAcrossModules(unittest.TestCase):
@@ -8766,16 +8832,6 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         # failing.
         self.assertEqual(smoketest.SMOKETEST_BUSY_EXIT,
                          health_check.SMOKETEST_BUSY_EXIT)
-
-    def test_timeout_cleanup_has_headroom_inside_the_parent_wait(self) -> None:
-        # The recovery child stops every smoketest agent in turn, each
-        # bounded by CLEANUP_COMMAND_TIMEOUT_S, and the parent kills it
-        # at SMOKETEST_CLEANUP_TIMEOUT_S. The parent's bound has to clear
-        # the child's worst case or a slow cleanup is cut off mid-pass.
-        self.assertGreaterEqual(
-            health_check.SMOKETEST_CLEANUP_TIMEOUT_S,
-            smoketest.CLEANUP_COMMAND_TIMEOUT_S
-            * len(smoketest.SMOKETEST_AGENT_NAMES))
 
     def test_smoketest_fixtures_are_exempt_from_ownership(self) -> None:
         # run.py exempts _-prefixed agents from the ownership gate so

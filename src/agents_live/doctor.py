@@ -370,14 +370,14 @@ def _task_inconsistencies() -> tuple[list[str], list[str]] | None:
     orphans: list[str] = []
     if referenced:
         try:
-            from .headless import list_agents  # noqa: PLC0415
+            from .headless import is_ephemeral, list_agents  # noqa: PLC0415
             existing = set(list_agents())
         except Exception:
             existing = None  # discovery unavailable: skip orphan half
         if existing is not None:
             orphans = sorted(
                 name for name in referenced
-                if name not in existing and not name.startswith("_"))
+                if name not in existing and not is_ephemeral(name))
     stale = [f"{root} (project root moved or deleted)"
              for root in sorted(missing_roots)]
     return orphans, stale
@@ -447,14 +447,14 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     orphans: list[str] = []
     if referenced:
         try:
-            from .headless import list_agents  # noqa: PLC0415
+            from .headless import is_ephemeral, list_agents  # noqa: PLC0415
             existing = set(list_agents())
         except Exception:
             existing = None  # discovery unavailable: skip orphan half
         if existing is not None:
             orphans = sorted(
                 name for name in referenced
-                if name not in existing and not name.startswith("_"))
+                if name not in existing and not is_ephemeral(name))
     stale = sorted(p for p in script_paths if not Path(p).is_file())
     stale.extend(f"{root} (project root moved or deleted)"
                  for root in sorted(missing_roots))

@@ -371,11 +371,31 @@ def use_utf8_io() -> None:
 # reads correctly on one host and mojibake on the other (#241). Every
 # child this tool launches is one it also configures - its own
 # subcommands, `uv`, `node`, `git` - and they all write UTF-8. A child
-# that does not is not covered by this and states its own encoding:
+# that does not is not covered by this and settles its own encoding:
 # `schtasks` writes the console code page and `wintasks` decodes it as
-# `oem`. Errors are replaced because a foreign byte is a bad log line,
-# not a reason to fail the operation that read it.
+# `oem`, and PowerShell is told what to write by `powershell_argv`.
+# Errors are replaced because a foreign byte is a bad log line, not a
+# reason to fail the operation that read it.
 CHILD_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+# Windows PowerShell writes the console OEM code page into a pipe, not
+# UTF-8, so `café` arrives as two undecodable bytes and an em dash
+# arrives as `-` - lost in the child, before any decoder could help.
+# Declaring the output encoding is the only repair that works from both
+# a Windows host and a WSL one, where Python has no `oem` codec to
+# decode with. PowerShell 7 already writes UTF-8 and is unaffected.
+_POWERSHELL_UTF8 = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();"
+
+
+def powershell_argv(executable: str, script: str) -> list[str]:
+    """argv that runs *script* and writes its output as UTF-8.
+
+    Every captured PowerShell call goes through here, so the output
+    :data:`CHILD_TEXT` then decodes is UTF-8 by construction rather than
+    by luck.
+    """
+    return [executable, "-NoProfile", "-NonInteractive", "-Command",
+            _POWERSHELL_UTF8 + script]
 
 
 def split_command_line(text: str) -> list[str]:
@@ -793,7 +813,7 @@ if _IS_WINDOWS:
                   "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
         try:
             completed = subprocess.run(
-                [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+                powershell_argv(shell, script),
                 capture_output=True, **CHILD_TEXT, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired):
@@ -982,7 +1002,7 @@ def defer_until_environment_exits(
     )
     try:
         spawn_detached(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            powershell_argv(powershell, script),
             stdin=subprocess.DEVNULL, stdout=None, stderr=None)
     except OSError:
         return False

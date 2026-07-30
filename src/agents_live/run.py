@@ -44,6 +44,7 @@ from .headless import (
     ensure_logs_dir,
     extract_prompt_body,
     headless_agent,
+    is_ephemeral,
     load_agent_config,
     logs_root,
     run_post_processor,
@@ -218,7 +219,7 @@ def main() -> int:
         try:
             # Ephemeral (_-prefixed) agents are never ownership-gated, so
             # the smoketest works regardless of registry state.
-            if config.name.startswith("_") or ownership.local_only():
+            if is_ephemeral(config.name) or ownership.local_only():
                 owners = {}
             else:
                 owners = ownership.load_owners()

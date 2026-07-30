@@ -159,6 +159,7 @@ __all__ = [
     "stop_watcher",
     "list_active_agent_names",
     "agent_details",
+    "is_ephemeral",
 ]
 
 
@@ -1116,6 +1117,19 @@ def load_agent_config(name: str) -> AgentConfig:
     if not matches:
         raise AgentInvalidError(f"agent '{name}' not found in any agent directory")
     return _parse_frontmatter(matches[0])
+
+
+def is_ephemeral(name: str) -> bool:
+    """Whether *name* is a fixture the framework creates and tears down.
+
+    Underscore-prefixed agents belong to one smoketest run: they are
+    written, activated, and removed inside it, and they match the
+    ``Agents/_*`` gitignore patterns. Nothing host-scoped should adopt
+    one - not the ownership registry, not orphan pruning, and above all
+    not the watcher restart sweep, which would otherwise revive a
+    fixture whose run is gone (#232).
+    """
+    return name.startswith("_")
 
 
 def agent_file_exists(name: str) -> bool:
