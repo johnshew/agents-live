@@ -31,6 +31,7 @@ from .headless import (
     logs_root,
     repo_root,
     resolve_agent_command,
+    runtime_is_launchable,
     stop_watcher,
     agents_dir,
 )
@@ -68,6 +69,28 @@ def lock_path() -> Path:
 FIXTURES_REL = "Agents/_smoketest-tmp"
 SMOKETEST_BUSY_EXIT = 75
 CLEANUP_COMMAND_TIMEOUT_S = 15
+# Which agent CLI to exercise when the caller does not name one. The
+# gate proves the trigger, run, and status loop, and any adapter the
+# host can launch proves it equally well, so this is a preference rather
+# than a requirement: a host with one agent CLI installed can still run
+# the gate. Naming a fixed runtime made the release gate unrunnable on a
+# host that had the other one (#246).
+RUNTIME_PREFERENCE = ("copilot", "claude")
+
+
+def _default_runtime() -> str:
+    """The first preferred runtime this host can launch.
+
+    Falls back to the first preference when none can be launched, so the
+    run fails with that runtime's own diagnosis rather than with a
+    choice made here.
+    """
+    for runtime in RUNTIME_PREFERENCE:
+        if runtime_is_launchable(runtime):
+            return runtime
+    return RUNTIME_PREFERENCE[0]
+
+
 # An agent call gets HEADLESS_TIMEOUT per attempt and is retried, so a
 # run that succeeds only on the retry can legitimately take every
 # attempt's budget. On a high-latency link that is the common case, not
@@ -586,9 +609,13 @@ def cleanup() -> tuple[list[str], list[str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime", default="claude")
+    parser.add_argument("--runtime", default=None,
+                        help="Agent runtime (default: the first of "
+                             f"{', '.join(RUNTIME_PREFERENCE)} this host can "
+                             "launch)")
     parser.add_argument("--model", default=None, help="Model to use (default: sonnet for claude, claude-haiku-4.5 for copilot)")
     args = parser.parse_args()
+    args.runtime = args.runtime or _default_runtime()
     started_at = time.time()
     model_for_verdict = args.model or ("sonnet" if args.runtime in ("claude", "agency claude") else "claude-haiku-4.5")
 
