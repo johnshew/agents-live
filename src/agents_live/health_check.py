@@ -41,6 +41,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -66,6 +67,9 @@ SWEEP_TIMEOUT_S = 300
 SMOKETEST_RUNTIME = "agency copilot"
 SMOKETEST_TIMEOUT_S = 360
 SMOKETEST_BUSY_EXIT = 75
+SMOKETEST_TERMINATE_GRACE_S = 15
+SMOKETEST_EXIT_WAIT_TIMEOUT_S = 5
+SMOKETEST_CLEANUP_TIMEOUT_S = 60
 # Smoke-relevant repo content: executable support code, not agent
 # prompts or docs (the smoketest makes a real agent call, so it only
 # re-runs when something that could break it changed).
@@ -635,31 +639,67 @@ def _resolve_smoketest_runtime() -> str | None:
     return None
 
 
+def _load_smoketest_result(result_path: Path, started: float) -> dict:
+    try:
+        if result_path.stat().st_mtime >= started - 1:
+            return json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _cleanup_timed_out_smoketest(root: Path) -> bool:
+    process = hostruntime.spawn_detached(
+        _self_argv("smoketest", "--cleanup-only", root=root),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        return process.wait(timeout=SMOKETEST_CLEANUP_TIMEOUT_S) == 0
+    except subprocess.TimeoutExpired:
+        hostruntime.terminate(
+            process.pid, grace_s=SMOKETEST_TERMINATE_GRACE_S)
+        return False
+
+
 def _run_smoketest(root: Path, runtime: str) -> dict:
     started = time.time()
     result_path = paths.repo_state_dir(root) / "logs" / \
         "smoketest-framework-result.json"
     try:
-        process = hostruntime.spawn_detached(
-            _self_argv("smoketest", "--runtime", runtime, root=root),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        try:
-            stdout, stderr = process.communicate(timeout=SMOKETEST_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            hostruntime.terminate(process.pid, grace_s=15)
-            process.communicate()
-            return {"status": "fail",
-                    "duration_s": round(time.time() - started, 1),
-                    "runtime": runtime,
-                    "reason": f"timeout after {SMOKETEST_TIMEOUT_S}s"}
+        with (tempfile.TemporaryFile() as stdout_file,
+              tempfile.TemporaryFile() as stderr_file):
+            process = hostruntime.spawn_detached(
+                _self_argv("smoketest", "--runtime", runtime, root=root),
+                stdout=stdout_file, stderr=stderr_file,
+            )
+            try:
+                process.wait(timeout=SMOKETEST_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                hostruntime.terminate(
+                    process.pid, grace_s=SMOKETEST_TERMINATE_GRACE_S)
+                try:
+                    process.wait(timeout=SMOKETEST_EXIT_WAIT_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    pass
+                persisted = _load_smoketest_result(result_path, started)
+                cleanup_ok = _cleanup_timed_out_smoketest(root)
+                failed_step = persisted.get("failed_step")
+                reason = f"timeout after {SMOKETEST_TIMEOUT_S}s"
+                if failed_step:
+                    reason += f" during {failed_step}"
+                if not cleanup_ok:
+                    reason += "; cleanup did not complete"
+                return {"status": "fail",
+                        "duration_s": round(time.time() - started, 1),
+                        "runtime": runtime,
+                        "reason": reason,
+                        **({"failed_step": failed_step} if failed_step else {})}
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace")
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
         duration = round(time.time() - started, 1)
-        persisted: dict = {}
-        try:
-            if result_path.stat().st_mtime >= started - 1:
-                persisted = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            persisted = {}
+        persisted = _load_smoketest_result(result_path, started)
         detail = {key: persisted[key]
                   for key in ("runtime", "model", "failed_step", "reason",
                               "category")

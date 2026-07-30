@@ -660,7 +660,8 @@ def collect() -> list[dict]:
     add(*_mechanism_check("schedule"))
     add("jq", _has("jq"), False, _fix("sudo apt install jq",
                                       "winget install jqlang.jq"),
-        note="only needed by shell handlers that parse JSON (write-files.sh)")
+        note="only needed by custom shell handlers that parse JSON; the "
+             "shipped write-files.py handler does not use it")
     add(*_mechanism_check("watch"))
     add_host_runtime_checks()
 

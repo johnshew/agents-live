@@ -422,17 +422,36 @@ def pin_executable(name: str, *, path: str | None = None) -> str:
     """
     if not _IS_WINDOWS:
         return name
-    resolved = shutil.which(name, path=path)
-    if resolved is None:
+    search_path = os.environ.get("PATH", "") if path is None else path
+    path_ext = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+    extensions = ([""] if Path(name).suffix else
+                  [suffix for suffix in path_ext if suffix])
+    directories = ([""] if os.path.dirname(name) else
+                   search_path.split(os.pathsep))
+    refused: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for directory in directories:
+        for extension in extensions:
+            candidate = os.path.join(directory, name + extension)
+            normalized = os.path.normcase(os.path.abspath(candidate))
+            if normalized in seen or not os.path.isfile(candidate):
+                continue
+            seen.add(normalized)
+            resolved = str(Path(candidate).resolve())
+            reason = _WINDOWS_REFUSED_SUFFIXES.get(
+                Path(resolved).suffix.lower())
+            if reason is not None:
+                refused.append((resolved, reason))
+                continue
+            return resolved
+    if refused:
+        resolved, reason = refused[0]
         raise ExecutableNotFound(
-            f"no executable named '{name}' on this host's PATH")
-    suffix = Path(resolved).suffix.lower()
-    reason = _WINDOWS_REFUSED_SUFFIXES.get(suffix)
-    if reason is not None:
-        raise ExecutableNotFound(
-            f"'{name}' resolves to {resolved}, {reason}; install the CLI "
-            f"itself, or point the runtime at its executable")
-    return resolved
+            f"only shims answer to '{name}' on this host's PATH; "
+            f"{resolved} is {reason}; install the CLI itself, or point "
+            f"the runtime at its executable")
+    raise ExecutableNotFound(
+        f"no executable named '{name}' on this host's PATH")
 
 
 # ---------------------------------------------------------------------------

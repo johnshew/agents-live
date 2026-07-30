@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["mcp"]
+# # mcp is held below 2.0: that release removed the client and server APIs
+# # used by this bridge (#205). Lift this with the package bound, not before.
+# dependencies = ["mcp<2"]
 # ///
 """Stdio MCP bridge to the in-process pipeline-mcp HTTP server.
 

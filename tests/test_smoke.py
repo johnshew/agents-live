@@ -34,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 import urllib.error
 import urllib.request
@@ -4900,8 +4901,25 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
             self.skipTest("only Windows resolves a name to a shim")
         directory = Path(self._tmp.name)
         (directory / "probe.bat").write_text("@echo off\n", encoding="utf-8")
-        with self.assertRaises(hostruntime.ExecutableNotFound):
-            hostruntime.pin_executable("probe", path=str(directory))
+        with self.assertRaisesRegex(hostruntime.ExecutableNotFound,
+                                    "only shims answer"):
+            with mock.patch.dict(os.environ, {"PATHEXT": ".BAT"}):
+                hostruntime.pin_executable("probe", path=str(directory))
+
+    def test_pin_executable_continues_past_a_refused_shim(self) -> None:
+        if not self.windows:
+            self.skipTest("only Windows resolves a name through PATHEXT")
+        shim_dir = Path(self._tmp.name) / "shim"
+        executable_dir = Path(self._tmp.name) / "executable"
+        shim_dir.mkdir()
+        executable_dir.mkdir()
+        (shim_dir / "probe.bat").write_text("@echo off\n", encoding="utf-8")
+        executable = executable_dir / "probe.exe"
+        executable.write_bytes(b"probe")
+        search_path = os.pathsep.join((str(shim_dir), str(executable_dir)))
+        with mock.patch.dict(os.environ, {"PATHEXT": ".BAT;.EXE"}):
+            pinned = hostruntime.pin_executable("probe", path=search_path)
+        self.assertEqual(Path(pinned), executable.resolve())
 
     def test_pin_executable_refuses_a_name_nothing_answers_to(self) -> None:
         if not self.windows:
@@ -4909,7 +4927,8 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
                 hostruntime.pin_executable("agents-live-no-such-tool"),
                 "agents-live-no-such-tool")
             return
-        with self.assertRaises(hostruntime.ExecutableNotFound):
+        with self.assertRaisesRegex(hostruntime.ExecutableNotFound,
+                                    "no executable named"):
             hostruntime.pin_executable("agents-live-no-such-tool",
                                        path=self._tmp.name)
 
@@ -4923,6 +4942,34 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
         else:
             self.assertEqual(headless._build_handler_command(handler),
                              [*shell, str(handler)])
+
+    def test_shipped_write_files_handler_is_portable_and_contained(self) -> None:
+        handler = (Path(headless.__file__).resolve().parent / "skill" /
+                   "templates" / "write-files.py")
+        self.assertTrue(handler.is_file())
+        root = Path(self._tmp.name)
+        escaped = root.parent / f"{root.name}-escaped.txt"
+        escaped.unlink(missing_ok=True)
+        self.addCleanup(escaped.unlink, missing_ok=True)
+        payload = json.dumps({
+            "files": [
+                {"path": "output/result.txt", "content": "portable"},
+                {"path": f"../{escaped.name}", "content": "unsafe"},
+            ],
+            "summary": "done",
+        })
+
+        completed = subprocess.run(
+            headless._build_handler_command(handler), cwd=root,
+            input=payload, capture_output=True, text=True, encoding="utf-8",
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((root / "output" / "result.txt").read_text(
+            encoding="utf-8"), "portable\n")
+        self.assertFalse(escaped.exists())
+        self.assertIn("rejecting unsafe path", completed.stderr)
 
     def test_node_handler_needs_no_shell_on_any_host(self) -> None:
         handler = Path(self._tmp.name) / "handler.js"
@@ -6742,6 +6789,84 @@ class TestUpdateCheck(unittest.TestCase):
             consume.assert_not_called()
             launch.assert_not_called()
 
+class TestPipelineDependencyContract(unittest.TestCase):
+    """Independently resolved pipeline entry points must use one MCP API."""
+
+    def test_bridge_and_package_mcp_constraints_agree(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        package = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8"))
+        package_mcp = next(
+            dependency for dependency in package["project"]["dependencies"]
+            if dependency.startswith("mcp"))
+
+        bridge_lines = (
+            root / "src" / "agents_live" / "pipeline_mcp_stdio_bridge.py"
+        ).read_text(encoding="utf-8").splitlines()
+        metadata_start = bridge_lines.index("# /// script") + 1
+        metadata_end = bridge_lines.index("# ///", metadata_start)
+        metadata = tomllib.loads("\n".join(
+            line.removeprefix("# ")
+            for line in bridge_lines[metadata_start:metadata_end]
+        ))
+        bridge_mcp = next(
+            dependency for dependency in metadata["dependencies"]
+            if dependency.startswith("mcp"))
+
+        self.assertEqual(package_mcp.removeprefix("mcp[cli]"),
+                         bridge_mcp.removeprefix("mcp"))
+
+
+class TestSmoketestSubprocessEncoding(unittest.TestCase):
+    """Captured child output must not fall back to the Windows ANSI page."""
+
+    def test_every_text_capture_uses_the_utf8_mapping(self) -> None:
+        source = Path(smoketest.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("text=True", source)
+        self.assertEqual(source.count("**_UTF8_TEXT"), 12)
+
+
+class TestSmoketestCleanupBudget(unittest.TestCase):
+    def test_stop_timeouts_do_not_prevent_file_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents = root / "Agents"
+            handlers = agents / "handlers"
+            handlers.mkdir(parents=True)
+            prompt = agents / f"{smoketest.SMOKETEST_AGENT_NAMES[0]}.md"
+            handler = handlers / smoketest.SMOKETEST_HANDLER_NAMES[0]
+            prompt.write_text("fixture", encoding="utf-8")
+            handler.write_text("fixture", encoding="utf-8")
+
+            def timeout_run(command, **kwargs):
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+            with (
+                mock.patch.object(smoketest, "repo_root", return_value=root),
+                mock.patch.object(smoketest, "agents_dir", return_value=agents),
+                mock.patch.object(smoketest.paths, "repo_state_dir",
+                                  return_value=root / ".state"),
+                mock.patch.object(smoketest, "_smoketest_run_pids",
+                                  return_value=[]),
+                mock.patch.object(smoketest.subprocess, "run",
+                                  side_effect=timeout_run) as run,
+                mock.patch.object(smoketest.schedules, "is_active",
+                                  return_value=False),
+                mock.patch.object(smoketest, "find_watcher_pid",
+                                  return_value=None),
+            ):
+                residue, diagnostics = smoketest.cleanup(
+                    deadline=time.monotonic() + 20)
+
+            self.assertEqual(run.call_count,
+                             len(smoketest.SMOKETEST_AGENT_NAMES))
+            self.assertFalse(prompt.exists())
+            self.assertFalse(handler.exists())
+            self.assertEqual(residue, [])
+            self.assertEqual(len(diagnostics),
+                             len(smoketest.SMOKETEST_AGENT_NAMES))
+
+
 class TestPipelineMcpStore(unittest.TestCase):
     """Store-level checks (no HTTP server started)."""
 
@@ -8511,6 +8636,86 @@ def _task_folder_lineno() -> int:
     raise AssertionError("wintasks no longer defines TASK_FOLDER")
 
 
+@unittest.skipUnless(hostruntime.id() == hostruntime.WINDOWS,
+                     "Windows inherited-handle regression")
+class TestTimedOutSmoketestCleanup(unittest.TestCase):
+    def test_timeout_cleans_an_escaped_descendant_and_reports_the_stage(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            state = Path(tmp) / "state"
+            root.mkdir()
+            result_path = state / "logs" / "smoketest-framework-result.json"
+            result_path.parent.mkdir(parents=True)
+            pid_path = Path(tmp) / "detached.pid"
+            residue = Path(tmp) / "watcher.residue"
+            fixture = Path(tmp) / "timeout_fixture.py"
+            fixture.write_text(
+                """import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+mode, result_name, pid_name, residue_name = sys.argv[1:]
+pid_path = Path(pid_name)
+residue = Path(residue_name)
+if mode == "cleanup":
+    if pid_path.exists():
+        subprocess.run(["taskkill", "/PID", pid_path.read_text(), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    residue.unlink(missing_ok=True)
+    raise SystemExit(0)
+
+Path(result_name).write_text(json.dumps({
+    "status": "RUNNING", "failed_step": "11/14 pipeline"
+}), encoding="utf-8")
+residue.write_text("active", encoding="utf-8")
+child_code = (
+    "import subprocess,sys,time; from pathlib import Path; "
+    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'], "
+    "stdout=sys.stdout, stderr=sys.stderr); "
+    "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')"
+)
+subprocess.run([sys.executable, "-c", child_code, str(pid_path)],
+               stdout=sys.stdout, stderr=sys.stderr, check=True)
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+
+            def fixture_argv(*args: str, root: Path | None = None) -> list[str]:
+                mode = "cleanup" if "--cleanup-only" in args else "run"
+                return [sys.executable, str(fixture), mode,
+                        str(result_path), str(pid_path), str(residue)]
+
+            started = time.monotonic()
+            with (
+                mock.patch.object(health_check, "_self_argv",
+                                  side_effect=fixture_argv),
+                mock.patch.object(health_check.paths, "repo_state_dir",
+                                  return_value=state),
+                mock.patch.object(health_check, "SMOKETEST_TIMEOUT_S", 0.5),
+                mock.patch.object(health_check,
+                                  "SMOKETEST_TERMINATE_GRACE_S", 0.5),
+                mock.patch.object(health_check,
+                                  "SMOKETEST_EXIT_WAIT_TIMEOUT_S", 0.5),
+                mock.patch.object(health_check,
+                                  "SMOKETEST_CLEANUP_TIMEOUT_S", 5),
+            ):
+                verdict = health_check._run_smoketest(root, "copilot")
+            elapsed = time.monotonic() - started
+
+            detached_pid = int(pid_path.read_text(encoding="utf-8"))
+            self.addCleanup(hostruntime.terminate, detached_pid, grace_s=1)
+            self.assertLess(elapsed, 8)
+            self.assertEqual(verdict["status"], "fail")
+            self.assertEqual(verdict["failed_step"], "11/14 pipeline")
+            self.assertIn("during 11/14 pipeline", verdict["reason"])
+            self.assertFalse(residue.exists())
+            self.assertFalse(hostruntime.is_alive(detached_pid))
+
+
 class TestAgreementsAcrossModules(unittest.TestCase):
     """Facts held in two places that have to keep saying the same thing."""
 
@@ -8532,6 +8737,10 @@ class TestAgreementsAcrossModules(unittest.TestCase):
         # failing.
         self.assertEqual(smoketest.SMOKETEST_BUSY_EXIT,
                          health_check.SMOKETEST_BUSY_EXIT)
+
+    def test_timeout_cleanup_has_headroom_inside_the_parent_wait(self) -> None:
+        self.assertLess(smoketest.CLEANUP_TOTAL_TIMEOUT_S,
+                        health_check.SMOKETEST_CLEANUP_TIMEOUT_S)
 
     def test_smoketest_fixtures_are_exempt_from_ownership(self) -> None:
         # run.py exempts _-prefixed agents from the ownership gate so

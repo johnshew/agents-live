@@ -1,7 +1,7 @@
 ---
 title: Agents Live Command Reference
 description: Installation, lifecycle, validation, and logging commands for agents-live
-ms.date: 2026-07-29
+ms.date: 2026-07-30
 ms.topic: reference
 ---
 
@@ -232,8 +232,8 @@ that runs every fix command unconditionally.
    sudo apt install inotify-tools
    ```
 
-5. **jq** -- optional; only needed by shell handlers that parse JSON
-   (currently just `write-files.sh`). Python handlers need nothing.
+5. **jq** -- optional; only needed by custom shell handlers that use it.
+   The shipped `write-files.py` handler needs no third-party package.
    ```bash
    sudo apt install jq
    ```
@@ -443,8 +443,8 @@ interrupting a watcher mid-dispatch is a decision the operator makes.
    ```
    Fix: `sudo apt install cron`
 
-9. **jq**: Optional -- only shell handlers that parse JSON with jq
-   need it (currently just `write-files.sh`).
+9. **jq**: Optional -- only custom shell handlers that parse JSON with jq
+   need it. The shipped generic handler is Python and does not use jq.
    ```bash
    command -v jq
    ```
@@ -653,7 +653,7 @@ Parse the user's description to extract:
 - **mode** -- `plan` (read-only, preferred), `pipeline`, or `write`
    (Agents Live-managed PipelineMcp side-channel; see
   [approach.md](approach.md#execution-modes))
-- **post-processor** -- post-processor script name, or omit for log-only (default: `write-files.sh` if using JSON output)
+- **post-processor** -- repo-relative post-processor path, or omit for log-only (default: `Agents/handlers/write-files.py` if using JSON output; copy it from the skill templates first)
 - **mcps** -- MCP server names for agency agents
 - **schedule** -- cron expression (for cron type)
 - **watchPath** -- repo-relative directory to monitor (for watcher type)
@@ -669,7 +669,7 @@ Parse the user's description to extract:
    ---
    runtime: agency copilot
    mode: plan
-   post-processor: write-files.sh
+   post-processor: Agents/handlers/write-files.py
    schedule: "0 9 * * *"
    ---
 

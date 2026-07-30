@@ -191,6 +191,8 @@ COMMANDS = (
         args=(
             Arg(("--runtime",), "Agent runtime.", kind="value"),
             Arg(("--model",), "Model override.", kind="value"),
+            Arg(("--cleanup-only",), "Remove smoketest runtime residue.",
+                hidden=True),
         ),
     ),
     Cmd(

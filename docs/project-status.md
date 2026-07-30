@@ -35,11 +35,15 @@ startup, credential redaction, release portability, and transactional
 upgrades.
 
 The implementation is feature-complete enough for normal use, but it is not
-yet as mature as Linux and WSL. The decisive remaining gap is that the native
-Windows Copilot smoketest cannot pass end to end. Current P1 defects involve
-Windows PATH resolution, text encoding, detached process cleanup, and handler
-portability, plus one shared pipeline dependency defect first exposed on
-Windows.
+yet as mature as Linux and WSL. The native Windows Copilot smoketest now passes
+all 14 steps from editable source after repairing PATH resolution, text
+encoding, detached process cleanup, handler portability, and one shared
+pipeline dependency defect first exposed on Windows. Installation guidance
+and first-run diagnostics still need to match the supported native toolchain,
+including the one-time PowerShell completion profile step, before that
+end-to-end path is release-ready from an installed artifact.
+([#243](https://github.com/johnshew/agents-live/issues/243),
+[#244](https://github.com/johnshew/agents-live/issues/244))
 
 ## Priority summary
 
@@ -47,15 +51,15 @@ No open issue currently warrants P0 or critical severity. No open issue is
 primarily a performance problem; the major Windows process-table and dashboard
 performance fixes have shipped.
 
-### P1 bugs
+### Completed P1 stabilization fixes
 
 | Issue | Severity | Platform | Impact |
 |---|---|---|---|
-| [#232](https://github.com/johnshew/agents-live/issues/232) | High | Windows | A timed-out smoketest can wedge maintenance and leave detached watchers. |
-| [#238](https://github.com/johnshew/agents-live/issues/238) | High | Windows | An earlier PATH shim can hide an installed `copilot.exe`. |
-| [#240](https://github.com/johnshew/agents-live/issues/240) | High | Shared | An unpinned bridge dependency breaks Copilot pipeline mode. |
-| [#239](https://github.com/johnshew/agents-live/issues/239) | Medium | Windows | Shipped examples use shell handlers that Windows refuses. |
-| [#241](https://github.com/johnshew/agents-live/issues/241) | Medium | Windows | ANSI decoding makes successful smoketest steps report failure. |
+| [#232](https://github.com/johnshew/agents-live/issues/232) | High | Windows | Timeout recovery is bounded and removes detached smoketest residue. |
+| [#238](https://github.com/johnshew/agents-live/issues/238) | High | Windows | Executable pinning continues past refused PATH shims to a native CLI. |
+| [#240](https://github.com/johnshew/agents-live/issues/240) | High | Shared | The independently resolved pipeline bridge shares the package's MCP bound. |
+| [#239](https://github.com/johnshew/agents-live/issues/239) | Medium | Windows | The shipped generic handler and active examples are portable Python. |
+| [#241](https://github.com/johnshew/agents-live/issues/241) | Medium | Windows | Every smoketest text capture decodes UTF-8 explicitly. |
 
 ### P1 reliability work
 
@@ -67,10 +71,13 @@ performance fixes have shipped.
 - [#180](https://github.com/johnshew/agents-live/issues/180) aligns testing
   policy with what the suite can and cannot prove.
 
-P2 contains bounded transaction defects, watcher upgrade policy, and
-operational documentation. P3 contains dashboard expansion, adapter-family
-extensibility, local span tracing, and additional examples. Those should not
-displace cross-platform reliability work.
+P2 contains bounded transaction defects, watcher upgrade policy, operational
+documentation, and native Windows installation readiness
+([#243](https://github.com/johnshew/agents-live/issues/243),
+[#244](https://github.com/johnshew/agents-live/issues/244)). P3 contains
+dashboard expansion, adapter-family extensibility, local span tracing, and
+additional examples. Those should not displace cross-platform reliability
+work.
 
 ## Testing strategy decision
 
@@ -84,7 +91,7 @@ the current defects to ship. The chosen approach is incremental: every P1 bug
 adds the smallest invariant or real outcome test that would have caught that
 exact defect.
 
-| P1 issue | Incremental #184 slice |
+| P1 issue | Completed incremental #184 slice |
 |---|---|
 | #238 | Test PATH plus PATHEXT enumeration with a refused shim before a real executable, then prove the native Copilot runtime starts. |
 | #240 | Assert that package and inline bridge dependency constraints agree, then start the bridge in a fresh uv script environment. |
@@ -99,29 +106,23 @@ at reasonable cost. Do not use test or line counts as the objective.
 
 ## Recommended sequence
 
-Use native Windows as the primary development and validation platform for the
-first five steps. Run the focused Windows check after each change and retain
-Linux and WSL CI as the shared-code regression gate.
+The first five stabilization steps are complete. Retain native Windows as the
+primary validation platform and Linux and WSL CI as the shared-code regression
+gate for the remaining sequence.
 
-1. Fix #238 so the supported Copilot executable is reachable on a normal
-   Windows PATH.
-2. Fix #240 so Copilot pipeline mode starts reliably on a fresh dependency
-   resolution.
-3. Fix #241 so the Windows smoketest reports real outcomes instead of decoding
-   artifacts.
-4. Fix #232 so failures and timeouts terminate cleanly without poisoning later
-   maintenance runs.
-5. Resolve #239, preferably with a portable generic handler and truthful
-   documentation. Add shell probing only if shell handlers remain a supported
-   Windows contract.
-6. Run the full native Windows Copilot smoketest and make that outcome part of
+1. Resolve #243, then #244 in the same installation-readiness pass. Verify the
+  documented native installation path, clean first-run health, platform-aware
+  doctor guidance, and the explicit PowerShell completion profile step from
+  an installed artifact.
+2. Run the full native Windows Copilot smoketest from that installed artifact
+   and make the outcome part of
    the release gate.
-7. Complete the targeted #184 and #180 policy updates based on the tests added
+3. Complete the targeted #184 and #180 policy updates based on the tests added
    above.
-8. Implement #123 so sustained agent failure becomes visible in status,
+4. Implement #123 so sustained agent failure becomes visible in status,
    maintenance health, and doctor output.
-9. Address P2 transactional and lifecycle work before beginning P3 feature
-   expansion.
+5. Address the remaining P2 transactional and lifecycle work before beginning
+   P3 feature expansion.
 
 ## Next stable milestone
 
@@ -129,6 +130,8 @@ The next stabilization milestone is reached when:
 
 - the native Windows Copilot smoketest passes end to end from an installed
   artifact;
+- the documented native Windows installation and first-run path ends in an
+   accurate healthy state and makes PowerShell completion activation explicit;
 - timeout cleanup is bounded and leaves no watcher, fixture, trigger, pipe, or
   lock residue;
 - the same release candidate passes Linux and WSL regression checks;
