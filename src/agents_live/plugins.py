@@ -327,7 +327,7 @@ def tool_environment() -> Path | None:
     try:
         uv = find_uv()
         completed = subprocess.run(
-            [uv, "tool", "dir"], capture_output=True, text=True,
+            [uv, "tool", "dir"], capture_output=True, **hostruntime.CHILD_TEXT,
             check=True, timeout=_TOOL_DIR_TIMEOUT_S)
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None

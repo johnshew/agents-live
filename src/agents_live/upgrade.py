@@ -102,13 +102,13 @@ def _holders(environment: Path) -> list[str]:
     :func:`plugins.only_the_launcher_failed`. Only processes an operator
     can act on are named.
     """
-    from .headless import split_command_line, watchers_on_host  # noqa: PLC0415
+    from .headless import watchers_on_host  # noqa: PLC0415
 
     try:
         held = {
             pid for pid, command in hostruntime.process_command_lines()
             if any(triggers.within(arg, environment)
-                   for arg in split_command_line(command))
+                   for arg in hostruntime.split_command_line(command))
         }
         watchers = watchers_on_host(under=environment)
     except OSError:

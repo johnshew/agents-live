@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: How agents-live runs natively on Windows - Task Scheduler instead of cron, ReadDirectoryChangesW instead of inotifywait, and the seam that keeps the two implementations from leaking into each other
-ms.date: 2026-07-28
+ms.date: 2026-07-30
 ms.topic: concept
 ---
 
@@ -76,8 +76,9 @@ this path would otherwise ship:
    `copilot` on an interactive PATH can be a PowerShell bootstrapper
    rather than the CLI, and VS Code installs exactly such a shim
    (`copilot.ps1` in its extension storage) that can prompt to install or
-   update. `CreateProcess` cannot execute a `.ps1`, and a scheduled task
-   does not inherit that PATH in any case. This is the concrete failure
+   update. `CreateProcess` cannot execute a `.ps1`; pinning therefore
+   searches PATH and PATHEXT in order, skips script and batch shims, and
+   selects the first native executable. This is the concrete failure
    security-model item 4 is written against, and it presents as "Copilot
    does not work headlessly" if it is not ruled out first.
 2. **Read both streams.** stdout carries only the model's answer; the
@@ -111,9 +112,9 @@ What does not, and what replaces it:
 
 | Dependency | Where | Windows equivalent |
 |---|---|---|
-| `crontab -l` / `crontab -` | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py), [health_check.py](../src/agents_live/health_check.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows) |
+| `crontab -l` / `crontab -` | [crontasks.py](../src/agents_live/crontasks.py), behind the store seam in [schedules.py](../src/agents_live/schedules.py) | One Task Scheduler task per agent, with a dispatcher that confirms dueness (see Scheduling on Windows). [wintasks.py](../src/agents_live/wintasks.py) answers the same questions with the same signatures, so the dispatch point selects a store rather than branching per operation |
 | `inotifywait -m -r` | [activate.py](../src/agents_live/activate.py) | `ReadDirectoryChangesW` through `ctypes`, behind the `EventSource` seam in [watchsource.py](../src/agents_live/watchsource.py) |
-| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | A `Win32_Process` snapshot of pid and command line, so a watcher is still found by what it runs rather than by a remembered pid |
+| `/proc` scan and `ps -eo pid=,args=` | [headless.py](../src/agents_live/headless.py) | A `Win32_Process` snapshot of pid and command line, so a watcher is still found by what it runs rather than by a remembered pid. Reading one back is `hostruntime.split_command_line`, beside the enumeration that produced it: Windows joined the arguments by quoting rules, not by spaces, and a repo root routinely has one |
 | `os.kill`, `os.killpg`, POSIX signals | [activate.py](../src/agents_live/activate.py), [headless.py](../src/agents_live/headless.py), [health_check.py](../src/agents_live/health_check.py) | `OpenProcess` for liveness and `TerminateProcess` over a snapshot-derived process tree; identity verification before forced termination |
 | `fcntl.flock`, `fcntl` non-blocking reads | [headless.py](../src/agents_live/headless.py), [activate.py](../src/agents_live/activate.py) | `LockFileEx` on a byte past any content, which behaves like `flock` and unlike a named mutex |
 | `start_new_session=True` | [activate.py](../src/agents_live/activate.py) | `CREATE_NEW_PROCESS_GROUP` plus `CREATE_NO_WINDOW`, and never `DETACHED_PROCESS`: a detached child allocates a console of its own, which the desktop then draws (see the decision log). Termination walks the tree |
@@ -122,6 +123,7 @@ What does not, and what replaces it:
 | `env -i` plus `HOME` and `PATH` as the whole agent environment | [headless.py](../src/agents_live/headless.py) | A Windows child needs `SystemRoot` to load at all, plus the profile, temp, and processor variables; `base_env` supplies that floor, and PATH is inherited rather than constructed (see the decision log) |
 | Command names resolved by the child | [headless.py](../src/agents_live/headless.py) | `CreateProcess` searches the launching process's PATH, not the child's environment, so `pin_executable` resolves an absolute executable up front and refuses script and batch shims |
 | ASCII-safe console output | every command that prints | A Windows console defaults to a legacy code page, so UTF-8 output raises `UnicodeEncodeError`; `use_utf8_io` reconfigures the streams, exports `PYTHONUTF8`, and restores the console code page on exit |
+| Locale-decoded child output | every module that captures a subprocess | The same legacy code page decodes captured bytes, so `text=True` alone reads mojibake on Windows and correctly on Linux; `hostruntime.CHILD_TEXT` states UTF-8 for every child this tool configures. Children that write something else settle it themselves: `schtasks` is read as `oem` in [wintasks.py](../src/agents_live/wintasks.py), and PowerShell writes the OEM page into a pipe whatever the host, so `powershell_argv` tells it to write UTF-8 instead |
 | `bash` for `.sh` handlers | [headless.py](../src/agents_live/headless.py) | Python and Node handlers already run natively; `shell_interpreter` reports no shell on Windows, so `.sh` and any unrecognized extension are refused (see Handlers on Windows) |
 | `hostname -s` | [ownership.py](../src/agents_live/ownership.py) | Nothing platform-specific. Every runtime, Windows and POSIX alike, owns under a generated `hostname/runtime/uuid` identity, because one machine hosts several runtimes and a hostname names all of them |
 | `os.fchmod` when writing state atomically | [paths.py](../src/agents_live/paths.py) | `os.chmod` on the temporary file: Windows grew `os.fchmod` only in Python 3.13, and has no POSIX mode bits to narrow in any version |
@@ -551,45 +553,20 @@ and require no cross-runtime lease.
 Handlers are dispatched by file extension: `.py` through
 `uv run --with`, `.js` through `node`, anything else through the host's
 shell ([headless.py](../src/agents_live/headless.py)). Python and Node
-handlers are mostly portable, so plan mode works on Windows. TypeScript is
-currently passed to `node` directly, which only works when the installed
-Node.js runtime supports that file's syntax. The shell fallback is where
-Windows stops: `shell_interpreter` reports that the host has none, so a
-`.sh` handler and any unrecognized extension are refused with an error
-naming the two extensions that do run. That is an allowlist expressed as
-a host capability rather than a platform test.
+handlers are mostly portable, so plan mode works on Windows. The shipped
+`write-files.py` template is the generic JSON-to-files example and has no
+third-party dependencies. TypeScript is currently passed to `node`
+directly, which only works when the installed Node.js runtime supports
+that file's syntax.
 
-The refusal fails closed, and says so at three layers, reusing the
-capability-probe contract in
-[preflight.py](../src/agents_live/preflight.py) with the capability name
-`handler_interpreter` and the existing `dependency_missing` code. The
-refusal at dispatch is the last of the three:
-
-1. **Activation refuses.** `start` probes the interpreter each agent's
-   handler needs and refuses the agent when it is unavailable. Nothing
-   gets scheduled that can only ever fail.
-2. **Per-run preflight re-probes and logs.** The probe is advisory and
-   subject to TOCTOU, so the run path repeats it. On failure it writes a
-   structured event (`level=error`, `error_category="dependency_missing"`)
-   and exits nonzero. This is the event a health-monitoring agent reads,
-   and it fires before the model call, so a run that cannot finish costs
-   no tokens.
-3. **`doctor` reports standing state.** Which agents declare a shell
-   handler, and whether a usable interpreter exists. No `--repair`: the
-   fix is converting the handler to Python or installing Git Bash, and
-   neither is the tool's to do silently.
-
-The probe cannot simply accept whatever `bash` resolves to. On Windows,
-`bash` on PATH is usually `C:\Windows\System32\bash.exe`, the WSL
-launcher. That would run the handler inside the distro against Windows
-path spellings and a different repository root, and it would appear to
-work. Accepting it is worse than refusing. The probe therefore accepts a
-Git Bash installation or an interpreter the operator names explicitly in
-project config, and rejects the WSL launcher by identity with a message
-that explains why.
-
-On Linux the probe always succeeds, so nothing about current behavior
-changes.
+The shell fallback is POSIX-only. On Windows, `shell_interpreter` reports
+no shell, so `.sh` and unrecognized extensions are refused at dispatch
+with an error recommending Python or Node. Agents Live does not probe for
+Git Bash, configure a project-specific interpreter, refuse activation in
+advance, or report shell-handler readiness through `doctor`. Those are
+limitations, not implied capabilities. Use a `.py` handler for portable
+automation; installing `jq` does not make a shell handler runnable on
+Windows.
 
 ## Working on a Windows host
 
@@ -727,6 +704,95 @@ failure settled it. Superseded planning content - the implementation
 order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
+
+### 2026-07-30: a fixture belongs to its run, and the sweep must not adopt one
+
+The first fix for #232 gave the smoketest a hidden `--cleanup-only` mode
+so a timed-out run could be cleaned up by the process that killed it.
+The reasoning behind it did not survive being checked. A timeout writes
+a `fail` verdict, and the smoketest gate only skips on a previous
+`pass`, so the next hourly maintenance pass re-runs it and its preflight
+cleanup removes the residue anyway. The cleanup mode was buying about an
+hour of tidiness for a new CLI surface, a detached spawn, and a test.
+
+What was actually wrong sat one layer up. Underscore-prefixed fixtures
+are ephemeral by construction, and five places in the tree already knew
+it - the ownership gate, registry pruning, the sweep's ownership-record
+prune, and two `doctor` orphan reports. The watcher restart sweep was
+the one place that did not, so a respawn entry a killed run left behind
+read as durable intent. The sweep tried to restart a fixture whose
+fixture directory was already half-removed, the restart failed, the
+failure set `infra_ok` false, and `infra_ok` gates the smoketest. The
+residue was suppressing the run whose preflight cleanup would have
+removed it. That is not an hour, it is permanent, and it matches what
+#232 observed: a beacon stuck at the prior failed verdict.
+
+So the mode came out and `headless.is_ephemeral` went in, named once and
+used at all six sites including the restart sweep. The rule is that a
+fixture belongs to the run that created it: nothing host-scoped adopts
+one, so residue is inert until the next run clears it. What remains of
+the original fix is the part that was always right - temporary files
+instead of pipes, so the wait ends on the process rather than on handles
+a detached descendant inherited.
+
+The general form, worth applying to the next platform defect: when a
+fix needs a new mode to compensate for behavior elsewhere, check whether
+the behavior elsewhere is the defect.
+
+### 2026-07-30: the trigger track gets the seam the watcher track had
+
+The watcher track has had the right shape since it landed: an
+`EventSource` protocol, two implementations, and `watchpolicy` holding
+every rule and knowing about neither. The trigger track only looked the
+same. `wintasks` was a real store, but the crontab half never left
+`headless`, so `schedules` had no POSIX module to name and repeated
+`if native_scheduler() == TASK_SCHEDULER` sixteen times, once per
+operation, reaching into private `headless` members on the other branch.
+
+Extracting `crontasks` as the peer of `wintasks` removed all sixteen.
+The two stores now answer the same questions with the same signatures,
+`schedules` chooses once in `_store()`, and what a stored trigger looks
+like - a crontab line, a registered task - never leaves the store. The
+store-level questions that had accumulated in the dispatch point
+(`current_form`, the maintenance trio, `persisted_roots`) moved into
+both stores, because each was already a question about what the store
+holds.
+
+Nothing about the crontab lines changed in the move. The measurable
+result is that adding a third store, or changing what one stores, is now
+one module rather than an edit at every branch.
+
+### 2026-07-30: decoding a child's output is a seam member, not a habit
+
+`use_utf8_io` had covered this process's own streams since the console
+work, but nothing covered the other direction. Around forty subprocess
+captures across fifteen modules passed `text=True` and inherited the
+locale encoding, which is UTF-8 on POSIX and the ANSI code page on
+Windows: the same call reads correctly on one host and mojibake on the
+other, and that is what made passing smoketest steps report failure.
+
+The first fix was a file-local mapping in `smoketest.py`, which repaired
+the harness and left the product alone. The rule that replaced it is that
+no capture may rely on the locale: `hostruntime.CHILD_TEXT` states UTF-8
+for every child this tool launches and configures, and a child that
+writes something else decodes itself - `wintasks` already read `schtasks`
+as `oem`, which is why the rule is "state it" rather than "always UTF-8".
+
+An `ast` walk in the suite enforces it across the package: a
+`subprocess.run` or `Popen` with `text=` and no `encoding=` fails. That
+is one assertion for a whole class of defect, and it runs on Linux where
+the defect cannot be observed.
+
+The review that followed found the rule's first real exception, and it
+was not on the Windows side of the tree. PowerShell writes the console
+OEM code page into a pipe: `café` came back as two undecodable bytes and
+an em dash was flattened to `-` inside the child, before any decoder
+could have helped. That affected the WSL heartbeat, which reaches
+`powershell.exe` over interop, and the process enumeration fallback.
+Decoding as `oem` is not available to fix it, because the codec is
+Windows-only and the heartbeat runs from WSL. Telling the child what to
+write is, so `powershell_argv` prefixes every invocation with an output
+encoding and is the only place that builds a PowerShell command line.
 
 ### 2026-07-28: an owner value names a runtime three ways, and matches on one
 
@@ -1416,13 +1482,13 @@ What is lost that way is PATH hygiene, and pinning replaces it.
 `CreateProcess` resolves a bare command name against the launching
 process's PATH, not the environment handed to the child, so a name pins
 nothing on Windows regardless. `pin_executable` resolves argv[0] to an
-absolute executable before launch and refuses two kinds of answer: a
-`.ps1`, which Windows cannot execute and which on this host is exactly
-the VS Code Copilot bootstrapper rule 1 above warns about, and a `.bat`
-or `.cmd`, which Windows runs through `cmd.exe` - a second parse of the
-argument string, and a prompt body carrying `&` or `|` would run as a
-command. POSIX returns the name unchanged, where `execvp` searches the
-child's own PATH and the constructed PATH is the pin.
+absolute executable before launch. It searches PATH and PATHEXT in order,
+skipping a `.ps1`, which Windows cannot execute, and `.bat` or `.cmd`
+shims, which Windows runs through `cmd.exe` - a second parse of the
+argument string where a prompt body carrying `&` or `|` would run as a
+command. It fails closed when only those shims answer to the name. POSIX
+returns the name unchanged, where `execvp` searches the child's own PATH
+and the constructed PATH is the pin.
 
 Output has to be UTF-8 on purpose. A Windows console defaults to a
 legacy code page and Python follows it, so `agents-live logs` died with
@@ -1435,12 +1501,12 @@ subcommand scripts the CLI launches start the same way, and switches the
 console code page for the life of the run, restoring it on exit because
 the console belongs to the shell rather than to the run.
 
-The run that proved this used the `claude` runtime, which installs a
-native executable. The `copilot` runtime is still unproven on Windows
-orchestration: this host has no Copilot CLI executable at all, only the
-VS Code bootstrapper, which pinning now refuses by design. The failure
-paths step 7 was meant to close - cancellation, timeout, expired
-credentials, streaming - therefore remain open for that runtime.
+The first run that proved this used the `claude` runtime, which installs a
+native executable. A later native installation showed the mainstream
+Copilot layout directly: VS Code's script and batch shims precede the
+WinGet `copilot.exe` on PATH. Pinning must continue past those refused
+entries to reach the installed CLI. Full Windows orchestration remains the
+release proof for cancellation, timeout, expired credentials, and streaming.
 
 ### 2026-07-26: locking is a file lock and termination is a tree walk
 
@@ -1549,10 +1615,9 @@ watcher.
 ### 2026-07-25: `.sh` handlers are refused on Windows
 
 Python and Node handlers already run natively, so plan mode is not
-blocked. `.sh` requires Git Bash or an explicitly configured
-interpreter; the WSL launcher on PATH is rejected by identity because
-accepting it would run handlers against the wrong root and appear to
-work.
+blocked. Windows reports no shell interpreter, so `.sh` and unrecognized
+extensions are refused at dispatch. There is no Git Bash probe or
+configured-interpreter escape hatch; portable examples use Python.
 
 ### 2026-07-25: Windows ownership is a generated UUID
 

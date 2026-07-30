@@ -41,6 +41,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from .headless import (
     agent_file_exists,
     clean_path,
     cli_shim_path,
+    is_ephemeral,
     list_agents,
     load_agent_config,
     packaged_execution,
@@ -226,7 +228,7 @@ def _lifecycle(subcommand: str, name: str) -> bool:
     so the full activation/teardown semantics apply."""
     result = subprocess.run(
         _self_argv(subcommand, "--name", name, root=repo_root()),
-        capture_output=True, text=True, check=False,
+        capture_output=True, **hostruntime.CHILD_TEXT, check=False,
     )
     if result.returncode == 0:
         return True
@@ -245,7 +247,7 @@ def _origin_main_synced(root: Path) -> bool:
         try:
             return subprocess.run(
                 ["git", *args], cwd=root,
-                capture_output=True, text=True, timeout=timeout)
+                capture_output=True, **hostruntime.CHILD_TEXT, timeout=timeout)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return None
     fetched = _git("fetch", "--quiet", "origin", "main", timeout=30)
@@ -282,7 +284,8 @@ def _agent_definition_exists(name: str, root: Path) -> bool:
             try:
                 probe = subprocess.run(
                     ["git", "cat-file", "-e", f"HEAD:{d}/{filename}"],
-                    cwd=root, capture_output=True, text=True, timeout=10,
+                    cwd=root, capture_output=True, timeout=10,
+                    **hostruntime.CHILD_TEXT,
                 )
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return True
@@ -308,8 +311,8 @@ def _prune_registry_orphans(root: Path, events: list[dict[str, str]]) -> dict:
                 "degraded": True}
     pruned: list[str] = []
     for name in sorted(owners):
-        if name.startswith("_"):
-            continue  # ephemeral fixtures are never registered or pruned
+        if is_ephemeral(name):
+            continue  # fixtures are never registered or pruned
         if _agent_definition_exists(name, root):
             continue
         if ownership.remove_owner(name):
@@ -413,8 +416,15 @@ def sweep() -> dict:
     # intent for. A deliberate stop removes that intent, so a stopped
     # agent is invisible here and is not restarted ("owned but stopped"
     # is durable).
+    #
+    # A fixture is never intended. Its run owns it start to finish, so a
+    # respawn entry outliving that run is residue, not intent, and
+    # restarting it would revive a fixture with no run behind it - and,
+    # when the restart failed, mark this sweep failed and suppress the
+    # very smoketest whose cleanup removes the residue (#232).
     intended = [name for name in schedules.watcher_respawn_names()
-                if name not in ownership_deactivated]
+                if name not in ownership_deactivated
+                and not is_ephemeral(name)]
 
     dead: list[str] = []
     restarted: list[str] = []
@@ -532,7 +542,8 @@ def plan_sweep() -> list[dict]:
     try:
         remote = subprocess.run(
             ["git", "ls-remote", "origin", "refs/heads/main"], cwd=repo_root(),
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True, check=False, timeout=10,
+            **hostruntime.CHILD_TEXT,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         remote = None
@@ -543,7 +554,7 @@ def plan_sweep() -> list[dict]:
     )
     if head and remote_sha == head:
         for name in sorted(owners):
-            if not name.startswith("_") and not _agent_definition_exists(
+            if not is_ephemeral(name) and not _agent_definition_exists(
                     name, repo_root()):
                 actions.append({
                     "action": "prune-ownership-record", "agent": name})
@@ -560,7 +571,8 @@ def _git_head(root: Path) -> str | None:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root,
-            capture_output=True, text=True, check=True, timeout=5,
+            capture_output=True, check=True, timeout=5,
+            **hostruntime.CHILD_TEXT,
         ).stdout.strip()
         return out or None
     except (subprocess.CalledProcessError, FileNotFoundError,
@@ -635,31 +647,55 @@ def _resolve_smoketest_runtime() -> str | None:
     return None
 
 
+def _load_smoketest_result(result_path: Path, started: float) -> dict:
+    try:
+        if result_path.stat().st_mtime >= started - 1:
+            return json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
 def _run_smoketest(root: Path, runtime: str) -> dict:
     started = time.time()
     result_path = paths.repo_state_dir(root) / "logs" / \
         "smoketest-framework-result.json"
     try:
-        process = hostruntime.spawn_detached(
-            _self_argv("smoketest", "--runtime", runtime, root=root),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        try:
-            stdout, stderr = process.communicate(timeout=SMOKETEST_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            hostruntime.terminate(process.pid, grace_s=15)
-            process.communicate()
-            return {"status": "fail",
-                    "duration_s": round(time.time() - started, 1),
-                    "runtime": runtime,
-                    "reason": f"timeout after {SMOKETEST_TIMEOUT_S}s"}
+        # Temporary files rather than pipes: a detached descendant can
+        # inherit the write handles and hold a pipe open long after the
+        # run is killed, which is what left maintenance waiting forever
+        # on `communicate()` (#232).
+        with (tempfile.TemporaryFile() as stdout_file,
+              tempfile.TemporaryFile() as stderr_file):
+            process = hostruntime.spawn_detached(
+                _self_argv("smoketest", "--runtime", runtime, root=root),
+                stdout=stdout_file, stderr=stderr_file,
+            )
+            try:
+                process.wait(timeout=SMOKETEST_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                hostruntime.terminate(process.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=hostruntime.TERMINATE_GRACE_S)
+                # What the killed run leaves behind is inert: fixtures
+                # are never restarted or adopted, and the next run's
+                # preflight cleanup removes them.
+                persisted = _load_smoketest_result(result_path, started)
+                failed_step = persisted.get("failed_step")
+                reason = f"timeout after {SMOKETEST_TIMEOUT_S}s"
+                if failed_step:
+                    reason += f" during {failed_step}"
+                return {"status": "fail",
+                        "duration_s": round(time.time() - started, 1),
+                        "runtime": runtime,
+                        "reason": reason,
+                        **({"failed_step": failed_step} if failed_step else {})}
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace")
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
         duration = round(time.time() - started, 1)
-        persisted: dict = {}
-        try:
-            if result_path.stat().st_mtime >= started - 1:
-                persisted = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            persisted = {}
+        persisted = _load_smoketest_result(result_path, started)
         detail = {key: persisted[key]
                   for key in ("runtime", "model", "failed_step", "reason",
                               "category")
@@ -836,7 +872,8 @@ def run_host_loop(quiet: bool) -> int:
         try:
             result = subprocess.run(
                 _self_argv("internal", "maintain", "--sweep", root=root),
-                capture_output=True, text=True, timeout=SWEEP_TIMEOUT_S,
+                capture_output=True, timeout=SWEEP_TIMEOUT_S,
+                **hostruntime.CHILD_TEXT,
             )
         except subprocess.TimeoutExpired:
             sweeps[alias] = {"repo": str(root), "status": "error",
@@ -964,7 +1001,7 @@ def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
         completed = subprocess.run(
             _self_argv(
                 "--json", "internal", "migrate", "--dry-run", root=root),
-            capture_output=True, text=True, check=False,
+            capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if completed.returncode != 0:
             preflight.emit_failure(
@@ -996,7 +1033,7 @@ def repair(*, dry_run: bool = False, quiet: bool = False) -> int:
         completed = subprocess.run(
             _self_argv(
                 "internal", "maintain", "--sweep", "--dry-run", root=root),
-            capture_output=True, text=True, check=False,
+            capture_output=True, **hostruntime.CHILD_TEXT, check=False,
         )
         if completed.returncode != 0:
             preflight.emit_failure(

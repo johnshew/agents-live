@@ -206,7 +206,8 @@ def _python_312_resolvable() -> bool:
         result = subprocess.run(
             ["uv", "run", hostruntime.interpreter_name(), "-c",
              "import sys; print(1 if sys.version_info >= (3, 12) else 0)"],
-            cwd=REPO, capture_output=True, text=True, timeout=120,
+            cwd=REPO, capture_output=True, timeout=120,
+            **hostruntime.CHILD_TEXT,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -369,14 +370,14 @@ def _task_inconsistencies() -> tuple[list[str], list[str]] | None:
     orphans: list[str] = []
     if referenced:
         try:
-            from .headless import list_agents  # noqa: PLC0415
+            from .headless import is_ephemeral, list_agents  # noqa: PLC0415
             existing = set(list_agents())
         except Exception:
             existing = None  # discovery unavailable: skip orphan half
         if existing is not None:
             orphans = sorted(
                 name for name in referenced
-                if name not in existing and not name.startswith("_"))
+                if name not in existing and not is_ephemeral(name))
     stale = [f"{root} (project root moved or deleted)"
              for root in sorted(missing_roots)]
     return orphans, stale
@@ -395,7 +396,8 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     only place they surface)."""
     try:
         completed = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True, timeout=10)
+            ["crontab", "-l"], capture_output=True, timeout=10,
+            **hostruntime.CHILD_TEXT)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if completed.returncode != 0:
@@ -403,7 +405,9 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
             return [], []  # no crontab yet: consistent by definition
         return None  # unreadable is not the same as empty: skip, don't vouch
     try:
-        from .headless import crontab_line_belongs_to_repo  # noqa: PLC0415
+        from . import crontasks  # noqa: PLC0415
+        from .headless import repo_root  # noqa: PLC0415
+        project_root = repo_root()
     except Exception:
         return None
     referenced: set[str] = set()
@@ -417,7 +421,7 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
         # are this project's concern (another project's agents are not
         # orphans here) - except lines whose pinned root no longer
         # exists at all, which no project can ever match or remove.
-        if not crontab_line_belongs_to_repo(stripped):
+        if not crontasks.belongs_to_root(stripped, project_root):
             try:
                 foreign_tokens = shlex.split(stripped)
             except ValueError:
@@ -443,14 +447,14 @@ def _crontab_inconsistencies() -> tuple[list[str], list[str]] | None:
     orphans: list[str] = []
     if referenced:
         try:
-            from .headless import list_agents  # noqa: PLC0415
+            from .headless import is_ephemeral, list_agents  # noqa: PLC0415
             existing = set(list_agents())
         except Exception:
             existing = None  # discovery unavailable: skip orphan half
         if existing is not None:
             orphans = sorted(
                 name for name in referenced
-                if name not in existing and not name.startswith("_"))
+                if name not in existing and not is_ephemeral(name))
     stale = sorted(p for p in script_paths if not Path(p).is_file())
     stale.extend(f"{root} (project root moved or deleted)"
                  for root in sorted(missing_roots))
@@ -523,7 +527,7 @@ def _copilot_tolerance_probe(native: dict[str, list[tuple[str, dict]]]) -> tuple
     try:
         r = subprocess.run(
             ["copilot", "--agent", "__agents_live_doctor_probe__", "-p", "probe"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, **hostruntime.CHILD_TEXT, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     listing = (r.stdout or "") + (r.stderr or "")
@@ -660,7 +664,8 @@ def collect() -> list[dict]:
     add(*_mechanism_check("schedule"))
     add("jq", _has("jq"), False, _fix("sudo apt install jq",
                                       "winget install jqlang.jq"),
-        note="only needed by shell handlers that parse JSON (write-files.sh)")
+        note="only needed by custom shell handlers that parse JSON; the "
+             "shipped write-files.py handler does not use it")
     add(*_mechanism_check("watch"))
     add_host_runtime_checks()
 
@@ -939,7 +944,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _hostname() -> str:
     try:
-        out = subprocess.run(["hostname", "-s"], capture_output=True, text=True,
+        out = subprocess.run(["hostname", "-s"], capture_output=True,
+                             **hostruntime.CHILD_TEXT,
                              timeout=2).stdout.strip()
         if out:
             return out.lower()

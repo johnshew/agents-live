@@ -17,13 +17,14 @@ from pathlib import Path
 from typing import Iterator
 
 try:
-    from . import preflight
+    from . import hostruntime, preflight
 except ImportError:
-    import preflight
+    import hostruntime  # type: ignore[no-redef]
+    import preflight  # type: ignore[no-redef]
 
 
 def _paths_module():
-    """The paths module under either layout (see preflight above: this
+    """The paths module under either layout (see hostruntime above: this
     module is also imported flat by ``uv run --script`` dispatches)."""
     try:
         from . import paths
@@ -298,7 +299,7 @@ def _child_json(alias: str, path: str, command: str) -> dict:
         env[SKIP_UPDATE_CHECK_ENV] = "1"
     completed = subprocess.run(
         [*_cli_base(), "--repo", path, command, "--json"],
-        capture_output=True, text=True, check=False, env=env,
+        capture_output=True, check=False, env=env, **hostruntime.CHILD_TEXT,
     )
     try:
         payload = json.loads(completed.stdout)
@@ -364,7 +365,8 @@ def collect_doctor() -> dict:
         env["XDG_CONFIG_HOME"] = empty
         host_run = subprocess.run(
             [*_cli_base(), "--json", "doctor"],
-            cwd=empty, env=env, capture_output=True, text=True, check=False,
+            cwd=empty, env=env, capture_output=True, check=False,
+            **hostruntime.CHILD_TEXT,
         )
     try:
         host = json.loads(host_run.stdout)

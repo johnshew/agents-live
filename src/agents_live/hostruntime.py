@@ -365,6 +365,58 @@ def use_utf8_io() -> None:
         _use_utf8_console()
 
 
+# The decoding half of `use_utf8_io`: how a captured child's bytes become
+# text. `text=True` alone asks Python for the locale encoding, which is
+# UTF-8 on POSIX and the ANSI code page on Windows, so the same call
+# reads correctly on one host and mojibake on the other (#241). Every
+# child this tool launches is one it also configures - its own
+# subcommands, `uv`, `node`, `git` - and they all write UTF-8. A child
+# that does not is not covered by this and settles its own encoding:
+# `schtasks` writes the console code page and `wintasks` decodes it as
+# `oem`, and PowerShell is told what to write by `powershell_argv`.
+# Errors are replaced because a foreign byte is a bad log line, not a
+# reason to fail the operation that read it.
+CHILD_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
+# Windows PowerShell writes the console OEM code page into a pipe, not
+# UTF-8, so `café` arrives as two undecodable bytes and an em dash
+# arrives as `-` - lost in the child, before any decoder could help.
+# Declaring the output encoding is the only repair that works from both
+# a Windows host and a WSL one, where Python has no `oem` codec to
+# decode with. PowerShell 7 already writes UTF-8 and is unaffected.
+_POWERSHELL_UTF8 = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();"
+
+
+def powershell_argv(executable: str, script: str) -> list[str]:
+    """argv that runs *script* and writes its output as UTF-8.
+
+    Every captured PowerShell call goes through here, so the output
+    :data:`CHILD_TEXT` then decodes is UTF-8 by construction rather than
+    by luck.
+    """
+    return [executable, "-NoProfile", "-NonInteractive", "-Command",
+            _POWERSHELL_UTF8 + script]
+
+
+def split_command_line(text: str) -> list[str]:
+    """A process's command line as the argument list it was built from.
+
+    The inverse of what `process_command_lines` reports, and it lives
+    here for that reason: on Windows the arguments were joined by
+    quoting rules rather than by spaces, and a repo root routinely has a
+    space in it, so only the parser that wrote the line can read it
+    back. POSIX reports argv already separated.
+    """
+    if not _IS_WINDOWS:
+        return text.split()
+    from . import wintasks  # noqa: PLC0415 - Windows leaf
+
+    try:
+        return wintasks.parse_command_line(text)
+    except wintasks.TaskError:
+        return text.split()
+
+
 def executable_filename(name: str) -> str:
     """The file name an installed console entry point has on this host.
 
@@ -416,23 +468,50 @@ def pin_executable(name: str, *, path: str | None = None) -> str:
     name alone pins nothing there and the absolute path is resolved up
     front instead.
 
+    The Windows search walks PATH and PATHEXT in the order Windows
+    itself would, skipping the shims in ``_WINDOWS_REFUSED_SUFFIXES``
+    rather than stopping at the first one: the mainstream Copilot layout
+    puts VS Code's shims ahead of the installed executable, so refusing
+    the first answer would refuse a host that has the CLI (#238). Unlike
+    `shutil.which` it never searches the current directory, which is not
+    a place a launched executable should come from.
+
     Raises :class:`ExecutableNotFound` when nothing on *path* answers to
-    the name, or when the only answer is a script or batch shim (see
-    ``_WINDOWS_REFUSED_SUFFIXES``).
+    the name, or when every answer is a refused shim.
     """
     if not _IS_WINDOWS:
         return name
-    resolved = shutil.which(name, path=path)
-    if resolved is None:
+    search_path = os.environ.get("PATH", "") if path is None else path
+    path_ext = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+    extensions = ([""] if Path(name).suffix else
+                  [suffix for suffix in path_ext if suffix])
+    directories = ([""] if os.path.dirname(name) else
+                   [directory for directory in search_path.split(os.pathsep)
+                    if directory])
+    refused: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for directory in directories:
+        for extension in extensions:
+            candidate = os.path.join(directory, name + extension)
+            normalized = os.path.normcase(os.path.abspath(candidate))
+            if normalized in seen or not os.path.isfile(candidate):
+                continue
+            seen.add(normalized)
+            resolved = str(Path(candidate).resolve())
+            reason = _WINDOWS_REFUSED_SUFFIXES.get(
+                Path(resolved).suffix.lower())
+            if reason is not None:
+                refused.append((resolved, reason))
+                continue
+            return resolved
+    if refused:
+        resolved, reason = refused[0]
         raise ExecutableNotFound(
-            f"no executable named '{name}' on this host's PATH")
-    suffix = Path(resolved).suffix.lower()
-    reason = _WINDOWS_REFUSED_SUFFIXES.get(suffix)
-    if reason is not None:
-        raise ExecutableNotFound(
-            f"'{name}' resolves to {resolved}, {reason}; install the CLI "
-            f"itself, or point the runtime at its executable")
-    return resolved
+            f"only shims answer to '{name}' on this host's PATH; "
+            f"{resolved} is {reason}; install the CLI itself, or point "
+            f"the runtime at its executable")
+    raise ExecutableNotFound(
+        f"no executable named '{name}' on this host's PATH")
 
 
 # ---------------------------------------------------------------------------
@@ -734,8 +813,8 @@ if _IS_WINDOWS:
                   "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
         try:
             completed = subprocess.run(
-                [shell, "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, timeout=30,
+                powershell_argv(shell, script),
+                capture_output=True, **CHILD_TEXT, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired):
             return []
@@ -841,7 +920,7 @@ else:
         """Every visible process as ``(pid, command line)``."""
         try:
             completed = subprocess.run(
-                ["ps", "-eo", "pid=,args="], capture_output=True, text=True,
+                ["ps", "-eo", "pid=,args="], capture_output=True, **CHILD_TEXT,
                 check=True)
         except (OSError, subprocess.CalledProcessError):
             return []
@@ -875,6 +954,10 @@ def spawn_detached(
     Detachment means two things on both platforms: the child does not
     die with its parent, and it leads its own group or tree, so
     :func:`terminate` can take it down with everything it spawned.
+
+    ``text`` decodes the child's streams through :data:`CHILD_TEXT`
+    rather than the locale, for the same reason every other capture in
+    the tool does.
     """
     return subprocess.Popen(
         list(argv),
@@ -883,7 +966,7 @@ def spawn_detached(
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
-        text=text,
+        **(CHILD_TEXT if text else {}),
         **_detached_popen_kwargs(),
     )
 
@@ -919,7 +1002,7 @@ def defer_until_environment_exits(
     )
     try:
         spawn_detached(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            powershell_argv(powershell, script),
             stdin=subprocess.DEVNULL, stdout=None, stderr=None)
     except OSError:
         return False

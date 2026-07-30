@@ -438,7 +438,8 @@ def main(argv: list[str] | None = None) -> int:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
-                **({"capture_output": True, "text": True} if capture else {}),
+                **({"capture_output": True, **hostruntime.CHILD_TEXT}
+                   if capture else {}),
             )
         except KeyboardInterrupt:
             # Ctrl-C reaches the child (same process group) which handles

@@ -76,7 +76,7 @@ class PosixEventSource:
             ["inotifywait", "-m", "-r", "-e", self.EVENTS,
              *[str(d) for d in self.directories], "--format", "%w%f"],
             cwd=self._cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1)
+            **hostruntime.CHILD_TEXT, bufsize=1)
         if self._process.stdout is None:
             raise WatchFailed("watcher stdout was not available")
         descriptor = self._process.stdout.fileno()

@@ -230,7 +230,8 @@ def current_host() -> str:
 def _read_current_host() -> str:
     try:
         out = subprocess.run(
-            ["hostname", "-s"], capture_output=True, text=True, check=True, timeout=2,
+            ["hostname", "-s"], capture_output=True, check=True, timeout=2,
+            **hostruntime.CHILD_TEXT,
         ).stdout.strip()
         if out:
             return out.lower()

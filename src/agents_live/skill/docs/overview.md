@@ -1,7 +1,7 @@
 ---
 title: Agents Live Overview
 description: Architecture, design principles, and market positioning for agents-live
-ms.date: 2026-07-21
+ms.date: 2026-07-30
 ms.topic: overview
 ---
 
@@ -31,7 +31,7 @@ optional pre/post scripts). A live agent looks like this:
 runtime: claude            # unattended execution adapter
 mode: plan                 # read-only; a handler script does the writing
 watchPath: notes/inbox/    # or schedule: "0 8 * * *", or both
-post-processor: file-notes.sh
+post-processor: Agents/handlers/file-notes.py
 ---
 For each new file in notes/inbox/: add frontmatter and tags, fix the
 title, decide where it belongs in the vault, and emit JSON:
@@ -40,7 +40,7 @@ title, decide where it belongs in the vault, and emit JSON:
 
 Drop a raw note into `notes/inbox/` and the watcher fires within
 seconds; one agent run later the note is cleaned up and filed. The agent
-decides, but the only thing that touches your vault is `file-notes.sh`,
+decides, but the only thing that touches your vault is `file-notes.py`,
 a deterministic script you own.
 
 **Why use this?** You keep the Claude Code and GitHub Copilot agents, prompts,

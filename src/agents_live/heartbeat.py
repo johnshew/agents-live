@@ -163,8 +163,8 @@ def _powershell() -> str:
 
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
-        [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True, text=True, timeout=30)
+        hostruntime.powershell_argv(_powershell(), script),
+        capture_output=True, **hostruntime.CHILD_TEXT, timeout=30)
     if completed.returncode:
         detail = completed.stderr.strip().splitlines()
         raise RuntimeError(

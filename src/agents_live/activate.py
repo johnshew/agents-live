@@ -23,6 +23,7 @@ from .headless import (
     cli_invocation,
     ensure_logs_dir,
     find_watcher_pid,
+    is_ephemeral,
     list_active_agent_names,
     list_agents,
     load_agent_config,
@@ -605,7 +606,7 @@ def _resolve_activation_ownership(
     # process. They are never gated by ownership and never seeded into
     # agent-owners.json, so the framework smoketest works on every host
     # regardless of registry state.
-    if name.startswith("_"):
+    if is_ephemeral(name):
         return True
 
     # Registry mode: a missing/corrupt registry is abstention, never

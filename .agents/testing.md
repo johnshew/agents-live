@@ -97,7 +97,7 @@ tar -tzf "dist/agents_live-${version}.tar.gz"
 
 Confirm that package modules, the vendored skill payload, tests, and release
 tools are present. The source distribution intentionally includes the generic
-`Agents/handlers/write-files.sh` fixture and `Agents/logs/.gitkeep`; no other
+`Agents/handlers/write-files.py` fixture and `Agents/logs/.gitkeep`; no other
 `Agents/` logs or data, deployment-specific agents, or private adapters should
 be present. The wheel contains only the installable package and its metadata.
 

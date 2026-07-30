@@ -424,7 +424,7 @@ def _run_script(script: str, args: list[str],
             _script_argv(script, args),
             cwd=_require_repo_path(REPO_ROOT),
             capture_output=True,
-            text=True,
+            **hostruntime.CHILD_TEXT,
             timeout=timeout,
             # Never hand children the dashboard's tty: a child that
             # prompts (ownership takeover) would block forever with its

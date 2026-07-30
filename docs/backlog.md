@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-07-29
+ms.date: 2026-07-30
 ms.topic: concept
 ---
 
@@ -62,6 +62,28 @@ These are complements, not duplicates: one rebalances what the suite
 executes, the other changes what counts as coverage before a fix is
 called done.
 
+The slices done so far point at one shape worth repeating. An invariant
+that states a rule about the whole package - no subprocess capture may
+rely on the platform locale - costs less than the mock tests it replaces,
+cannot drift as the package grows, and runs on hosts where the defect it
+guards cannot be reproduced. That last property matters most on Windows,
+where the platform receiving the most change is the one CI sees least.
+An assertion about a literal in one file is the anti-pattern: it breaks
+on unrelated edits and proves nothing. A test is not finished until the
+fix has been removed and the test watched to fail.
+
+The corollary, learned the hard way: a Windows-only test that flakes is
+worse than no test, because on that platform it is the only signal and
+an untrustworthy signal invites ignoring the suite.
+
+What these slices have not done is change the balance #184 was filed
+about. The suite has grown from 45 classes and 420 tests to 58 and 527
+at a constant ~1.45 patch calls per test, so the mock-driven population
+is keeping pace rather than shrinking. The decision #184 poses - convert
+those classes, or state plainly that their job is import and signature
+breakage rather than behaviour - is still open, and incremental slices
+will not make it for us.
+
 ## Safer execution modes in practice
 
 `plan` and `pipeline` are documented as the safe defaults, but the
@@ -85,12 +107,34 @@ the seam is, why it is functions rather than a protocol object, and what
 the spikes contradicted. Whether the Windows half earns its keep in the
 long run stays an open product question; the seam itself is settled.
 
+The direction for keeping it settled is that a Windows defect is fixed at
+the seam, not at the call site. Three rounds of that have now landed:
+child-output decoding became a host-runtime member instead of a habit
+repeated in every module, the crontab became a trigger store beside Task
+Scheduler instead of mechanics inside `headless` that forced the dispatch
+point to branch per operation, and reading a command line back moved
+beside the enumeration that produced it. All three removed code.
+
+Two tests for any future platform fix follow from that. Does it leave
+common code with one more special case or one fewer? And if it needs a
+new mode or flag to compensate for behaviour elsewhere, is that other
+behaviour the actual defect? The second test retired a hidden
+`smoketest --cleanup-only` mode: the residue it cleaned up was harmless,
+and what was really wrong was that the maintenance sweep tried to adopt
+an ephemeral fixture. Fixtures now belong to the run that creates them,
+named once as `headless.is_ephemeral` and honoured everywhere.
+
 What is not settled is process and file lifecycle on that platform.
 Windows will not delete or replace a running executable, and the defects
 that follow from it keep arriving through the seam rather than in it:
 locked launchers during upgrade, deferred self-removal during uninstall,
 and detached processes that outlive the run that started them. Those are
 tracked under the theme above rather than here.
+
+Installation and first-run readiness on native Windows is the remaining
+gap before the platform is releasable from an installed artifact
+([#243](https://github.com/johnshew/agents-live/issues/243),
+[#244](https://github.com/johnshew/agents-live/issues/244)).
 
 ## Maintaining this file
 

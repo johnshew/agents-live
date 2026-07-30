@@ -172,7 +172,7 @@ def _in_sandbox() -> bool:
         result = subprocess.run(
             ["crontab", "-l"],
             capture_output=True,
-            text=True,
+            **hostruntime.CHILD_TEXT,
             check=False,
         )
     except FileNotFoundError:

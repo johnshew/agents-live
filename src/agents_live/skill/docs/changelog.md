@@ -6,6 +6,32 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: native Windows Copilot runs resolve the installed CLI and decode its output reliably. (#238, #241)
+  Executable pinning continues past refused PowerShell and batch shims to the
+  first native executable on PATH. Captured subprocess output is decoded UTF-8
+  through one host-runtime member instead of the platform locale, which on
+  Windows was the ANSI code page and made successful steps report failure.
+  PowerShell is told to write UTF-8 rather than assumed to: it emits the
+  console OEM code page into a pipe, so a non-ASCII path in the WSL heartbeat
+  or in an enumerated command line was corrupted before anything decoded it.
+- fix: timed-out framework smoketests leave maintenance and the next run usable. (#232)
+  Recovery cannot block on output handles a detached descendant inherited, and
+  it reports the last stage reached before the timeout. Smoketest fixtures are
+  also never adopted by host maintenance: the sweep used to try to restart a
+  fixture watcher a killed run left behind, and a failed restart suppressed the
+  next smoketest, which is what would have cleaned the residue up.
+- fix: Copilot pipeline mode keeps its independently resolved MCP bridge compatible. (#240)
+  The bridge now shares the package's MCP 1.x constraint and starts in a fresh
+  uv script environment instead of failing behind an agent timeout.
+- fix: shipped handler examples run on every supported host. (#239)
+  A dependency-free Python `write-files` template replaces the Bash and jq
+  default, while Windows documentation states that shell handlers remain a
+  POSIX-only capability.
+- refactor: the crontab is a trigger store beside Task Scheduler, not a special case. (#184)
+  Crontab mechanics moved out of `headless` into a `crontasks` module that
+  answers the same questions as `wintasks` with the same signatures, so the
+  scheduling dispatch point chooses a store once instead of branching on the
+  platform in every operation. No trigger changes form.
 - feat: native Windows installs generate PowerShell completion. (#233)
   It sits alongside the Windows-local Bash and Zsh files. Linux and WSL
   continue to install only Bash and Zsh completion in their own XDG data

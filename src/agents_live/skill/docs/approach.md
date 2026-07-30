@@ -1,7 +1,7 @@
 ---
 title: Agents Live Architecture
 description: Architecture and runtime contracts for agents-live triggered agents
-ms.date: 2026-07-21
+ms.date: 2026-07-30
 ms.topic: concept
 ---
 
@@ -82,8 +82,8 @@ weekly-summary    cron     0 8 * * 0     agency copilot   plan  stopped
 
 Agents/                              # git-tracked content only
 ├── handlers/                        # deterministic pre/post-processors
-│   ├── write-files.sh               # generic: JSON files[] → disk
-│   └── ms-todo-to-md.sh             # agent-specific: To Do JSON → .md files
+│   ├── write-files.py               # generic: JSON files[] → disk
+│   └── ms-todo-to-md.py             # agent-specific: To Do JSON → .md files
 └── data/
     └── agent-owners.json            # git-synced shared multi-host ownership state
 
@@ -136,7 +136,7 @@ configuration. There is no separate manifest or Agents Live agent format.
 runtime: copilot               # required unattended execution adapter
 mode: plan                     # plan (read-only) or write (default: plan)
 model: claude-haiku-4.5        # optional model override
-handler: ms-todo-to-md.sh      # handler script name, or omit for log-only
+handler: ms-todo-to-md.py      # handler script name, or omit for log-only
 env:                           # optional env vars for the agent process
   EXAMPLE_KEY: example-value
 mcps:                          # MCP servers (agency agents only)
@@ -172,7 +172,7 @@ schedule: "0 * * * *"          # cron expression (scheduled agent)
 | `transcript` | no | `true` | Capture full session transcript (copilot: `--share`). Set `false` to disable for noisy/stable agents |
 | `output-schema` | no | *(none)* | Safe-output (§3.9): JSON Schema the agent output must satisfy - inline mapping, or a `.json` file reference beside the agent. Failure = `agent_output_invalid`; the post-processor never runs |
 | `output-max-bytes` | no | `1048576` | Safe-output: cap on raw agent stdout bytes (always enforced; this key overrides the default) |
-| `output-path-roots` | no | *(none)* | Safe-output: repo-relative roots; every `path` field in the agent's JSON must resolve under one of them (the `write-files.sh` pattern) |
+| `output-path-roots` | no | *(none)* | Safe-output: repo-relative roots; every `path` field in the agent's JSON must resolve under one of them (the `write-files.py` pattern) |
 | `output-provenance` | no | *(none)* | Safe-output: `strict` requires the whole stdout to be a single unrepaired JSON document (extraction record `source=stdout, repaired=false, candidates=1`); default remains accept-and-act |
 
 The three opt-in safe-output keys validate stdout and are rejected on
@@ -218,7 +218,7 @@ The JSON output includes all frontmatter fields plus computed state:
       "mode": "plan",
       "promptPath": ".claude/agents/todo-sync.md",
       "state": "stopped",
-      "handler": "Agents/handlers/ms-todo-to-md.sh",
+      "handler": "Agents/handlers/ms-todo-to-md.py",
       "schedule": "0 * * * *",
       "mcps": ["softeria"]
     }
@@ -252,11 +252,14 @@ contracts:
   checkout or `agents-live internal watch-loop <name>` when packaged.
   Matching uses the adjacent `watch-loop <name>` action/name pair.
 
-`headless.py` exposes both the per-name lookup (`cron_line_matches`,
-watcher cmdline matching) and the reverse, enumerate-all lookup
-(`_list_active_cron_agent_names`, `_list_active_watcher_agent_names`,
-`list_active_agent_names`). The reverse lookup is what makes a deleted agent
-file a complete decommission:
+`schedules.py` is the one place that chooses between the two trigger
+stores - `crontasks.py` for the user crontab, `wintasks.py` for Task
+Scheduler - and they answer the same questions with the same
+signatures, so nothing above it knows there are two. Each store exposes
+the per-name lookup and the reverse, enumerate-all lookup
+(`installed_names`); `headless.py` keeps the watcher-process side
+(`list_active_agent_names`). The reverse lookup is what makes a deleted
+agent file a complete decommission:
 
 - `activate.py --prune-orphans` enumerates everything live on the host and
   tears down (cron + watcher + desired-state entries) any name with no backing
@@ -300,8 +303,9 @@ is required when `runtime: none`.
 
 **Plan + handler** is preferred: the agent thinks, the script acts. Prompts
 include a JSON output section; handlers process the JSON. The generic handler
-(`write-files.sh`) creates files from JSON. Write agent-specific handlers for
-custom processing (e.g. `ms-todo-to-md.sh` transforms To Do API data into
+(`write-files.py`, shipped in the skill templates) creates files from JSON on
+every supported host. Write agent-specific handlers for custom processing
+(e.g. `ms-todo-to-md.py` transforms To Do API data into
 Obsidian notes).
 
 **Pipeline mode** (`mode: pipeline`) replaces stdin/stdout/files as the
@@ -452,7 +456,7 @@ Supports all agents via `--agent`. Stops and cleans up on failure.
 | Claude Code | `npm i -g @anthropic-ai/claude-code` | Agent CLI for `claude` / `agency claude` |
 | Copilot CLI | `npm i -g @github/copilot` | Agent CLI for `copilot` / `agency copilot` |
 | `crontab` | `sudo apt install cron` | Scheduled agents |
-| `jq` | `sudo apt install jq` | JSON parsing in handlers |
+| `jq` | `sudo apt install jq` | Optional dependency for custom shell handlers that use it |
 | `inotifywait` | `sudo apt install inotify-tools` | File watcher |
 
 ### MCP server resolution (source of truth + override)
@@ -523,7 +527,7 @@ repo is resolved, and the tool work with no initialized project.
 Each line is a JSON object with at minimum `ts` (ISO-8601 UTC) and `phase`:
 
 ```json
-{"ts":"2026-04-08T13:05:01Z","phase":"start","trigger":"cron","runtime":"agency copilot","mode":"plan","handler":"ms-todo-to-md.sh"}
+{"ts":"2026-04-08T13:05:01Z","phase":"start","trigger":"cron","runtime":"agency copilot","mode":"plan","handler":"ms-todo-to-md.py"}
 {"ts":"2026-04-08T13:05:15Z","phase":"agent","status":"ok","output":"...","model":"claude-sonnet-4-6","tokens_in":"12.4k","tokens_out":"174","tokens_cached":"12.4k","cost_usd":"0.0308"}
 {"ts":"2026-04-08T13:05:16Z","phase":"handler","status":"ok","message":"wrote 1 file, 9 unchanged"}
 {"ts":"2026-04-08T13:05:16Z","phase":"done","status":"ok","duration_s":15.0}
