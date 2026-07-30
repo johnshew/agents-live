@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.5.0 - 2026-07-30
+
 - fix: native Windows Copilot runs resolve the installed CLI and decode its output reliably. (#238, #241)
   Executable pinning continues past refused PowerShell and batch shims to the
   first native executable on PATH. Captured subprocess output is decoded UTF-8
