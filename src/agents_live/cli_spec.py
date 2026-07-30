@@ -302,12 +302,24 @@ Zsh:
         autoload -Uz compinit
         compinit
 
+PowerShell:
+    # Load completions for the current session.
+    agents-live completions powershell | Out-String | Invoke-Expression
+
+    On Windows, --update prints the persistent script path. Dot-source that
+    Windows-local path from your PowerShell profile to load it in new sessions.
+
 Persistent install or repair:
-    agents-live completions --update""",
+    agents-live completions --update
+
+Windows installs Bash, Zsh, and PowerShell files in Windows-local user data.
+Linux and WSL install Bash and Zsh files in their own XDG data home. Agents
+Live never discovers or writes completion files across the Windows/WSL
+boundary and never edits shell startup files.""",
         args=(
             Arg(("shell",), "Shell name.", kind="positional",
-                choices=("bash", "zsh")),
-            Arg(("--update",), "Install or refresh both shells."),
+                choices=("bash", "zsh", "powershell")),
+            Arg(("--update",), "Install or refresh runtime completions."),
         ),
     ),
     Cmd(

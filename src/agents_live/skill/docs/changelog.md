@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: native Windows installs generated PowerShell completion alongside its
+  Windows-local Bash and Zsh files. (#233) Linux and WSL continue to install
+  only Bash and Zsh completion in their own XDG data home. Neither runtime
+  probes or writes the other runtime's files.
+
 ## 5.4.2 - 2026-07-29
 
 - fix: native dashboards no longer reject their own loopback server. (#228)
