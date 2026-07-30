@@ -3464,7 +3464,10 @@ class TestCliContract(_TempProject):
             / "agents-live-completion.ps1")
 
         expected = (bash_path, zsh_path, powershell_path)
-        self.assertEqual(completions.update(), expected)
+        with mock.patch.object(
+                completions.hostruntime, "id",
+                return_value=completions.hostruntime.WINDOWS):
+            self.assertEqual(completions.update(), expected)
 
         self.assertEqual(bash_path.read_text(encoding="utf-8"), completions.bash())
         self.assertEqual(zsh_path.read_text(encoding="utf-8"), completions.zsh())
@@ -3540,11 +3543,10 @@ class TestCliContract(_TempProject):
         sibling = completions.destinations()[0].with_name("other-command")
         sibling.write_text("keep\n", encoding="utf-8")
 
-        self.assertEqual(completions.remove(), completions.destinations())
+        destinations = completions.destinations()
+        self.assertEqual(completions.remove(), destinations)
 
-        self.assertFalse(completions.destinations()[0].exists())
-        self.assertFalse(completions.destinations()[1].exists())
-        self.assertFalse(completions.destinations()[2].exists())
+        self.assertTrue(all(not path.exists() for path in destinations))
         self.assertTrue(sibling.is_file())
 
     def test_completions_help_explains_installation(self) -> None:
