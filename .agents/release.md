@@ -41,7 +41,9 @@ The audit must report no personal information, secrets, or nonportable
 paths, and its adapter-resolution and doc-link checks must pass.
 The framework smoketest must pass end to end: it exercises the real
 trigger/run/status loop in this checkout, catching integration breaks
-the unit suite cannot. `tools/release.py` runs all of these gates
+the unit suite cannot. It uses whichever agent CLI this host can launch,
+preferring `copilot`, so the gate does not require a particular vendor's
+CLI to be installed. `tools/release.py` runs all of these gates
 itself during `--prepare` and `--publish`.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one

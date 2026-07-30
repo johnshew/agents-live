@@ -609,6 +609,13 @@ smoketest directly, run `doctor` first and stop if any required check fails.
 agents-live smoketest
 ```
 
+Without `--runtime`, the smoketest uses the first agent CLI this host can
+actually launch, preferring `copilot` and falling back to `claude`. The gate
+proves the trigger, run, and status loop, and any adapter the host can start
+proves it equally, so a host with only one agent CLI installed can still run
+it. "Can launch" is decided by the same executable pinning dispatch uses, so a
+name answered only by a Windows `.cmd` or `.ps1` shim counts as absent.
+
 The full 13-step chain is the default. A host-local advisory lock prevents
 manual and health-check runs from sharing the fixed `_smoketest-*` resources.
 A contender exits with status 75 (`BUSY`) without changing resources or the

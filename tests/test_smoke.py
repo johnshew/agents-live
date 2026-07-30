@@ -4934,6 +4934,36 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
             hostruntime.pin_executable("agents-live-no-such-tool",
                                        path=self._tmp.name)
 
+    def test_a_runtime_answered_only_by_a_shim_is_not_launchable(self) -> None:
+        # The distinction the release gate needed: `which` reports the
+        # shim and calls the CLI present, pinning refuses it, and only
+        # the second answer says whether a run can start (#246).
+        if not self.windows:
+            self.skipTest("only Windows resolves a name to a shim")
+        directory = Path(self._tmp.name)
+        (directory / "copilot.bat").write_text("@echo off\n", encoding="utf-8")
+        with (
+            mock.patch.object(headless, "clean_path",
+                              return_value=str(directory)),
+            mock.patch.dict(os.environ, {"PATHEXT": ".BAT;.EXE"}),
+        ):
+            self.assertIsNotNone(
+                shutil.which("copilot", path=str(directory)))
+            self.assertFalse(headless.runtime_is_launchable("copilot"))
+
+    def test_a_runtime_with_a_real_executable_is_launchable(self) -> None:
+        directory = Path(self._tmp.name)
+        binary = directory / hostruntime.executable_filename("copilot")
+        binary.write_bytes(b"copilot")
+        binary.chmod(0o755)
+        with (
+            mock.patch.object(headless, "clean_path",
+                              return_value=str(directory)),
+            mock.patch.dict(os.environ, {"PATHEXT": ".BAT;.EXE"}),
+        ):
+            self.assertTrue(headless.runtime_is_launchable("copilot"))
+
+
     def test_shell_handler_runs_only_where_there_is_a_shell(self) -> None:
         handler = Path(self._tmp.name) / "handler.sh"
         handler.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -4984,6 +5014,28 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
             os.environ.pop("PYTHONUTF8", None)
             hostruntime.use_utf8_io()
             self.assertEqual(os.environ["PYTHONUTF8"], "1")
+
+
+class TestSmoketestRuntimeChoice(unittest.TestCase):
+    """The gate proves the loop; any launchable adapter proves it (#246)."""
+
+    def _choose(self, launchable: set[str]) -> str:
+        with mock.patch.object(smoketest, "runtime_is_launchable",
+                               side_effect=lambda name: name in launchable):
+            return smoketest._default_runtime()
+
+    def test_the_preferred_runtime_wins_when_both_are_launchable(self) -> None:
+        self.assertEqual(self._choose({"copilot", "claude"}), "copilot")
+
+    def test_the_other_runtime_is_used_when_the_preferred_one_is_absent(
+            self) -> None:
+        self.assertEqual(self._choose({"claude"}), "claude")
+
+    def test_no_launchable_runtime_still_names_one(self) -> None:
+        # So the run fails with that runtime's own diagnosis - which says
+        # what is wrong with the install - rather than with a choice the
+        # gate made silently.
+        self.assertEqual(self._choose(set()), smoketest.RUNTIME_PREFERENCE[0])
 
 
 class TestWindowsScheduling(unittest.TestCase):

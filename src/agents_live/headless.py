@@ -160,6 +160,7 @@ __all__ = [
     "list_active_agent_names",
     "agent_details",
     "is_ephemeral",
+    "runtime_is_launchable",
 ]
 
 
@@ -1392,6 +1393,21 @@ def _runtime_binary(runtime: str) -> list[str]:
     except hostruntime.ExecutableNotFound as exc:
         raise AgentsLiveError(f"runtime '{runtime}': {exc}") from exc
     return binary
+
+
+def runtime_is_launchable(runtime: str) -> bool:
+    """Whether this host can actually start *runtime*'s CLI.
+
+    Asks the question dispatch will ask, which is not the question
+    `shutil.which` answers: on Windows a name is routinely answered only
+    by a `.cmd` or `.ps1` shim that pinning refuses, so `which` reports
+    a CLI that cannot be launched.
+    """
+    try:
+        _runtime_binary(runtime)
+    except AgentsLiveError:
+        return False
+    return True
 
 
 @lru_cache(maxsize=8)

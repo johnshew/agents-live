@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: `smoketest` runs on a host that has one agent CLI rather than a particular one.
+  It defaulted to `claude` and failed outright where only Copilot was
+  installed, which also made the release gate unrunnable there. It now picks
+  the first runtime the host can actually launch, preferring `copilot`, and
+  `--runtime` still names one explicitly. Launchability is decided by the same
+  pinning that dispatch uses, so a name answered only by a Windows shim counts
+  as absent rather than present.
+
 ## 5.5.0 - 2026-07-30
 
 - fix: native Windows Copilot runs resolve the installed CLI and decode its output reliably. (#238, #241)
