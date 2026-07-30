@@ -312,6 +312,28 @@ def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
 # rewritten by an install or an upgrade.
 _SHIM_NAME = hostruntime.executable_filename("agents-live")
 
+# Long enough for a cold uv to answer, short enough that a command
+# blocked on it does not look hung.
+_TOOL_DIR_TIMEOUT_S = 15
+
+
+def tool_environment() -> Path | None:
+    """Where uv keeps this tool, or ``None`` if it will not say.
+
+    Asked of uv rather than derived from ``sys.prefix``: a command can be
+    run from an ephemeral ``uvx`` environment or from a checkout, neither
+    of which is the installation it is about to change.
+    """
+    try:
+        uv = find_uv()
+        completed = subprocess.run(
+            [uv, "tool", "dir"], capture_output=True, text=True,
+            check=True, timeout=_TOOL_DIR_TIMEOUT_S)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    environment = Path(completed.stdout.strip()) / "agents-live"
+    return environment if environment.is_dir() else None
+
 
 def converge(roots: list[Path], *, trigger: str = "unspecified",
              pin_primary: bool = True) -> bool:

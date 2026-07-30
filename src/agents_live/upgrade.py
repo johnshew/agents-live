@@ -12,8 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import (__version__, adminlog, hostruntime, init, paths, plugins,
-               preflight, repos)
+from . import (__version__, adminlog, dashboards, hostruntime, init, paths,
+               plugins, preflight, repos, triggers)
 from .spawn import find_uv
 
 
@@ -87,6 +87,77 @@ def _install_command(uv: str, source: Path | None) -> list[str]:
             "--reinstall-package", "agents-live", str(source)]
 
 
+def _holders(environment: Path) -> list[str]:
+    """The long-lived agents-live processes running out of *environment*.
+
+    Watchers and dashboards outlive the command that started them and
+    hold the environment's files open. uv discovers that only part way
+    through rebuilding, which is how an upgrade removes a plugin and then
+    fails on the launcher, leaving neither the old nor the new state
+    (#231).
+
+    This process is deliberately not counted. It runs from the same
+    environment and cannot stop itself, and uv writes the launcher last,
+    so the launcher it holds is already covered by
+    :func:`plugins.only_the_launcher_failed`. Only processes an operator
+    can act on are named.
+    """
+    from .headless import split_command_line, watchers_on_host  # noqa: PLC0415
+
+    try:
+        held = {
+            pid for pid, command in hostruntime.process_command_lines()
+            if any(triggers.within(arg, environment)
+                   for arg in split_command_line(command))
+        }
+        watchers = watchers_on_host(under=environment)
+    except OSError:
+        # An unreadable process table must not fail an upgrade that would
+        # otherwise work; uv still reports whatever it cannot replace.
+        return []
+    holders = [
+        f"watcher '{name}'{f' in {project}' if project else ''} (pid {pid})"
+        for pid, name, project in watchers
+    ]
+    holders += [
+        f"dashboard on port {entry['port']} (pid {entry['pid']})"
+        for entry in dashboards.running() if int(entry["pid"]) in held
+    ]
+    return sorted(holders)
+
+
+def _refuse_while_held(end: dict) -> bool:
+    """Whether processes hold the installation this upgrade would rewrite.
+
+    Only where the host locks a running image: POSIX replaces one without
+    complaint, so there is nothing to refuse, and stopping a watcher
+    there would cost more than it saves.
+    """
+    if not hostruntime.locks_running_image():
+        return False
+    # With nothing long-lived running, nothing can be holding the
+    # installation, and there is no reason to pay for `uv tool dir`.
+    if not _running_watchers() and not dashboards.running():
+        return False
+    environment = plugins.tool_environment()
+    if environment is None:
+        return False
+    holders = _holders(environment)
+    if not holders:
+        return False
+    end["status"] = "error"
+    end["level"] = "error"
+    end["held_by"] = len(holders)
+    end["message"] = "installation in use; nothing was changed"
+    preflight.emit_failure(
+        "upgrade",
+        "this installation is in use, so nothing was changed: "
+        f"{'; '.join(holders)}. Stop them and run upgrade again "
+        "(`agents-live --repo <path> stop <name>`, "
+        "`agents-live dashboard --stop`)")
+    return True
+
+
 def _upgrade_runtime(roots: list[Path] | None = None,
                      source: Path | None = None) -> int:
     try:
@@ -97,6 +168,10 @@ def _upgrade_runtime(roots: list[Path] | None = None,
     with adminlog.operation("upgrade-runtime",
                             version_before=__version__,
                             source=str(source) if source else "pypi") as end:
+        # Before uv is invoked at all: a rebuild it cannot finish leaves
+        # the environment neither on the old version nor the new (#231).
+        if _refuse_while_held(end):
+            return 1
         # The upgrade rewrites this tool's own executables, and on
         # Windows one of them is the running process.
         launcher_before = plugins.launcher_stamp()

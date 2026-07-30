@@ -8,13 +8,12 @@ import sys
 from pathlib import Path
 
 from . import (adminlog, completions, health_check, heartbeat, hostruntime,
-               preflight, schedules)
+               plugins, preflight, schedules)
 from .spawn import find_uv
 
 # Long enough for a watcher to finish the dispatch it is in, short enough
 # that an uninstall does not appear to hang.
 _WATCHER_GRACE_S = 5
-_TOOL_DIR_TIMEOUT_S = 15
 
 
 def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
@@ -30,24 +29,6 @@ def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
         return False
     print("Uninstall will complete after this command exits")
     return True
-
-
-def _tool_environment() -> Path | None:
-    """Where uv keeps this tool, or ``None`` if it will not say.
-
-    Asked of uv rather than derived from ``sys.prefix``: uninstall can be
-    run from an ephemeral ``uvx`` environment, which is not the
-    installation being removed.
-    """
-    try:
-        uv = find_uv()
-        completed = subprocess.run(
-            [uv, "tool", "dir"], capture_output=True, text=True,
-            check=True, timeout=_TOOL_DIR_TIMEOUT_S)
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    environment = Path(completed.stdout.strip()) / "agents-live"
-    return environment if environment.is_dir() else None
 
 
 def _stop_own_watchers(environment: Path | None
@@ -113,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
-    environment = _tool_environment()
+    environment = plugins.tool_environment()
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
     survivors = _stop_own_watchers(environment)
