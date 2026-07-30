@@ -2106,8 +2106,6 @@ def headless_agent(config: AgentConfig, prompt_text: str, *, stream: bool = Fals
                     env=env,
                     capture_output=True,
                     **hostruntime.CHILD_TEXT,
-                    encoding="utf-8",
-                    errors="replace",
                     timeout=timeout,
                     check=False,
                 )
@@ -2327,8 +2325,6 @@ def _run_agent_streaming(command: list[str], env: dict[str, str], config: AgentC
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         **hostruntime.CHILD_TEXT,
-        encoding="utf-8",
-        errors="replace",
     )
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []

@@ -6838,6 +6838,30 @@ class TestSmoketestSubprocessEncoding(unittest.TestCase):
                     offenders.append(f"{module.name}:{node.lineno}")
         self.assertEqual(offenders, [])
 
+    def test_no_capture_states_its_encoding_twice(self) -> None:
+        # Spreading CHILD_TEXT over a call that already named `encoding`
+        # is a TypeError at the call, not at import, so only a path the
+        # suite actually executes would otherwise reveal it. Both agent
+        # dispatch calls were written that way and reached the release
+        # smoketest before anything complained.
+        clash = {"text", "encoding", "errors"}
+        offenders: list[str] = []
+        package = Path(hostruntime.__file__).resolve().parent
+        for module in sorted(package.glob("*.py")):
+            tree = ast.parse(module.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                spread = any(
+                    keyword.arg is None
+                    and ast.unparse(keyword.value).endswith("CHILD_TEXT")
+                    for keyword in node.keywords)
+                duplicated = {keyword.arg for keyword in node.keywords} & clash
+                if spread and duplicated:
+                    offenders.append(
+                        f"{module.name}:{node.lineno} {sorted(duplicated)}")
+        self.assertEqual(offenders, [])
+
     def test_the_two_shipped_write_files_handlers_are_one_file(self) -> None:
         package = Path(hostruntime.__file__).resolve().parent
         template = package / "skill" / "templates" / "write-files.py"
