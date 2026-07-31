@@ -7970,6 +7970,61 @@ class TestInstallSkill(_TempProject):
         refresh.assert_called_once_with(refresh_skills=True)
         install.assert_not_called()
 
+    def test_installed_windows_upgrade_hands_off_before_uv_mutates(self) -> None:
+        environment = self.root / "uv-tools" / "agents-live"
+        interpreter = environment / "Scripts" / "python.exe"
+        with (
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(plugins, "tool_environment",
+                              return_value=environment),
+            mock.patch.object(sys, "executable", str(interpreter)),
+            mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
+            mock.patch.object(upgrade, "_running_watchers", return_value=[]),
+            mock.patch.object(dashboards, "running", return_value=[]),
+            mock.patch.object(
+                hostruntime, "defer_until_environment_exits",
+                return_value=True) as defer,
+            mock.patch.object(upgrade, "_upgrade_runtime") as runtime,
+            mock.patch.object(upgrade, "_refresh_with_installed_cli") as refresh,
+            mock.patch("sys.argv", ["agents-live upgrade"]),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        defer.assert_called_once_with(
+            ["uv.exe", "tool", "run", "--from", "agents-live",
+             "agents-live", "upgrade"], environment)
+        runtime.assert_not_called()
+        refresh.assert_not_called()
+        events = [json.loads(line) for line in adminlog.log_path().read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        completed = [event for event in events
+                     if event.get("operation") == "upgrade-runtime"
+                     and event.get("status") != "start"]
+        self.assertEqual(completed[-1]["status"], "deferred")
+
+    def test_external_windows_upgrade_runs_directly(self) -> None:
+        environment = self.root / "uv-tools" / "agents-live"
+        with (
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(plugins, "tool_environment",
+                              return_value=environment),
+            mock.patch.object(sys, "executable",
+                              str(self.root / "uv-cache" / "python.exe")),
+            mock.patch.object(upgrade, "_upgrade_runtime", return_value=0) as runtime,
+            mock.patch.object(
+                upgrade, "_refresh_with_installed_cli", return_value=0),
+            mock.patch.object(
+                hostruntime, "defer_until_environment_exits") as defer,
+            mock.patch("sys.argv", ["agents-live upgrade"]),
+        ):
+            self.assertEqual(upgrade.main(), 0)
+        runtime.assert_called_once_with([], source=None)
+        defer.assert_not_called()
+
     def test_runtime_only_upgrade_refreshes_installed_completions(self) -> None:
         with (
             mock.patch.object(upgrade, "_targets", return_value=([], [])),

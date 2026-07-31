@@ -6,6 +6,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: native Windows upgrades no longer destroy the installation they run from. (#248)
+  An installed command now exits before an external uv environment rebuilds
+  the tool, so Windows cannot leave the environment without its packages when
+  the running interpreter prevents removal of the executable directory.
+
 ## 5.5.1 - 2026-07-30
 
 - fix: `smoketest` runs on a host that has one agent CLI rather than a particular one.
