@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
+  The continuation reads the upgraded tool's receipt instead of its temporary
+  environment, so declared plugins and their ownership backends are restored.
+
 ## 5.5.2 - 2026-07-30
 
 - fix: native Windows upgrades no longer destroy the installation they run from. (#248)

@@ -223,6 +223,8 @@ COMMANDS = (
             Arg(("--skills-only",), "Refresh only skill payloads."),
             Arg(("--from",), "Install the runtime from a local path "
                 "instead of PyPI.", kind="value"),
+            Arg(("--continuation-environment",), "Installed tool environment.",
+                kind="value", hidden=True),
         ),
     ),
     Cmd(

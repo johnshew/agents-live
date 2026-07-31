@@ -181,7 +181,8 @@ def _handoff_windows_upgrade(
         return 1
     package = str(source) if source is not None else "agents-live"
     command = [uv, "tool", "run", "--from", package,
-               "agents-live", "upgrade"]
+               "agents-live", "upgrade", "--continuation-environment",
+               str(environment)]
     if source is not None:
         command.extend(["--from", str(source)])
     if runtime_only:
@@ -207,7 +208,8 @@ def _handoff_windows_upgrade(
 
 
 def _upgrade_runtime(roots: list[Path] | None = None,
-                     source: Path | None = None) -> int:
+                     source: Path | None = None,
+                     receipt_environment: Path | None = None) -> int:
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
@@ -245,7 +247,12 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         if kept_launcher:
             _warn_launcher_kept()
         try:
-            plugins.converge(roots or [], trigger="upgrade", pin_primary=False)
+            converge_options = {}
+            if receipt_environment is not None:
+                converge_options["receipt_environment"] = receipt_environment
+            plugins.converge(
+                roots or [], trigger="upgrade", pin_primary=False,
+                **converge_options)
         except (OSError, ValueError, plugins.PluginError) as exc:
             end["status"] = "error"
             end["level"] = "error"
@@ -392,6 +399,10 @@ def main() -> int:
         help="Install the runtime from a local project directory or built "
              "artifact instead of PyPI",
     )
+    parser.add_argument(
+        "--continuation-environment", type=Path,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
     print(f"Installed agents-live version: {__version__}")
 
@@ -409,6 +420,19 @@ def main() -> int:
                 code="source_missing")
             return 1
         source = source.resolve()
+
+    continuation_environment = args.continuation_environment
+    if continuation_environment is not None:
+        installed_environment = plugins.tool_environment()
+        if (hostruntime.id() != hostruntime.WINDOWS
+                or installed_environment is None
+                or continuation_environment.resolve() != installed_environment.resolve()
+                or triggers.within(sys.executable, installed_environment)):
+            preflight.emit_failure(
+                "upgrade", "invalid internal Windows upgrade continuation",
+                code="invalid_arguments")
+            return 1
+        continuation_environment = installed_environment
 
     try:
         targets, errors = _targets()
@@ -433,8 +457,12 @@ def main() -> int:
             source, runtime_only=args.runtime_only)
         if deferred is not None:
             return deferred
+        runtime_options = {}
+        if continuation_environment is not None:
+            runtime_options["receipt_environment"] = continuation_environment
         runtime_status = _upgrade_runtime(
-            list(dict.fromkeys(target_roots)), source=source)
+            list(dict.fromkeys(target_roots)), source=source,
+            **runtime_options)
         if runtime_status != 0:
             return runtime_status
         if args.runtime_only:
