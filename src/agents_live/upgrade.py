@@ -158,6 +158,53 @@ def _refuse_while_held(end: dict) -> bool:
     return True
 
 
+def _handoff_windows_upgrade(
+        source: Path | None, *, runtime_only: bool) -> int | None:
+    """Defer an installed Windows upgrade to an external uv environment.
+
+    uv removes the tool environment before rebuilding it. A process running
+    from that environment holds its interpreter open on Windows, so a direct
+    upgrade can remove the packages and then fail to remove ``Scripts``. The
+    deferred process runs this same command through ``uv tool run``; its
+    interpreter lives outside the environment uv rewrites.
+    """
+    if hostruntime.id() != hostruntime.WINDOWS:
+        return None
+    environment = plugins.tool_environment()
+    if (environment is None
+            or not triggers.within(sys.executable, environment)):
+        return None
+    try:
+        uv = find_uv()
+    except FileNotFoundError as exc:
+        preflight.emit_failure("upgrade", str(exc))
+        return 1
+    package = str(source) if source is not None else "agents-live"
+    command = [uv, "tool", "run", "--from", package,
+               "agents-live", "upgrade"]
+    if source is not None:
+        command.extend(["--from", str(source)])
+    if runtime_only:
+        command.append("--runtime-only")
+    with adminlog.operation(
+            "upgrade-runtime", version_before=__version__, source=package,
+            deferred=True) as end:
+        if _refuse_while_held(end):
+            return 1
+        if not hostruntime.defer_until_environment_exits(command, environment):
+            end["status"] = "error"
+            end["level"] = "error"
+            end["message"] = "Windows upgrade helper could not start"
+            preflight.emit_failure(
+                "upgrade", "nothing was changed because the Windows upgrade "
+                "helper could not start; run `uv tool run --from agents-live "
+                "agents-live upgrade` after this command exits")
+            return 1
+        end["message"] = "upgrade deferred until this process exits"
+    print("Upgrade will complete after this command exits")
+    return 0
+
+
 def _upgrade_runtime(roots: list[Path] | None = None,
                      source: Path | None = None) -> int:
     try:
@@ -381,6 +428,10 @@ def main() -> int:
         return 1
 
     if not args.skills_only:
+        deferred = _handoff_windows_upgrade(
+            source, runtime_only=args.runtime_only)
+        if deferred is not None:
+            return deferred
         runtime_status = _upgrade_runtime(
             list(dict.fromkeys(target_roots)), source=source)
         if runtime_status != 0:
