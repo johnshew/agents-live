@@ -200,6 +200,7 @@ def _handoff_windows_upgrade(
                 "helper could not start; run `uv tool run --from agents-live "
                 "agents-live upgrade` after this command exits")
             return 1
+        end["status"] = "deferred"
         end["message"] = "upgrade deferred until this process exits"
     print("Upgrade will complete after this command exits")
     return 0

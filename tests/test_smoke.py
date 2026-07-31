@@ -7997,6 +7997,12 @@ class TestInstallSkill(_TempProject):
              "agents-live", "upgrade"], environment)
         runtime.assert_not_called()
         refresh.assert_not_called()
+        events = [json.loads(line) for line in adminlog.log_path().read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        completed = [event for event in events
+                     if event.get("operation") == "upgrade-runtime"
+                     and event.get("status") != "start"]
+        self.assertEqual(completed[-1]["status"], "deferred")
 
     def test_external_windows_upgrade_runs_directly(self) -> None:
         environment = self.root / "uv-tools" / "agents-live"
