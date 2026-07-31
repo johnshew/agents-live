@@ -1687,6 +1687,18 @@ class TestConvergencePinsTheKernel(_TempProject):
             [{"name": "agents-live"}], pin_primary=False)
         self.assertEqual(primary.value, "agents-live")
 
+    def test_external_continuation_reads_the_installed_receipt(self) -> None:
+        environment = self.root / "installed-tool"
+        environment.mkdir()
+        receipt = environment / "uv-receipt.toml"
+        receipt.write_text(
+            '[tool]\nrequirements = [{ name = "agents-live" }]\n',
+            encoding="utf-8")
+        with mock.patch.object(sys, "prefix", str(self.root / "ephemeral")):
+            primary, _ = plugins._receipt_requirements(
+                pin_primary=False, environment=environment)
+        self.assertEqual(primary.value, "agents-live")
+
     def test_an_explicit_source_or_specifier_is_left_alone(self) -> None:
         primary, _ = self.resolve(
             [{"name": "agents-live", "specifier": "==4.0.0"}])
@@ -7994,7 +8006,8 @@ class TestInstallSkill(_TempProject):
             self.assertEqual(upgrade.main(), 0)
         defer.assert_called_once_with(
             ["uv.exe", "tool", "run", "--from", "agents-live",
-             "agents-live", "upgrade"], environment)
+             "agents-live", "upgrade", "--continuation-environment",
+             str(environment)], environment)
         runtime.assert_not_called()
         refresh.assert_not_called()
         events = [json.loads(line) for line in adminlog.log_path().read_text(
@@ -8019,11 +8032,32 @@ class TestInstallSkill(_TempProject):
                 upgrade, "_refresh_with_installed_cli", return_value=0),
             mock.patch.object(
                 hostruntime, "defer_until_environment_exits") as defer,
-            mock.patch("sys.argv", ["agents-live upgrade"]),
+            mock.patch("sys.argv", [
+                "agents-live upgrade", "--continuation-environment",
+                str(environment)]),
         ):
             self.assertEqual(upgrade.main(), 0)
-        runtime.assert_called_once_with([], source=None)
+        runtime.assert_called_once_with(
+            [], source=None, receipt_environment=environment)
         defer.assert_not_called()
+
+    def test_continuation_rejects_a_different_tool_environment(self) -> None:
+        environment = self.root / "uv-tools" / "agents-live"
+        with (
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(hostruntime, "id",
+                              return_value=hostruntime.WINDOWS),
+            mock.patch.object(plugins, "tool_environment",
+                              return_value=environment),
+            mock.patch.object(sys, "executable",
+                              str(self.root / "uv-cache" / "python.exe")),
+            mock.patch.object(upgrade, "_upgrade_runtime") as runtime,
+            mock.patch("sys.argv", [
+                "agents-live upgrade", "--continuation-environment",
+                str(self.root / "other-tool")]),
+        ):
+            self.assertEqual(upgrade.main(), 1)
+        runtime.assert_not_called()
 
     def test_runtime_only_upgrade_refreshes_installed_completions(self) -> None:
         with (

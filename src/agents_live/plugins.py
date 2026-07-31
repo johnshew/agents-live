@@ -222,8 +222,8 @@ def checks(root: Path, *, require_exists: bool = True) -> list[tuple[str, bool, 
     ]
 
 
-def _receipt_path() -> Path | None:
-    candidate = Path(sys.prefix) / "uv-receipt.toml"
+def _receipt_path(environment: Path | None = None) -> Path | None:
+    candidate = Path(environment or sys.prefix) / "uv-receipt.toml"
     return candidate if candidate.is_file() else None
 
 
@@ -266,9 +266,10 @@ def _pinned_primary(
     return replace(parsed, value=f"{parsed.value}=={__version__}")
 
 
-def _receipt_requirements(*, pin_primary: bool = True) -> tuple[
+def _receipt_requirements(*, pin_primary: bool = True,
+                          environment: Path | None = None) -> tuple[
         ReceiptRequirement, dict[str, ReceiptRequirement]]:
-    receipt = _receipt_path()
+    receipt = _receipt_path(environment)
     if receipt is None:
         raise PluginError(
             "plugin convergence requires an uv tool installation of agents-live; "
@@ -336,7 +337,8 @@ def tool_environment() -> Path | None:
 
 
 def converge(roots: list[Path], *, trigger: str = "unspecified",
-             pin_primary: bool = True) -> bool:
+             pin_primary: bool = True,
+             receipt_environment: Path | None = None) -> bool:
     """Converge the host-global uv tool environment.
 
     Return True when plugins were installed and False when already converged.
@@ -369,7 +371,8 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
         integrity_error = _integrity_error(plugin)
         if integrity_error:
             raise PluginError(integrity_error)
-    primary, requirements = _receipt_requirements(pin_primary=pin_primary)
+    primary, requirements = _receipt_requirements(
+        pin_primary=pin_primary, environment=receipt_environment)
     requirements.update({
         key: ReceiptRequirement(str(plugin.path))
         for key, plugin in declarations.items()
