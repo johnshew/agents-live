@@ -7893,6 +7893,57 @@ class TestInstallSkill(_TempProject):
                 )
             self.assertEqual(installed.stdout.strip(), "1.0.0")
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows handoff behavior")
+    def test_external_convergence_restores_a_declared_plugin(self) -> None:
+        tool = self.root / "tool"
+        plugin = self.root / "plugin"
+        (tool / "src" / "agents_live").mkdir(parents=True)
+        (tool / "src" / "agents_live" / "__init__.py").write_text(
+            "def main(): pass\n", encoding="utf-8")
+        (tool / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["hatchling"]\n'
+            'build-backend = "hatchling.build"\n\n'
+            '[project]\nname = "agents-live"\nversion = "1.0.0"\n\n'
+            '[project.scripts]\nagents-live = "agents_live:main"\n',
+            encoding="utf-8")
+        (plugin / "src" / "dummy_plugin").mkdir(parents=True)
+        (plugin / "src" / "dummy_plugin" / "__init__.py").write_text(
+            "backend = object()\n", encoding="utf-8")
+        (plugin / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["hatchling"]\n'
+            'build-backend = "hatchling.build"\n\n'
+            '[project]\nname = "dummy-plugin"\nversion = "1.0.0"\n\n'
+            '[project.entry-points."agents_live.ownership"]\n'
+            'dummy = "dummy_plugin:backend"\n',
+            encoding="utf-8")
+        wheels = self.root / "dist"
+        subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(wheels), str(plugin)],
+            check=True, capture_output=True, text=True)
+        plugin_wheel = next(wheels.glob("dummy_plugin-*.whl"))
+        (self.root / ".agents-live.toml").write_text(
+            f'[plugins]\ndummy-plugin = {{ path = "dist/{plugin_wheel.name}" }}\n',
+            encoding="utf-8")
+        environment = {
+            "UV_TOOL_DIR": str(self.root / "tools"),
+            "UV_TOOL_BIN_DIR": str(self.root / "bin"),
+        }
+        with mock.patch.dict(os.environ, environment):
+            subprocess.run(
+                ["uv", "tool", "install", str(tool)],
+                check=True, capture_output=True, text=True)
+            installed_environment = self.root / "tools" / "agents-live"
+            with mock.patch.object(
+                    sys, "prefix", str(self.root / "external-environment")):
+                self.assertTrue(plugins.converge(
+                    [self.root], trigger="upgrade", pin_primary=False,
+                    receipt_environment=installed_environment))
+            tool_python = installed_environment / "Scripts" / "python.exe"
+            restored = subprocess.run(
+                [str(tool_python), "-c", "import dummy_plugin"],
+                check=False, capture_output=True, text=True)
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+
     def test_plugin_convergence_preserves_receipt_and_unions_declarations(self) -> None:
         first_wheel = self.root / "first.whl"
         second_wheel = self.root / "second.whl"
