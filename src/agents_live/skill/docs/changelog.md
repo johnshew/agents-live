@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.5.1 - 2026-07-30
+
 - fix: `smoketest` runs on a host that has one agent CLI rather than a particular one.
   It defaulted to `claude` and failed outright where only Copilot was
   installed, which also made the release gate unrunnable there. It now picks
