@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 5.5.2 - 2026-07-30
+
 - fix: native Windows upgrades no longer destroy the installation they run from. (#248)
   An installed command now exits before an external uv environment rebuilds
   the tool, so Windows cannot leave the environment without its packages when
