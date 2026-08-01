@@ -70,9 +70,9 @@ The costs follow from that:
 Ordered. Later goals must not be bought at the cost of earlier ones.
 
 1. **Reduce concepts before reducing lines.** Measurable proxies:
-  - Public types and callables imported across a seam: target under
-    25 per port. Value-object fields do not count; the fitness
-    function inspects the exported API and cross-boundary imports.
+   - Public types and callables imported across a seam: target under
+     25 per port. Value-object fields do not count; the fitness
+     function inspects the exported API and cross-boundary imports.
    - Frontmatter fields an agent author must know: 25 today; 21 after
      the collapses this document actually specifies (the three watch
      fields to one string, `model` into the selector, `handler`
