@@ -18,7 +18,9 @@ for a decision.
 
 ## Problem
 
-The package is about 19,600 lines of source against 8,750 lines of test.
+The package is about 19,000 lines of source against 8,750 lines of
+test. (Every line count in this document is non-blank lines,
+`grep -cve '^\s*$'`.)
 The two seams that matter already exist, but neither is explicit:
 
 - The **host seam** is a set of functions (`hostruntime`) plus two
@@ -67,7 +69,7 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
 
 1. **Reduce concepts before reducing lines.** Measurable proxies:
    - Symbols crossing a seam: target under 25 per port.
-   - Frontmatter fields an agent author must know: 24 today, target 12.
+   - Frontmatter fields an agent author must know: 25 today, target 12.
    - Public CLI verbs: target no growth, and `heartbeat` removed.
    - Occurrences of `sys.platform`, `os.name`, or a WSL check outside
      `runtime/hosts/`: target zero, enforced by a test.
@@ -92,10 +94,26 @@ version bump, see [Open decisions](#open-decisions)).
 
 ## Target architecture
 
-Two ports, in the ports-and-adapters sense. `runtime` is the port for
-"automation on this host". `agent` is the port for "a runnable unit of
-work". They never import each other. A small dispatcher owns the wiring,
-and the CLI sits above both.
+Six top-level pieces, two of them ports in the ports-and-adapters
+sense:
+
+- **`runtime/`** - the port for "automation on this host": triggers,
+  watches, processes, liveness, convergence. Implemented by host
+  plugins: `posix`, `wsl`, `windows`.
+- **`agent/`** - the port for "a runnable unit of work": definition,
+  invocation, outcome. Implemented by provider plugins: `claude`,
+  `copilot`, `fake`, later `api`.
+- **`dispatch.py`** - the only module below the CLI that imports both
+  ports. Turns an event envelope into an agent run.
+- **`state/`** - repository registry, ownership, and the durable
+  subscription index. Sits below both ports.
+- **`obs/`** - event log, timeline, query. Written by both ports,
+  owned by neither.
+- **`cli/`** - inspects and changes settings through the ports and
+  hands execution to `dispatch`; no execution logic of its own.
+
+The two ports never import each other, and only primitives cross a
+seam. Arrows below point from depender to dependee.
 
 ```mermaid
 graph TD
@@ -103,7 +121,8 @@ graph TD
     CLI --> AG[agent/ - port]
     RT --> HOSTS[hosts: posix, wsl, windows]
     AG --> PROV[providers: claude, copilot, fake, api]
-    RT -->|Event envelope| DISP[dispatch - the only wiring]
+    CLI --> DISP[dispatch - the only wiring]
+    DISP -->|drains Event envelopes| RT
     DISP -->|agent id| AG
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
@@ -135,7 +154,7 @@ class Runtime(Protocol):
         '''Read-only. Liveness is a field here, not a command.'''
 
     def plan(self, desired: Sequence[Subscription]) -> Plan:
-        '''Pure diff of desired against actual. Printable.'''
+        '''Gather actual, delegate to the pure core diff. Printable.'''
 
     def apply(self, plan: Plan) -> Applied:
         '''Execute a plan. Refuses if the host changed under it.'''
@@ -188,11 +207,22 @@ class Event:
     payload: Mapping[str, str | list[str]]   # e.g. {"changed": [...]}
 ```
 
+One mapping is worth stating, because today's store persists three
+trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
+A `watch` subscription's durable OS artifact is its `@reboot`
+watcher-respawn entry, so `TriggerStore` still holds one artifact per
+subscription of either kind. The host-scoped check-and-repair loop is
+not a special case: it is a subscription the runtime injects into
+every plan, with the runtime itself as `target`, converged and
+orphan-swept like the rest.
+
 What lives in the **runtime core**, generic across hosts: the two
 grammars, debounce, the fire-rate circuit breaker, duplicate
 suppression, the "is this minute actually due" gate that today only
-Windows needs, subscription-key derivation, the plan diff, orphan
-detection, and the junk sweep.
+Windows needs, subscription-key derivation, the pure plan diff
+(`plan(desired, actual)` - the facade method gathers `actual` and
+delegates to it; the pure function is what Tier 1 tests exercise),
+orphan detection, and the junk sweep.
 
 What a **host plugin** supplies, and nothing more: the three protocols
 above plus a liveness report. `wsl` is `posix` plus a liveness
@@ -280,6 +310,12 @@ range       = number , "-" , number ;
 number      = digit , { digit } ;
 ```
 
+Today's language is five-field cron plus `@reboot` only
+(`triggers.py`). The other `@` specials are additions, and they
+canonicalize to their cron equivalents in the core before any host
+renders them, so Task Scheduler never learns they exist. `@reboot` is
+the one special with no cron form and keeps its per-host rendering.
+
 Watch expression:
 
 ```ebnf
@@ -296,6 +332,13 @@ So `watch: "docs/**/*.md !**/node_modules/** debounce 2s"` replaces the
 three fields used today. The gain is not brevity; it is that a
 subscription is one comparable, hashable, renderable string, which is
 what makes `plan` a pure diff and makes the index a flat table.
+
+A host watches directories, not globs: the core derives each
+`ChangeSource` root as the longest literal prefix of an include
+pattern (`docs/` above), and the patterns themselves are policy
+applied in the generic watch loop. That replaces today's split, where
+`watchPath` names the directories and `watchIgnore` filters what they
+yield.
 
 ### The agent port
 
@@ -319,7 +362,9 @@ class Agent:
 and transcript reference, or a failure with a category drawn from a
 closed taxonomy (the categories `headless.py` already emits: `timeout`,
 `output_parse_error`, `agent_output_invalid`, `cli_crash`,
-`handler_crash`, `pre_processor_crash`, `agent_invalid`, `empty_output`).
+`handler_crash`, `pre_processor_crash`, `agent_invalid`, `empty_output`, and the hierarchy's base
+`agent_error`, which stays as the explicit catch-all so the union is
+closed rather than open through inheritance).
 Exceptions stay internal to the port; the seam returns values.
 
 `Agent.triggers()` is the answer to "ask the agent for its schedule
@@ -334,9 +379,13 @@ Providers stay as small as `agent_adapters` already proves they can be:
 ```python
 class Provider(Protocol):
     name: str
-    def plan(self, spec: ResolvedSpec, request: Request) -> Launch: ...
+    def prepare(self, spec: ResolvedSpec, request: Request) -> Launch: ...
     def parse(self, raw: RawOutput) -> Completion: ...
 ```
+
+(`prepare`, not `plan`: that word belongs to the runtime port's
+convergence diff, per the naming discipline in
+[Naming hazard](#naming-hazard-worth-fixing-now).)
 
 `Launch` is either a subprocess description (argv, env, temp config
 files, whether a pty is required, whether TUI noise must be filtered) or
@@ -385,16 +434,19 @@ reject any use of the bare word for the agent side.
 ### The CLI
 
 `cli/` is a separate directory whose only permitted imports are the two
-ports, `obs`, and `state`. It constructs a runtime, reads health and
-subscriptions, computes and prints plans, applies them, and invokes
-`agent.run` for a one-shot `run`. It contains no event loop, no argv
+ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
+health and subscriptions, computes and prints plans, and applies them.
+A one-shot `run` builds the same envelope a trigger firing would and
+hands it to `dispatch` - the same-envelope rule applied to the manual
+path, so a user-invoked run and a cron-invoked run differ only in how
+the envelope was produced. The CLI contains no event loop, no argv
 construction for a provider, and no platform branch. The declarative
 `cli_spec` approach is good and should survive intact.
 
-### Two components the proposal did not name
+### state/, obs/, and dispatch
 
-Both exist today and will re-scatter across the ports unless they are
-named:
+`state/` and `obs/` exist today and will re-scatter across the ports
+unless they are named:
 
 - **`state/`** - repository registry, ownership, and the durable
   subscription index. `repos.py`, `ownership.py`, and `paths.py` are
@@ -404,7 +456,8 @@ named:
   runtime test assert on emitted events without importing an agent.
 
 And one that is genuinely new: **`dispatch.py`**, roughly 150 lines,
-the only module that imports both ports. Ownership gating, the
+the only module below the CLI that imports both ports. Ownership
+gating, the
 not-due gate, and envelope-to-request translation live there. It is
 glue, but it is glue with a name and a test.
 
@@ -415,15 +468,15 @@ promises.
 
 | Area | Today | Target | Where the reduction comes from |
 |---|---|---|---|
-| Host automation (`hostruntime`, `crontasks`, `wintasks`, `winwatch`, `watchsource`, `watchpolicy`, `triggers`, `schedules`, `heartbeat`) | 3,344 | ~1,500 | Shared grammar and policy; hosts reduced to install, remove, list, watch, liveness. Task Scheduler XML is largely irreducible. |
-| Lifecycle commands (`activate`, `stop`, `health_check`, `doctor`, `preflight`, `migrate`) | 3,404 | ~900 | One pure planner replaces five convergence implementations; `--dry-run` and orphan pruning fall out of it. |
+| Host automation (`hostruntime`, `crontasks`, `wintasks`, `winwatch`, `watchsource`, `watchpolicy`, `triggers`, `schedules`, `heartbeat`) | 3,544 | ~1,500 | Shared grammar and policy; hosts reduced to install, remove, list, watch, liveness. Task Scheduler XML is largely irreducible. |
+| Lifecycle commands (`activate`, `stop`, `health_check`, `doctor`, `preflight`, `migrate`) | 3,266 | ~900 | One pure planner replaces five convergence implementations; `--dry-run` and orphan pruning fall out of it. |
 | Agent execution (`headless`, `run`, `agent_adapters`) | 3,181 | ~1,300 | Generic execution separated from provider quirks; one output path instead of layered retries. |
 | MCP (`pipeline_mcp`, `pipeline_runtime`, bridge, loader) | 838 | ~700 | Mostly moves. |
 | CLI (`cli`, `cli_spec`, `status`, `completions`, `dashboard`, `dashboards`) | 2,961 | ~2,200 | Dashboard is UI and stays; status and completions read the ports instead of re-deriving. |
 | `smoketest` | 1,386 | ~450 | Conformance suites and a fake provider absorb most of it; what remains is the real-CLI release gate. |
 | Test suite | 8,753 | ~5,000 | Table-driven grammar and planner tests plus two conformance suites replace the mock population. |
 
-Source total: roughly 19,600 to roughly 11,500. The number is a
+Source total: roughly 19,000 to roughly 11,500. The number is a
 consequence; the concept counts in [Goals](#goals) are the target.
 
 ## Testing approach
@@ -554,7 +607,7 @@ recognized is not the same as it being in the specification.
 ### What this settles
 
 **The extension mechanism already exists: `metadata`.** This package's
-eighteen agent-seam fields do not need to be argued into the standard
+nineteen agent-seam fields do not need to be argued into the standard
 vocabulary or invented as a private convention. They belong under
 `metadata` with a prefixed key, and a conforming reader that has never
 heard of this package still reads the file correctly.
@@ -585,7 +638,8 @@ the package cannot drift from the standard silently.
 
 ## Field inventory
 
-Twenty-four frontmatter fields are parsed today. Before deciding what to
+Twenty-five frontmatter fields are parsed today, not counting `name`,
+which is identity rather than configuration. Before deciding what to
 collapse, here is which seam consumes each. Nothing is collapsed in this
 table; it is the input to that decision.
 
@@ -607,9 +661,11 @@ table; it is the input to that decision.
 
 **Consumed by the agent seam only,** listed so the boundary is visible:
 `runtime`, `model`, `mode`, `allow-tools`, `mcps`, `env`, `transcript`,
-`pre-processor`, `post-processor`, `output-schema`, `output-max-bytes`,
-`output-path-roots`, `output-provenance`, `description`, `tools`,
-`user-invocable`, `disable-model-invocation`, `argument-hint`.
+`pre-processor`, `post-processor`, `handler` (a compatibility alias
+for `post-processor`; see [Defects](#defects-found-while-writing-this)),
+`output-schema`, `output-max-bytes`, `output-path-roots`,
+`output-provenance`, `description`, `tools`, `user-invocable`,
+`disable-model-invocation`, `argument-hint`.
 
 Observations that bear on the collapse decision:
 
@@ -622,9 +678,9 @@ Observations that bear on the collapse decision:
   problems the watch path has.
 - `owner` is the only field read on both sides of the dispatcher, and
   it is already a `state/` concern rather than a definition concern.
-- Eighteen of twenty-four fields never leave the agent seam. Whatever
+- Nineteen of twenty-five fields never leave the agent seam. Whatever
   the runtime refactoring does, it should not touch them.
-- Of those eighteen, only `description` and `allowed-tools` are in the
+- Of those nineteen, only `description` and `allowed-tools` are in the
   Agent Skills specification, and the package spells the second one
   `allow-tools`. `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` are carried in the
@@ -694,9 +750,10 @@ seam should therefore land in the same phase.
    - **Field-level.** Fix `allow-tools` to `allowed-tools`, keep the
      flat `Agents/<name>.md` layout, leave the extension fields at the
      top level. Cheap, and still not conforming.
-   - **Metadata-level.** Move the eighteen extension fields under
-     `metadata` with a prefixed key. Requires the string-valued
-     grammars, which is the collapse this document proposes anyway.
+   - **Metadata-level.** Move the extension fields under `metadata`
+     with a prefixed key (eighteen of them; the `handler` alias is
+     retired rather than moved). Requires the string-valued grammars,
+     which is the collapse this document proposes anyway.
    - **Layout-level.** Also adopt `<skill>/SKILL.md` with `name`
      matching the directory, which brings `scripts/` and `references/`
      as the home for handlers. Largest change, and the only position
@@ -773,6 +830,11 @@ document.
 - `headless.py` describes `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` as ecosystem-standard
   metadata. They are Claude Code extensions, not specification fields.
+- `headless.py` parses `handler` as a compatibility alias for
+  `post-processor` (`handler_path` resolves `post_processor or
+  handler`). The repository rule forbids compatibility shims; the
+  breaking release should retire the alias rather than carry it into
+  `metadata`.
 
 ### What can start without any decision
 
