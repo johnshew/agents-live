@@ -71,7 +71,12 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
 
 1. **Reduce concepts before reducing lines.** Measurable proxies:
    - Symbols crossing a seam: target under 25 per port.
-   - Frontmatter fields an agent author must know: 25 today, target 12.
+   - Frontmatter fields an agent author must know: 25 today; 21 after
+     the collapses this document actually specifies (the three watch
+     fields to one string, `model` into the selector, `handler`
+     retired). A smaller surface is desirable but needs field
+     decisions not yet made; an earlier target of 12 was aspiration
+     without a plan and is withdrawn.
    - Public CLI verbs: target no growth, and `heartbeat` removed.
    - Occurrences of `sys.platform`, `os.name`, or a WSL check outside
      `runtime/hosts/`: target zero, enforced by a test.
@@ -127,8 +132,8 @@ graph TD
     RT --> HOSTS[hosts: posix, wsl, windows]
     AG --> PROV[providers: claude, copilot, fake, api]
     CLI --> DISP[dispatch - the only wiring]
-    DISP -->|Event envelope| RT
-    DISP -->|agent id| AG
+    DISP -->|consumes Event envelopes from| RT
+    DISP -->|resolves target, calls run on| AG
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
     RT --> ST[state/ - repos, ownership, subscription index]
@@ -177,10 +182,12 @@ class Runtime(Protocol):
 
 
 class TriggerStore(Protocol):
-    '''Durable. Survives reboot. One OS artifact per subscription.'''
+    '''Durable. Survives reboot. One OS artifact per subscription.
+    Observes artifacts only: it cannot reconstruct a Subscription,
+    because a watcher's artifact records just its respawn command.'''
     def install(self, rendered: RenderedSubscription) -> None: ...
     def remove(self, key: str) -> None: ...
-    def list(self) -> list[Subscription]: ...
+    def list(self) -> list[InstalledTrigger]: ...
 
 
 class ChangeSource(Protocol):
@@ -212,32 +219,79 @@ Value types, primitives only:
 class Subscription:
     key: str          # stable, derived from repo + target + trigger
     repo: str         # repository root the subscription belongs to
-    target: str       # agent id. Not an object, not a callable.
+    target: str       # "agent:<id>", or "runtime" for the
+                      # maintenance loop. Not an object, not a callable.
     kind: str         # "schedule" | "watch"
     trigger: str      # one expression string, per the grammars below
 
 @dataclass(frozen=True)
+class InstalledTrigger:
+    key: str          # matches a Subscription.key when it is ours
+    kind: str
+    rendered: str     # the OS artifact's own record, fingerprintable
+
+@dataclass(frozen=True)
 class Event:
-    id: str           # correlation id, unique per firing
-    key: str
+    id: str               # correlation id, unique per firing
+    origin: str           # "clock" | "boot" | "watch" | "manual"
+    key: str | None       # subscription key; None for a manual run
     repo: str
     target: str
-    kind: str
     at: datetime
+    trigger: str | None   # the matched expression, for the dueness gate
     payload: Mapping[str, str | list[str]]
     # Small values travel inline; large ones (a changed-file batch) by
     # state-file reference, which the Windows command-line length
     # bound already requires (windows-support.md).
 ```
 
+`Subscription` is desired state, computed from definitions;
+`InstalledTrigger` is observed state, read back from the OS. They are
+different types on purpose: a watcher's OS artifact records only its
+respawn command, never the watch expression, so the store cannot
+reconstruct a `Subscription` and is never asked to. `plan` matches the
+two by key and by a fingerprint of the rendered form.
+
+A watch subscription has a second piece of observed state the store
+cannot see: the running watcher process, which loaded its watch
+expression at spawn. `actual` for a watch subscription is therefore a
+pair - the installed respawn trigger and the running watcher - where
+the watcher is found through `ProcessHost.owned()` and carries the
+fingerprint of the expression it was started with, recorded in the
+subscription index at spawn. A plan whose desired fingerprint differs
+restarts the watcher; without that, editing a watch expression would
+take effect only at the next reboot.
+
+`Event.origin`
+distinguishes the four ways a run begins - `clock` and `boot` split
+what one "schedule" kind used to cover, because only `clock` events
+pass through the dueness gate, and a `manual` run has no subscription
+at all, which is why `key` and `trigger` are optional.
+
+Two preconditions carry over from today's `activate` into the planner
+contract rather than being lost as polish (`activate.py`): batch
+reconciliation never *invents* an owner - an unregistered agent with
+no frontmatter `owner:` is excluded from `desired` and reported, and
+when the ownership registry is unavailable the planner abstains
+rather than guessing - but it may *materialize* an owner the
+frontmatter explicitly declares, which is today's behavior, preserved
+deliberately. Claiming beyond that stays a targeted, single-agent
+decision made above the planner. Without the rule, `apply(plan(...))`
+would quietly turn convergence into ownership acquisition, which is
+exactly the sweep-adoption bug today's code guards against.
+
 One mapping is worth stating, because today's store persists three
 trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
 A `watch` subscription's durable OS artifact is its `@reboot`
 watcher-respawn entry, so `TriggerStore` still holds one artifact per
 subscription of either kind. The host-scoped check-and-repair loop is
-not a special case: it is a subscription the runtime injects into
-every plan, with the runtime itself as `target`, converged and
-orphan-swept like the rest.
+not a special case in the planner: it is a subscription the runtime
+injects into every plan with the reserved target `runtime`, converged
+and orphan-swept like the rest. It is a special case at firing time,
+deliberately: `dispatch` resolves only `agent:` targets through the
+agent port, and a `runtime`-targeted subscription renders to the
+runtime's own maintain entry point, so a maintenance firing never
+enters event dispatch at all.
 
 What lives in the **runtime core**, generic across hosts: the two
 grammars, debounce, the fire-rate circuit breaker, duplicate
@@ -247,10 +301,17 @@ Windows needs, subscription-key derivation, the pure plan diff
 delegates to it; the pure function is what Tier 1 tests exercise),
 orphan detection, and the junk sweep.
 
-What a **host plugin** supplies, and nothing more: the three protocols
-above plus a liveness report. `wsl` is `posix` plus a liveness
-implementation; that is the entire delta, and it is what absorbs
-`heartbeat.py`.
+What a **host plugin** supplies: the three protocols above, a
+liveness report, and the host facts `hostruntime` answers today -
+identity, state location, owner identity, lock acquisition,
+executable pinning, the child environment floor, shell availability,
+and native-tool detection (`hostruntime.py`). That list is longer
+than "three protocols plus liveness", so freezing the plugin contract
+starts with a capability inventory of `hostruntime`'s exports, not
+with this sketch. `wsl` is likewise more than `posix` plus liveness:
+it is a separate environment with its own ownership identity and
+interop-native tool checks; liveness is what absorbs `heartbeat.py`,
+not the whole delta.
 
 `ProcessHost` is the home for what is scattered today across
 `hidden.py` (`CREATE_NO_WINDOW`), `spawn.py`, `hostruntime`'s pty and
@@ -277,8 +338,8 @@ EventBridge, and CloudEvents all converge on:
 
 - Registration writes a **declarative, durable record** (the OS artifact
   plus an index entry). It is idempotent and reconcilable.
-- Firing produces an **envelope of primitives** - id, key, repo,
-  target, kind, timestamp, payload - which the watcher loop hands to
+- Firing produces an **envelope of primitives** - id, origin, key,
+  repo, target, timestamp, payload - which the watcher loop hands to
   the dispatcher in-process, and which a scheduler-launched process
   rebuilds through an ingress decoder from argv plus, for large
   payloads, a state-file reference (`agents-live run --name X
@@ -478,10 +539,10 @@ reject any use of the bare word for the agent side.
 `cli/` is a separate directory whose only permitted imports are the two
 ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
 health and subscriptions, computes and prints plans, and applies them.
-A one-shot `run` builds the same envelope a trigger firing would and
-hands it to `dispatch` - the same-envelope rule applied to the manual
-path, so a user-invoked run and a cron-invoked run differ only in how
-the envelope was produced. The CLI contains no event loop, no argv
+A one-shot `run` builds an envelope with origin `manual` - no
+subscription key, no trigger expression - and hands it to `dispatch`,
+so a user-invoked run and a cron-invoked run travel the same path and
+differ only in origin and how the envelope was produced. The CLI contains no event loop, no argv
 construction for a provider, and no platform branch. The declarative
 `cli_spec` approach is good and should survive intact.
 
@@ -502,8 +563,9 @@ the only module below the CLI that imports both ports. Its surface is
 `dispatch(event, context)`: the watch loop calls it in-process, and a
 scheduler-launched process reaches it through an ingress decoder that
 rebuilds the envelope from argv and the state-file payload reference.
-Ownership gating, the not-due gate, and envelope-to-request
-translation live there. It is glue, but it is glue with a name and a
+Ownership gating, the not-due gate (`clock` events only; `boot` and
+`manual` are never "not due"), and envelope-to-request translation
+live there. It is glue, but it is glue with a name and a
 test.
 
 ## Expected size
@@ -535,8 +597,10 @@ selector grammar, debounce, the fire-rate breaker, dueness, and the plan
 diff are all pure functions. `plan(desired, actual) -> Plan` being pure
 is the unlock: every convergence scenario that today needs a mocked
 `crontab` or a mocked `Register-ScheduledTask` becomes a table row.
-Property tests apply well here (round-trip a rendered schedule, and
-assert `apply(plan(d, a))` leaves `plan(d, actual') == empty`).
+Property tests apply well here (round-trip a rendered schedule). The
+convergence property - `apply(plan(d, a))` leaves
+`plan(d, actual') == empty` - runs one tier up against the fake host,
+since `apply` is I/O by definition and does not belong in this tier.
 
 **Tier 2 - host conformance suite, plus an in-tree `fake` host.** One
 abstract test class, run against every registered host plugin, skipped
@@ -562,10 +626,11 @@ paired with a **deterministic fake CLI executable** - a tiny program
 the real invocation path launches - which is what exercises argv
 quoting, output decoding, kill-on-timeout, and process-tree cleanup:
 the paths [#184](https://github.com/johnshew/agents-live/issues/184)
-says keep shipping defects. Every fake - host, provider, CLI -
-registers through the same plugin entry point as the real
-implementation, which is the payoff of goal 4 and what makes the
-plugin rule testable rather than aspirational.
+says keep shipping defects. The fake host and fake provider register
+through the same plugin entry points as the real implementations -
+the payoff of goal 4, and what makes the plugin rule testable rather
+than aspirational; the fake CLI is not a plugin itself but the
+executable the provider's `Launch` points at.
 
 **Tier 4 - seam contract tests.** The runtime emits envelopes into a
 recorded corpus; the dispatcher is tested against that corpus. Neither
@@ -624,6 +689,18 @@ suite green, and can be released.
    directories, handlers under `scripts/`, and the `skills-ref
    validate` gate. A migration of what a definition is, so it gets its
    own release and its own migration note.
+8. **Simplify the repository's language and documentation.** Once the
+  names, ports, and optional skill layout are stable, review every
+  README, `AGENTS.md`, `.agents/` guide, design document, shipped skill
+  document, template, example, CLI help string, and relevant code
+  comment. Present one consistent model: an Agent Skill is the
+  definition, Agents Live adds local automation, the runtime owns host
+  subscriptions, and providers execute runs. Remove retired terms and
+  duplicated architecture explanations, keep the root README and
+  shipped overview synchronized, and validate links, frontmatter,
+  templates, and examples. Each earlier phase still updates the docs it
+  directly changes; this final pass is for cross-repository coherence,
+  not deferred documentation.
 
 Phases 1 and 2 are mechanical and low risk. Phase 3 changes process
 management and liveness and is not; it sits early because everything
@@ -631,7 +708,8 @@ after it builds on `ProcessHost`. Phases 4 and 7 are the ones that
 affect existing user agents. Phase 5 is the largest and should be
 sliced by concern (output normalization first, then argv construction,
 then MCP), each slice guarded by the fake provider and fake CLI added
-at the start of the phase.
+at the start of the phase. Phase 8 follows the last terminology-changing
+phase that is selected, whether or not phase 7 is chosen.
 
 ## The definition standard
 
@@ -690,8 +768,10 @@ recognized is not the same as it being in the specification.
 **The extension mechanism already exists: `metadata`.** This package's
 nineteen agent-seam fields do not need to be argued into the standard
 vocabulary or invented as a private convention. They belong under
-`metadata` with a prefixed key, and a conforming reader that has never
-heard of this package still reads the file correctly.
+`metadata` with the `agents-live.` prefix (`agents-live.schedule`,
+`agents-live.allow-tools`, and so on - one prefix, stated once, used
+everywhere), and a conforming reader that has never heard of this
+package still reads the file correctly.
 
 **`metadata` values are strings.** That constraint arrives from the
 specification, independently of anything argued in this document, and
@@ -702,10 +782,27 @@ nested `output-schema` object cannot live in `metadata` at all without
 being encoded. Two of the three grammars were proposed here for a
 different reason and turn out to be required for conformance.
 
+The three grammars are not the whole mapping, though. The
+metadata-level position is not implementable until every extension
+field has a stated string encoding - `env`, `mcps`, `output-schema`,
+`output-path-roots`, the processors, the booleans, and the numeric
+settings (structured values are most likely JSON-in-string) - plus a
+schema-version key so a reader can tell which encoding it is looking
+at. That mapping is part of the open decision, not an afterthought.
+
 **Two conflicts with today's definitions:**
 
-- The package parses `allow-tools`. The specification says
-  `allowed-tools`. One letter, and it is this package that is wrong.
+- The package parses `allow-tools`; the specification defines
+  `allowed-tools`. This is not a typo to fix by renaming: the
+  package's field *narrows* constrained headless execution and can
+  never grant a tool, while the spec's field tells any conforming
+  client which tools are *pre-approved* during skill use. Renaming
+  would merge two different security contracts and could broaden
+  interactive authority in every other client that reads the file.
+  The exact keys: at field level the spelling stays `allow-tools`; at
+  metadata level it becomes `agents-live.allow-tools`. It never
+  becomes `allowed-tools` unless the two contracts are proven
+  identical.
 - The specification requires `name` to match the parent directory
   name, which means `<skill>/SKILL.md`. The package uses flat
   `Agents/<name>.md` (alongside the native agent directories
@@ -764,9 +861,11 @@ Observations that bear on the collapse decision:
   it is already a `state/` concern rather than a definition concern.
 - Nineteen of twenty-five fields never leave the agent seam. Whatever
   the runtime refactoring does, it should not touch them.
-- Of those nineteen, only `description` and `allowed-tools` are in the
-  Agent Skills specification, and the package spells the second one
-  `allow-tools`. `tools`, `user-invocable`,
+- Of those nineteen, only `description` is an Agent Skills
+  specification field outright. `allow-tools` resembles the spec's
+  `allowed-tools` but deliberately does not map onto it - the two are
+  different security contracts (see the conflicts under
+  [What this settles](#what-this-settles)). `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` are carried in the
   code as ecosystem-standard metadata; they are Claude Code
   extensions, not specification fields. The comment should be
@@ -833,12 +932,15 @@ seam should therefore land in the same phase.
 1. **How far to conform.** Building on Agent Skills is settled; what
    remains is where the extension frontmatter lives and whether to
    adopt the layout. Three positions, in increasing cost:
-   - **Field-level.** Fix `allow-tools` to `allowed-tools`, keep the
-     flat `Agents/<name>.md` layout, leave the extension fields at the
-     top level. Cheap, and still not conforming.
+   - **Field-level.** Keep the flat `Agents/<name>.md` layout and the
+     extension fields at the top level. `allow-tools` keeps its own
+     name either way: renaming it onto the spec's `allowed-tools`
+     would merge two different security contracts (see
+     [Defects](#defects-found-while-writing-this)). Cheap, and still
+     not conforming.
    - **Metadata-level.** Move the extension fields under `metadata`
-     with a prefixed key (eighteen of them; the `handler` alias is
-     retired rather than moved). Requires the string-valued grammars,
+     with the `agents-live.` prefix (eighteen of them; the `handler`
+     alias is retired rather than moved). Requires the string-valued grammars,
      which is the collapse this document proposes anyway.
    - **Layout-level.** Also adopt `<skill>/SKILL.md` with `name`
      matching the directory, which brings `scripts/` and `references/`
@@ -934,6 +1036,32 @@ ports, and extracting it before the agent port exists would wire it
 to `headless.py` only to rewire it a phase later. The sequence did
 gain phase 7, the layout migration, from this feedback.
 
+A second review round (also 2026-07-31) produced seven findings and
+two corrections. All were folded in above - the
+`InstalledTrigger`/`Subscription` split, `Event.origin` with optional
+key and trigger, the `allow-tools` defect reversal, planner ownership
+preconditions, the host capability inventory, the metadata encoding
+map, and the two testing corrections - except one:
+
+**"The event arrow between runtime and dispatch is reversed."** Not
+acted on as stated: the diagram draws dependencies, not dataflow, and
+dispatch depends on the runtime. But two reviewers in a row misread
+that edge, so the labels now name the action (`consumes ... from`,
+`calls run on`) instead of the payload, which is what invited the
+dataflow reading.
+
+A third round (the developer's own review, 2026-07-31) added phase 8
+- the repository-wide terminology and documentation pass - and five
+concerns, all folded in with nothing declined: watch-subscription
+convergence now includes the running watcher and its configuration
+fingerprint, `Subscription.target` is discriminated (`agent:<id>` |
+`runtime`) with maintenance kept outside event dispatch, the batch
+rule was sharpened to "never invents an owner, but may materialize an
+explicitly declared one" to match `activate.py` exactly, the
+field-count target was replaced with the supported figure (21, with
+12 withdrawn as unplanned aspiration), and the `allow-tools` keys are
+now stated exactly for both conformance positions.
+
 ## Picking this up
 
 Nothing here is committed work. Per the repository rule, a work item
@@ -973,8 +1101,14 @@ Both are real today and independent of whether this refactoring
 proceeds. They should be filed as issues rather than left in this
 document.
 
-- `headless.py` parses `allow-tools`. The Agent Skills specification
-  and every client implementing it use `allowed-tools`.
+- An earlier draft recorded `allow-tools` as a misspelling of the
+  specification's `allowed-tools`. Review showed the opposite defect:
+  the two are different security contracts (narrowing headless
+  execution versus pre-approving tools for any client), and renaming
+  would silently broaden interactive authority. The field keeps its
+  own name - `allow-tools` at top level, `agents-live.allow-tools` if
+  it moves under `metadata` - and the near-collision deserves a
+  warning in the docs.
 - `headless.py` describes `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` as ecosystem-standard
   metadata. They are Claude Code extensions, not specification fields.
