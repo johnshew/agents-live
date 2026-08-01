@@ -30,6 +30,9 @@ this directory is installed by `agents-live init` or `upgrade`.
   prioritized stabilization work, and recommended implementation sequence.
 - [windows-support.md](windows-support.md) - architecture guide to running
   the runtime natively on Windows instead of through WSL.
+- [refactoring-runtime-and-agent-seams.md](refactoring-runtime-and-agent-seams.md) -
+  proposal to reduce the package to two ports, a host runtime manager and
+  an agent execution seam, with platform and provider plugins.
 
 Design documents are added here as they are written, one file per topic,
 named after the topic.
