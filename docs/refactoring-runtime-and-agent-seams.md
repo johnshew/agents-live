@@ -70,7 +70,9 @@ The costs follow from that:
 Ordered. Later goals must not be bought at the cost of earlier ones.
 
 1. **Reduce concepts before reducing lines.** Measurable proxies:
-   - Symbols crossing a seam: target under 25 per port.
+  - Public types and callables imported across a seam: target under
+    25 per port. Value-object fields do not count; the fitness
+    function inspects the exported API and cross-boundary imports.
    - Frontmatter fields an agent author must know: 25 today; 21 after
      the collapses this document actually specifies (the three watch
      fields to one string, `model` into the selector, `handler`
@@ -173,7 +175,7 @@ class Runtime(Protocol):
     def health(self) -> Health:
         '''Read-only. Liveness is a field here, not a command.'''
 
-    def plan(self, desired: Sequence[Subscription]) -> Plan:
+    def plan(self, desired: DesiredAutomation) -> Plan:
         '''Gather actual, delegate to the pure core diff. Printable.'''
 
     def apply(self, plan: Plan) -> Applied:
@@ -217,12 +219,17 @@ Value types, primitives only:
 ```python
 @dataclass(frozen=True)
 class Subscription:
-    key: str          # stable, derived from repo + target + trigger
-    repo: str         # repository root the subscription belongs to
+    key: str          # stable, derived from scope + target + trigger
+    scope: str        # "host" or "repo:<normalized-root>"
     target: str       # "agent:<id>", or "runtime" for the
                       # maintenance loop. Not an object, not a callable.
     kind: str         # "schedule" | "watch"
     trigger: str      # one expression string, per the grammars below
+
+@dataclass(frozen=True)
+class DesiredAutomation:
+    subscriptions: tuple[Subscription, ...]
+    declared_owners: Mapping[str, str]  # agent target -> explicit owner
 
 @dataclass(frozen=True)
 class InstalledTrigger:
@@ -231,12 +238,18 @@ class InstalledTrigger:
     rendered: str     # the OS artifact's own record, fingerprintable
 
 @dataclass(frozen=True)
+class WatcherRecord:
+    key: str
+    fingerprint: str  # canonical watch expression loaded at spawn
+    process: ProcessRef
+
+@dataclass(frozen=True)
 class Event:
     id: str               # correlation id, unique per firing
     origin: str           # "clock" | "boot" | "watch" | "manual"
     key: str | None       # subscription key; None for a manual run
     repo: str
-    target: str
+    target: str           # "agent:<id>"; runtime maintenance emits no Event
     at: datetime
     trigger: str | None   # the matched expression, for the dueness gate
     payload: Mapping[str, str | list[str]]
@@ -258,9 +271,26 @@ expression at spawn. `actual` for a watch subscription is therefore a
 pair - the installed respawn trigger and the running watcher - where
 the watcher is found through `ProcessHost.owned()` and carries the
 fingerprint of the expression it was started with, recorded in the
-subscription index at spawn. A plan whose desired fingerprint differs
-restarts the watcher; without that, editing a watch expression would
-take effect only at the next reboot.
+subscription index as `WatcherRecord`. A plan whose desired fingerprint
+differs emits `StopWatcher` followed by `StartWatcher`; without that,
+editing a watch expression would take effect only at the next reboot.
+
+The plan deliberately spans the runtime protocols and `state/`.
+Its operation vocabulary includes `MaterializeOwner`, `InstallTrigger`,
+`RemoveTrigger`, `StartWatcher`, and `StopWatcher`; `apply` interprets
+them through `TriggerStore`, `ProcessHost`, and the subscription index.
+The exact `Plan`, `Applied`, `Health`, `RenderedSubscription`, and
+`ChildResult` fields are phase-2 design work, but the ownership of each
+operation is fixed here.
+
+Watcher record ordering fails toward convergence. `apply` spawns the
+watcher, receives its `ProcessRef`, then atomically writes the
+`WatcherRecord`. If that write fails, it terminates the child and
+reports the start as failed. A crash between spawn and record is found
+on the next pass as an owned process with no matching record; the pass
+terminates it before starting the canonical watcher. Stopping does the
+reverse: confirm termination, then remove the record. No unrecorded
+watcher is ever treated as current.
 
 `Event.origin`
 distinguishes the four ways a run begins - `clock` and `boot` split
@@ -276,22 +306,28 @@ when the ownership registry is unavailable the planner abstains
 rather than guessing - but it may *materialize* an owner the
 frontmatter explicitly declares, which is today's behavior, preserved
 deliberately. Claiming beyond that stays a targeted, single-agent
-decision made above the planner. Without the rule, `apply(plan(...))`
-would quietly turn convergence into ownership acquisition, which is
-exactly the sweep-adoption bug today's code guards against.
+decision made above the planner. Collection reads definitions into
+`DesiredAutomation` and gathers an ownership snapshot without writing;
+the pure planner emits a `MaterializeOwner` operation for an explicit
+declaration. `apply` performs that operation before any trigger write
+and stops if it fails.
+
+Without the rule, `apply(plan(...))` would quietly turn convergence into
+ownership acquisition, which is exactly the sweep-adoption bug today's
+code guards against.
 
 One mapping is worth stating, because today's store persists three
 trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
 A `watch` subscription's durable OS artifact is its `@reboot`
 watcher-respawn entry, so `TriggerStore` still holds one artifact per
 subscription of either kind. The host-scoped check-and-repair loop is
-not a special case in the planner: it is a subscription the runtime
-injects into every plan with the reserved target `runtime`, converged
-and orphan-swept like the rest. It is a special case at firing time,
+not a special case in the planner: it is exactly one subscription with
+`scope="host"` and target `runtime`, added to the host plan rather than
+to every repository plan. It is a special case at firing time,
 deliberately: `dispatch` resolves only `agent:` targets through the
-agent port, and a `runtime`-targeted subscription renders to the
-runtime's own maintain entry point, so a maintenance firing never
-enters event dispatch at all.
+agent port, and the runtime-targeted subscription renders the scheduled
+invocation of `Runtime.ensure()` (today's `internal maintain` entry
+point), so a maintenance firing never enters event dispatch at all.
 
 What lives in the **runtime core**, generic across hosts: the two
 grammars, debounce, the fire-rate circuit breaker, duplicate
@@ -323,6 +359,14 @@ execution receives the child-execution slice as an injected parameter
 (`dispatch` and the CLI pass it into `agent.run`) rather than
 importing it, which is how a provider stays free of platform knowledge
 and how `agent/` stays free of a `runtime/` import.
+
+WSL liveness also owns a Windows-side Task Scheduler artifact. Phase 3
+must recognize both the current public `heartbeat` action and its legacy
+task, install the replacement internal liveness invocation, verify a
+fresh beacon, and only then remove the old tasks and public command.
+That cross-OS migration follows `heartbeat.install()`'s existing
+verify-before-remove behavior. It belongs to WSL liveness convergence,
+not to the generic `TriggerStore`.
 
 ### Firing events: what the state of the art actually is here
 
@@ -668,13 +712,16 @@ suite green, and can be released.
    `crontasks`, `wintasks`, `winwatch`, `watchsource` behind
    `hosts/posix.py` and `hosts/windows.py`. Add the pure planner. Switch
    `activate`, `stop`, and `doctor` to `plan`/`apply` and delete their
-   bespoke convergence. Add the host conformance suite.
+    bespoke convergence. Add the host conformance suite. Treat owner
+    materialization, watcher record ordering, unrecorded-process cleanup,
+    and restart-on-fingerprint-change as phase acceptance criteria.
 3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
    the `heartbeat` command. Absorb `hidden.py`, `spawn.py`, and
    `hostruntime`'s child execution into `ProcessHost`, and add the
    durable dispatch budget in the same phase, since the budget exists
-   to bound what process spawning makes possible. Removing `heartbeat`
-   is the first visible simplification for a user.
+    to bound what process spawning makes possible. Migrate and verify the
+    Windows-side heartbeat task before removing its old invocation;
+    removing `heartbeat` is the first visible simplification for a user.
 4. **Land the grammars.** Schedule, watch, and selector, with a
    validator and a clear failure message. This is the breaking
    frontmatter change; it needs its own release and migration note.
@@ -690,17 +737,17 @@ suite green, and can be released.
    validate` gate. A migration of what a definition is, so it gets its
    own release and its own migration note.
 8. **Simplify the repository's language and documentation.** Once the
-  names, ports, and optional skill layout are stable, review every
-  README, `AGENTS.md`, `.agents/` guide, design document, shipped skill
-  document, template, example, CLI help string, and relevant code
-  comment. Present one consistent model: an Agent Skill is the
-  definition, Agents Live adds local automation, the runtime owns host
-  subscriptions, and providers execute runs. Remove retired terms and
-  duplicated architecture explanations, keep the root README and
-  shipped overview synchronized, and validate links, frontmatter,
-  templates, and examples. Each earlier phase still updates the docs it
-  directly changes; this final pass is for cross-repository coherence,
-  not deferred documentation.
+    names, ports, and optional skill layout are stable, review every
+    README, `AGENTS.md`, `.agents/` guide, design document, shipped skill
+    document, template, example, CLI help string, and relevant code
+    comment. Present one consistent model: an Agent Skill is the
+    definition, Agents Live adds local automation, the runtime owns host
+    subscriptions, and providers execute runs. Remove retired terms and
+    duplicated architecture explanations, keep the root README and
+    shipped overview synchronized, and validate links, frontmatter,
+    templates, and examples. Each earlier phase still updates the docs it
+    directly changes; this final pass is for cross-repository coherence,
+    not deferred documentation.
 
 Phases 1 and 2 are mechanical and low risk. Phase 3 changes process
 management and liveness and is not; it sits early because everything
@@ -765,10 +812,14 @@ recognized is not the same as it being in the specification.
 
 ### What this settles
 
-**The extension mechanism already exists: `metadata`.** This package's
-nineteen agent-seam fields do not need to be argued into the standard
-vocabulary or invented as a private convention. They belong under
-`metadata` with the `agents-live.` prefix (`agents-live.schedule`,
+**The extension mechanism already exists: `metadata`.** Before the
+documented collapses, 23 current fields are outside the Agent Skills
+specification after `description` stays native and the `handler` alias
+is retired. The watch and selector collapses reduce that to 20
+extension keys. This count includes runtime fields, `owner`, and
+`timeout`; the nineteen fields confined to the agent seam are not the
+whole metadata surface. The extension keys belong under `metadata`
+with the `agents-live.` prefix (`agents-live.schedule`,
 `agents-live.allow-tools`, and so on - one prefix, stated once, used
 everywhere), and a conforming reader that has never heard of this
 package still reads the file correctly.
@@ -939,9 +990,10 @@ seam should therefore land in the same phase.
      [Defects](#defects-found-while-writing-this)). Cheap, and still
      not conforming.
    - **Metadata-level.** Move the extension fields under `metadata`
-     with the `agents-live.` prefix (eighteen of them; the `handler`
-     alias is retired rather than moved). Requires the string-valued grammars,
-     which is the collapse this document proposes anyway.
+     with the `agents-live.` prefix (20 after the documented collapses;
+     the `handler` alias is retired rather than moved). Requires the
+     string-valued grammars, which is the collapse this document
+     proposes anyway.
    - **Layout-level.** Also adopt `<skill>/SKILL.md` with `name`
      matching the directory, which brings `scripts/` and `references/`
      as the home for handlers. Largest change, and the only position
@@ -1061,6 +1113,16 @@ explicitly declared one" to match `activate.py` exactly, the
 field-count target was replaced with the supported figure (21, with
 12 withdrawn as unplanned aspiration), and the `allow-tools` keys are
 now stated exactly for both conformance positions.
+
+A fourth verification round separated contract defects from phase
+detail. The host-scope subscription and metadata counts were corrected;
+the pure planner now emits owner materialization rather than performing
+I/O; watcher operations and crash ordering are explicit; maintenance is
+the scheduled form of `Runtime.ensure()`; and heartbeat retirement has
+a verify-before-remove migration. Two conclusions were declined:
+watcher restart is expressible through `ProcessHost`, so spanning
+protocols is the runtime plan's job, and the Windows heartbeat task is
+a WSL liveness artifact rather than a second generic trigger store.
 
 ## Picking this up
 
