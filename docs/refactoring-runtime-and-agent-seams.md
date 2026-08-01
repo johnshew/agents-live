@@ -206,7 +206,7 @@ class ProcessHost(Protocol):
     def run_child(self, argv: Sequence[str], **io) -> ChildResult: ...
     def alive(self, ref: ProcessRef) -> bool: ...
     def terminate(self, ref: ProcessRef) -> None: ...
-    def owned(self) -> list[ProcessRef]: ...
+    def owned(self, role: str | None = None) -> list[ProcessRef]: ...
 ```
 
 `Event` is produced by a generic loop in `runtime/watchloop.py` that
@@ -218,9 +218,16 @@ Value types, primitives only:
 
 ```python
 @dataclass(frozen=True)
+class AgentKey:
+    repo: str         # normalized repository root
+    agent: str        # agent id; ownership is per (repo, agent), so
+                      # same-named agents in different repos never collide
+
+@dataclass(frozen=True)
 class Subscription:
     key: str          # stable, derived from scope + target + trigger
-    scope: str        # "host" or "repo:<normalized-root>"
+    scope: str        # "runtime:<owner-id>" (this runtime installation)
+                      # or "repo:<normalized-root>"
     target: str       # "agent:<id>", or "runtime" for the
                       # maintenance loop. Not an object, not a callable.
     kind: str         # "schedule" | "watch"
@@ -228,8 +235,10 @@ class Subscription:
 
 @dataclass(frozen=True)
 class DesiredAutomation:
+    covers: tuple[str, ...]     # scopes this plan is authoritative for
     subscriptions: tuple[Subscription, ...]
-    declared_owners: Mapping[str, str]  # agent target -> explicit owner
+    declared_owners: Mapping[AgentKey, str]
+    ownership_revision: str | None  # registry commit hash; None in local mode
 
 @dataclass(frozen=True)
 class InstalledTrigger:
@@ -265,6 +274,16 @@ respawn command, never the watch expression, so the store cannot
 reconstruct a `Subscription` and is never asked to. `plan` matches the
 two by key and by a fingerprint of the rendered form.
 
+`scope` names a runtime installation, not a machine: native Windows
+and each WSL distribution on the same hardware are separate runtimes
+that own agents independently (`hostruntime.py`), so the runtime scope
+is spelled with the owner identity the 2026-07-28 decision log already
+defines, never a bare "host". `covers` makes a plan authoritative only
+where it says it is: pruning and orphan detection are confined to the
+declared scopes, so a single-agent or single-repository plan can never
+remove another repository's subscriptions from the host-global
+crontab.
+
 A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
 expression at spawn. `actual` for a watch subscription is therefore a
@@ -287,10 +306,13 @@ Watcher record ordering fails toward convergence. `apply` spawns the
 watcher, receives its `ProcessRef`, then atomically writes the
 `WatcherRecord`. If that write fails, it terminates the child and
 reports the start as failed. A crash between spawn and record is found
-on the next pass as an owned process with no matching record; the pass
-terminates it before starting the canonical watcher. Stopping does the
-reverse: confirm termination, then remove the record. No unrecorded
-watcher is ever treated as current.
+on the next pass as an owned watcher-role process with no matching
+record; the pass terminates it before starting the canonical watcher.
+The cleanup consults `owned(role="watcher")` only - `ProcessRef`
+carries a role precisely so this sweep can never terminate an
+in-flight provider child. Stopping does the reverse: confirm
+termination, then remove the record. No unrecorded watcher is ever
+treated as current.
 
 `Event.origin`
 distinguishes the four ways a run begins - `clock` and `boot` split
@@ -312,6 +334,20 @@ the pure planner emits a `MaterializeOwner` operation for an explicit
 declaration. `apply` performs that operation before any trigger write
 and stops if it fails.
 
+The snapshot is versioned: `ownership_revision` records the registry
+revision the snapshot was read at (a commit hash - the backend is
+git-backed), and `apply` refuses a plan whose revision the registry
+has since moved past, which extends the stale-plan rule to concurrent
+ownership transfers. The full set of ownership modes is part of the
+contract, not folklore: local mode (no registry; nothing is owned
+elsewhere), unavailable registry (abstain from enforcement, never
+assume), wildcard `*` (any runtime may service), unclaimed (excluded
+and reported), explicitly declared (materialized as above), and
+ephemeral `_`-prefixed definitions (owned by the run that created
+them, exempt from ownership and from sweeps). Ownership is keyed by
+`AgentKey` - repository plus agent id - because a runtime-scoped plan
+spans repositories where bare names can collide.
+
 Without the rule, `apply(plan(...))` would quietly turn convergence into
 ownership acquisition, which is exactly the sweep-adoption bug today's
 code guards against.
@@ -322,8 +358,8 @@ A `watch` subscription's durable OS artifact is its `@reboot`
 watcher-respawn entry, so `TriggerStore` still holds one artifact per
 subscription of either kind. The host-scoped check-and-repair loop is
 not a special case in the planner: it is exactly one subscription with
-`scope="host"` and target `runtime`, added to the host plan rather than
-to every repository plan. It is a special case at firing time,
+the runtime-instance scope and target `runtime`, added to that
+runtime's plan rather than to every repository plan. It is a special case at firing time,
 deliberately: `dispatch` resolves only `agent:` targets through the
 agent port, and the runtime-targeted subscription renders the scheduled
 invocation of `Runtime.ensure()` (today's `internal maintain` entry
@@ -354,19 +390,24 @@ not the whole delta.
 child-output decoding, and the `wslg.exe` windowless launcher.
 `ProcessRef` carries pid, creation time, and image name - the identity
 triple [windows-support.md](windows-support.md) already requires
-before a termination - so no seam ever passes a bare pid. Agent
+before a termination - plus a role (`watcher` | `provider-child` |
+`maintenance`), so no seam ever passes a bare pid and no sweep ever
+guesses what a process is. Agent
 execution receives the child-execution slice as an injected parameter
 (`dispatch` and the CLI pass it into `agent.run`) rather than
 importing it, which is how a provider stays free of platform knowledge
 and how `agent/` stays free of a `runtime/` import.
 
-WSL liveness also owns a Windows-side Task Scheduler artifact. Phase 3
-must recognize both the current public `heartbeat` action and its legacy
-task, install the replacement internal liveness invocation, verify a
-fresh beacon, and only then remove the old tasks and public command.
-That cross-OS migration follows `heartbeat.install()`'s existing
-verify-before-remove behavior. It belongs to WSL liveness convergence,
-not to the generic `TriggerStore`.
+WSL liveness also owns a Windows-side Task Scheduler artifact, and
+replacing it is not yet transactional: today's `heartbeat.install()`
+registers the current task name with `Register-ScheduledTask -Force` -
+overwriting the existing registration - *before* it verifies a fresh
+beacon; only the legacy task enjoys verify-before-remove. Phase 3 must
+close that gap rather than inherit it: stage the replacement under a
+distinct task name (or capture the old action and restore it on
+failure), verify a fresh beacon, and only then swap and remove the old
+tasks and the public command. The migration belongs to WSL liveness
+convergence, not to the generic `TriggerStore`.
 
 ### Firing events: what the state of the art actually is here
 
@@ -609,8 +650,12 @@ scheduler-launched process reaches it through an ingress decoder that
 rebuilds the envelope from argv and the state-file payload reference.
 Ownership gating, the not-due gate (`clock` events only; `boot` and
 `manual` are never "not due"), and envelope-to-request translation
-live there. It is glue, but it is glue with a name and a
-test.
+live there. The ownership gate re-reads the registry at dispatch time
+and fails closed: a transfer propagates by git pull, so the losing
+runtime's triggers keep firing until its next reconciliation prunes
+them, and dispatch is the barrier during that window - eventual
+cleanup on the losing side, immediate refusal at the gate. It is
+glue, but it is glue with a name and a test.
 
 ## Expected size
 
@@ -714,14 +759,21 @@ suite green, and can be released.
    `activate`, `stop`, and `doctor` to `plan`/`apply` and delete their
     bespoke convergence. Add the host conformance suite. Treat owner
     materialization, watcher record ordering, unrecorded-process cleanup,
-    and restart-on-fingerprint-change as phase acceptance criteria.
+    and restart-on-fingerprint-change as phase acceptance criteria,
+    exercised over the shapes that actually break: same-named agents in
+    different repositories, native Windows plus WSL on one machine,
+    wildcard and unavailable ownership, a transfer landing between
+    `plan` and `apply`, partial-scope reconciliation, and watcher-only
+    cleanup with a provider child alive.
 3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
    the `heartbeat` command. Absorb `hidden.py`, `spawn.py`, and
    `hostruntime`'s child execution into `ProcessHost`, and add the
    durable dispatch budget in the same phase, since the budget exists
-    to bound what process spawning makes possible. Migrate and verify the
-    Windows-side heartbeat task before removing its old invocation;
-    removing `heartbeat` is the first visible simplification for a user.
+    to bound what process spawning makes possible. Stage the replacement
+    heartbeat task under a distinct name, verify a fresh beacon, then
+    swap and remove the old invocation - never `-Force` over a working
+    registration; removing `heartbeat` is the first visible
+    simplification for a user.
 4. **Land the grammars.** Schedule, watch, and selector, with a
    validator and a clear failure message. This is the breaking
    frontmatter change; it needs its own release and migration note.
@@ -812,11 +864,11 @@ recognized is not the same as it being in the specification.
 
 ### What this settles
 
-**The extension mechanism already exists: `metadata`.** Before the
-documented collapses, 23 current fields are outside the Agent Skills
-specification after `description` stays native and the `handler` alias
-is retired. The watch and selector collapses reduce that to 20
-extension keys. This count includes runtime fields, `owner`, and
+**The extension mechanism already exists: `metadata`.** Of the 25
+fields parsed today, 24 are outside the Agent Skills specification
+(`description` is native); retiring the `handler` alias leaves 23,
+and the watch and selector collapses reduce that to 20 extension
+keys. This count includes runtime fields, `owner`, and
 `timeout`; the nineteen fields confined to the agent seam are not the
 whole metadata surface. The extension keys belong under `metadata`
 with the `agents-live.` prefix (`agents-live.schedule`,
@@ -1123,6 +1175,26 @@ a verify-before-remove migration. Two conclusions were declined:
 watcher restart is expressible through `ProcessHost`, so spanning
 protocols is the runtime plan's job, and the Windows heartbeat task is
 a WSL liveness artifact rather than a second generic trigger store.
+
+A fifth round hardened phase 2 for the real deployment shape -
+several repositories, native Windows plus WSL runtimes on one
+machine, and ownership transfers racing reconciliation. All ten
+findings were folded in, none declined: ownership keyed by `AgentKey`
+(repository plus agent id, since a runtime-scoped plan spans
+repositories where bare names collide); `scope` respelled from the
+ambiguous "host" to the runtime-instance form using the owner
+identity; plans made authoritative only over their declared `covers`,
+bounding pruning; versioned ownership snapshots that `apply` refuses
+when the registry has moved past them; the six ownership modes stated
+in the contract; `owned()` filtered by process role so watcher
+cleanup can never terminate an in-flight provider child; a
+transactional heartbeat replacement - correcting round four's
+overstatement, since today's `-Force` registration overwrites the
+current task before verification and only the legacy task was ever
+verify-before-remove; fail-closed dispatch-time ownership rechecks
+with eventual cleanup on the losing runtime; the metadata counts
+restated as 24 non-spec today, 23 after `handler` retires, 20 after
+the collapses; and phase-2 acceptance scenarios covering all of it.
 
 ## Picking this up
 
