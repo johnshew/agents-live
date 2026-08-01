@@ -4903,6 +4903,39 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
         with self.assertRaises(hostruntime.ExecutableNotFound):
             hostruntime.pin_executable("probe", path=str(directory))
 
+    def test_a_shim_does_not_hide_an_executable_further_along_path(
+            self) -> None:
+        # An editor installs a launcher script for a CLI and puts it on
+        # PATH ahead of the CLI's own installation; the operator does not
+        # get to reorder that (#238).
+        if not self.windows:
+            self.skipTest("only Windows resolves a name to a shim")
+        shim, real = Path(self._tmp.name) / "shim", Path(self._tmp.name) / "cli"
+        shim.mkdir()
+        real.mkdir()
+        (shim / "probe.bat").write_text("@echo off\n", encoding="utf-8")
+        (real / "probe.exe").write_bytes(b"")
+        pinned = hostruntime.pin_executable(
+            "probe", path=os.pathsep.join([str(shim), str(real)]))
+        self.assertEqual(Path(pinned), real / "probe.exe")
+
+    def test_only_shims_is_reported_differently_from_nothing_at_all(
+            self) -> None:
+        # The two need different answers: install the CLI, versus the CLI
+        # is installed and the runtime still will not use it.
+        if not self.windows:
+            self.skipTest("only Windows resolves a name to a shim")
+        directory = Path(self._tmp.name)
+        (directory / "probe.cmd").write_text("@echo off\n", encoding="utf-8")
+        with self.assertRaises(hostruntime.ExecutableNotFound) as shims:
+            hostruntime.pin_executable("probe", path=str(directory))
+        self.assertIn("answers only to shims", str(shims.exception))
+        self.assertIn("probe.cmd", str(shims.exception).lower())
+        with self.assertRaises(hostruntime.ExecutableNotFound) as absent:
+            hostruntime.pin_executable("agents-live-no-such-tool",
+                                       path=str(directory))
+        self.assertIn("no executable named", str(absent.exception))
+
     def test_pin_executable_refuses_a_name_nothing_answers_to(self) -> None:
         if not self.windows:
             self.assertEqual(

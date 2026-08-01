@@ -72,14 +72,18 @@ flags [agent_adapters.py](../src/agents_live/agent_adapters.py) already
 builds. Five rules follow from how the CLI behaves, and each one is a bug
 this path would otherwise ship:
 
-1. **Pin a fully qualified `copilot.exe`; never resolve by name.** The
-   `copilot` on an interactive PATH can be a PowerShell bootstrapper
-   rather than the CLI, and VS Code installs exactly such a shim
-   (`copilot.ps1` in its extension storage) that can prompt to install or
-   update. `CreateProcess` cannot execute a `.ps1`, and a scheduled task
-   does not inherit that PATH in any case. This is the concrete failure
-   security-model item 4 is written against, and it presents as "Copilot
-   does not work headlessly" if it is not ruled out first.
+1. **Pin a fully qualified `copilot.exe`, and do not stop at the first
+   answer.** The `copilot` on an interactive PATH can be a launcher
+   script rather than the CLI, and VS Code installs exactly such a shim
+   (`copilot.ps1` and `copilot.bat` in its extension storage) that can
+   prompt to install or update. `CreateProcess` cannot execute a `.ps1`,
+   a `.bat` re-parses arguments through `cmd.exe`, and a scheduled task
+   does not inherit that PATH in any case. The shim also sits ahead of
+   the CLI's own installation, so refusing it has to continue the search
+   rather than end it; refusing outright made an installed Copilot CLI
+   unusable (#238). This is the concrete failure security-model item 4
+   is written against, and it presents as "Copilot does not work
+   headlessly" if it is not ruled out first.
 2. **Read both streams.** stdout carries only the model's answer; the
    usage summary, credit cost, and resume identifier go to stderr. This
    is the opposite of the Linux `script -qc` path, where everything
@@ -88,7 +92,10 @@ this path would otherwise ship:
    stderr.
 3. **Decode both streams as UTF-8 explicitly.** Capturing through
    Python's text mode without `encoding="utf-8"` falls back to the ANSI
-   code page and corrupts the stderr summary.
+   code page. The failure is worse than corruption: a byte that code
+   page cannot decode kills the reader thread, and `subprocess` hands
+   back `None` for that stream rather than raising, so the symptom lands
+   somewhere else entirely (#241).
 4. **Do not assume a single output block.** The same prompt yields the
    answer once, twice, or followed by a completion marker depending on
    launch context. Normalization tolerates repetition and trailing
@@ -713,11 +720,6 @@ through a quoting parser.
   nothing fires while nobody is signed in. `doctor` says so. Stored
   credentials, S4U, mapped drives, and network repositories are separate
   work if that limit ever needs lifting.
-- **What an installed Copilot CLI looks like on Windows**, now that
-  pinning refuses batch shims. If the npm package's global bin entry is
-  a `.cmd` rather than an executable, the runtime has to pin the
-  interpreter and entry script instead, and the adapter's `binary` grows
-  a Windows spelling.
 
 ## Decision log
 
@@ -727,6 +729,41 @@ failure settled it. Superseded planning content - the implementation
 order, phasing, and sizing estimates this document carried while the
 work was in progress - was removed once complete; it remains in git
 history.
+
+### 2026-07-29: the Copilot CLI is an executable, and a shim must not end the search
+
+The open question this replaces asked what an installed Copilot CLI
+looks like on Windows, and whether the adapter's `binary` would need a
+Windows spelling for a `.cmd` entry point. It does not. A Copilot CLI
+installed through WinGet is a real `copilot.exe`, so the bare name the
+adapter registers is right and pinning resolves it unchanged.
+
+What was wrong was the search. `pin_executable` took the first PATH hit
+and refused it if it was a shim, which reads as correct until you notice
+where the shims are: VS Code puts `copilot.ps1` and `copilot.bat` in its
+extension storage, and that directory sits roughly twenty entries ahead
+of the CLI's own installation. The refusal message told the operator to
+install the CLI, which they already had, and PATH order is the editor's
+choice rather than theirs. Continuing past a refused candidate and
+reporting "only shims answer to this name" separately from "nothing
+answers to this name" is the whole fix (#238).
+
+That unblocked the first `smoketest --runtime copilot` ever run on a
+native Windows host, which then found two more, neither of them Windows
+specific in origin and both invisible until copilot could run at all:
+the pipeline stdio bridge did not pin `mcp<2` the way `pyproject.toml`
+does, so pipeline mode timed out with no explanation (#240); and the
+smoketest captured child output in Python's default text mode, so a byte
+the ANSI code page cannot decode turned a successful run into an
+`AttributeError` on `None` (#241). Rule 3 above had already been written
+against exactly that, and applied everywhere except the harness that
+proves the thing works.
+
+The lesson is about the order of proof rather than any of the three
+bugs. Two runtimes are supported; the Windows half was declared covered
+while only one of them had ever been exercised there, and the other was
+hiding three defects behind a resolution failure in the first hundred
+lines of the run path.
 
 ### 2026-07-28: an owner value names a runtime three ways, and matches on one
 

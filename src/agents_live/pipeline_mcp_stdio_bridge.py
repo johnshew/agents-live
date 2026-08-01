@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["mcp"]
+# # mcp is held below 2.0 here for the same reason pyproject.toml holds
+# # it there: 2.0 moved the entry points this file imports.
+# dependencies = ["mcp<2"]
 # ///
 """Stdio MCP bridge to the in-process pipeline-mcp HTTP server.
 

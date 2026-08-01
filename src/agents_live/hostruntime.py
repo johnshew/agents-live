@@ -416,23 +416,38 @@ def pin_executable(name: str, *, path: str | None = None) -> str:
     name alone pins nothing there and the absolute path is resolved up
     front instead.
 
+    A refused shim does not end the search. An editor that installs a
+    launcher script for a CLI puts it on PATH ahead of the CLI's own
+    installation, so stopping at the first answer hides an executable
+    the operator has already installed and cannot reorder (#238).
+
     Raises :class:`ExecutableNotFound` when nothing on *path* answers to
-    the name, or when the only answer is a script or batch shim (see
+    the name, or when every answer is a script or batch shim (see
     ``_WINDOWS_REFUSED_SUFFIXES``).
     """
     if not _IS_WINDOWS:
         return name
-    resolved = shutil.which(name, path=path)
-    if resolved is None:
+    refused: list[str] = []
+    for directory in (path if path is not None
+                      else os.environ.get("PATH", "")).split(os.pathsep):
+        if not directory:
+            continue
+        resolved = shutil.which(name, path=directory)
+        if resolved is None:
+            continue
+        reason = _WINDOWS_REFUSED_SUFFIXES.get(Path(resolved).suffix.lower())
+        if reason is None:
+            return resolved
+        entry = f"{resolved}, {reason}"
+        if entry not in refused:  # which() searches the cwd every time
+            refused.append(entry)
+    if refused:
         raise ExecutableNotFound(
-            f"no executable named '{name}' on this host's PATH")
-    suffix = Path(resolved).suffix.lower()
-    reason = _WINDOWS_REFUSED_SUFFIXES.get(suffix)
-    if reason is not None:
-        raise ExecutableNotFound(
-            f"'{name}' resolves to {resolved}, {reason}; install the CLI "
-            f"itself, or point the runtime at its executable")
-    return resolved
+            f"'{name}' answers only to shims: {'; '.join(refused)}; "
+            f"install the CLI itself, or point the runtime at its "
+            f"executable")
+    raise ExecutableNotFound(
+        f"no executable named '{name}' on this host's PATH")
 
 
 # ---------------------------------------------------------------------------

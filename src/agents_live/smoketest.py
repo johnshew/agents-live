@@ -37,6 +37,11 @@ from .headless import (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+# Windows text mode falls back to the ANSI code page, which cannot decode
+# what an agent CLI writes. The reader thread then dies and the captured
+# stream arrives as None rather than text (windows-support.md, rule 3).
+_UTF8_TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
+
 
 def _module_argv(module: str) -> list[str]:
     """argv prefix that executes one lifecycle module in either layout.
@@ -323,9 +328,9 @@ def run_status(*args: str) -> str:
         [*_module_argv("status"), *argv],
         cwd=repo_root(),
         capture_output=True,
-        text=True,
         check=False,
         env=env,
+        **_UTF8_TEXT,
     )
     if completed.returncode != 0:
         raise SmokeFailure(completed.stderr.strip() or completed.stdout.strip() or "status failed")
@@ -338,7 +343,7 @@ def run_agent(name: str, changed_files: list[str] | None = None) -> str:
     if changed_files:
         cmd.extend(["--changed-files", json.dumps(changed_files)])
     completed = subprocess.run(
-        cmd, cwd=repo_root(), capture_output=True, text=True, check=False,
+        cmd, cwd=repo_root(), capture_output=True, check=False, **_UTF8_TEXT,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -457,7 +462,7 @@ def _check_dashboard_lists_agents(expected: list[str]) -> None:
         [*_module_argv("cli"), "--repo", str(repo_root()),
          "dashboard", "--port", str(port)],
         cwd=repo_root(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True,
+        **_UTF8_TEXT,
     )
     page_url = f"http://127.0.0.1:{port}/"
     agents_url = f"http://127.0.0.1:{port}/api/agents"
@@ -517,8 +522,8 @@ def cleanup() -> tuple[list[str], list[str]]:
         try:
             result = subprocess.run(
                 [*_module_argv("stop"), "--name", name],
-                cwd=repo_root(), check=False, capture_output=True, text=True,
-                timeout=CLEANUP_COMMAND_TIMEOUT_S,
+                cwd=repo_root(), check=False, capture_output=True,
+                timeout=CLEANUP_COMMAND_TIMEOUT_S, **_UTF8_TEXT,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             diagnostics.append(f"stop {name}: {exc}")
@@ -905,7 +910,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
             fail("inotifywait not found. Install with: sudo apt install inotify-tools")
         activate_result = subprocess.run(
             [*_module_argv("activate"), "--name", watcher_name],
-            cwd=repo_root(), capture_output=True, text=True, check=False,
+            cwd=repo_root(), capture_output=True, check=False, **_UTF8_TEXT,
         )
         if activate_result.returncode != 0:
             fail(f"activate.py failed: {activate_result.stderr.strip() or activate_result.stdout.strip()}")
@@ -1204,7 +1209,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Cleanup pipeline test artifacts
         subprocess.run(
             [*_module_argv("stop"), "--name", pipeline_name],
-            cwd=repo_root(), check=False, capture_output=True, text=True,
+            cwd=repo_root(), check=False, capture_output=True, **_UTF8_TEXT,
         )
         (agents_dir() / f"{pipeline_name}.md").unlink(missing_ok=True)
         print("  mode: pipeline (PipelineMcp side-channel): PASS")
@@ -1281,7 +1286,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Cleanup spawn test artifacts
         spawn_result_file.unlink(missing_ok=True)
         subprocess.run([*_module_argv("stop"), "--name", spawn_agent_name],
-                       cwd=repo_root(), check=False, capture_output=True, text=True)
+                       cwd=repo_root(), check=False, capture_output=True,
+                       **_UTF8_TEXT)
         (agents_dir() / f"{spawn_agent_name}.md").unlink(missing_ok=True)
         print("  Spawn module (detached dispatch): PASS")
 
@@ -1336,7 +1342,7 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Activate the watcher
         activate_result = subprocess.run(
             [*_module_argv("activate"), "--name", debounce_name],
-            cwd=repo_root(), capture_output=True, text=True, check=False,
+            cwd=repo_root(), capture_output=True, check=False, **_UTF8_TEXT,
         )
         if activate_result.returncode != 0:
             fail(f"activate.py failed for debounce agent: {activate_result.stderr.strip()[:200]}")
@@ -1411,7 +1417,8 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         # Cleanup debounce test
         stop_watcher(debounce_name)
         subprocess.run([*_module_argv("stop"), "--name", debounce_name],
-                       cwd=repo_root(), check=False, capture_output=True, text=True)
+                       cwd=repo_root(), check=False, capture_output=True,
+                       **_UTF8_TEXT)
         (agents_dir() / f"{debounce_name}.md").unlink(missing_ok=True)
         debounce_trigger.unlink(missing_ok=True)
         debounce_result_file.unlink(missing_ok=True)
@@ -1420,9 +1427,10 @@ def _run_locked(args: argparse.Namespace, started_at: float, model_for_verdict: 
         current_step = "14/14 stop"
         print("[14/14] Tearing down test agents...")
         stop_watcher(watcher_name)
-        subprocess.run([*_module_argv("stop"), "--name", cron_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([*_module_argv("stop"), "--name", watcher_name], cwd=repo_root(), check=False, capture_output=True, text=True)
-        subprocess.run([*_module_argv("stop"), "--name", preprocessor_name], cwd=repo_root(), check=False, capture_output=True, text=True)
+        for name in (cron_name, watcher_name, preprocessor_name):
+            subprocess.run([*_module_argv("stop"), "--name", name],
+                           cwd=repo_root(), check=False, capture_output=True,
+                           **_UTF8_TEXT)
         # Teardown only stops scheduling; remove smoketest files ourselves
         for name in (cron_name, watcher_name, preprocessor_name):
             prompt = agents_dir() / f"{name}.md"
