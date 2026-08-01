@@ -44,7 +44,9 @@ The costs follow from that:
    what is the difference". The backlog theme "Host changes that cannot
    half-finish" ([#226](https://github.com/johnshew/agents-live/issues/226),
    [#231](https://github.com/johnshew/agents-live/issues/231)) is a
-   symptom of that missing owner, not of five separate bugs.
+   symptom of that missing owner, not of five separate bugs - though
+   those two issues concern plugin and executable state rather than
+   triggers: the same convergence gap on different artifacts.
 2. **Liveness leaked into the command surface.** `heartbeat` is a public
    verb about a WSL implementation detail. Nothing outside a WSL host
    should know the word.
@@ -113,7 +115,10 @@ sense:
   hands execution to `dispatch`; no execution logic of its own.
 
 The two ports never import each other, and only primitives cross a
-seam. Arrows below point from depender to dependee.
+seam. The change lands strangler-fig - each phase releases
+independently over the live system, per the
+[migration sequence](#migration-sequence) - not as a rewrite. Arrows
+below point from depender to dependee.
 
 ```mermaid
 graph TD
@@ -122,7 +127,7 @@ graph TD
     RT --> HOSTS[hosts: posix, wsl, windows]
     AG --> PROV[providers: claude, copilot, fake, api]
     CLI --> DISP[dispatch - the only wiring]
-    DISP -->|drains Event envelopes| RT
+    DISP -->|Event envelope| RT
     DISP -->|agent id| AG
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
@@ -137,8 +142,18 @@ converges a set of subscriptions, and emits events.
 
 `Runtime` is a facade over three narrow, separately implementable
 protocols. The segregation is not ceremony: the three have different
-lifetimes (durable, process-scoped, child-scoped), different failure
+lifetimes (durable, process-scoped, per-child), different failure
 modes, and different conformance tests.
+
+The facade itself is adopted on evidence, not upfront:
+[windows-support.md](windows-support.md) records building and
+rejecting a `HostRuntime` object once already, because nearly every
+member was a stateless function of the host. Phase 2 therefore lands
+the planner as pure functions, and the object form arrives only if the
+prototype shows real instance state (a plan's validity window is the
+likely candidate). If it does not, the port stays a module of
+functions plus the three protocols, and nothing else in this document
+changes.
 
 ```python
 class Runtime(Protocol):
@@ -157,7 +172,8 @@ class Runtime(Protocol):
         '''Gather actual, delegate to the pure core diff. Printable.'''
 
     def apply(self, plan: Plan) -> Applied:
-        '''Execute a plan. Refuses if the host changed under it.'''
+        '''Check preconditions, refuse a stale plan, execute, and
+        report per-operation results.'''
 
 
 class TriggerStore(Protocol):
@@ -175,11 +191,12 @@ class ChangeSource(Protocol):
 
 
 class ProcessHost(Protocol):
-    '''Child-scoped. Used by the runtime and by agent execution.'''
-    def spawn_detached(self, argv: Sequence[str], **io) -> int: ...
+    '''Process management. `run_child` is the slice agent execution
+    receives by injection; the rest is runtime-internal.'''
+    def spawn_detached(self, argv: Sequence[str], **io) -> ProcessRef: ...
     def run_child(self, argv: Sequence[str], **io) -> ChildResult: ...
-    def alive(self, pid: int) -> bool: ...
-    def terminate(self, pid: int) -> None: ...
+    def alive(self, ref: ProcessRef) -> bool: ...
+    def terminate(self, ref: ProcessRef) -> None: ...
     def owned(self) -> list[ProcessRef]: ...
 ```
 
@@ -193,18 +210,24 @@ Value types, primitives only:
 ```python
 @dataclass(frozen=True)
 class Subscription:
-    key: str          # stable, repo-scoped, derived from target + trigger
+    key: str          # stable, derived from repo + target + trigger
+    repo: str         # repository root the subscription belongs to
     target: str       # agent id. Not an object, not a callable.
     kind: str         # "schedule" | "watch"
     trigger: str      # one expression string, per the grammars below
 
 @dataclass(frozen=True)
 class Event:
+    id: str           # correlation id, unique per firing
     key: str
+    repo: str
     target: str
     kind: str
     at: datetime
-    payload: Mapping[str, str | list[str]]   # e.g. {"changed": [...]}
+    payload: Mapping[str, str | list[str]]
+    # Small values travel inline; large ones (a changed-file batch) by
+    # state-file reference, which the Windows command-line length
+    # bound already requires (windows-support.md).
 ```
 
 One mapping is worth stating, because today's store persists three
@@ -231,9 +254,14 @@ implementation; that is the entire delta, and it is what absorbs
 
 `ProcessHost` is the home for what is scattered today across
 `hidden.py` (`CREATE_NO_WINDOW`), `spawn.py`, `hostruntime`'s pty and
-child-output decoding, and the `wslg.exe` windowless launcher. Agent
-execution consumes it rather than reimplementing it, which is how a
-provider stays free of platform knowledge.
+child-output decoding, and the `wslg.exe` windowless launcher.
+`ProcessRef` carries pid, creation time, and image name - the identity
+triple [windows-support.md](windows-support.md) already requires
+before a termination - so no seam ever passes a bare pid. Agent
+execution receives the child-execution slice as an injected parameter
+(`dispatch` and the CLI pass it into `agent.run`) rather than
+importing it, which is how a provider stays free of platform knowledge
+and how `agent/` stays free of a `runtime/` import.
 
 ### Firing events: what the state of the art actually is here
 
@@ -249,10 +277,12 @@ EventBridge, and CloudEvents all converge on:
 
 - Registration writes a **declarative, durable record** (the OS artifact
   plus an index entry). It is idempotent and reconcilable.
-- Firing produces an **envelope of primitives** - key, target, kind,
-  timestamp, payload - which is either handed to an in-process
-  dispatcher (watcher loop) or serialized into an argv (`agents-live
-  run --name X --changed-files [...]`, which is what happens today).
+- Firing produces an **envelope of primitives** - id, key, repo,
+  target, kind, timestamp, payload - which the watcher loop hands to
+  the dispatcher in-process, and which a scheduler-launched process
+  rebuilds through an ingress decoder from argv plus, for large
+  payloads, a state-file reference (`agents-live run --name X
+  --changed-files [...]` is that ingress today, in cruder form).
 - The **dispatcher** resolves target to a runnable. It is the only code
   that knows both halves exist.
 
@@ -296,8 +326,9 @@ by each host. Sketches, deliberately close to today's behavior:
 Schedule expression:
 
 ```ebnf
+schedules   = schedule , { ";" , schedule } ;
 schedule    = special | cron ;
-special     = "@reboot" | "@hourly" | "@daily" | "@weekly" | "@monthly" ;
+special     = "@reboot" ;
 cron        = minute sp hour sp dom sp month sp dow ;
 minute      = field ;   (* 0-59  *)
 hour        = field ;   (* 0-23  *)
@@ -310,11 +341,14 @@ range       = number , "-" , number ;
 number      = digit , { digit } ;
 ```
 
-Today's language is five-field cron plus `@reboot` only
-(`triggers.py`). The other `@` specials are additions, and they
-canonicalize to their cron equivalents in the core before any host
-renders them, so Task Scheduler never learns they exist. `@reboot` is
-the one special with no cron form and keeps its per-host rendering.
+This is exactly today's language - five-field cron plus `@reboot`
+(`triggers.py`) - with two additions that change no behavior: an agent
+that declares several schedules (allowed today as a YAML list) carries
+them in one string separated by `;`, each becoming its own
+subscription; and the parsed form is re-rendered canonically, so
+comparison and hashing never depend on the author's spelling. New `@`
+specials (`@hourly` and kin) were considered and dropped: they would
+change user-visible behavior, which is a non-goal.
 
 Watch expression:
 
@@ -342,8 +376,9 @@ yield.
 
 ### The agent port
 
-An agent is a skill definition with additional fields, loaded into a
-handle you can run.
+An agent builds on an Agent Skill: the definition file is a conforming
+skill, and this package adds extension frontmatter and processes it.
+Loaded, that file becomes a handle you can run.
 
 ```python
 def load(agent_id: str, *, root: Path) -> Agent: ...
@@ -386,6 +421,13 @@ class Provider(Protocol):
 (`prepare`, not `plan`: that word belongs to the runtime port's
 convergence diff, per the naming discipline in
 [Naming hazard](#naming-hazard-worth-fixing-now).)
+
+Two lifecycle questions stay open until the fake CLI (see
+[Testing approach](#testing-approach)) shows what generic invocation
+actually needs from a provider: how streaming output is normalized
+incrementally, and who cleans up what `prepare` created. The likely
+answer is a `parse_stream` hook and a cleanup handle on `Launch`, not
+a wider protocol; that call belongs to phase 5, made against evidence.
 
 `Launch` is either a subprocess description (argv, env, temp config
 files, whether a pty is required, whether TUI noise must be filtered) or
@@ -456,10 +498,13 @@ unless they are named:
   runtime test assert on emitted events without importing an agent.
 
 And one that is genuinely new: **`dispatch.py`**, roughly 150 lines,
-the only module below the CLI that imports both ports. Ownership
-gating, the
-not-due gate, and envelope-to-request translation live there. It is
-glue, but it is glue with a name and a test.
+the only module below the CLI that imports both ports. Its surface is
+`dispatch(event, context)`: the watch loop calls it in-process, and a
+scheduler-launched process reaches it through an ingress decoder that
+rebuilds the envelope from argv and the state-file payload reference.
+Ownership gating, the not-due gate, and envelope-to-request
+translation live there. It is glue, but it is glue with a name and a
+test.
 
 ## Expected size
 
@@ -493,9 +538,12 @@ is the unlock: every convergence scenario that today needs a mocked
 Property tests apply well here (round-trip a rendered schedule, and
 assert `apply(plan(d, a))` leaves `plan(d, actual') == empty`).
 
-**Tier 2 - host conformance suite.** One abstract test class, run
-against every registered host plugin, skipped when the platform is not
-present. Install, list, remove, install twice, remove what is not
+**Tier 2 - host conformance suite, plus an in-tree `fake` host.** One
+abstract test class, run against every registered host plugin, skipped
+when the platform is not present. The fake host (in-memory trigger
+store, scripted change source, recording process host) registers
+through the same entry point as the real ones and is what runtime-core
+and dispatcher tests run against. Install, list, remove, install twice, remove what is not
 there, enumerate after an external edit. Shipped in the package so a
 third-party host plugin runs the same suite. This replaces per-platform
 duplicate tests and gives the Windows half a real signal, which the
@@ -508,11 +556,23 @@ this plan. With it, the entire agent pipeline - schema validation, size
 caps, path roots, retries, timeout handling, error taxonomy, logging -
 is testable end to end with no CLI installed, no network, and no
 mocks. Today that path is only reachable through `smoketest` with real
-credentials, which is why it is 1,386 lines.
+credentials, which is why it is 1,386 lines. The fake provider is
+in-process and deliberately skips the subprocess layer, so it is
+paired with a **deterministic fake CLI executable** - a tiny program
+the real invocation path launches - which is what exercises argv
+quoting, output decoding, kill-on-timeout, and process-tree cleanup:
+the paths [#184](https://github.com/johnshew/agents-live/issues/184)
+says keep shipping defects. Every fake - host, provider, CLI -
+registers through the same plugin entry point as the real
+implementation, which is the payoff of goal 4 and what makes the
+plugin rule testable rather than aspirational.
 
 **Tier 4 - seam contract tests.** The runtime emits envelopes into a
 recorded corpus; the dispatcher is tested against that corpus. Neither
-side is ever tested against a mock of the other.
+side is ever tested against a mock of the other. Down the road the
+corpus grows into a log-driven simulator: `obs/` records every
+envelope and outcome, so a field incident can be replayed against the
+fakes and kept as a regression test.
 
 **Tier 5 - architecture fitness functions.** Cheap, non-flaky,
 whole-package invariants of exactly the kind the backlog says pay off:
@@ -556,15 +616,22 @@ suite green, and can be released.
 5. **Carve out the agent port.** Split `headless.py` into
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
-   fake.py` and the provider conformance suite; shrink `smoketest`.
-   Extract `dispatch.py`.
+   fake.py`, the fake CLI executable, and the provider conformance
+   suite; shrink `smoketest`. Extract `dispatch.py`.
 6. **Move the CLI into `cli/`** and enforce its import boundary.
+7. **Adopt the skill layout**, if the layout-level position in
+   [Open decisions](#open-decisions) is chosen: `<skill>/SKILL.md`
+   directories, handlers under `scripts/`, and the `skills-ref
+   validate` gate. A migration of what a definition is, so it gets its
+   own release and its own migration note.
 
-Phases 1 through 3 are mechanical and low risk. Phase 4 is the only one
-that affects existing user agents. Phase 5 is the largest and should be
+Phases 1 and 2 are mechanical and low risk. Phase 3 changes process
+management and liveness and is not; it sits early because everything
+after it builds on `ProcessHost`. Phases 4 and 7 are the ones that
+affect existing user agents. Phase 5 is the largest and should be
 sliced by concern (output normalization first, then argv construction,
-then MCP), each slice guarded by the fake provider added at the start
-of the phase.
+then MCP), each slice guarded by the fake provider and fake CLI added
+at the start of the phase.
 
 ## The definition standard
 
@@ -574,6 +641,20 @@ an open standard and is now implemented by Claude Code, GitHub Copilot,
 VS Code, Gemini CLI, OpenAI Codex, Cursor, Goose, OpenCode, and others.
 There is a reference validator, `skills-ref validate`, and a spec
 repository at `github.com/agentskills/agentskills`.
+
+One boundary keeps this honest: Agent Skills is a definition standard,
+not an execution standard. The specification defines an instruction
+bundle a client loads; it says nothing about providers, triggers,
+isolation, or invocation. The relationship is layered, and deliberate:
+**this package builds on Agent Skills** - the file stays a conforming
+skill any client can read, and this package adds extension frontmatter
+and processes it. The skill spec governs the definition; this package
+governs execution. That is the pattern the code already applies to
+native agent directories (`headless.py`: a file in `.claude/agents/`
+is a standard definition, and carrying `schedule:`/`watchPath:` makes
+it *also* a scheduled agent). Adopting the skill layout is therefore a
+migration of what a definition is, not a path rename, and the
+migration sequence gives it its own phase.
 
 The rationale for taking the ecosystem's word for it is already
 recorded outside this repository, in the engineering leadership repo
@@ -627,7 +708,9 @@ different reason and turn out to be required for conformance.
   `allowed-tools`. One letter, and it is this package that is wrong.
 - The specification requires `name` to match the parent directory
   name, which means `<skill>/SKILL.md`. The package uses flat
-  `Agents/<name>.md`. Conforming means adopting the directory layout,
+  `Agents/<name>.md` (alongside the native agent directories
+  `.claude/agents/` and `.github/agents/` it already reads).
+  Conforming means adopting the directory layout,
   which is also what makes bundled `scripts/`, `references/`, and
   `assets/` available - the natural home for the handlers that
   `pre-processor` and `post-processor` point at today.
@@ -669,10 +752,11 @@ for `post-processor`; see [Defects](#defects-found-while-writing-this)),
 
 Observations that bear on the collapse decision:
 
-- Only four fields cross into the runtime, and all four describe watch
-  subscriptions. That is the entire case for a watch grammar, and it is
-  weaker than it first looked: the gain is one comparable, hashable key
-  per subscription, not fewer fields for the author.
+- Only four fields cross into the runtime, and three of them -
+  `watchPath`, `watchIgnore`, `debounce` - describe watch
+  subscriptions. Those three are the entire case for a watch grammar,
+  and it is weaker than it first looked: the gain is one comparable,
+  hashable key per subscription, not fewer fields for the author.
 - `schedule` needs no collapsing. It is already one string per
   subscription, which is why the scheduled path has never had the
   problems the watch path has.
@@ -746,7 +830,9 @@ seam should therefore land in the same phase.
 
 ## Open decisions
 
-1. **How far to conform.** Three positions, in increasing cost:
+1. **How far to conform.** Building on Agent Skills is settled; what
+   remains is where the extension frontmatter lives and whether to
+   adopt the layout. Three positions, in increasing cost:
    - **Field-level.** Fix `allow-tools` to `allowed-tools`, keep the
      flat `Agents/<name>.md` layout, leave the extension fields at the
      top level. Cheap, and still not conforming.
@@ -781,12 +867,72 @@ Accepted costs:
 
 Gains beyond line count:
 
-- "Host changes that cannot half-finish" becomes structural: `plan` is
-  computed before the first write, and `apply` refuses a stale plan.
+- Half-finished host changes shrink from a design gap to a bounded,
+  visible failure: `plan` is computed before the first write, and
+  `apply` checks preconditions, refuses a stale plan, and reports
+  per-operation results, so what remains after a failure is printable
+  and resumable rather than silently divergent. The planner covers
+  subscriptions; the plugin-convergence and executable-replacement
+  halves of [#226](https://github.com/johnshew/agents-live/issues/226)
+  and [#231](https://github.com/johnshew/agents-live/issues/231) need
+  the same fingerprint-and-precondition pattern applied to their own
+  artifacts - enabled here, not delivered.
 - A third-party host or provider is a first-class citizen, with a
   conformance suite to prove it.
 - A future direct-to-API provider is a plugin, not a fork of the
   execution path.
+
+## Review feedback not acted on, and why
+
+A design review on 2026-07-31 produced nine findings. The accepted
+ones are already folded into the sections above: the Agent Skills
+layering statement, `ProcessRef` identity and the injected
+child-runner, the ingress decoder and the richer envelope, the
+softened plan/apply claim, the fake CLI executable, and the
+resequenced migration. What follows is the feedback that was not
+acted on, or only partly, and the reasoning - recorded so the next
+reader does not re-litigate it without new evidence.
+
+**"`state/` and `obs/` are directories, not cohesive abstractions;
+moving them first is churn without a behavioral seam."** Not acted
+on. Phase 1's purpose is not a behavioral seam; it is landing the
+import-boundary fitness functions while they are cheap to satisfy,
+and pure moves are reversible. The fair kernel of the point - both
+ports free-writing JSONL couples them to a concrete schema - is an
+argument for naming `obs/` as the schema's owner, not against it.
+
+**"Replace `prepare`/`parse` with a full provider lifecycle (start,
+events, cancel, close)."** Partly acted on. Streaming normalization
+and cleanup are now recorded as open questions on the provider seam,
+but the wider protocol was declined: the small contract is the
+package's largest line-count win, and the right surface will only be
+visible once the fake CLI exercises real invocation. Deferred to
+phase 5, decided on evidence.
+
+**"The `Runtime` facade repeats an abstraction windows-support.md
+already rejected."** Partly acted on. The history is real and is now
+cited in the port section; the response is prototype-first - planner
+as pure functions, the object form only if real instance state shows
+up - rather than withdrawing the facade. The earlier rejection
+predates the plan/apply lifecycle, which is the one candidate for
+genuine state.
+
+**"Use versioned JSON or a sidecar automation file instead of a
+whitespace-sensitive DSL."** Not acted on. If the extension fields
+move under `metadata`, the specification forces string values
+regardless, so some string encoding is unavoidable, and hashability
+comes from canonical re-rendering, which the grammar section now
+states. A sidecar file would reopen the one-file definition and
+create a second artifact to keep consistent. Revisit only if the
+metadata-level position is rejected.
+
+**"Reorder the migration around contracts: event ingress, planner,
+process services, provider lifecycle, then the format break."**
+Mostly the existing order already. The one visible difference -
+dispatch landing in phase 5 - stands, because dispatch needs both
+ports, and extracting it before the agent port exists would wire it
+to `headless.py` only to rewire it a phase later. The sequence did
+gain phase 7, the layout migration, from this feedback.
 
 ## Picking this up
 
@@ -808,6 +954,8 @@ something below them changes.
 | Generalize the circuit breaker | Yes, as one durable budget per project per host, fail-open, not per subscription. | [Circuit breakers](#circuit-breakers) |
 | Where do spawned and ephemeral agents belong | Split: process lifecycle to `ProcessHost` in the runtime seam, definition lifetime to `state/`. | [Process management](#process-management) |
 | Asyncio | No. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
+| Is an agent a different thing from a skill | No: an agent is a conforming Agent Skill plus extension frontmatter this package processes. The skill spec governs the definition; this package governs execution. | [The definition standard](#the-definition-standard) |
+| How the pieces are tested | A fake per plugin seam - host, provider, and a fake provider CLI executable - each registered through the same entry points as the real implementations; later, a log-driven simulator replays recorded envelopes. | [Testing approach](#testing-approach) |
 
 ### Still needing a decision
 
