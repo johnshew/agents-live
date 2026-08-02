@@ -118,8 +118,8 @@ sense:
   `copilot`, `fake`, later `api`.
 - **`dispatch.py`** - the only module below the CLI that imports both
   ports. Turns an event envelope into an agent run.
-- **`state/`** - repository registry, ownership, and the durable
-  subscription index. Sits below both ports.
+- **`state/`** - repository registry, assignment, activation, and the
+  durable subscription index. Sits above both ports.
 - **`obs/`** - event log, timeline, query. Written by both ports,
   owned by neither.
 - **`cli/`** - inspects and changes settings through the ports and
@@ -142,7 +142,7 @@ graph TD
     DISP -->|resolves target, calls run on| AG
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
-    RT --> ST[state/ - repos, ownership, subscription index]
+    RT --> ST[state/ - repos, assignment, activation, index]
     AG --> ST
 ```
 
@@ -170,7 +170,7 @@ check-and-repair loop can prune an orphaned trigger
 (`health_check.py`) but can never restore a missing one: converging
 from frontmatter alone would undo every `stop`. The desired set is
 therefore frontmatter *times* an activation set that `activate` writes
-and `stop` clears, kept in `state/` beside ownership. Recording it is
+and `stop` clears, kept in `state/` beside assignment. Recording it is
 what turns an externally deleted trigger into repairable drift instead
 of a silent deactivation.
 
@@ -244,15 +244,9 @@ Value types, primitives only:
 
 ```python
 @dataclass(frozen=True)
-class AgentKey:
-    repo: str         # normalized repository root
-    agent: str        # agent id; ownership is per (repo, agent), so
-                      # same-named agents in different repos never collide
-
-@dataclass(frozen=True)
 class Subscription:
     key: str          # stable, derived from scope + target + trigger
-    scope: str        # "runtime:<owner-id>" (this runtime installation)
+    scope: str        # "runtime:<runtime-id>" (this installation)
                       # or "repo:<normalized-root>"
     target: str       # "agent:<id>", or "runtime" for the
                       # maintenance loop. Not an object, not a callable.
@@ -262,9 +256,10 @@ class Subscription:
 @dataclass(frozen=True)
 class DesiredAutomation:
     covers: tuple[str, ...]     # scopes this call is authoritative for
-    subscriptions: tuple[Subscription, ...]  # activated agents only
-    declared_owners: Mapping[AgentKey, str]
-    ownership_revision: str | None  # registry commit hash; None in local mode
+    subscriptions: tuple[Subscription, ...]
+    # Already filtered to the agents assigned to this runtime and
+    # started here. The runtime never sees an owner; see Assignment
+    # and activation.
 
 @dataclass(frozen=True)
 class InstalledTrigger:
@@ -280,9 +275,8 @@ class WatcherRecord:
 
 @dataclass(frozen=True)
 class Operation:
-    kind: str    # "materialize-owner" | "install-trigger"
-                 # | "remove-trigger" | "start-watcher"
-                 # | "stop-watcher" | "repair-host"
+    kind: str    # "install-trigger" | "remove-trigger"
+                 # | "start-watcher" | "stop-watcher" | "repair-host"
     key: str
     detail: str  # printable, rendered in the user's vocabulary
 
@@ -319,9 +313,11 @@ the two by key and by a fingerprint of the rendered form.
 
 `scope` names a runtime installation, not a machine: native Windows
 and each WSL distribution on the same hardware are separate runtimes
-that own agents independently (`hostruntime.py`), so the runtime scope
-is spelled with the owner identity the 2026-07-28 decision log already
-defines, never a bare "host". `covers` makes a call authoritative only
+that run agents independently (`hostruntime.py`), so the runtime scope
+is spelled with the runtime identity the 2026-07-28 decision log
+already defines, never a bare "host". That identity is a name for an
+installation and has nothing to do with which agents are assigned to
+it. `covers` makes a call authoritative only
 where it says it is: pruning and orphan detection are confined to the
 declared scopes, so activating one agent, or reconciling one
 repository, can never remove another repository's subscriptions from
@@ -339,14 +335,14 @@ that, editing a watch expression would take effect only at the next
 reboot.
 
 Convergence deliberately spans the runtime protocols and `state/`.
-Its operation vocabulary - materialize an owner, install or remove a
+Its operation vocabulary - install or remove a
 trigger, start or stop a watcher, repair a host prerequisite - is
 interpreted through `TriggerStore`, `ProcessHost`, and the
 subscription index. That vocabulary is internal: it is what `converge`
 reports and what `status` and `doctor` render into the user's words,
 never something a caller assembles. The exact `Converged`, `Health`,
 `RenderedSubscription`, and `ChildResult` fields are phase-2 design
-work; the ownership of each operation is fixed here.
+work; which protocol owns each operation is fixed here.
 
 One call rather than a plan handed back and applied later is
 deliberate. A held plan needs a validity window, a staleness rule, and
@@ -374,40 +370,9 @@ what one "schedule" kind used to cover, because only `clock` events
 pass through the dueness gate, and a `manual` run has no subscription
 at all, which is why `key` and `trigger` are optional.
 
-Two preconditions carry over from today's `activate` into the
-convergence contract rather than being lost as polish
-(`activate.py`): batch
-reconciliation never *invents* an owner - an unregistered agent with
-no frontmatter `owner:` is excluded from `desired` and reported, and
-when the ownership registry is unavailable convergence abstains
-rather than guessing - but it may *materialize* an owner the
-frontmatter explicitly declares, which is today's behavior, preserved
-deliberately. Claiming beyond that stays a targeted, single-agent
-decision made above the runtime. Collection reads definitions into
-`DesiredAutomation` and gathers an ownership snapshot without writing;
-the pure diff emits a materialize-owner operation for an explicit
-declaration, and `converge` performs it before any trigger write and
-abandons the pass if it fails.
-
-The snapshot is versioned: `ownership_revision` records the registry
-revision it was read at (a commit hash - the backend is git-backed),
-and `converge` re-reads it immediately before its first write and
-abandons the pass if the registry has moved. That is what a
-stale-plan rule would have bought, without a plan to keep. The window
-it cannot close - a transfer landing mid-pass - is closed at dispatch,
-which fails closed. The full set of ownership modes is part of the
-contract, not folklore: local mode (no registry; nothing is owned
-elsewhere), unavailable registry (abstain from enforcement, never
-assume), wildcard `*` (any runtime may service), unclaimed (excluded
-and reported), explicitly declared (materialized as above), and
-ephemeral `_`-prefixed definitions (owned by the run that created
-them, exempt from ownership and from sweeps). Ownership is keyed by
-`AgentKey` - repository plus agent id - because a runtime-scoped pass
-spans repositories where bare names can collide.
-
-Without the rule, convergence would quietly become ownership
-acquisition, which is exactly the sweep-adoption bug today's code
-guards against.
+Two preconditions carry over from today's `activate`, but they belong
+one layer up rather than in the runtime: see
+[Assignment and activation](#assignment-and-activation).
 
 One mapping is worth stating, because today's store persists three
 trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
@@ -434,13 +399,13 @@ orphan detection, and the junk sweep.
 
 What a **host plugin** supplies: the three protocols above, a
 liveness report, and the host facts `hostruntime` answers today -
-identity, state location, owner identity, lock acquisition,
+identity, state location, runtime identity, lock acquisition,
 executable pinning, the child environment floor, shell availability,
 and native-tool detection (`hostruntime.py`). That list is longer
 than "three protocols plus liveness", so freezing the plugin contract
 starts with a capability inventory of `hostruntime`'s exports, not
 with this sketch. `wsl` is likewise more than `posix` plus liveness:
-it is a separate environment with its own ownership identity and
+it is a separate environment with its own runtime identity and
 interop-native tool checks; liveness is what absorbs `heartbeat.py`,
 not the whole delta.
 
@@ -467,6 +432,65 @@ distinct task name (or capture the old action and restore it on
 failure), verify a fresh beacon, and only then swap and remove the old
 tasks and the public command. The migration belongs to WSL liveness
 convergence, not to the generic `TriggerStore`.
+
+### Assignment and activation
+
+Two facts decide what a runtime should be running, and neither belongs
+to the runtime. Both live in `state/`, above the port, and what they
+hand down is a set of agent keys. Nothing below reads an `owner:`
+field, consults the registry, or uses the word ownership: not
+`Runtime`, not `dispatch`, not `cli/`, and not the agent seam, which
+never did.
+
+**Assignment: whose agent is this?** A pure function of the agent
+inventory, the registry snapshot, and this runtime's identity,
+answering one question per agent: is this one mine? Its key is
+`AgentKey`, repository root plus agent id, because a fleet spans
+repositories in which bare agent names collide. `*` means
+every runtime may run it, a named owner means one runtime may, and
+unclaimed means none may until someone claims it. Being pure and
+whole-fleet, it is also the report that is awkward to get today: list
+the agents, see which are wildcard and which are pinned to a single
+machine, and see which machine.
+
+**Activation: is it started here?** For the agents that are mine, a
+per-runtime record of started or stopped that `activate` writes and
+`stop` clears. Getting a machine running is then exactly what it
+sounds like: make the agents assigned to it match their started or
+stopped state.
+
+Convergence receives `subscriptions` already filtered by both and has
+nothing left to decide, which is why `DesiredAutomation` carries no
+owner map and no registry revision.
+
+The preconditions that were drafted into the planner are this layer's
+rules, which is where they belonged. Assignment never *invents* an
+owner: an unregistered agent with no frontmatter `owner:` is reported
+and excluded, and an unavailable registry means abstain rather than
+guess. It may *materialize* an owner the frontmatter explicitly
+declares, which is today's behavior at `activate.py`, preserved
+deliberately - frontmatter `owner:` is a seed read at first
+activation, never a second source of truth afterwards. Claiming beyond
+that stays an explicit, single-agent act. The modes are stated once,
+here: local (no registry, nothing assigned elsewhere), registry
+unavailable (abstain), wildcard, unclaimed, explicitly declared, and
+ephemeral `_`-prefixed definitions, which belong to the run that
+created them and are exempt from assignment and from sweeps.
+Assignment resolves and seeds before anything reaches the runtime, so
+a failure there converges nothing rather than half of something.
+
+One consequence deserves to be explicit, because it is the only place
+the separation could leak. Assignment can change while a trigger is
+installed: a transfer propagates by git pull, so the losing runtime's
+triggers keep firing until its next convergence prunes them. The
+barrier is at dispatch, and it is deliberately not an ownership check.
+It is the same desired-state question asked for a single key - is this
+subscription still one I should be running? - which assignment feeds
+several layers up while `dispatch` never learns the word. It costs one
+state read on the firing path and fails closed. The alternative,
+letting the losing machine run until its next maintenance pass, is a
+bounded window in which one agent runs on two machines, and for an
+agent that writes files that is not a bounded cost.
 
 ### Firing events: what the state of the art actually is here
 
@@ -745,9 +769,9 @@ construction for a provider, and no platform branch. The declarative
 `state/` and `obs/` exist today and will re-scatter across the ports
 unless they are named:
 
-- **`state/`** - repository registry, ownership, and the durable
-  subscription index. `repos.py`, `ownership.py`, and `paths.py` are
-  already close to this.
+- **`state/`** - the repository registry, assignment, activation, and
+  the durable subscription index. `repos.py`, `ownership.py`, and
+  `paths.py` are already close to this.
 - **`obs/`** - the JSONL event schema, `qlog`, `timeline`. Both ports
   write to it; neither owns it. Keeping it separate is what lets a
   runtime test assert on emitted events without importing an agent.
@@ -758,14 +782,13 @@ the only module below the CLI that imports both ports. Its surface is
 scheduler-launched process reaches it through an ingress decoder that
 rebuilds the envelope from argv and the state-file payload reference,
 refusing an envelope version it does not know.
-Ownership gating, the not-due gate (`clock` events only; `boot`,
-`watch`, and `manual` are never "not due"), the concurrency skip, and
-envelope-to-request translation
-live there. The ownership gate re-reads the registry at dispatch time
-and fails closed: a transfer propagates by git pull, so the losing
-runtime's triggers keep firing until its next reconciliation prunes
-them, and dispatch is the barrier during that window - eventual
-cleanup on the losing side, immediate refusal at the gate. It is
+The still-desired check, the not-due gate (`clock` events only;
+`boot`, `watch`, and `manual` are never "not due"), the concurrency
+skip, and envelope-to-request translation
+live there. The still-desired check re-reads `state/` at firing time
+and fails closed, which is what covers the window between an
+assignment change and the losing runtime's next convergence -
+eventual cleanup on that side, immediate refusal at the gate. It is
 glue, but it is glue with a name and a test.
 
 ## Expected size
@@ -793,7 +816,8 @@ other side. Making the seams explicit is what fixes that, so the test
 plan is part of the refactoring rather than a follow-up.
 
 **Tier 1 - pure, table-driven, no I/O.** The two trigger grammars, the
-selector grammar, debounce, the fire-rate breaker, dueness, and the
+selector grammar, debounce, the fire-rate breaker, dueness,
+assignment, and the
 convergence diff are all pure functions. `diff(desired, actual) ->
 operations` being pure is the unlock: every convergence scenario that
 today needs a mocked `crontab` or a mocked `Register-ScheduledTask`
@@ -867,18 +891,20 @@ suite green, and can be released.
 2. **Introduce the runtime port over today's stores.** Move
    `crontasks`, `wintasks`, `winwatch`, `watchsource` behind
    `hosts/posix.py` and `hosts/windows.py`. Add the pure diff and the
-   single `converge`. Record activation in `state/`, so that a trigger
-   removed behind the tool's back is repairable drift rather than a
-   silent deactivation. Put `activate`, `stop`, and `doctor` on that
+   single `converge`. Lift assignment and activation into `state/` as
+   the two facts above the port, so that the runtime receives an
+   already-filtered set and a trigger removed behind the tool's back
+   is repairable drift rather than a silent deactivation. Put
+   `activate`, `stop`, and `doctor` on that
    one path and delete their bespoke convergence: the verbs keep
    exactly the meaning and wording they have today, and nothing about
    convergence reaches the command surface.
-   Add the host conformance suite. Treat owner
-    materialization, watcher record ordering, unrecorded-process cleanup,
+   Add the host conformance suite. Treat assignment resolution,
+    watcher record ordering, unrecorded-process cleanup,
     and restart-on-fingerprint-change as phase acceptance criteria,
     exercised over the shapes that actually break: same-named agents in
     different repositories, native Windows plus WSL on one machine,
-    wildcard and unavailable ownership, a transfer landing mid-pass,
+    wildcard and unavailable registries, a transfer landing mid-pass,
     partial-scope reconciliation, and watcher-only
     cleanup with a provider child alive.
 3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
@@ -1051,11 +1077,11 @@ table; it is the input to that decision.
 | `watchIgnore` | list of patterns | Policy input to the generic watch loop. |
 | `debounce` | seconds | Policy input to the generic watch loop. |
 
-**Consumed by the dispatcher, which sits between the two seams:**
+**Consumed above both seams:**
 
 | Field | Shape today | Role |
 |---|---|---|
-| `owner` | identity string or `*` | Whether this host may service the event. Sourced from `state/`, not parsed twice. |
+| `owner` | identity string or `*` | Seed for assignment in `state/`, read at first activation. Neither seam ever sees it. |
 | `timeout` | seconds, default 120 | Enforced generically around provider execution. A provider that owns its own timeout cannot be held to a common contract. |
 
 **Consumed by the agent seam only,** listed so the boundary is visible:
@@ -1076,8 +1102,9 @@ Observations that bear on the collapse decision:
 - `schedule` needs no collapsing. It is already one string per
   subscription, which is why the scheduled path has never had the
   problems the watch path has.
-- `owner` is the only field read on both sides of the dispatcher, and
-  it is already a `state/` concern rather than a definition concern.
+- `owner` is not a definition concern at all: it seeds assignment in
+  `state/` at first activation, and after that the registry answers.
+  Neither seam reads it.
 - Nineteen of twenty-five fields never leave the agent seam. Whatever
   the runtime refactoring does, it should not touch them.
 - Of those nineteen, only `description` is an Agent Skills
@@ -1107,9 +1134,9 @@ anything.
 
 **Definition lifetime is not process management.** An ephemeral
 `_`-prefixed definition belongs to the run that created it and must not
-be adopted by a maintenance sweep. That is an ownership and collection
+be adopted by a maintenance sweep. That is a lifetime and collection
 rule about a file, and it belongs in `state/` beside repository
-registration and agent ownership. The backlog reached this conclusion
+registration and assignment. The backlog reached this conclusion
 once already, when a hidden `smoketest --cleanup-only` mode was retired
 in favor of naming the rule as `headless.is_ephemeral`; this
 refactoring should give the rule a home rather than a helper.
@@ -1333,6 +1360,19 @@ stated decoder rule across an upgrade, concurrency policy fixed at
 skip (unifying `IgnoreNew` on Windows with cron's accidental overlap),
 and misfire policy fixed at skip, matching both hosts today.
 
+A seventh round pulled ownership out of the runtime entirely. It is
+now assignment: a pure, fleet-wide answer to "whose agent is this?"
+that sits in `state/` above both ports and hands down a set of agent
+keys, paired with activation, the per-runtime started-or-stopped
+record. `DesiredAutomation` lost its owner map and registry revision,
+the operation vocabulary lost materialize-owner, and the six modes
+plus the never-invent rule moved to the layer that was already making
+those decisions. Getting a machine running reduces to making the
+agents assigned to it match their started or stopped state. The one
+place the separation could leak is named rather than hidden: the
+firing-time barrier is a still-desired check on one subscription key,
+not an ownership check, and `dispatch` never learns the word.
+
 ## Picking this up
 
 Nothing here is committed work. Per the repository rule, a work item
@@ -1349,6 +1389,7 @@ something below them changes.
 | What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `activate` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
 | Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
 | What says an agent is active here | A recorded activation fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
+| Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and activation](#assignment-and-activation) |
 | Callbacks or something else for firing events | Neither: a durable subscription plus an envelope of primitives. The registering process is never the servicing process. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
 | Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields `Event`. | [Where events are produced](#where-events-are-produced) |
 | What the firing contract fixes | A versioned envelope the ingress decoder can refuse, concurrency policy skip, and misfire policy skip. All in the runtime core; none becomes a frontmatter field. | [The firing contract](#the-firing-contract) |
