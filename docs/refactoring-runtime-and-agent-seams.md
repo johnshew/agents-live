@@ -230,13 +230,16 @@ class Runtime(Protocol):
     changes: ChangeSourceFactory | None   # None = host cannot watch
     processes: ProcessHost
 
-    def converge(self, desired: DesiredAutomation, *,
+    def converge(self, subscriptions: Sequence[Subscription], *,
+                 covers: Sequence[str],
                  dry_run: bool = False) -> Converged:
-        '''Goal-seek: make this runtime match desired, and report what
-        it did. Host prerequisites and liveness first, then
-        subscriptions. Idempotent - a second call reports nothing to
-        do. dry_run reports the same operations without performing
-        them, which is what `--dry-run` prints.'''
+        '''Goal-seek: make this runtime match the subscriptions, and
+        report what it did. `covers` names the scopes this call may
+        prune; a subscription outside them is a caller error. Host
+        prerequisites and liveness first, then subscriptions.
+        Idempotent - a second call reports nothing to do. dry_run
+        reports the same operations without performing them, which is
+        what `--dry-run` prints.'''
 
     def health(self) -> Health:
         '''Read-only. Liveness is a field here, not a command.'''
@@ -285,14 +288,6 @@ class Subscription:
                       # maintenance loop. Not an object, not a callable.
     kind: str         # "schedule" | "watch"
     trigger: str      # one expression string, per the grammars below
-
-@dataclass(frozen=True)
-class DesiredAutomation:
-    covers: tuple[str, ...]     # scopes this call is authoritative for
-    subscriptions: tuple[Subscription, ...]
-    # Already filtered to the agents assigned to this runtime and
-    # started here. The runtime never sees an owner; see Assignment
-    # and started state.
 
 @dataclass(frozen=True)
 class InstalledTrigger:
@@ -521,9 +516,12 @@ The runtime adds one subscription of its own, its check-and-repair
 loop, as a host prerequisite. Collection never sees it and no caller
 assembles it.
 
-Convergence therefore receives `subscriptions` already filtered by
-both facts and has nothing left to decide, which is why
-`DesiredAutomation` carries no owner map and no registry revision.
+Convergence therefore receives subscriptions already filtered by both
+facts and has nothing left to decide. There is no request object
+wrapping them: the call takes what should exist and the scopes it may
+prune, because those two are all that is left once assignment and
+started state answer upstream, and a two-field wrapper would be a name
+for nothing.
 
 The preconditions that were drafted into the planner are this layer's
 rules, which is where they belonged. Assignment never *invents* an
@@ -1493,6 +1491,16 @@ somebody has to go there regardless, and one
 `start --transfer-here` on that machine does the whole move - the
 losing runtime drops the agent from its desired set on its own and
 prunes the trigger at its next convergence.
+
+A tenth round killed `DesiredAutomation`. Once assignment took the
+owner map and the registry revision, the type was two fields with one
+call site, and "automation" was a noun that distinguished nothing from
+"the subscriptions". `converge` now takes the subscriptions and the
+scopes it may prune as two parameters, which is one fewer type across
+the seam by goal 1's own count. The pair is worth keeping visible
+rather than bundled: what should exist and where this call is allowed
+to act are different kinds of fact, and hiding them behind one name is
+what let the ownership fields accumulate there in the first place.
 
 ## Picking this up
 
