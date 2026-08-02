@@ -118,8 +118,8 @@ sense:
   `copilot`, `fake`, later `api`.
 - **`dispatch.py`** - the only module below the CLI that imports both
   ports. Turns an event envelope into an agent run.
-- **`state/`** - repository registry, assignment, activation, and the
-  durable subscription index. Sits above both ports.
+- **`state/`** - repository registry, assignment, started state, and
+  the durable subscription index. Sits above both ports.
 - **`obs/`** - event log, timeline, query. Written by both ports,
   owned by neither.
 - **`cli/`** - inspects and changes settings through the ports and
@@ -142,7 +142,7 @@ graph TD
     DISP -->|resolves target, calls run on| AG
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
-    RT --> ST[state/ - repos, assignment, activation, index]
+    RT --> ST[state/ - repos, assignment, started state, index]
     AG --> ST
 ```
 
@@ -158,21 +158,30 @@ stop making it happen, and `run` means do it once now. Convergence is
 how those verbs are kept honest, never something the user is asked to
 think about: no verb, flag, or message names a plan, a diff, a
 subscription, or a convergence pass. What surfaces instead is `status`
-and `doctor` in the same three-verb vocabulary - this agent is active
+and `doctor` in the same three-verb vocabulary - this agent is started
 here, this one should be and is not, re-run `activate`.
 
+One word, one meaning: an agent is **started** or **stopped** on a
+runtime, and a **run** is one execution of it. Nothing here calls an
+agent active, activated, enabled, or running - those were four
+spellings of one bit, and the concurrency rule in
+[the firing contract](#the-firing-contract) needs "running" to keep
+meaning a run in flight. The verb is `activate` today; whether it
+becomes `start` is [an open question](#open-decisions), and the state
+it writes is started either way.
+
 That has one consequence worth stating, because today's code does not
-satisfy it: **activation is a recorded fact**, not something derivable
+satisfy it: **started is a recorded fact**, not something derivable
 from frontmatter. A schedule in frontmatter says how an agent would
-run if it were active, not that it is active on this runtime. Today
+run if it were started, not that it is started on this runtime. Today
 the only record is the installed trigger itself, which is why the
 check-and-repair loop can prune an orphaned trigger
 (`health_check.py`) but can never restore a missing one: converging
 from frontmatter alone would undo every `stop`. The desired set is
-therefore frontmatter *times* an activation set that `activate` writes
+therefore frontmatter *times* the started set that `activate` writes
 and `stop` clears, kept in `state/` beside assignment. Recording it is
 what turns an externally deleted trigger into repairable drift instead
-of a silent deactivation.
+of a silent stop.
 
 `Runtime` is a facade over three narrow, separately implementable
 protocols. The segregation is not ceremony: the three have different
@@ -259,7 +268,7 @@ class DesiredAutomation:
     subscriptions: tuple[Subscription, ...]
     # Already filtered to the agents assigned to this runtime and
     # started here. The runtime never sees an owner; see Assignment
-    # and activation.
+    # and started state.
 
 @dataclass(frozen=True)
 class InstalledTrigger:
@@ -304,7 +313,7 @@ class Event:
 ```
 
 `Subscription` is desired state, computed from the frontmatter of the
-agents this runtime has activated; `InstalledTrigger` is observed
+agents started on this runtime; `InstalledTrigger` is observed
 state, read back from the OS. They are
 different types on purpose: a watcher's OS artifact records only its
 respawn command, never the watch expression, so the store cannot
@@ -319,7 +328,7 @@ already defines, never a bare "host". That identity is a name for an
 installation and has nothing to do with which agents are assigned to
 it. `covers` makes a call authoritative only
 where it says it is: pruning and orphan detection are confined to the
-declared scopes, so activating one agent, or reconciling one
+declared scopes, so starting one agent, or reconciling one
 repository, can never remove another repository's subscriptions from
 the host-global crontab.
 
@@ -372,7 +381,7 @@ at all, which is why `key` and `trigger` are optional.
 
 Two preconditions carry over from today's `activate`, but they belong
 one layer up rather than in the runtime: see
-[Assignment and activation](#assignment-and-activation).
+[Assignment and started state](#assignment-and-started-state).
 
 One mapping is worth stating, because today's store persists three
 trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
@@ -385,8 +394,8 @@ runtime's own convergence rather than to every repository's. It is a
 special case at firing time,
 deliberately: `dispatch` resolves only `agent:` targets through the
 agent port, and the runtime-targeted subscription renders the
-scheduled invocation of `Runtime.converge()` over everything this
-runtime has activated (today's `internal maintain` entry
+scheduled invocation of `Runtime.converge()` over everything started
+on this runtime (today's `internal maintain` entry
 point), so a maintenance firing never enters event dispatch at all.
 
 What lives in the **runtime core**, generic across hosts: the two
@@ -433,7 +442,7 @@ failure), verify a fresh beacon, and only then swap and remove the old
 tasks and the public command. The migration belongs to WSL liveness
 convergence, not to the generic `TriggerStore`.
 
-### Assignment and activation
+### Assignment and started state
 
 Two facts decide what a runtime should be running, and neither belongs
 to the runtime. Both live in `state/`, above the port, and what they
@@ -453,15 +462,44 @@ whole-fleet, it is also the report that is awkward to get today: list
 the agents, see which are wildcard and which are pinned to a single
 machine, and see which machine.
 
-**Activation: is it started here?** For the agents that are mine, a
+**Started state: is it started here?** For the agents that are mine, a
 per-runtime record of started or stopped that `activate` writes and
 `stop` clears. Getting a machine running is then exactly what it
 sounds like: make the agents assigned to it match their started or
 stopped state.
 
-Convergence receives `subscriptions` already filtered by both and has
-nothing left to decide, which is why `DesiredAutomation` carries no
-owner map and no registry revision.
+**What convergence is handed.** Collection is a loop with no decisions
+left in it. Read the agent inventory, keep the ones assignment says
+are mine, keep the ones marked started, expand each through
+`Agent.triggers()`, and pass the result down. Three details keep that
+from being naive.
+
+*It is subscriptions, not agents.* A started agent with two schedules
+and a watch expression is three subscriptions, and the expansion
+happens here, which is how `converge` avoids ever parsing frontmatter.
+
+*The absent are the stopped.* Anything inside the authority scope and
+not in the list is removed, which is what "everything else is stopped"
+has to mean to mean anything. Orphan pruning stops being a separate
+mechanism: an agent whose file was deleted is simply not in the list.
+Today that is `activate.prune_orphans` plus a sweep in the repair
+loop; afterwards it is the absence of a line.
+
+*A short list is dangerous, so a partial read abstains.* If a
+repository could not be read or the registry was unavailable, the list
+does not mean "fewer agents are started", it means "unknown".
+Collection either narrows `covers` to exclude what it could not read
+or declines to converge at all. This is assignment's abstain rule
+again and the reason `covers` exists: without it, an unmounted drive
+would quietly stop every agent in that repository.
+
+The runtime adds one subscription of its own, its check-and-repair
+loop, as a host prerequisite. Collection never sees it and no caller
+assembles it.
+
+Convergence therefore receives `subscriptions` already filtered by
+both facts and has nothing left to decide, which is why
+`DesiredAutomation` carries no owner map and no registry revision.
 
 The preconditions that were drafted into the planner are this layer's
 rules, which is where they belonged. Assignment never *invents* an
@@ -469,8 +507,9 @@ owner: an unregistered agent with no frontmatter `owner:` is reported
 and excluded, and an unavailable registry means abstain rather than
 guess. It may *materialize* an owner the frontmatter explicitly
 declares, which is today's behavior at `activate.py`, preserved
-deliberately - frontmatter `owner:` is a seed read at first
-activation, never a second source of truth afterwards. Claiming beyond
+deliberately - frontmatter `owner:` is a seed read the first time an
+agent is started, never a second source of truth afterwards. Claiming
+beyond
 that stays an explicit, single-agent act. The modes are stated once,
 here: local (no registry, nothing assigned elsewhere), registry
 unavailable (abstain), wildcard, unclaimed, explicitly declared, and
@@ -753,7 +792,7 @@ reject any use of the bare word for the agent side.
 
 `cli/` is a separate directory whose only permitted imports are the two
 ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
-health and what is active, and converges. `activate`, `stop`, and
+health and what is started, and converges. `activate`, `stop`, and
 `run` keep exactly the meanings they have today; `--dry-run` prints
 what would change. No verb, flag, help string, or error text names a
 plan, a diff, or a convergence pass.
@@ -769,8 +808,8 @@ construction for a provider, and no platform branch. The declarative
 `state/` and `obs/` exist today and will re-scatter across the ports
 unless they are named:
 
-- **`state/`** - the repository registry, assignment, activation, and
-  the durable subscription index. `repos.py`, `ownership.py`, and
+- **`state/`** - the repository registry, assignment, started state,
+  and the durable subscription index. `repos.py`, `ownership.py`, and
   `paths.py` are already close to this.
 - **`obs/`** - the JSONL event schema, `qlog`, `timeline`. Both ports
   write to it; neither owns it. Keeping it separate is what lets a
@@ -891,10 +930,10 @@ suite green, and can be released.
 2. **Introduce the runtime port over today's stores.** Move
    `crontasks`, `wintasks`, `winwatch`, `watchsource` behind
    `hosts/posix.py` and `hosts/windows.py`. Add the pure diff and the
-   single `converge`. Lift assignment and activation into `state/` as
-   the two facts above the port, so that the runtime receives an
+   single `converge`. Lift assignment and started state into `state/`
+   as the two facts above the port, so that the runtime receives an
    already-filtered set and a trigger removed behind the tool's back
-   is repairable drift rather than a silent deactivation. Put
+   is repairable drift rather than a silent stop. Put
    `activate`, `stop`, and `doctor` on that
    one path and delete their bespoke convergence: the verbs keep
    exactly the meaning and wording they have today, and nothing about
@@ -1081,7 +1120,7 @@ table; it is the input to that decision.
 
 | Field | Shape today | Role |
 |---|---|---|
-| `owner` | identity string or `*` | Seed for assignment in `state/`, read at first activation. Neither seam ever sees it. |
+| `owner` | identity string or `*` | Seed for assignment in `state/`, read the first time an agent is started. Neither seam ever sees it. |
 | `timeout` | seconds, default 120 | Enforced generically around provider execution. A provider that owns its own timeout cannot be held to a common contract. |
 
 **Consumed by the agent seam only,** listed so the boundary is visible:
@@ -1103,8 +1142,8 @@ Observations that bear on the collapse decision:
   subscription, which is why the scheduled path has never had the
   problems the watch path has.
 - `owner` is not a definition concern at all: it seeds assignment in
-  `state/` at first activation, and after that the registry answers.
-  Neither seam reads it.
+  `state/` the first time an agent is started, and after that the
+  registry answers. Neither seam reads it.
 - Nineteen of twenty-five fields never leave the agent seam. Whatever
   the runtime refactoring does, it should not touch them.
 - Of those nineteen, only `description` is an Agent Skills
@@ -1202,6 +1241,13 @@ seam should therefore land in the same phase.
    version bump with a migration note and, at most, a one-release
    validator that explains the new form when it sees the old. Current
    version is 5.5.2.
+3. **Whether the verb becomes `start`.** The state an agent is in is
+   started or stopped, and `stop` is already the opposite verb;
+   `activate` is the odd one out. Once assignment and convergence are
+   their own layers it no longer does anything a user would call
+   activating - it marks an agent started and converges. Renaming is
+   user-visible, so it belongs with the release that already breaks
+   frontmatter, or not at all. Either way the state keeps one name.
 
 ## Consequences
 
@@ -1373,6 +1419,19 @@ place the separation could leak is named rather than hidden: the
 firing-time barrier is a still-desired check on one subscription key,
 not an ownership check, and `dispatch` never learns the word.
 
+An eighth round settled the vocabulary and the collection contract.
+The bit an agent carries has one name now, started or stopped;
+active, activated, and enabled are gone, and "running" is reserved for
+a run in flight, which the concurrency rule needs it to mean. Whether
+the verb follows the state and becomes `start` is left as an open
+decision, since renaming a shipped verb is user-visible. Collection
+was written down rather than assumed: it expands started, assigned
+agents into subscriptions, so orphan pruning stops being a separate
+mechanism, and it abstains instead of shortening the list when a
+repository or the registry cannot be read - otherwise an unmounted
+drive would read as "nothing is started here" and stop everything in
+it.
+
 ## Picking this up
 
 Nothing here is committed work. Per the repository rule, a work item
@@ -1388,8 +1447,9 @@ something below them changes.
 |---|---|---|
 | What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `activate` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
 | Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
-| What says an agent is active here | A recorded activation fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
-| Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and activation](#assignment-and-activation) |
+| What says an agent runs here | A recorded started-or-stopped fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
+| Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and started state](#assignment-and-started-state) |
+| What convergence is handed | Subscriptions of the agents that are assigned here and started here, plus the scopes the call is authoritative for. A partial read abstains rather than shortening the list. | [Assignment and started state](#assignment-and-started-state) |
 | Callbacks or something else for firing events | Neither: a durable subscription plus an envelope of primitives. The registering process is never the servicing process. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
 | Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields `Event`. | [Where events are produced](#where-events-are-produced) |
 | What the firing contract fixes | A versioned envelope the ingress decoder can refuse, concurrency policy skip, and misfire policy skip. All in the runtime core; none becomes a frontmatter field. | [The firing contract](#the-firing-contract) |
