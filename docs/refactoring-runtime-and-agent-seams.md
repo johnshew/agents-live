@@ -231,15 +231,15 @@ class Runtime(Protocol):
     processes: ProcessHost
 
     def converge(self, subscriptions: Sequence[Subscription], *,
-                 covers: Sequence[str],
+                 complete_for: Sequence[str],
                  dry_run: bool = False) -> Converged:
-        '''Goal-seek: make this runtime match the subscriptions, and
-        report what it did. `covers` names the scopes this call may
-        prune; a subscription outside them is a caller error. Host
-        prerequisites and liveness first, then subscriptions.
-        Idempotent - a second call reports nothing to do. dry_run
-        reports the same operations without performing them, which is
-        what `--dry-run` prints.'''
+        '''Goal-seek: make this runtime match the subscriptions.
+        `complete_for` names the scopes this list is the whole answer
+        for, and is therefore what may be pruned; a subscription
+        outside them is a caller error. Host prerequisites and
+        liveness first, then subscriptions. Idempotent - a second call
+        reports nothing to do. dry_run reports the same operations
+        without performing them, which is what `--dry-run` prints.'''
 
     def health(self) -> Health:
         '''Read-only. Liveness is a field here, not a command.'''
@@ -345,11 +345,23 @@ that run agents independently (`hostruntime.py`), so the runtime scope
 is spelled with the runtime identity the 2026-07-28 decision log
 already defines, never a bare "host". That identity is a name for an
 installation and has nothing to do with which agents are assigned to
-it. `covers` makes a call authoritative only
-where it says it is: pruning and orphan detection are confined to the
-declared scopes, so starting one agent, or reconciling one
-repository, can never remove another repository's subscriptions from
-the host-global crontab.
+it. `complete_for` is the second half of the call, and it is what
+makes removal safe. The subscriptions say what should exist;
+`complete_for` says which scopes that list is the *whole* answer for,
+and therefore which scopes may have things removed from them.
+Starting one agent in repository A passes
+`complete_for=("repo:/src/A",)`, so a stale trigger of A's is pruned
+and repository B's entries in the same host-global crontab are not
+touched. The maintenance pass passes every registered repository plus
+the runtime scope, which is what lets it prune anywhere. A repository
+that could not be read is left out of both arguments, so its triggers
+survive untouched.
+
+Deriving it from the subscriptions instead would lose exactly that
+last case: an empty list for repository B is ambiguous between "B has
+nothing started" and "B could not be read", and one of those two
+meanings deletes B's automation. Stating completeness separately is
+what forces the caller to say which it meant.
 
 A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
@@ -507,9 +519,10 @@ loop; afterwards it is the absence of a line.
 *A short list is dangerous, so a partial read abstains.* If a
 repository could not be read or the registry was unavailable, the list
 does not mean "fewer agents are started", it means "unknown".
-Collection either narrows `covers` to exclude what it could not read
-or declines to converge at all. This is assignment's abstain rule
-again and the reason `covers` exists: without it, an unmounted drive
+Collection either drops what it could not read from `complete_for` or
+declines to converge at all. This is assignment's abstain rule
+again and the reason completeness is stated rather than inferred:
+without it, an unmounted drive
 would quietly stop every agent in that repository.
 
 The runtime adds one subscription of its own, its check-and-repair
@@ -518,10 +531,10 @@ assembles it.
 
 Convergence therefore receives subscriptions already filtered by both
 facts and has nothing left to decide. There is no request object
-wrapping them: the call takes what should exist and the scopes it may
-prune, because those two are all that is left once assignment and
-started state answer upstream, and a two-field wrapper would be a name
-for nothing.
+wrapping them: the call takes what should exist and the scopes that
+list is complete for, because those two are all that is left once
+assignment and started state answer upstream, and a two-field wrapper
+would be a name for nothing.
 
 The preconditions that were drafted into the planner are this layer's
 rules, which is where they belonged. Assignment never *invents* an
@@ -1496,11 +1509,15 @@ A tenth round killed `DesiredAutomation`. Once assignment took the
 owner map and the registry revision, the type was two fields with one
 call site, and "automation" was a noun that distinguished nothing from
 "the subscriptions". `converge` now takes the subscriptions and the
-scopes it may prune as two parameters, which is one fewer type across
-the seam by goal 1's own count. The pair is worth keeping visible
-rather than bundled: what should exist and where this call is allowed
-to act are different kinds of fact, and hiding them behind one name is
-what let the ownership fields accumulate there in the first place.
+scopes that list is complete for as two parameters, which is one fewer
+type across the seam by goal 1's own count. The pair is worth keeping
+visible rather than bundled: what should exist and where this call is
+allowed to act are different kinds of fact, and hiding them behind one
+name is what let the ownership fields accumulate there in the first
+place. The scope argument was also respelled from `covers` to
+`complete_for`, because what it asserts is completeness - pruning is
+the consequence, and a caller that cannot assert completeness for a
+scope must leave it out rather than shorten its list.
 
 ## Picking this up
 
@@ -1519,7 +1536,7 @@ something below them changes.
 | Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
 | What says an agent runs here | A recorded started-or-stopped fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
 | Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and started state](#assignment-and-started-state) |
-| What convergence is handed | Subscriptions of the agents that are assigned here and started here, plus the scopes the call is authoritative for. A partial read abstains rather than shortening the list. | [Assignment and started state](#assignment-and-started-state) |
+| What convergence is handed | Subscriptions of the agents that are assigned here and started here, plus the scopes that list is complete for. A partial read abstains rather than shortening the list. | [Assignment and started state](#assignment-and-started-state) |
 | Callbacks or something else for firing events | Neither: a durable subscription plus an envelope of primitives. The registering process is never the servicing process. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
 | Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields `Event`. | [Where events are produced](#where-events-are-produced) |
 | What the firing contract fixes | A versioned envelope the ingress decoder can refuse, concurrency policy skip, and misfire policy skip. All in the runtime core; none becomes a frontmatter field. | [The firing contract](#the-firing-contract) |
