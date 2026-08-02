@@ -80,6 +80,10 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
      decisions not yet made; an earlier target of 12 was aspiration
      without a plan and is withdrawn.
    - Public CLI verbs: target no growth, and `heartbeat` removed.
+   - Internal mechanism words (`plan`, `apply`, `converge`, `diff`,
+     `subscription`) appearing in CLI help, output, or error text:
+     target zero, enforced by a test. The user's vocabulary is
+     `activate`, `stop`, and `run`.
    - Occurrences of `sys.platform`, `os.name`, or a WSL check outside
      `runtime/hosts/`: target zero, enforced by a test.
    - Modules that import both a host detail and an agent detail: target
@@ -147,6 +151,29 @@ graph TD
 Intentionally small. It initializes the host, keeps itself honest,
 converges a set of subscriptions, and emits events.
 
+The user model it serves is three verbs and nothing else. An agent is
+an Agent Skill whose frontmatter says how and when it should execute;
+`activate` means make that happen automatically here, `stop` means
+stop making it happen, and `run` means do it once now. Convergence is
+how those verbs are kept honest, never something the user is asked to
+think about: no verb, flag, or message names a plan, a diff, a
+subscription, or a convergence pass. What surfaces instead is `status`
+and `doctor` in the same three-verb vocabulary - this agent is active
+here, this one should be and is not, re-run `activate`.
+
+That has one consequence worth stating, because today's code does not
+satisfy it: **activation is a recorded fact**, not something derivable
+from frontmatter. A schedule in frontmatter says how an agent would
+run if it were active, not that it is active on this runtime. Today
+the only record is the installed trigger itself, which is why the
+check-and-repair loop can prune an orphaned trigger
+(`health_check.py`) but can never restore a missing one: converging
+from frontmatter alone would undo every `stop`. The desired set is
+therefore frontmatter *times* an activation set that `activate` writes
+and `stop` clears, kept in `state/` beside ownership. Recording it is
+what turns an externally deleted trigger into repairable drift instead
+of a silent deactivation.
+
 `Runtime` is a facade over three narrow, separately implementable
 protocols. The segregation is not ceremony: the three have different
 lifetimes (durable, process-scoped, per-child), different failure
@@ -155,12 +182,13 @@ modes, and different conformance tests.
 The facade itself is adopted on evidence, not upfront:
 [windows-support.md](windows-support.md) records building and
 rejecting a `HostRuntime` object once already, because nearly every
-member was a stateless function of the host. Phase 2 therefore lands
-the planner as pure functions, and the object form arrives only if the
-prototype shows real instance state (a plan's validity window is the
-likely candidate). If it does not, the port stays a module of
-functions plus the three protocols, and nothing else in this document
-changes.
+member was a stateless function of the host. With one idempotent
+`converge` and no plan held between calls, the validity window that
+was the likely candidate for instance state no longer exists, so the
+port most probably stays a module of functions plus the three
+protocols. Phase 2 lands it that way and adopts the object form only
+if the prototype produces real instance state; nothing else in this
+document changes either way.
 
 ```python
 class Runtime(Protocol):
@@ -169,18 +197,16 @@ class Runtime(Protocol):
     changes: ChangeSourceFactory | None   # None = host cannot watch
     processes: ProcessHost
 
-    def ensure(self) -> Health:
-        '''Create what the host needs, verify liveness, sweep junk.'''
+    def converge(self, desired: DesiredAutomation, *,
+                 dry_run: bool = False) -> Converged:
+        '''Goal-seek: make this runtime match desired, and report what
+        it did. Host prerequisites and liveness first, then
+        subscriptions. Idempotent - a second call reports nothing to
+        do. dry_run reports the same operations without performing
+        them, which is what `--dry-run` prints.'''
 
     def health(self) -> Health:
         '''Read-only. Liveness is a field here, not a command.'''
-
-    def plan(self, desired: DesiredAutomation) -> Plan:
-        '''Gather actual, delegate to the pure core diff. Printable.'''
-
-    def apply(self, plan: Plan) -> Applied:
-        '''Check preconditions, refuse a stale plan, execute, and
-        report per-operation results.'''
 
 
 class TriggerStore(Protocol):
@@ -235,8 +261,8 @@ class Subscription:
 
 @dataclass(frozen=True)
 class DesiredAutomation:
-    covers: tuple[str, ...]     # scopes this plan is authoritative for
-    subscriptions: tuple[Subscription, ...]
+    covers: tuple[str, ...]     # scopes this call is authoritative for
+    subscriptions: tuple[Subscription, ...]  # activated agents only
     declared_owners: Mapping[AgentKey, str]
     ownership_revision: str | None  # registry commit hash; None in local mode
 
@@ -253,7 +279,23 @@ class WatcherRecord:
     process: ProcessRef
 
 @dataclass(frozen=True)
+class Operation:
+    kind: str    # "materialize-owner" | "install-trigger"
+                 # | "remove-trigger" | "start-watcher"
+                 # | "stop-watcher" | "repair-host"
+    key: str
+    detail: str  # printable, rendered in the user's vocabulary
+
+@dataclass(frozen=True)
+class Converged:
+    dry_run: bool
+    done: tuple[Operation, ...]              # "would do" when dry_run
+    failed: tuple[tuple[Operation, str], ...]  # operation, error
+    health: Health
+
+@dataclass(frozen=True)
 class Event:
+    spec: str             # envelope schema version; see the firing contract
     id: str               # correlation id, unique per firing
     origin: str           # "clock" | "boot" | "watch" | "manual"
     key: str | None       # subscription key; None for a manual run
@@ -267,22 +309,23 @@ class Event:
     # bound already requires (windows-support.md).
 ```
 
-`Subscription` is desired state, computed from definitions;
-`InstalledTrigger` is observed state, read back from the OS. They are
+`Subscription` is desired state, computed from the frontmatter of the
+agents this runtime has activated; `InstalledTrigger` is observed
+state, read back from the OS. They are
 different types on purpose: a watcher's OS artifact records only its
 respawn command, never the watch expression, so the store cannot
-reconstruct a `Subscription` and is never asked to. `plan` matches the
-two by key and by a fingerprint of the rendered form.
+reconstruct a `Subscription` and is never asked to. The diff matches
+the two by key and by a fingerprint of the rendered form.
 
 `scope` names a runtime installation, not a machine: native Windows
 and each WSL distribution on the same hardware are separate runtimes
 that own agents independently (`hostruntime.py`), so the runtime scope
 is spelled with the owner identity the 2026-07-28 decision log already
-defines, never a bare "host". `covers` makes a plan authoritative only
+defines, never a bare "host". `covers` makes a call authoritative only
 where it says it is: pruning and orphan detection are confined to the
-declared scopes, so a single-agent or single-repository plan can never
-remove another repository's subscriptions from the host-global
-crontab.
+declared scopes, so activating one agent, or reconciling one
+repository, can never remove another repository's subscriptions from
+the host-global crontab.
 
 A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
@@ -290,20 +333,31 @@ expression at spawn. `actual` for a watch subscription is therefore a
 pair - the installed respawn trigger and the running watcher - where
 the watcher is found through `ProcessHost.owned()` and carries the
 fingerprint of the expression it was started with, recorded in the
-subscription index as `WatcherRecord`. A plan whose desired fingerprint
-differs emits `StopWatcher` followed by `StartWatcher`; without that,
-editing a watch expression would take effect only at the next reboot.
+subscription index as `WatcherRecord`. A desired fingerprint that
+differs produces a stop-watcher followed by a start-watcher; without
+that, editing a watch expression would take effect only at the next
+reboot.
 
-The plan deliberately spans the runtime protocols and `state/`.
-Its operation vocabulary includes `MaterializeOwner`, `InstallTrigger`,
-`RemoveTrigger`, `StartWatcher`, and `StopWatcher`; `apply` interprets
-them through `TriggerStore`, `ProcessHost`, and the subscription index.
-The exact `Plan`, `Applied`, `Health`, `RenderedSubscription`, and
-`ChildResult` fields are phase-2 design work, but the ownership of each
-operation is fixed here.
+Convergence deliberately spans the runtime protocols and `state/`.
+Its operation vocabulary - materialize an owner, install or remove a
+trigger, start or stop a watcher, repair a host prerequisite - is
+interpreted through `TriggerStore`, `ProcessHost`, and the
+subscription index. That vocabulary is internal: it is what `converge`
+reports and what `status` and `doctor` render into the user's words,
+never something a caller assembles. The exact `Converged`, `Health`,
+`RenderedSubscription`, and `ChildResult` fields are phase-2 design
+work; the ownership of each operation is fixed here.
 
-Watcher record ordering fails toward convergence. `apply` spawns the
-watcher, receives its `ProcessRef`, then atomically writes the
+One call rather than a plan handed back and applied later is
+deliberate. A held plan needs a validity window, a staleness rule, and
+a caller that knows to re-plan after a partial failure. A single
+idempotent pass under the runtime lock needs none of those, and the
+answer to a partial failure is to run the same command again.
+`--dry-run` is the only thing the two-step surface bought, and
+`converge(..., dry_run=True)` returns it without the artifact.
+
+Watcher record ordering fails toward convergence. `converge` spawns
+the watcher, receives its `ProcessRef`, then atomically writes the
 `WatcherRecord`. If that write fails, it terminates the child and
 reports the start as failed. A crash between spawn and record is found
 on the next pass as an owned watcher-role process with no matching
@@ -320,57 +374,62 @@ what one "schedule" kind used to cover, because only `clock` events
 pass through the dueness gate, and a `manual` run has no subscription
 at all, which is why `key` and `trigger` are optional.
 
-Two preconditions carry over from today's `activate` into the planner
-contract rather than being lost as polish (`activate.py`): batch
+Two preconditions carry over from today's `activate` into the
+convergence contract rather than being lost as polish
+(`activate.py`): batch
 reconciliation never *invents* an owner - an unregistered agent with
 no frontmatter `owner:` is excluded from `desired` and reported, and
-when the ownership registry is unavailable the planner abstains
+when the ownership registry is unavailable convergence abstains
 rather than guessing - but it may *materialize* an owner the
 frontmatter explicitly declares, which is today's behavior, preserved
 deliberately. Claiming beyond that stays a targeted, single-agent
-decision made above the planner. Collection reads definitions into
+decision made above the runtime. Collection reads definitions into
 `DesiredAutomation` and gathers an ownership snapshot without writing;
-the pure planner emits a `MaterializeOwner` operation for an explicit
-declaration. `apply` performs that operation before any trigger write
-and stops if it fails.
+the pure diff emits a materialize-owner operation for an explicit
+declaration, and `converge` performs it before any trigger write and
+abandons the pass if it fails.
 
 The snapshot is versioned: `ownership_revision` records the registry
-revision the snapshot was read at (a commit hash - the backend is
-git-backed), and `apply` refuses a plan whose revision the registry
-has since moved past, which extends the stale-plan rule to concurrent
-ownership transfers. The full set of ownership modes is part of the
+revision it was read at (a commit hash - the backend is git-backed),
+and `converge` re-reads it immediately before its first write and
+abandons the pass if the registry has moved. That is what a
+stale-plan rule would have bought, without a plan to keep. The window
+it cannot close - a transfer landing mid-pass - is closed at dispatch,
+which fails closed. The full set of ownership modes is part of the
 contract, not folklore: local mode (no registry; nothing is owned
 elsewhere), unavailable registry (abstain from enforcement, never
 assume), wildcard `*` (any runtime may service), unclaimed (excluded
 and reported), explicitly declared (materialized as above), and
 ephemeral `_`-prefixed definitions (owned by the run that created
 them, exempt from ownership and from sweeps). Ownership is keyed by
-`AgentKey` - repository plus agent id - because a runtime-scoped plan
+`AgentKey` - repository plus agent id - because a runtime-scoped pass
 spans repositories where bare names can collide.
 
-Without the rule, `apply(plan(...))` would quietly turn convergence into
-ownership acquisition, which is exactly the sweep-adoption bug today's
-code guards against.
+Without the rule, convergence would quietly become ownership
+acquisition, which is exactly the sweep-adoption bug today's code
+guards against.
 
 One mapping is worth stating, because today's store persists three
 trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
 A `watch` subscription's durable OS artifact is its `@reboot`
 watcher-respawn entry, so `TriggerStore` still holds one artifact per
 subscription of either kind. The host-scoped check-and-repair loop is
-not a special case in the planner: it is exactly one subscription with
+not a special case in the diff: it is exactly one subscription with
 the runtime-instance scope and target `runtime`, added to that
-runtime's plan rather than to every repository plan. It is a special case at firing time,
+runtime's own convergence rather than to every repository's. It is a
+special case at firing time,
 deliberately: `dispatch` resolves only `agent:` targets through the
-agent port, and the runtime-targeted subscription renders the scheduled
-invocation of `Runtime.ensure()` (today's `internal maintain` entry
+agent port, and the runtime-targeted subscription renders the
+scheduled invocation of `Runtime.converge()` over everything this
+runtime has activated (today's `internal maintain` entry
 point), so a maintenance firing never enters event dispatch at all.
 
 What lives in the **runtime core**, generic across hosts: the two
 grammars, debounce, the fire-rate circuit breaker, duplicate
 suppression, the "is this minute actually due" gate that today only
-Windows needs, subscription-key derivation, the pure plan diff
-(`plan(desired, actual)` - the facade method gathers `actual` and
-delegates to it; the pure function is what Tier 1 tests exercise),
+Windows needs, subscription-key derivation, the pure diff
+(`diff(desired, actual) -> operations` - `converge` gathers `actual`
+and delegates to it; the pure function is what Tier 1 tests exercise),
 orphan detection, and the junk sweep.
 
 What a **host plugin** supplies: the three protocols above, a
@@ -464,6 +523,53 @@ durable and reconcilable; streaming is process-scoped and disposable.
 Merging those two lifetimes into one interface is the mistake option A
 makes, and it is the mistake the current code makes implicitly.
 
+### The firing contract
+
+Three rules the envelope needs and today's code leaves implicit. They
+are fixed in the runtime core rather than exposed as frontmatter:
+none is a decision an agent author has the information to make, and
+the field count in [Goals](#goals) should not grow. If one ever needs
+to vary per agent it becomes an option clause in the schedule
+expression, which costs no new field.
+
+**The envelope is versioned.** `Event.spec` carries the envelope
+schema version, and the argv ingress carries it too. This is not
+bookkeeping: the process that writes a durable trigger and the process
+that services it are separated by an operating system and, across an
+upgrade, by a release boundary. A cron line written by 5.5 fires into
+a 6.0 binary. The decoder therefore accepts the current version and
+the one before it, and refuses an unknown version with an admin-log
+error rather than guessing at a payload. That is an upgrade path
+rather than a compatibility shim - the two ends are separated by the
+scheduler, not by a code path this package controls - and the window
+is bounded, because the next convergence rewrites the artifact at the
+current version.
+
+**Concurrency policy: skip.** A firing that arrives while the same
+subscription's previous run is still going does not start a second
+run; it is recorded and dropped. This unifies a split that exists
+today: Task Scheduler is configured `MultipleInstancesPolicy=IgnoreNew`
+(`wintasks.py`, whose comment notes that overlapping runs share one
+log and one lock), while cron on the same agent happily starts a
+second run. Skip is the behavior worth keeping, and stating it is what
+makes the two hosts agree. The two values a general scheduler would
+also offer are declined: `allow` is the accidental POSIX behavior this
+rule removes, and `replace` would let a watch storm kill an agent
+mid-answer.
+
+**Misfire policy: skip.** A `clock` firing that arrives outside a
+minute its expression names does not run, and firings missed while the
+machine was off or asleep are not replayed. That is cron's behavior by
+construction and Windows's behavior today, where Task Scheduler is set
+`StartWhenAvailable=true` and `claim_due_minute` filters what comes
+back (`schedules.py`); the rule that file leaves to Task Scheduler is
+now stated rather than inherited. Two firings inside one matching
+minute still produce one run, which is what the claim in that function
+already provides. `boot` firings are exempt, being due by definition,
+and `watch` and `manual` firings never consult the gate. Catch-up
+after downtime is the obvious future option and would change
+user-visible behavior, so it stays out of scope here.
+
 ### Trigger grammars
 
 One string per subscription, parsed once in the runtime core, rendered
@@ -511,7 +617,7 @@ glob        = ? repo-relative path or glob, quoted if it contains spaces ? ;
 So `watch: "docs/**/*.md !**/node_modules/** debounce 2s"` replaces the
 three fields used today. The gain is not brevity; it is that a
 subscription is one comparable, hashable, renderable string, which is
-what makes `plan` a pure diff and makes the index a flat table.
+what keeps the diff pure and the index a flat table.
 
 A host watches directories, not globs: the core derives each
 `ChangeSource` root as the longest literal prefix of an include
@@ -564,8 +670,8 @@ class Provider(Protocol):
     def parse(self, raw: RawOutput) -> Completion: ...
 ```
 
-(`prepare`, not `plan`: that word belongs to the runtime port's
-convergence diff, per the naming discipline in
+(`prepare`, not `plan`: the runtime port's internal diff owns that
+word, per the naming discipline in
 [Naming hazard](#naming-hazard-worth-fixing-now).)
 
 Two lifecycle questions stay open until the fake CLI (see
@@ -623,7 +729,10 @@ reject any use of the bare word for the agent side.
 
 `cli/` is a separate directory whose only permitted imports are the two
 ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
-health and subscriptions, computes and prints plans, and applies them.
+health and what is active, and converges. `activate`, `stop`, and
+`run` keep exactly the meanings they have today; `--dry-run` prints
+what would change. No verb, flag, help string, or error text names a
+plan, a diff, or a convergence pass.
 A one-shot `run` builds an envelope with origin `manual` - no
 subscription key, no trigger expression - and hands it to `dispatch`,
 so a user-invoked run and a cron-invoked run travel the same path and
@@ -647,9 +756,11 @@ And one that is genuinely new: **`dispatch.py`**, roughly 150 lines,
 the only module below the CLI that imports both ports. Its surface is
 `dispatch(event, context)`: the watch loop calls it in-process, and a
 scheduler-launched process reaches it through an ingress decoder that
-rebuilds the envelope from argv and the state-file payload reference.
-Ownership gating, the not-due gate (`clock` events only; `boot` and
-`manual` are never "not due"), and envelope-to-request translation
+rebuilds the envelope from argv and the state-file payload reference,
+refusing an envelope version it does not know.
+Ownership gating, the not-due gate (`clock` events only; `boot`,
+`watch`, and `manual` are never "not due"), the concurrency skip, and
+envelope-to-request translation
 live there. The ownership gate re-reads the registry at dispatch time
 and fails closed: a transfer propagates by git pull, so the losing
 runtime's triggers keep firing until its next reconciliation prunes
@@ -665,12 +776,12 @@ promises.
 | Area | Today | Target | Where the reduction comes from |
 |---|---|---|---|
 | Host automation (`hostruntime`, `crontasks`, `wintasks`, `winwatch`, `watchsource`, `watchpolicy`, `triggers`, `schedules`, `heartbeat`) | 3,544 | ~1,500 | Shared grammar and policy; hosts reduced to install, remove, list, watch, liveness. Task Scheduler XML is largely irreducible. |
-| Lifecycle commands (`activate`, `stop`, `health_check`, `doctor`, `preflight`, `migrate`) | 3,266 | ~900 | One pure planner replaces five convergence implementations; `--dry-run` and orphan pruning fall out of it. |
+| Lifecycle commands (`activate`, `stop`, `health_check`, `doctor`, `preflight`, `migrate`) | 3,266 | ~900 | One convergence path replaces five implementations; `--dry-run` and orphan pruning fall out of it. |
 | Agent execution (`headless`, `run`, `agent_adapters`) | 3,181 | ~1,300 | Generic execution separated from provider quirks; one output path instead of layered retries. |
 | MCP (`pipeline_mcp`, `pipeline_runtime`, bridge, loader) | 838 | ~700 | Mostly moves. |
 | CLI (`cli`, `cli_spec`, `status`, `completions`, `dashboard`, `dashboards`) | 2,961 | ~2,200 | Dashboard is UI and stays; status and completions read the ports instead of re-deriving. |
 | `smoketest` | 1,386 | ~450 | Conformance suites and a fake provider absorb most of it; what remains is the real-CLI release gate. |
-| Test suite | 8,753 | ~5,000 | Table-driven grammar and planner tests plus two conformance suites replace the mock population. |
+| Test suite | 8,753 | ~5,000 | Table-driven grammar and diff tests plus two conformance suites replace the mock population. |
 
 Source total: roughly 19,000 to roughly 11,500. The number is a
 consequence; the concept counts in [Goals](#goals) are the target.
@@ -682,14 +793,14 @@ other side. Making the seams explicit is what fixes that, so the test
 plan is part of the refactoring rather than a follow-up.
 
 **Tier 1 - pure, table-driven, no I/O.** The two trigger grammars, the
-selector grammar, debounce, the fire-rate breaker, dueness, and the plan
-diff are all pure functions. `plan(desired, actual) -> Plan` being pure
-is the unlock: every convergence scenario that today needs a mocked
-`crontab` or a mocked `Register-ScheduledTask` becomes a table row.
-Property tests apply well here (round-trip a rendered schedule). The
-convergence property - `apply(plan(d, a))` leaves
-`plan(d, actual') == empty` - runs one tier up against the fake host,
-since `apply` is I/O by definition and does not belong in this tier.
+selector grammar, debounce, the fire-rate breaker, dueness, and the
+convergence diff are all pure functions. `diff(desired, actual) ->
+operations` being pure is the unlock: every convergence scenario that
+today needs a mocked `crontab` or a mocked `Register-ScheduledTask`
+becomes a table row. Property tests apply well here (round-trip a
+rendered schedule). Idempotence - a second `converge` finds nothing to
+do - runs one tier up against the fake host, since converging is I/O
+by definition and does not belong in this tier.
 
 **Tier 2 - host conformance suite, plus an in-tree `fake` host.** One
 abstract test class, run against every registered host plugin, skipped
@@ -755,15 +866,20 @@ suite green, and can be released.
    satisfy.
 2. **Introduce the runtime port over today's stores.** Move
    `crontasks`, `wintasks`, `winwatch`, `watchsource` behind
-   `hosts/posix.py` and `hosts/windows.py`. Add the pure planner. Switch
-   `activate`, `stop`, and `doctor` to `plan`/`apply` and delete their
-    bespoke convergence. Add the host conformance suite. Treat owner
+   `hosts/posix.py` and `hosts/windows.py`. Add the pure diff and the
+   single `converge`. Record activation in `state/`, so that a trigger
+   removed behind the tool's back is repairable drift rather than a
+   silent deactivation. Put `activate`, `stop`, and `doctor` on that
+   one path and delete their bespoke convergence: the verbs keep
+   exactly the meaning and wording they have today, and nothing about
+   convergence reaches the command surface.
+   Add the host conformance suite. Treat owner
     materialization, watcher record ordering, unrecorded-process cleanup,
     and restart-on-fingerprint-change as phase acceptance criteria,
     exercised over the shapes that actually break: same-named agents in
     different repositories, native Windows plus WSL on one machine,
-    wildcard and unavailable ownership, a transfer landing between
-    `plan` and `apply`, partial-scope reconciliation, and watcher-only
+    wildcard and unavailable ownership, a transfer landing mid-pass,
+    partial-scope reconciliation, and watcher-only
     cleanup with a provider child alive.
 3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
    the `heartbeat` command. Absorb `hidden.py`, `spawn.py`, and
@@ -1074,10 +1190,10 @@ Accepted costs:
 Gains beyond line count:
 
 - Half-finished host changes shrink from a design gap to a bounded,
-  visible failure: `plan` is computed before the first write, and
-  `apply` checks preconditions, refuses a stale plan, and reports
-  per-operation results, so what remains after a failure is printable
-  and resumable rather than silently divergent. The planner covers
+  visible failure: the whole diff is computed before the first write,
+  and `converge` reports per-operation results, so what remains after
+  a failure is printable and the remedy is to run the same command
+  again. Convergence covers
   subscriptions; the plugin-convergence and executable-replacement
   halves of [#226](https://github.com/johnshew/agents-live/issues/226)
   and [#231](https://github.com/johnshew/agents-live/issues/231) need
@@ -1121,7 +1237,9 @@ cited in the port section; the response is prototype-first - planner
 as pure functions, the object form only if real instance state shows
 up - rather than withdrawing the facade. The earlier rejection
 predates the plan/apply lifecycle, which is the one candidate for
-genuine state.
+genuine state. Round six removed that candidate by withdrawing
+plan/apply, so the module-of-functions outcome is now the expected
+one.
 
 **"Use versioned JSON or a sidecar automation file instead of a
 whitespace-sensitive DSL."** Not acted on. If the extension fields
@@ -1170,7 +1288,8 @@ A fourth verification round separated contract defects from phase
 detail. The host-scope subscription and metadata counts were corrected;
 the pure planner now emits owner materialization rather than performing
 I/O; watcher operations and crash ordering are explicit; maintenance is
-the scheduled form of `Runtime.ensure()`; and heartbeat retirement has
+the scheduled form of the runtime's own convergence (`ensure` at the
+time, `converge` after round six); and heartbeat retirement has
 a verify-before-remove migration. Two conclusions were declined:
 watcher restart is expressible through `ProcessHost`, so spanning
 protocols is the runtime plan's job, and the Windows heartbeat task is
@@ -1196,6 +1315,24 @@ with eventual cleanup on the losing runtime; the metadata counts
 restated as 24 non-spec today, 23 after `handler` retires, 20 after
 the collapses; and phase-2 acceptance scenarios covering all of it.
 
+A sixth round asked the question the previous five had not: is
+plan/apply necessary at all, given how simple the user's model is. It
+is not. The port now exposes one idempotent `converge` plus `health`;
+the diff, the operation vocabulary, and the word convergence are
+internal, and `--dry-run` is a flag on the pass rather than a plan
+artifact with a validity window and a staleness rule. `activate`,
+`stop`, and `run` keep the meanings they have today and are the only
+vocabulary the user sees, enforced as a fitness function over CLI
+text. The round also produced a finding that the simplification
+forces: activation has to become a recorded fact in `state/`, because
+a runtime that goal-seeks on frontmatter alone would undo every
+`stop` - which is exactly why today's repair loop can prune an
+orphaned trigger but never restore a missing one. The same round
+closed the three firing-contract gaps: a versioned envelope with a
+stated decoder rule across an upgrade, concurrency policy fixed at
+skip (unifying `IgnoreNew` on Windows with cron's accidental overlap),
+and misfire policy fixed at skip, matching both hosts today.
+
 ## Picking this up
 
 Nothing here is committed work. Per the repository rule, a work item
@@ -1209,8 +1346,12 @@ something below them changes.
 
 | Question | Answer | Section |
 |---|---|---|
+| What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `activate` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
+| Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
+| What says an agent is active here | A recorded activation fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
 | Callbacks or something else for firing events | Neither: a durable subscription plus an envelope of primitives. The registering process is never the servicing process. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
 | Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields `Event`. | [Where events are produced](#where-events-are-produced) |
+| What the firing contract fixes | A versioned envelope the ingress decoder can refuse, concurrency policy skip, and misfire policy skip. All in the runtime core; none becomes a frontmatter field. | [The firing contract](#the-firing-contract) |
 | Which skill standard | Agent Skills, <https://agentskills.io/specification>. | [The definition standard](#the-definition-standard) |
 | How do package-specific fields fit the standard | Under `metadata`, which the specification provides for exactly this. | [What this settles](#what-this-settles) |
 | Generalize the circuit breaker | Yes, as one durable budget per project per host, fail-open, not per subscription. | [Circuit breakers](#circuit-breakers) |
@@ -1263,5 +1404,5 @@ and the fitness functions are what keep the later phases honest.
 Phase 2 can follow if the runtime port is wanted independently of the
 frontmatter question: moving `crontasks`, `wintasks`, `winwatch`, and
 `watchsource` behind `TriggerStore` and `ChangeSource`, and replacing
-five convergence implementations with one pure planner, requires no
+five convergence implementations with one convergence path, requires no
 change to any agent definition.
