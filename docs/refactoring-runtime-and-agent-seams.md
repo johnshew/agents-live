@@ -523,13 +523,20 @@ which is the only reason anyone claims (`cli_spec.py`). Claiming is
 assignment and starting is convergence, but the user wants both in one
 breath, so the CLI composes them in that order; if the claim succeeds
 and the start fails, the claim stands and re-running the command
-finishes the job. The sibling flag is the one that does not fit:
-`--transfer-to <identity>` assigns an agent to a *different* runtime
-and deliberately starts nothing here (`activate.py` returns without
-registering). A flag on `start` that never starts is a wart, and phase
-4 should either give remote reassignment its own spelling or drop it,
-since `stop` here plus `start --transfer-here` there already expresses
-the move in the three verbs. The modes are stated once,
+finishes the job.
+
+Its sibling `--transfer-to <identity>` retires. It assigns an agent to
+another runtime and starts nothing here (`activate.py` returns without
+registering), and it does not finish the move either: the receiving
+runtime has no started record, so somebody still has to go there and
+start it. The trip it appears to save is a trip that has to happen
+anyway. What replaces it is one command on the machine that should run
+the agent - `start --transfer-here` - because the losing runtime needs
+no instruction: assignment stops answering "mine", so the agent drops
+out of that runtime's desired set and its next convergence prunes the
+trigger, with the dispatch-time check refusing in the meantime.
+Running `stop` there is a way to make that immediate, not a
+requirement. The modes are stated once,
 here: local (no registry, nothing assigned elsewhere), registry
 unavailable (abstain), wildcard, unclaimed, explicitly declared, and
 ephemeral `_`-prefixed definitions, which belong to the run that
@@ -981,8 +988,8 @@ suite green, and can be released.
 4. **Land the grammars.** Schedule, watch, and selector,
    with a validator and a clear failure message. This is the breaking
    release; it needs its own migration note. `start --transfer-to`
-   is settled here too: either a spelling of its own or dropped, since
-   it is the one flag on `start` that starts nothing.
+   retires here, since a move is one `start --transfer-here` on the
+   machine that should run the agent.
 5. **Carve out the agent port.** Split `headless.py` into
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
@@ -1463,8 +1470,12 @@ advertises "Activate cron and watcher triggers" and `stop` still says
 order the CLI should compose because claiming is never an end in
 itself. What remains is `--transfer-to`, which assigns to another
 runtime and starts nothing, and `--prune-orphans`, which convergence
-makes redundant. Both are phase decisions now rather than open
-questions about vocabulary.
+makes redundant. Both retire. `--transfer-to` in particular saves no
+work: the receiving runtime has no started record either way, so
+somebody has to go there regardless, and one
+`start --transfer-here` on that machine does the whole move - the
+losing runtime drops the agent from its desired set on its own and
+prunes the trigger at its next convergence.
 
 ## Picking this up
 
