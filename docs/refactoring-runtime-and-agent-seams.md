@@ -83,7 +83,7 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
    - Internal mechanism words (`plan`, `apply`, `converge`, `diff`,
      `subscription`) appearing in CLI help, output, or error text:
      target zero, enforced by a test. The user's vocabulary is
-     `activate`, `stop`, and `run`.
+     `start`, `stop`, and `run`.
    - Occurrences of `sys.platform`, `os.name`, or a WSL check outside
      `runtime/hosts/`: target zero, enforced by a test.
    - Modules that import both a host detail and an agent detail: target
@@ -153,22 +153,27 @@ converges a set of subscriptions, and emits events.
 
 The user model it serves is three verbs and nothing else. An agent is
 an Agent Skill whose frontmatter says how and when it should execute;
-`activate` means make that happen automatically here, `stop` means
+`start` means make that happen automatically here, `stop` means
 stop making it happen, and `run` means do it once now. Convergence is
 how those verbs are kept honest, never something the user is asked to
 think about: no verb, flag, or message names a plan, a diff, a
 subscription, or a convergence pass. What surfaces instead is `status`
 and `doctor` in the same three-verb vocabulary - this agent is started
-here, this one should be and is not, re-run `activate`.
+here, this one should be and is not, re-run `start`.
 
 One word, one meaning: an agent is **started** or **stopped** on a
 runtime, and a **run** is one execution of it. Nothing here calls an
 agent active, activated, enabled, or running - those were four
 spellings of one bit, and the concurrency rule in
 [the firing contract](#the-firing-contract) needs "running" to keep
-meaning a run in flight. The verb is `activate` today; whether it
-becomes `start` is [an open question](#open-decisions), and the state
-it writes is started either way.
+meaning a run in flight. The verb is `activate` today, and it becomes
+`start` in the breaking release: `stop` is already the opposite verb,
+the state it writes is started, and once assignment and convergence
+are their own layers it no longer does anything a user would call
+activating. One caution comes with the word. In a service manager,
+`start` means run now and `enable` means run on its triggers; here an
+agent is not a daemon, so `start` means the second and `run` means
+once, now. The help text should say so in those words.
 
 That has one consequence worth stating, because today's code does not
 satisfy it: **started is a recorded fact**, not something derivable
@@ -178,7 +183,7 @@ the only record is the installed trigger itself, which is why the
 check-and-repair loop can prune an orphaned trigger
 (`health_check.py`) but can never restore a missing one: converging
 from frontmatter alone would undo every `stop`. The desired set is
-therefore frontmatter *times* the started set that `activate` writes
+therefore frontmatter *times* the started set that `start` writes
 and `stop` clears, kept in `state/` beside assignment. Recording it is
 what turns an externally deleted trigger into repairable drift instead
 of a silent stop.
@@ -463,7 +468,7 @@ the agents, see which are wildcard and which are pinned to a single
 machine, and see which machine.
 
 **Started state: is it started here?** For the agents that are mine, a
-per-runtime record of started or stopped that `activate` writes and
+per-runtime record of started or stopped that `start` writes and
 `stop` clears. Getting a machine running is then exactly what it
 sounds like: make the agents assigned to it match their started or
 stopped state.
@@ -510,7 +515,10 @@ declares, which is today's behavior at `activate.py`, preserved
 deliberately - frontmatter `owner:` is a seed read the first time an
 agent is started, never a second source of truth afterwards. Claiming
 beyond
-that stays an explicit, single-agent act. The modes are stated once,
+that stays an explicit, single-agent act, and where that act lives on
+the command surface is a phase-4 question: it is an assignment
+operation, not a start, so it does not belong to any of the three
+verbs by default. The modes are stated once,
 here: local (no registry, nothing assigned elsewhere), registry
 unavailable (abstain), wildcard, unclaimed, explicitly declared, and
 ephemeral `_`-prefixed definitions, which belong to the run that
@@ -792,8 +800,9 @@ reject any use of the bare word for the agent side.
 
 `cli/` is a separate directory whose only permitted imports are the two
 ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
-health and what is started, and converges. `activate`, `stop`, and
-`run` keep exactly the meanings they have today; `--dry-run` prints
+health and what is started, and converges. `start`, `stop`, and
+`run` keep exactly the meanings they have today under their present
+names; `--dry-run` prints
 what would change. No verb, flag, help string, or error text names a
 plan, a diff, or a convergence pass.
 A one-shot `run` builds an envelope with origin `manual` - no
@@ -936,7 +945,8 @@ suite green, and can be released.
    is repairable drift rather than a silent stop. Put
    `activate`, `stop`, and `doctor` on that
    one path and delete their bespoke convergence: the verbs keep
-   exactly the meaning and wording they have today, and nothing about
+   exactly the meaning and wording they have today, with the rename to
+   `start` waiting for phase 4, and nothing about
    convergence reaches the command surface.
    Add the host conformance suite. Treat assignment resolution,
     watcher record ordering, unrecorded-process cleanup,
@@ -955,9 +965,11 @@ suite green, and can be released.
     swap and remove the old invocation - never `-Force` over a working
     registration; removing `heartbeat` is the first visible
     simplification for a user.
-4. **Land the grammars.** Schedule, watch, and selector, with a
-   validator and a clear failure message. This is the breaking
-   frontmatter change; it needs its own release and migration note.
+4. **Land the grammars and the verb.** Schedule, watch, and selector,
+   with a validator and a clear failure message, plus `activate`
+   becoming `start`. This is the breaking release; it needs its own
+   migration note, and the verb rides along because the release is
+   already breaking and the rename costs one word.
 5. **Carve out the agent port.** Split `headless.py` into
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
@@ -1240,14 +1252,8 @@ seam should therefore land in the same phase.
    The repository rule forbids compatibility shims, so this is a major
    version bump with a migration note and, at most, a one-release
    validator that explains the new form when it sees the old. Current
-   version is 5.5.2.
-3. **Whether the verb becomes `start`.** The state an agent is in is
-   started or stopped, and `stop` is already the opposite verb;
-   `activate` is the odd one out. Once assignment and convergence are
-   their own layers it no longer does anything a user would call
-   activating - it marks an agent started and converges. Renaming is
-   user-visible, so it belongs with the release that already breaks
-   frontmatter, or not at all. Either way the state keeps one name.
+   version is 5.5.2. The verb rename from `activate` to `start` rides
+   along with it.
 
 ## Consequences
 
@@ -1432,6 +1438,14 @@ repository or the registry cannot be read - otherwise an unmounted
 drive would read as "nothing is started here" and stop everything in
 it.
 
+A ninth round took the last step the eighth left open: the verb
+follows the state. `activate` becomes `start`, retiring the one
+asymmetric pair in the command surface, and it rides along with the
+breaking release rather than earning one of its own. What that leaves
+unplaced is the claim-and-transfer operation `activate --transfer-here`
+provides today: it is assignment, not starting, so it does not belong
+to any of the three verbs and needs a home decided in phase 4.
+
 ## Picking this up
 
 Nothing here is committed work. Per the repository rule, a work item
@@ -1445,7 +1459,7 @@ something below them changes.
 
 | Question | Answer | Section |
 |---|---|---|
-| What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `activate` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
+| What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `start` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
 | Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
 | What says an agent runs here | A recorded started-or-stopped fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
 | Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and started state](#assignment-and-started-state) |
