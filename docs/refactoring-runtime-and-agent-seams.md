@@ -171,11 +171,28 @@ already publishes `start`, `stop`, and `run`, and only the words
 behind them lag - the module is `activate.py`, `start`'s help says
 "Activate cron and watcher triggers", and `stop`'s says "Deactivate
 triggers". That is a module rename in phase 2 and a help-text pass in
-phase 8, not a breaking change. One caution comes with the word.
-In a service manager, `start` means run now and `enable` means run on
-its triggers; here an agent is not a daemon, so `start` means the
-second and `run` means once, now. The help text should say so in
-those words.
+phase 8, not a breaking change.
+
+One caution comes with the word, and it is narrower than it looks.
+Service managers do split the two ideas deliberately: systemd states
+outright that "enabling and starting units is orthogonal", where
+`enable` hooks a unit up to be started later and `start` spawns the
+daemon now, and where `disable` stops nothing (`systemctl(1)`).
+Windows Task Scheduler, the closer analogue, splits them too but
+spells them the other way round: a task is Enabled or Disabled, and
+`Start-ScheduledTask` runs it once, now. launchd uses load and
+bootstrap for the same idea. So there is no universal convention to
+appeal to, only a universal distinction.
+
+That distinction exists because a daemon has a resident running state
+separate from its registration. Most agents have none: between firings
+nothing of theirs is running, so there is one bit here rather than two,
+and naming it is a free choice. `start` earns it because watch agents
+*do* leave a process resident - starting one literally starts a
+watcher, which `enable` would describe poorly - and because `stop` is
+already its opposite. The residual risk is somebody typing `start` and
+expecting an immediate run; one line of output naming the next fire
+time and pointing at `run` closes it.
 
 That has one consequence worth stating, because today's code does not
 satisfy it: **started is a recorded fact**, not something derivable
