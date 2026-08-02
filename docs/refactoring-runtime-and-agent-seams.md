@@ -166,14 +166,16 @@ runtime, and a **run** is one execution of it. Nothing here calls an
 agent active, activated, enabled, or running - those were four
 spellings of one bit, and the concurrency rule in
 [the firing contract](#the-firing-contract) needs "running" to keep
-meaning a run in flight. The verb is `activate` today, and it becomes
-`start` in the breaking release: `stop` is already the opposite verb,
-the state it writes is started, and once assignment and convergence
-are their own layers it no longer does anything a user would call
-activating. One caution comes with the word. In a service manager,
-`start` means run now and `enable` means run on its triggers; here an
-agent is not a daemon, so `start` means the second and `run` means
-once, now. The help text should say so in those words.
+meaning a run in flight. The verbs need no rename: `cli_spec.py`
+already publishes `start`, `stop`, and `run`, and only the words
+behind them lag - the module is `activate.py`, `start`'s help says
+"Activate cron and watcher triggers", and `stop`'s says "Deactivate
+triggers". That is a module rename in phase 2 and a help-text pass in
+phase 8, not a breaking change. One caution comes with the word.
+In a service manager, `start` means run now and `enable` means run on
+its triggers; here an agent is not a daemon, so `start` means the
+second and `run` means once, now. The help text should say so in
+those words.
 
 That has one consequence worth stating, because today's code does not
 satisfy it: **started is a recorded fact**, not something derivable
@@ -515,10 +517,19 @@ declares, which is today's behavior at `activate.py`, preserved
 deliberately - frontmatter `owner:` is a seed read the first time an
 agent is started, never a second source of truth afterwards. Claiming
 beyond
-that stays an explicit, single-agent act, and where that act lives on
-the command surface is a phase-4 question: it is an assignment
-operation, not a start, so it does not belong to any of the three
-verbs by default. The modes are stated once,
+that stays an explicit, single-agent act, and it already has the right
+home: `start --transfer-here` claims for this runtime and then starts,
+which is the only reason anyone claims (`cli_spec.py`). Claiming is
+assignment and starting is convergence, but the user wants both in one
+breath, so the CLI composes them in that order; if the claim succeeds
+and the start fails, the claim stands and re-running the command
+finishes the job. The sibling flag is the one that does not fit:
+`--transfer-to <identity>` assigns an agent to a *different* runtime
+and deliberately starts nothing here (`activate.py` returns without
+registering). A flag on `start` that never starts is a wart, and phase
+4 should either give remote reassignment its own spelling or drop it,
+since `stop` here plus `start --transfer-here` there already expresses
+the move in the three verbs. The modes are stated once,
 here: local (no registry, nothing assigned elsewhere), registry
 unavailable (abstain), wildcard, unclaimed, explicitly declared, and
 ephemeral `_`-prefixed definitions, which belong to the run that
@@ -943,11 +954,13 @@ suite green, and can be released.
    as the two facts above the port, so that the runtime receives an
    already-filtered set and a trigger removed behind the tool's back
    is repairable drift rather than a silent stop. Put
-   `activate`, `stop`, and `doctor` on that
+   `start`, `stop`, and `doctor` on that
    one path and delete their bespoke convergence: the verbs keep
-   exactly the meaning and wording they have today, with the rename to
-   `start` waiting for phase 4, and nothing about
-   convergence reaches the command surface.
+   exactly the meaning and wording they have today, and the module
+   behind `start` stops being called `activate`. Nothing about
+   convergence reaches the command surface, and `--prune-orphans`
+   retires, because pruning is what convergence does with anything
+   absent from the list.
    Add the host conformance suite. Treat assignment resolution,
     watcher record ordering, unrecorded-process cleanup,
     and restart-on-fingerprint-change as phase acceptance criteria,
@@ -965,11 +978,11 @@ suite green, and can be released.
     swap and remove the old invocation - never `-Force` over a working
     registration; removing `heartbeat` is the first visible
     simplification for a user.
-4. **Land the grammars and the verb.** Schedule, watch, and selector,
-   with a validator and a clear failure message, plus `activate`
-   becoming `start`. This is the breaking release; it needs its own
-   migration note, and the verb rides along because the release is
-   already breaking and the rename costs one word.
+4. **Land the grammars.** Schedule, watch, and selector,
+   with a validator and a clear failure message. This is the breaking
+   release; it needs its own migration note. `start --transfer-to`
+   is settled here too: either a spelling of its own or dropped, since
+   it is the one flag on `start` that starts nothing.
 5. **Carve out the agent port.** Split `headless.py` into
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
@@ -1252,8 +1265,8 @@ seam should therefore land in the same phase.
    The repository rule forbids compatibility shims, so this is a major
    version bump with a migration note and, at most, a one-release
    validator that explains the new form when it sees the old. Current
-   version is 5.5.2. The verb rename from `activate` to `start` rides
-   along with it.
+   version is 5.5.2. The verbs are not part of it: `start`, `stop`,
+   and `run` are already the published names.
 
 ## Consequences
 
@@ -1438,13 +1451,20 @@ repository or the registry cannot be read - otherwise an unmounted
 drive would read as "nothing is started here" and stop everything in
 it.
 
-A ninth round took the last step the eighth left open: the verb
-follows the state. `activate` becomes `start`, retiring the one
-asymmetric pair in the command surface, and it rides along with the
-breaking release rather than earning one of its own. What that leaves
-unplaced is the claim-and-transfer operation `activate --transfer-here`
-provides today: it is assignment, not starting, so it does not belong
-to any of the three verbs and needs a home decided in phase 4.
+A ninth round corrected an error the eighth introduced and settled the
+claim flag. The error: the document had `activate` becoming `start` in
+the breaking release, but `cli_spec.py` already publishes `start`,
+`stop`, and `run` - `activate` is only the module behind `start`. So
+there is no verb rename and no user-visible break; there is a module
+rename in phase 2 and a help-text pass in phase 8, since `start` still
+advertises "Activate cron and watcher triggers" and `stop` still says
+"Deactivate". The claim flag likewise needed no new home:
+`start --transfer-here` already claims and then starts, which is the
+order the CLI should compose because claiming is never an end in
+itself. What remains is `--transfer-to`, which assigns to another
+runtime and starts nothing, and `--prune-orphans`, which convergence
+makes redundant. Both are phase decisions now rather than open
+questions about vocabulary.
 
 ## Picking this up
 
