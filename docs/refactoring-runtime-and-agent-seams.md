@@ -12,9 +12,11 @@ should be rewritten in the past tense as a decision, per the
 conventions in [README.md](README.md).
 
 To resume this work later, start at
-[Picking this up](#picking-this-up) at the end of the document. It
-lists what is decided, what is not, and what can begin without waiting
-for a decision.
+[Key learnings and next steps](#key-learnings-and-next-steps), then
+[Picking this up](#picking-this-up) at the end of the document. The
+first records what a long review session established and what is not
+yet folded into the body; the second lists what is decided, what is
+not, and what can begin without waiting for a decision.
 
 ## Problem
 
@@ -1518,6 +1520,236 @@ place. The scope argument was also respelled from `covers` to
 `complete_for`, because what it asserts is completeness - pruning is
 the consequence, and a caller that cannot assert completeness for a
 scope must leave it out rather than shorten its list.
+
+## Key learnings and next steps
+
+Ten review rounds are summarized above as they were folded in. This
+section is different: it records what the rounds *taught*, separately
+from what they changed, and it flags the conclusions from the last
+session (2026-08-02 and 2026-08-03) that are **not yet folded into the
+body**. Where this section and the body disagree, this section is
+later and wins; the body is corrected in step 1 of the next steps.
+
+### Learnings already reflected in the body
+
+1. **Borrowed shapes carry costs the borrower does not need.**
+   `plan`/`apply` came from Terraform, which needs it because a human
+   reviews a plan before it touches shared infrastructure. Nobody
+   reviews a crontab edit. Withdrawing it deleted three concepts at
+   once: the plan's validity window, the staleness rule, and the
+   caller that had to know to re-plan after a partial failure. The
+   remedy for a partial failure is now "run the same command again",
+   which is what a user would try anyway. It also settled an open
+   question in the document's favour, since the validity window was
+   the one candidate for real instance state in the facade.
+
+2. **Convergence needs a recorded intent, or `stop` is not
+   expressible.** Frontmatter says how an agent *would* run, never
+   that it *is* started on this runtime. That is why today's
+   check-and-repair loop can prune an orphaned trigger
+   (`health_check.py`) but can never restore a missing one: converging
+   from frontmatter alone would undo every `stop`. Recording started
+   state is what turns an externally deleted trigger into repairable
+   drift instead of a silent stop.
+
+3. **A wrapper type is where fields accumulate unnoticed.**
+   `DesiredAutomation` began as four fields and a plausible name. It
+   is how ownership ended up inside the runtime port without anyone
+   deciding it belonged there. Once ownership moved out it was two
+   fields and one call site, and deleting it was better than renaming
+   it. Watch for the same shape elsewhere.
+
+4. **Name the obligation, not the consequence.** `covers` described
+   what would happen (these scopes get pruned) and left the caller to
+   infer the duty. `complete_for` states the duty (this list is the
+   whole answer for these scopes) and lets pruning follow. The rename
+   came directly from a reader asking what the argument was for -
+   which is the reliable signal that a name is not carrying its
+   meaning.
+
+5. **One word, one meaning.** Active, activated, enabled, and started
+   were four spellings of one bit. The state is now started or
+   stopped, and "running" is reserved for a run in flight, which the
+   concurrency rule needs it to mean.
+
+6. **The firing contract had three silent holes**, all now closed in
+   the runtime core rather than as new frontmatter fields: a versioned
+   envelope the ingress decoder can refuse (a 5.5 cron line fires into
+   a 6.0 binary), concurrency policy fixed at skip, and misfire policy
+   fixed at skip. The concurrency rule unified a real split - Windows
+   sets `MultipleInstancesPolicy=IgnoreNew` while cron happily
+   overlaps the same agent.
+
+### Learnings not yet folded into the body
+
+These came from the last session and supersede parts of
+[Assignment and started state](#assignment-and-started-state) and the
+`converge` signature.
+
+7. **Ownership is an optional plugin, not a core concept.** This is
+   the largest correction outstanding.
+   [ownership.py](../src/agents_live/ownership.py) makes registry mode
+   opt-in per project: `mode()` returns `"local"` unless the project
+   config declares `ownership = "registry"`, and registry mode
+   additionally requires a backend the public kernel does not ship
+   ("multi-host ownership is a private plugin... the public kernel is
+   local-only"). In a default install, assignment answers "yes, mine"
+   for everything in a registered repository, so it is a constant. The
+   body currently spends a paragraph on six ownership modes and states
+   the registry-revision rule as though it were core; it should lead
+   with local mode being the definition of "mine" and treat the
+   registry as a plugin that can answer differently.
+
+8. **Three inputs, one rule, three answers.** The rule is: *does
+   removing this destroy working automation?*
+
+   | Input | Kind | Where it lives | Unreadable means |
+   |---|---|---|---|
+   | The list of places (`repos.py`) | Where to look | `~/.config/agents-live/config.toml` | Nothing can be derived. Abstain. |
+   | Assignment | Permission | Absent by default; plugin when declared | Last verified answer stands. |
+   | Definitions in a place | Content | Inside each repository | Nothing to derive. Prune its triggers. |
+
+   Started state is a fourth fact, but it is an output of `start` and
+   `stop` rather than an input to be read from elsewhere.
+
+9. **An unreadable repository should have its triggers pruned.** This
+   reverses the abstain rule the body still states. A crontab line is
+   `cd /src/C && agents-live run --name foo`; if C is unreadable that
+   run fails anyway, so leaving the trigger installed preserves
+   nothing but a failing run every interval, log noise, and a `status`
+   that claims the agent is fine. Abstaining there protects broken
+   automation, not working automation. The registry case is genuinely
+   different and keeps its abstain: there the agents would run
+   correctly, and their triggers would be deleted for a fact that
+   merely could not be confirmed.
+
+10. **Pruning is safe because the intent is not in the repository.**
+    Started state is keyed by (repo, agent) and lives under
+    `paths.state_home()`; `repo_state_dir` is already machine-local
+    and outside the project tree ("runtime state never lives inside a
+    project tree"). So pruning C's triggers loses nothing: when C
+    comes back, the next convergence rebuilds the subscription from
+    frontmatter times started state. Prune and restore is automatic.
+    The real fragility is elsewhere and worth checking before relying
+    on this: `repo_state_key` hashes the *resolved absolute path*, so
+    a repository that is **moved** gets a fresh state directory and
+    silently loses its started set. Unreadable is recoverable; moved
+    is not.
+
+11. **Enumerate every registered repository on every convergence.** A
+    handful of repositories and tens of local definition files is
+    milliseconds. Once enumeration is unconditional, `complete_for`
+    stops varying: `start`, `stop`, and the maintenance pass all
+    converge everything and differ only in what they write first. That
+    collapses several questions at once - orphan sweeping happens on
+    every command rather than only in the background pass, and stale
+    renderings written by an older version are replaced rather than
+    accumulating. The argument survives as `Sequence[str] | ALL`, with
+    `ALL` as the normal value and a narrowed list as the degraded one.
+
+12. **Only `ALL` can sweep an unregistered repository's leftovers.** A
+    list of scopes never reaches them, by construction: every scope
+    named is honest about not covering the others, so entries under a
+    scope nobody claims survive forever. `ALL` asserts "this list is
+    the complete answer for everything this runtime owns", which is
+    the claim that licenses removing them. Its precondition is reading
+    the list of places successfully; anything less falls back to
+    naming the scopes actually read, and the sweep is simply deferred.
+
+13. **Exhaustive pruning requires a structured marker first.** Today
+    the crontab store identifies its own lines by token-matching the
+    command (`belongs_to_root` and `is_maintenance_line` in
+    [triggers.py](../src/agents_live/triggers.py)). Under scoped
+    pruning, a heuristic that *misses* leaves one orphan. Under
+    exhaustive pruning, a heuristic that *over-matches* deletes a line
+    the user wrote themselves. So the Ansible-style marker comment
+    carrying key, scope, and fingerprint is a prerequisite for turning
+    exhaustive pruning on, not a later refinement.
+
+14. **The accepted cost, stated so it is a decision.** If a volume is
+    briefly unavailable - locked at boot, unmounted for a minute - its
+    triggers are pruned and reinstated at the next convergence, and
+    any run due inside that window is lost under misfire policy skip.
+    A grace period was considered and rejected: it is a third state
+    and a timer to get wrong. The mitigation is that convergence is
+    frequent, which learning 11 makes true.
+
+### Prior art worth keeping in view
+
+A survey of comparable systems confirmed the core choices - durable
+subscription plus event envelope, primitives across the seam, a pure
+diff, delegating scheduling to the OS, no asyncio. Watchman is the
+strongest confirmation: its `trigger` is durable and survives daemon
+restart while its `subscribe` dies with the client, which is
+`TriggerStore` and `ChangeSource` arrived at independently. Three
+findings remain unadopted and should be weighed in phase 2 and 3:
+
+- **Delegate process supervision where the host has it.** The
+  `WatcherRecord` plus `owned(role=)` plus crash-ordering design is a
+  small process supervisor. A Win32 **job object** makes membership
+  definitional rather than enumerated (`TerminateJobObject`,
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and a systemd user unit gives
+  restart and cleanup for free. Enumerate-and-match is racy by
+  construction; a handle is not.
+- **Put the fingerprint on the artifact, not in a side index.**
+  Kubernetes stores `pod-template-hash` as a label on the object it
+  manages. Doing the same makes learning 13's marker and the watcher
+  fingerprint the same mechanism, and removes the write-ordering
+  window between spawn and record.
+- **Scope the artifact store, not the plan.** Terraform documents
+  `-target` as a hazard because partial scope causes undetected drift.
+  Ansible's answer is a `cron_file` per unit of management. One
+  `cron.d` file per repository would make authority structural rather
+  than a rule the caller must honour.
+
+### Meta-learnings about the review itself
+
+- **Check the code before asserting.** Two corrections came from
+  grepping rather than reasoning: `start` is *already* the published
+  verb (`activate` is only the module behind it), and ownership is
+  optional. A third, the claim that service managers universally
+  "enable rather than start", was half wrong - systemd separates
+  enable and start, but Task Scheduler spells the same split the other
+  way round, so there is a distinction to reason about but no
+  convention to appeal to.
+- **A reader asking "what is this for?" means the name is wrong.**
+  That produced learning 4 and, one step later, the discovery that the
+  argument should usually be a constant.
+- **Beware stale editor tabs.** Several turns were spent explaining
+  edits that appeared absent because the file was open through a
+  pinned `git:` URI several commits behind `HEAD`. Confirm against the
+  working tree, not a pinned blob.
+
+### Next steps
+
+In order. Steps 1 and 2 are documentation and issue hygiene; the rest
+is the migration sequence.
+
+1. **Fold learnings 7 through 14 into the body.** Rewrite
+   [Assignment and started state](#assignment-and-started-state)
+   around the three-input table, demote ownership to an optional
+   plugin, change the `converge` signature so the scope argument is
+   `Sequence[str] | ALL` with `ALL` as the ordinary case, replace the
+   "a partial read abstains" rule with the split answer, and add
+   learnings 10 and 14 as stated costs. Update the settled-questions
+   table rows for "Where ownership lives" and "What convergence is
+   handed", which are now wrong.
+2. **File the issues.** The three defects under
+   [Defects](#defects-found-while-writing-this), plus two new ones
+   from this session: the moved-repository state-key fragility
+   (learning 10) and the trigger-marker prerequisite (learning 13).
+   Per the repository rule, a work item becomes a GitHub issue before
+   it is started.
+3. **Start phase 1** - carve out `state/` and `obs/`, land the tier-5
+   fitness functions. Nothing gates it.
+4. **Phase 2, marker first.** Land the structured trigger marker
+   before exhaustive convergence, then the rest of the phase. The
+   phase acceptance criteria already listed still apply; add
+   unreadable-repository pruning and moved-repository state to them.
+5. **Decide the Agent Skills conformance position**, which gates
+   phase 4 and phase 7 and is the one question in
+   [Still needing a decision](#still-needing-a-decision) that nothing
+   else can proceed past.
 
 ## Picking this up
 
