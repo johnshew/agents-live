@@ -19,7 +19,7 @@ decided, what is not, and what can begin without waiting for a decision.
 
 ## Problem
 
-The package is 18,952 lines of source against 8,753 lines of
+The package is 18,951 lines of source against 8,753 lines of
 test. (Every line count in this document is non-blank lines,
 `grep -cve '^\s*$'`.)
 The two seams that matter already exist, but neither is explicit:
@@ -44,9 +44,9 @@ The costs follow from that:
    `health_check` (1,014), `doctor` (863), and `schedules` (194) each
    reimplement part of "what should be installed, what is installed,
   what is the difference". The backlog theme "Host changes that cannot
-  half-finish" ([#226](https://github.com/johnshew/agents-live/issues/226),
-  [#231](https://github.com/johnshew/agents-live/issues/231), now
-  closed) illustrates the same failure shape, though those issues
+  half-finish" (open [#226](https://github.com/johnshew/agents-live/issues/226),
+  closed [#231](https://github.com/johnshew/agents-live/issues/231))
+  illustrates the same failure shape, though those issues
   concern plugin and executable state rather than triggers. They are
   evidence for a reusable convergence pattern, not evidence that one
   host-state owner can make unlike artifacts transactional.
@@ -108,7 +108,7 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
 
 Non-goals: changing what the tool does for a user, adding a scheduler
 daemon, adopting asyncio, or shipping any backward-compatibility shim
-(the repository rule stands; the frontmatter break is handled by a
+(the repository rule stands; any frontmatter break is handled by a
 version bump, see [Open decisions](#open-decisions)).
 
 ## Target architecture
@@ -232,15 +232,20 @@ cannot live in one of the three stateful implementations.
 
 ```python
 def converge(subscriptions: Sequence[Subscription], *,
-       dry_run: bool = False) -> Converged:
-  '''Goal-seek: make this runtime match the complete desired set.
-  Host prerequisites and liveness first, then subscriptions.
-  Idempotent - a second call reports nothing to do. dry_run reports
-  the same operations without performing them.'''
+             dry_run: bool = False) -> Converged:
+    '''Goal-seek: make this runtime match the complete desired set.
+    Host prerequisites and liveness first, then subscriptions.
+    Idempotent - a second call reports nothing to do. dry_run reports
+    the same operations without performing them.'''
 
 
 def health() -> Health:
     '''Read-only. Liveness is a field here, not a command.'''
+
+
+def change_source() -> ChangeSource | None:
+    '''None when this host cannot watch, so no adapter is obliged to
+    declare a method it would only raise from.'''
 
 
 class TriggerStore(Protocol):
@@ -551,8 +556,9 @@ Three options were considered for whether the port streams events.
 
 **Decision: B, with C's segregation kept inside the runtime module.** The port
 surface stays small, policy stays generic and testable with no host
-present, and a host that cannot watch reports `changes is None` rather
-than raising from a method it was obliged to declare. Registration is
+present, and a host that cannot watch returns `None` from
+`change_source()` rather than raising from a method it was obliged to
+declare. Registration is
 durable and reconcilable; streaming is process-scoped and disposable.
 Merging those two lifetimes into one interface is the mistake option A
 makes, and it is the mistake the current code makes implicitly.
@@ -641,19 +647,45 @@ already accepted remain out of scope.
 Watch expression:
 
 ```ebnf
-watch       = clause , { sp , clause } ;
-clause      = include | exclude | option ;
+watch       = patterns , [ sp , debounce ] ;
+patterns    = pattern , { sp , pattern } ;
+pattern     = include | exclude ;
 include     = glob ;
 exclude     = "!" , glob ;
-option      = "debounce" , sp , duration ;
-duration    = number , [ "ms" | "s" | "m" ] ;
+debounce    = "debounce" , sp , duration ;
+duration    = number , unit ;
+unit        = "ms" | "s" | "m" ;
 glob        = ? repo-relative path or glob, quoted if it contains spaces ? ;
 ```
 
-So `watch: "docs/**/*.md !**/node_modules/** debounce 2s"` replaces the
+So `watch: "docs/**/*.md !node_modules/** debounce 2s"` replaces the
 three fields used today. The gain is not brevity; it is that a
 subscription is one comparable, hashable, renderable string, which is
 what keeps the diff pure and the index a flat table.
+
+`debounce` is deliberately not a pattern. There is one watch
+subscription per agent holding one window (`watchpolicy.DebounceWindow`
+already carries a single delay), so the term is one optional trailing
+option on the whole expression rather than something that could appear
+to attach to a preceding glob. Four rules travel with it: at least one
+include, since an expression of only excludes watches nothing; at most
+one `debounce`, a second being an error rather than last-wins;
+precedence that is not positional, so a path fires when it matches an
+include and no exclude, unlike gitignore's last-match-wins; and a
+canonical form of sorted includes, sorted excludes, then the normalized
+duration, so reordering does not restart a watcher.
+
+The author's excludes sit on a built-in floor that stays implicit:
+dotfiles, `__pycache__`, `_index_.md`, and the tool's own JSONL logs are
+always ignored (`watchpolicy.should_ignore`).
+
+The collapse is a capability gain rather than a rename. Today's
+`watchIgnore` is not glob-matched at all: an entry matches an exact
+basename, or a directory prefix when it ends in `/`. So the old form
+maps into the new one mechanically (`secrets.env` to `!**/secrets.env`,
+`node_modules/` to `!node_modules/**`) while the reverse does not, which
+is what lets a migrator compute the replacement line from a file's own
+values.
 
 A host watches directories, not globs: the core derives each
 `ChangeSource` root as the longest literal prefix of an include
@@ -709,6 +741,30 @@ class Provider(Protocol):
 word, per the naming discipline in
 [Naming hazard](#naming-hazard-worth-fixing-now).)
 
+The two `prepare` functions are one level apart, and the type names say
+so. The agent port's `prepare` resolves the `runtime:` selector to a
+concrete provider, model, and effort, narrows `AgentSpec` to
+`ResolvedSpec`, and delegates to the selected provider.
+**`ResolvedSpec` is that narrowed projection**: what a provider needs to
+build a launch, which is the prompt, mode, allow-tools, mcps, the
+environment overlay, and the resolved model and effort. It deliberately
+excludes the trigger fields, `owner`, the output contract, and the
+processors. The narrowing is what keeps a published plugin boundary from
+becoming a contract over the whole definition, and it costs nothing by
+goal 1's count: `AgentSpec` crosses the port's public surface and
+`ResolvedSpec` crosses the provider seam, one named type each. It is
+also what today's adapters already do, receiving `mode`, `allow_tools`,
+`system_prompt`, and `env` rather than an `AgentConfig`. The exact fields
+are phase-5 work; the rule is fixed here.
+
+`Completion` is likewise narrower than `Outcome` and not a second
+spelling of it. A provider returns what it could read out of its own
+output: the text or structured payload, usage, and a transcript
+reference. `finish` calls `parse` and turns the result into `Outcome` by
+applying the provider-independent validation and classification listed
+below. A provider never classifies an error, which is
+what keeps the taxonomy closed.
+
 Two lifecycle questions stay open until the fake CLI (see
 [Testing approach](#testing-approach)) shows what generic invocation
 actually needs from a provider: how streaming output is normalized
@@ -717,10 +773,15 @@ answer is a `parse_stream` hook and a cleanup handle on `Launch`, not
 a wider protocol; that call belongs to phase 5, made against evidence.
 
 `Launch` is either a subprocess description (argv, env, temp config
-files, whether a pty is required, whether TUI noise must be filtered) or
-a direct call description for a future API-router provider. `dispatch`
-owns timeout, retry, streaming, process cleanup, and conversion from
-`ChildResult` to the primitive `RawOutput` record. The agent port owns
+files, the resolved timeout, whether a pty is required, whether TUI
+noise must be filtered) or a direct call description for a future
+API-router provider. `dispatch` owns retry, streaming, process cleanup,
+and conversion from `ChildResult` to the primitive `RawOutput` record,
+and it enforces the timeout `Launch` carries rather than owning it: the
+value is a per-agent fact `prepare` resolves from the definition and its
+default, and `dispatch` is the only side holding the child it applies
+to. `RawOutput` records whether the child timed out, so the `timeout`
+category is still classified in the agent port. The agent port owns
 provider-independent size caps, JSON extraction and repair, schema and
 path-root validation, provenance, and error classification. Logging is
 through `obs/`. That split is the single largest line reduction available
@@ -818,7 +879,8 @@ promises.
 | `smoketest` | 1,386 | ~450 | Conformance suites and a fake provider absorb most of it; what remains is the real-CLI release gate. |
 | Test suite | 8,753 | ~5,000 | Table-driven grammar and diff tests plus two conformance suites replace the mock population. |
 
-Source total: roughly 19,000 to roughly 11,500. The number is a
+Source total: roughly 19,000 to roughly 10,800, holding the 3,775 lines
+outside these rows constant. The number is a
 consequence; the concept counts in [Goals](#goals) are the target.
 
 ## Testing approach
@@ -1168,21 +1230,41 @@ seam should therefore land in the same phase.
 
 ## Open decisions
 
-1. **Do the grammars earn a breaking release?** The watch and provider
-  selector strings must simplify authoring and implementation on their
-  own merits. Agent Skills metadata is not a justification. If selected,
-  the repository rule requires a clean break, a major version bump from
-  5.5.2, and a migration note.
-2. **What does a repository move do to started state?** The current state
-  key intentionally hashes the resolved absolute path. Before phase 2
-  stores intent there, the existing `repos` operation must either move
-  that state explicitly or document that moving a repository stops its
-  agents.
-3. **Does the full event envelope earn its fields?** A stable scheduler
-  ingress already carries agent id, origin flags, and changed files.
-  Before adding schema version, subscription key, target, timestamp, and
-  a decoder, phase 5 must show which required behavior cannot be derived
-  inside the launched process.
+Two of the three were settled on 2026-08-08. The third is deliberately
+left to implementation.
+
+1. **Do the grammars earn a breaking release? Yes, as a clean break.**
+  The watch and selector collapses ship with the `handler` retirement in
+  one major version bump from 5.5.2, since there is no reason to spend
+  two breaks where one will do. No compatibility period and no dual-form
+  parsing: 6.0 refuses the retired names by name, with the replacement
+  computed from the file's own values, and a one-shot migrator rewrites
+  definitions as an explicit operator action. Coexistence was considered
+  and declined - it buys a delay at the price of two accepted spellings,
+  a mixing rule, and a removal condition somebody has to enforce later,
+  which is the arrangement `handler` already demonstrates nobody
+  enforces. The failure behavior is specified in
+  [target-architecture.md](target-architecture.md#retiring-the-old-fields);
+  the case that makes it more than a message is that a durable trigger
+  written by 5.x survives the upgrade and keeps firing into the 6.0
+  binary, so an agent can be started and unloadable at once.
+2. **What does a repository move do to started state? Nothing, by
+  design.** A move is `stop`, `mv`, register, `repos remove`, `start`.
+  Forgetting is safe rather than silent: the repository becomes
+  unreadable, so its triggers are pruned by the ordinary rule, and what
+  survives is an orphaned registry entry and an orphaned state
+  directory. Those are reported by `doctor` rather than removed, because
+  unreadable is ambiguous between moved, deleted, and briefly unmounted,
+  and auto-deregistering would break the unmount case this document
+  already commits to keeping recoverable. Carrying state across the move
+  automatically was declined: it requires guessing intent from a
+  basename.
+3. **Does the full event envelope earn its fields? Decided in phase 5,
+  against the prototype.** A stable scheduler ingress already carries
+  agent id, origin flags, and changed files. Rather than settling schema
+  version, subscription key, target, timestamp, and a decoder on paper,
+  phase 5 shows which required behavior cannot be derived inside the
+  launched process.
 
 Agent Skills packaging is separate work and gates none of these decisions.
 
@@ -1276,8 +1358,9 @@ that edge, so the labels now name the action (`consumes ... from`,
 `calls run on`) instead of the payload, which is what invited the
 dataflow reading.
 
-A third round (the developer's own review, 2026-07-31) added phase 8
-- the repository-wide terminology and documentation pass - and five
+A third round (the developer's own review, 2026-07-31) added the
+repository-wide terminology and documentation pass - the final phase of
+the migration sequence - and five
 concerns, all folded in with nothing declined: watch-subscription
 convergence now includes the running watcher and its configuration
 fingerprint, `Subscription.target` is discriminated (`agent:<id>` |
@@ -1368,7 +1451,8 @@ claim flag. The error: the document had `activate` becoming `start` in
 the breaking release, but `cli_spec.py` already publishes `start`,
 `stop`, and `run` - `activate` is only the module behind `start`. So
 there is no verb rename and no user-visible break; there is a module
-rename in phase 2 and a help-text pass in phase 8, since `start` still
+rename in phase 2 and a help-text pass in the documentation phase,
+since `start` still
 advertises "Activate cron and watcher triggers" and `stop` still says
 "Deactivate". The claim flag likewise needed no new home:
 `start --transfer-here` already claims and then starts, which is the

@@ -33,6 +33,9 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [refactoring-runtime-and-agent-seams.md](refactoring-runtime-and-agent-seams.md) -
   proposal to reduce the package to two ports, a host runtime manager and
   an agent execution seam, with platform and provider plugins.
+- [target-architecture.md](target-architecture.md) - reader's guide to the
+  end state that proposal describes: the major pieces, where state lives,
+  and the lifecycle of one agent from registration to firing.
 
 Design documents are added here as they are written, one file per topic,
 named after the topic.
