@@ -39,8 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from . import (
-    adminlog, completions, health_check, heartbeat, paths, plugins, preflight,
-    repos)
+    adminlog, completions, lifecycle, paths, plugins, preflight, repos)
 
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
@@ -57,8 +56,7 @@ _SKILL_PAYLOAD = ("SKILL.md", "VERSION", "docs", "templates")
 def initialize(root: Path) -> bool:
     """Create the standard project layout (idempotent): the root config
     marker (``.agents-live.toml``, unless ``pyproject.toml`` already
-    declares ``[tool.agents-live]``) plus ``Agents/data/`` (git-synced
-    shared state such as ``agent-owners.json``) and ``Agents/handlers/``.
+    declares ``[tool.agents-live]``) plus the ``Agents/`` definition root.
     Logs and other machine-local runtime state live in the user-level
     XDG state home (``paths.repo_state_dir``), never in the tree.
     Returns True if the config marker was created.
@@ -78,8 +76,8 @@ def initialize(root: Path) -> bool:
         (root / paths.CONFIG_DOTFILE).write_text(
             _DOTFILE_HEADER, encoding="utf-8")
     agents_dir = root / "Agents"
-    (agents_dir / "data").mkdir(parents=True, exist_ok=True)
-    (agents_dir / "handlers").mkdir(parents=True, exist_ok=True)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    paths.repo_state_dir(root).mkdir(parents=True, exist_ok=True)
     return created
 
 
@@ -269,7 +267,8 @@ def main() -> int:
         plugin_roots = [global_root]
         plugin_roots.extend(
             Path(value) for _, value, error in repos.entries() if error is None)
-        if plugins.converge(list(dict.fromkeys(plugin_roots)), trigger="init"):
+        if plugins.converge(
+                list(dict.fromkeys(plugin_roots)), trigger="init"):
             print("Converged declared plugins in the agents-live tool environment")
     except (OSError, ValueError, plugins.PluginError) as exc:
         preflight.emit_failure("init", f"plugin convergence failed: {exc}")
@@ -277,46 +276,26 @@ def main() -> int:
     global_skill_status = install_skill(global_root)
     skill_status = (
         install_skill(root) if root != global_root else global_skill_status)
-    if skill_status == "installed":
-        print("Installed skill payload: .claude/skills/agents-live/ "
-              "(SKILL.md, docs, templates)")
-    elif skill_status == "refreshed":
-        print("Refreshed skill payload to match the installed package: "
+    if skill_status:
+        print(f"{skill_status.capitalize()} skill payload: "
               ".claude/skills/agents-live/")
-
     completions.update_best_effort("init")
-
     try:
-        health_check.ensure_health_cron_lines()
-    except (OSError, ValueError, health_check.AgentsLiveError) as exc:
-        preflight.emit_failure("init", f"automatic maintenance setup failed: {exc}")
+        convergence = lifecycle.converge()
+    except lifecycle.CollectionUnavailable as exc:
+        preflight.emit_failure("init", str(exc))
         return 1
-
-    # On WSL, scheduled work only fires while the distro is alive, so the
-    # heartbeat is part of initializing host support rather than a step
-    # the operator is expected to remember separately.
-    heartbeat.install_best_effort("init")
-
+    if convergence.failed:
+        for operation, detail in convergence.failed:
+            print(f"{operation.key}: {detail}", file=sys.stderr)
+        return 1
     print(
         "\nNext steps:\n"
-        "  - copy a starter from .claude/skills/agents-live/templates/\n"
-        "    into .claude/agents/<agent-name>.md and edit its frontmatter\n"
+        "  - create Agents/<agent-name>/SKILL.md\n"
         "  - `agents-live run <agent-name>` to test it once\n"
-        "  - `agents-live start <agent-name>` to activate its triggers\n"
+        "  - `agents-live start <agent-name>` to start automatic runs\n"
         "  docs: https://github.com/johnshew/agents-live\n")
-
-    # Close with a read-only doctor run (§3.4 step 6) so a fresh install
-    # ends in a verified green state, not a hopeful one. Reload: doctor
-    # resolves its repo root at import time, and init may target a root
-    # the process hadn't resolved before.
-    os.environ[paths.ENV_VAR] = str(root)
-    paths.clear_cache()
-    import importlib
-    from . import doctor
-    doctor = importlib.reload(doctor)
-    sys.argv = ["agents-live doctor"]
-    print("Running doctor...")
-    return doctor.main()
+    return 0
 
 
 if __name__ == "__main__":

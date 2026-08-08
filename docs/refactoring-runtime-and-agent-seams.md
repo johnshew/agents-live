@@ -888,11 +888,13 @@ provider-independent validation and classification listed
 below. A provider never classifies an error, which is
 what keeps the taxonomy closed.
 
-One lifecycle question stays open until the fake CLI (see
-[Testing approach](#testing-approach)) shows what generic invocation
-actually needs from a provider: how streaming output is normalized
-incrementally. The likely answer is a `parse_stream` hook rather than a
-wider protocol; that call belongs to phase 5, made against evidence.
+The fake CLI prototype settled streaming without widening the provider
+protocol. Claude emits one JSON document and Copilot's TUI filtering depends
+on complete lines, while validation and post-processing require the completed
+value. `ChildRunner` therefore captures bounded UTF-8 output and `interpret`
+normalizes it once after exit. There is no `parse_stream` hook in schema
+version 1; dispatch may mirror raw progress for a human later without making
+partial provider output part of the seam.
 
 The question of who cleans up what `prepare` created is no longer open.
 Anything scoped to the whole run, the pipeline MCP server most of all,
@@ -1906,19 +1908,17 @@ explicit stop and start, and the event envelope is settled in phase 5
 against a prototype. What remains open is smaller and is listed here so
 it is not lost.
 
-1. **Does dispatch need the full event envelope?** Deferred to phase 5
-   deliberately, to be answered by a prototype rather than on paper.
-2. **Where does the watcher fingerprint live?** The artifact is the
-   target and a runtime-owned index is the named fallback; phase 2
-   decides by measuring a watch expression at the Windows command-line
-   length bound.
-3. **How is streaming output normalized incrementally?** The one
-   remaining provider-lifecycle question, to be answered against the
-   fake CLI.
-4. **The complete `agents-live.*` field registry.** Every key, default,
-   grammar, and validation rule has to be written down before
-   implementation, per
-   [frontmatter-convergence.md](frontmatter-convergence.md).
+1. **Dispatch envelope:** the handoff carries only repository, agent,
+   origin, subscription key, and changed files. Observability creates its own
+   versioned envelope.
+2. **Watcher fingerprint:** it lives in the structured durable artifact marker
+   and watcher argv. Measurements at the Windows bound did not require a
+   side index.
+3. **Streaming:** complete output is normalized after child exit. The fake CLI
+   showed no provider-independent incremental value, so no `parse_stream` hook
+   was added.
+4. **Field registry:** [definition-format.md](../src/agents_live/skill/docs/definition-format.md)
+   records every schema-version-1 key, encoding, default, and constraint.
 
 ### Findings from the 2026-08-08 audit, not yet resolved
 

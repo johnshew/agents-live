@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema", "duckdb"]
+# dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema", "duckdb", "skills-ref==0.1.1"]
 # ///
 """Export-safe smoke tests for the agents-live package (§5.1 "exported
 test suite", F4).
@@ -52,7 +52,7 @@ try:  # installed package layout
         run, schedules, smoketest, spawn, status, uninstall, update_check,
         upgrade, triggers, watchpolicy, watchsource, winwatch, wintasks,
     )
-    from agents_live.cli_spec import (
+    from agents_live.cli.spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
     )
@@ -92,7 +92,7 @@ except ImportError:  # flat checkout layout
     import watchsource
     import winwatch
     import wintasks
-    from cli_spec import (
+    from cli.spec import (
         Arg, Cmd, COMMANDS, GLOBAL_ARGS, HELP_ARG, POST_COMMAND_ARGS,
         render_docs_block, validation_error, visible_args,
     )
@@ -5014,6 +5014,28 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
             encoding="utf-8"), "portable\n")
         self.assertFalse(escaped.exists())
         self.assertIn("rejecting unsafe path", completed.stderr)
+
+    def test_shipped_templates_conform_to_agent_skills(self) -> None:
+        templates = (
+            Path(headless.__file__).resolve().parent / "skill" / "templates")
+        skills = sorted(
+            path.parent for path in templates.glob("*/SKILL.md"))
+        self.assertTrue(skills)
+        executable = shutil.which("agentskills")
+        self.assertIsNotNone(executable)
+        for skill in skills:
+            with self.subTest(skill=skill.name):
+                completed = subprocess.run(
+                    [executable, "validate", str(skill)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                )
+                self.assertEqual(
+                    0, completed.returncode,
+                    completed.stdout + completed.stderr)
 
     def test_node_handler_needs_no_shell_on_any_host(self) -> None:
         handler = Path(self._tmp.name) / "handler.js"

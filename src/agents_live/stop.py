@@ -1,58 +1,30 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["PyYAML"]
-# ///
+"""Clear started intent, then converge the complete runtime."""
 from __future__ import annotations
 
 import argparse
 import sys
 
-from .headless import (
-    AgentsLiveError,
-    load_agent_config,
-    stop_watcher,
-)
-
-from . import preflight
-from . import schedules
+from . import lifecycle, paths, state
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Stop automatic runs for an agent.")
     parser.add_argument("--name", required=True)
-    args = parser.parse_args()
-
+    parser.add_argument("--dry-run", "-n", action="store_true")
+    args = parser.parse_args(argv)
+    root = paths.resolve_root()
     try:
-        trigger_type = ""
-        try:
-            trigger_type = load_agent_config(args.name).trigger_type
-        except AgentsLiveError:
-            trigger_type = ""
-
-        if trigger_type in {"", "cron", "multi"}:
-            removed = schedules.remove(args.name)
-            if removed:
-                print(f"Removed cron entry for '{args.name}'")
-            elif trigger_type == "cron":
-                print(f"No cron entry found for '{args.name}' (may not have been started)")
-
-        if trigger_type in {"", "watcher", "multi"}:
-            pid = stop_watcher(args.name)
-            schedules.remove_watcher_respawn(args.name)
-            if trigger_type in {"watcher", "multi"}:
-                if pid is not None:
-                    print(f"Stopped watcher for '{args.name}'")
-                else:
-                    print(f"No watcher found for '{args.name}'")
-
-        print(f"Agent '{args.name}' stopped (config preserved)")
-        return 0
-    except AgentsLiveError as exc:
-        # Layer 2 (§3.6): typed errors leave as the envelope in json
-        # mode, one concise stderr line otherwise.
-        preflight.emit_typed_error(exc, "stop")
+        result = lifecycle.converge(
+            removals={root: {args.name}}, dry_run=args.dry_run)
+    except (lifecycle.CollectionUnavailable,
+            state.StartedStateUnavailable, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
         return 1
+    verb = "Would stop" if args.dry_run else "Stopped"
+    print(f"{verb} '{args.name}'.")
+    for operation, message in result.failed:
+        print(f"{operation.key}: {message}", file=sys.stderr)
+    return 1 if result.failed else 0
 
 
 if __name__ == "__main__":

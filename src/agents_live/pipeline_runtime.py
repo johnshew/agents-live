@@ -83,6 +83,8 @@ def pipeline_runtime(
             ),
             encoding="utf-8",
         )
+        claude_cfg.chmod(0o600)
+        copilot_cfg.chmod(0o600)
         yield {
             "PIPELINE_MCP_URL": mcp.url,
             "PIPELINE_MCP_TOKEN": mcp.token,

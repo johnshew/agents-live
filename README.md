@@ -8,17 +8,21 @@
 scheduled and file-triggered local automations, without moving them to another
 agent platform.
 
-Your agent stays one Markdown file. Agents Live adds triggers, execution
-controls, logs, and automatic repair using standard host tools.
+Each definition is a conforming Agent Skill directory. Agents Live reads its
+namespaced execution metadata, adds local triggers, and repairs drift using
+standard host tools.
 
-### `markdown-polisher.md`
+### `Agents/markdown-polisher/SKILL.md`
 
 ```markdown
 ---
+name: markdown-polisher
 description: Polish Markdown documents when they change.
-runtime: claude
-mode: write
-watchPath: docs/
+metadata:
+  agents-live.schema-version: "1"
+  agents-live.selector: "claude"
+  agents-live.mode: "write"
+  agents-live.watch: "docs/** debounce 1s"
 ---
 Correct spelling, grammar, and Markdown formatting errors in the selected files.
 Preserve their meaning, links, code, and frontmatter. When a `Files changed:`
@@ -33,7 +37,7 @@ details.
 ```bash
 uv tool install agents-live
 agents-live init
-agents-live start ./markdown-polisher.md
+agents-live start markdown-polisher
 ```
 
 The watcher sleeps until a file changes, then runs the agent immediately with
@@ -44,7 +48,7 @@ Manage the running agent with `status` and `stop`:
 
 ```bash
 agents-live status
-agents-live stop ./markdown-polisher.md
+agents-live stop markdown-polisher
 ```
 
 There is no polling interval or clock tick. The agent runs only when the
@@ -58,14 +62,14 @@ you already use, `uv`, and your host scheduler and file-watch facility.
 
 Cron-only agents have no persistent process. A file-watch agent uses one small
 local watcher. There are no externally reachable ports or databases. Custom
-handlers and plugins may bring their own dependencies; Agents Live core does
+post-processors and plugins may bring their own dependencies; Agents Live core does
 not require them.
 
 ## Safe by default
 
 Execution modes make write access explicit:
 
-1. `plan` is read-only. The agent emits JSON for a validated handler to apply.
+1. `plan` is read-only. The agent emits JSON for a validated post-processor to apply.
 2. `pipeline` limits the agent to a schema-checked data channel shared with
    your pre-processors and post-processors.
 3. `write` grants full write access as an explicit per-agent choice.
@@ -75,7 +79,7 @@ your local account and agent CLI.
 
 The example uses `write` so it can fix documents directly. For tighter
 control, use [`plan`](src/agents_live/skill/docs/approach.md#execution-modes)
-with a validated handler or
+with a validated post-processor or
 [`pipeline`](src/agents_live/skill/docs/approach.md#execution-modes) with
 schema-checked pre-processors and post-processors.
 
@@ -101,9 +105,9 @@ agents-live init
 ```
 
 `cron` runs scheduled agents and automatic maintenance; `inotifywait` is only
-needed when agents watch files or directories. On WSL, `agents-live init`
-installs a heartbeat that keeps the distro running, so scheduled agents fire
-without an open session.
+needed when definitions watch files or directories. On WSL, the first
+convergence stages and verifies Windows-side liveness before replacing an
+existing task, so scheduled runs do not require an open session.
 
 On Windows:
 
@@ -124,8 +128,8 @@ configuration issues.
 
 ## Go further
 
-Repositories are optional. Initialize one later with `agents-live init --repo`
-when you need shared configuration or name-based commands.
+Definitions live under a registered repository's `Agents/` directory. Register
+another repository with `agents-live init --repo <path>`.
 
 See the [command reference](src/agents_live/skill/docs/commands.md) for
 repository workflows, health checks and repair, upgrades, dashboards, shell
@@ -135,11 +139,11 @@ safety, persistence, and maintenance behavior.
 
 ## Documentation
 
-The optional `/agents-live` skill is installed by `agents-live init`, but every
-workflow remains an ordinary CLI command.
+Every workflow is an ordinary CLI command.
 
 - [Overview](src/agents_live/skill/docs/overview.md)
 - [Starter templates](src/agents_live/skill/templates/)
+- [Definition format](src/agents_live/skill/docs/definition-format.md)
 - [Skill reference](src/agents_live/skill/SKILL.md)
 - [Changelog](src/agents_live/skill/docs/changelog.md)
 

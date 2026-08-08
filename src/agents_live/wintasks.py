@@ -404,6 +404,7 @@ def translate(schedule: str) -> list[dict[str, object]]:
     text = schedule.strip()
     if text == triggers.BOOT:
         return [{"kind": "boot"}]
+    text = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
     try:
         minutes, _hours, days, _months, weekdays = triggers.schedule_fields(text)
     except triggers.ScheduleSyntaxError as exc:

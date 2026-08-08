@@ -21,8 +21,9 @@ rather than papered over.
 
 ## The system in one paragraph
 
-An **agent definition** is a markdown file in a repository whose
-frontmatter says what work to do, how to run it, and when it should run.
+An **agent definition** is a conforming `Agents/<name>/SKILL.md` directory.
+Its body says what work to do and its namespaced metadata says how and when
+it should run.
 Agents Live turns that last part into real automation on one machine: it
 registers a trigger with the operating system's own scheduler, and when
 that trigger fires it runs the agent through a provider CLI and records

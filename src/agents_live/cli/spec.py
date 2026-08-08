@@ -72,54 +72,54 @@ COMMANDS = (
             Arg(("--scheduled",), "This run came from an installed schedule."),
             Arg(("--boot",), "This run came from a startup trigger."),
             Arg(("--quiet",), "Suppress progress output."),
+            Arg(("--artifact-marker",), "Artifact marker.", kind="value", hidden=True),
+            Arg(("--runtime-role",), "Process role.", kind="value", hidden=True),
+            Arg(("--subscription-key",), "Subscription key.", kind="value", hidden=True),
+            Arg(("--subscription-fingerprint",), "Subscription fingerprint.",
+                kind="value", hidden=True),
         ),
     ),
     Cmd(
-        "start", "Activate cron and watcher triggers.", "activate", "in-process",
+        "start", "Start automatic runs for an agent.", "start", "in-process",
         probes=("schedule", "watch"), dynamic_probes="start", json=True,
         name_sugar=True,
-        mutually_exclusive=(("--yes", "--all"),
-                            ("--transfer-to", "--transfer-here")),
         requires_one_of=("--name", "--all"),
         args=(
             Arg(("--name",), "Agent name.", kind="value"),
-            Arg(("--all",), "Activate all configured agents."),
+            Arg(("--all",), "Start all configured agents."),
             Arg(("--dry-run", "-n"), "Preview without mutating."),
-            Arg(("--yes",), "Confirm ownership takeover without prompting."),
-            Arg(("--transfer-to",), "Transfer ownership to an identity.",
-                kind="value"),
-            Arg(("--transfer-here",), "Claim ownership for this runtime."),
-            Arg(("--prune-orphans",), "Remove triggers for deleted agents."),
         ),
     ),
     Cmd(
-        "internal", "Run internal watcher plumbing.", "activate", "in-process",
+        "internal", "Run internal watcher plumbing.", "internal", "in-process",
         probes=("schedule", "watch"), hidden=True, subcommand_required=True,
         subcommands=(
             Cmd(
-                "watch-loop", "Run one watcher loop.", "activate", "in-process",
-                args=(Arg(("name",), "Agent name.", kind="positional",
-                          required=True),),
+                "watch-loop", "Run one watcher loop.", "internal", "in-process",
+                args=(
+                    Arg(("name",), "Agent name.", kind="positional", required=True),
+                    Arg(("--watch-expression",), "Canonical watch expression.",
+                        kind="value", hidden=True),
+                    Arg(("--runtime-role",), "Process role.", kind="value", hidden=True),
+                    Arg(("--subscription-key",), "Subscription key.",
+                        kind="value", hidden=True),
+                    Arg(("--subscription-fingerprint",), "Subscription fingerprint.",
+                        kind="value", hidden=True),
+                    Arg(("--artifact-marker",), "Artifact marker.",
+                        kind="value", hidden=True),
+                ),
             ),
             Cmd(
-                "ensure-watcher", "Restore one watcher.", "activate",
-                "in-process",
-                args=(Arg(("name",), "Agent name.", kind="positional",
-                          required=True),),
-            ),
-            Cmd(
-                "list-reboot-watchers", "List durable watchers.", "activate",
-                "in-process",
-            ),
-            Cmd(
-                "maintain", "Run automatic host maintenance.", "health_check",
+                "maintain", "Run automatic host maintenance.", "internal",
                 "in-process", hidden=True,
                 args=(
                     Arg(("--quiet",), "Suppress progress output."),
-                    Arg(("--sweep",), "Run one workspace sweep.", hidden=True),
-                    Arg(("--dry-run",), "Show planned workspace repairs.",
-                        hidden=True),
+                    Arg(("--dry-run",), "Preview without mutating.", hidden=True),
                 ),
+            ),
+            Cmd(
+                "liveness", "Refresh host liveness.", "internal",
+                "in-process", hidden=True,
             ),
             Cmd(
                 "migrate", "Converge persisted trigger invocations.",
@@ -129,10 +129,13 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "stop", "Deactivate triggers and keep configuration.", "stop",
+        "stop", "Stop automatic runs and keep the definition.", "stop",
         "in-process", probes=("schedule",), json=True, name_sugar=True,
         default_notice=True,
-        args=(Arg(("--name",), "Agent name.", kind="value", required=True),),
+        args=(
+            Arg(("--name",), "Agent name.", kind="value", required=True),
+            Arg(("--dry-run", "-n"), "Preview without mutating."),
+        ),
     ),
     Cmd(
         "status", "List agents and runtime state.", "status", "in-process",
@@ -201,7 +204,7 @@ COMMANDS = (
         args=(
             Arg(("--all-repos",), "Check every registered repository."),
             Arg(("--repair",), "Run immediate repair before diagnosis."),
-            Arg(("--dry-run",), "Show the repair plan without mutating."),
+            Arg(("--dry-run",), "Preview repairs without mutating."),
         ),
     ),
     Cmd(
@@ -228,22 +231,11 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "heartbeat", "Run or manage the host heartbeat.", "heartbeat",
-        "in-process", root="none",
-        subcommands=(
-            Cmd(
-                "install", "Install the heartbeat.", "heartbeat", "in-process",
-                root="none",
-                args=(Arg(("--distro",), "Distribution name.", kind="value"),),
-            ),
-            Cmd(
-                "uninstall", "Remove the heartbeat.", "heartbeat", "in-process",
-                root="none",
-                args=(
-                    Arg(("--distro",), "Distribution name.", kind="value"),
-                    Arg(("--retain-state",), "Retain heartbeat state."),
-                ),
-            ),
+        "migrate", "Convert 5.x flat definitions.", "definition_migrate",
+        "in-process",
+        args=(
+            Arg(("paths",), "Definitions to convert.", kind="positional"),
+            Arg(("--dry-run",), "Preview without mutating."),
         ),
     ),
     Cmd(

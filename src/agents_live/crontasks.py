@@ -19,7 +19,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from . import headless, hostruntime, triggers
+from . import hostruntime, paths, triggers
 
 # The kinds a caller can name, spelled as ``wintasks`` spells them so
 # the two stores stay substitutable. A crontab has no separate clock and
@@ -38,7 +38,7 @@ def _cwd() -> Path:
     uninstall) legitimately have no project.
     """
     try:
-        return headless.repo_root()
+        return paths.resolve_root()
     except ValueError:
         return Path.home()
 
@@ -58,7 +58,7 @@ def lines() -> list[str] | None:
             **hostruntime.CHILD_TEXT,
         )
     except FileNotFoundError as exc:
-        raise headless.CliCrashError("crontab command not found") from exc
+        raise RuntimeError("crontab command not found") from exc
     if completed.returncode != 0:
         if "no crontab for" in (completed.stderr or ""):
             return []
@@ -75,10 +75,10 @@ def write(new_lines: Sequence[str]) -> None:
             check=True, **hostruntime.CHILD_TEXT,
         )
     except FileNotFoundError as exc:
-        raise headless.CliCrashError("crontab command not found") from exc
+        raise RuntimeError("crontab command not found") from exc
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() if exc.stderr else "failed to update crontab"
-        raise headless.AgentsLiveError(detail) from exc
+        raise RuntimeError(detail) from exc
 
 
 @contextmanager
@@ -94,7 +94,7 @@ def lock() -> Iterator[None]:
         held.enter_context(
             hostruntime.exclusive_lock(state_dir() / "crontab.lock"))
     except hostruntime.LockBusy as exc:
-        raise headless.AgentsLiveError(
+        raise RuntimeError(
             "crontab is busy; another agents-live process is updating it; retry"
         ) from exc
     try:
@@ -114,7 +114,7 @@ def _editing() -> Iterator[list[str]]:
     with lock():
         current = lines()
         if current is None:
-            raise headless.AgentsLiveError("crontab is not accessible")
+            raise RuntimeError("crontab is not accessible")
         working = list(current)
         yield working
         if working != current:
