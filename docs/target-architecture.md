@@ -624,11 +624,21 @@ the Monday schedule, an `@reboot` line that respawns the watcher, and the
 maintenance line.
 
 **5. Spawn the watcher.** A watch subscription has a second piece of
-state the trigger store cannot see: a live process. Convergence spawns
-it, receives its process reference, and only then records it. If that
-record fails, it kills the child and reports the operation as failed. No
-unrecorded watcher is ever treated as current, which is what stops a
-crash from leaving an orphan the next pass cannot recognize.
+state the trigger store cannot see: a live process. The `@reboot` line
+carries a structured marker holding the subscription key and a
+fingerprint of the watch expression, and the watcher is spawned with that
+same canonical expression in its own command line. Both halves of
+"actual" therefore describe themselves, and convergence recovers them by
+reading the artifact and matching `owned(role="watcher")` against it.
+
+Nothing is written to a side index, which is the point. A separate record
+would have to be written after the spawn, opening a window where a
+process exists and its record does not, and that window is what forces a
+crash-recovery rule. Making the process its own record closes it by
+construction. Whether the command-line length bound on Windows permits
+this is the one thing phase 2 measures before committing; if it does not,
+the fallback is a runtime-owned index and the crash-ordering rule that
+comes with it.
 
 ### Stage 3: what exists now
 
@@ -888,8 +898,11 @@ files. Whether it needs a versioned envelope with a subscription key and
 timestamp is a question the prototype answers better than a document can,
 so it is settled during phase 5 rather than before it.
 
-One design detail inside the picture is also unresolved: whether the
-watcher fingerprint lives in a runtime-owned index or on the durable
-artifact itself. Putting it on the artifact would make it the same
-mechanism as the marker that exhaustive pruning already needs, and would
-remove the write-ordering window in stage 2.
+One design detail inside the picture is settled as a target rather than
+as a fact: the watcher fingerprint lives on the durable artifact and in
+the watcher's own command line, not in a runtime-owned index. That makes
+it the same mechanism as the marker exhaustive pruning already needs, and
+it removes the write-ordering window in stage 2 instead of writing a rule
+to survive it. Phase 2 confirms it by measurement, since a watch
+expression at the Windows command-line length bound is what could defeat
+it, and keeps an index as the named fallback.

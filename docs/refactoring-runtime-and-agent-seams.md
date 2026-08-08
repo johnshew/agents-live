@@ -146,10 +146,12 @@ graph TD
     RT --> HOSTS[hosts: posix, wsl, windows]
     AG --> PROV[providers: claude, copilot, fake, api]
     CLI --> DISP[dispatch - execution handoff]
+    CLI --> OBS[obs/ - event log, timeline, query]
     DISP -->|consumes firing context from| RT
-    DISP -->|resolves target, calls run on| AG
+    DISP -->|resolves target, calls prepare and finish on| AG
     DISP --> ST
-    RT --> OBS[obs/ - event log, timeline, query]
+    DISP --> OBS
+    RT --> OBS
     AG --> OBS
 ```
 
@@ -310,7 +312,8 @@ class Operation:
     kind: str    # "install-trigger" | "remove-trigger"
                  # | "start-watcher" | "stop-watcher" | "repair-host"
     key: str
-    detail: str  # printable, rendered in the user's vocabulary
+    detail: str  # printable, internal vocabulary; status and doctor
+                 # translate it into the user's words
 
 @dataclass(frozen=True)
 class Converged:
@@ -348,12 +351,32 @@ A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
 expression at spawn. `actual` for a watch subscription is therefore a
 pair - the installed respawn trigger and the running watcher - where
-the watcher is found through `ProcessHost.owned()` and carries the
-fingerprint of the expression it was started with, recorded in the
-runtime's artifact index as `WatcherRecord`. A desired fingerprint that
-differs produces a stop-watcher followed by a start-watcher; without
-that, editing a watch expression would take effect only at the next
-reboot.
+the watcher is found through `ProcessHost.owned(role="watcher")` and
+carries the fingerprint of the expression it was started with. A desired
+fingerprint that differs produces a stop-watcher followed by a
+start-watcher; without that, editing a watch expression would take
+effect only at the next reboot.
+
+**Where that fingerprint lives is the one design detail phase 2 settles
+by measurement.** The target is that it lives on the artifact and
+nowhere else: the structured marker that learning 13 already makes a
+prerequisite for exhaustive pruning carries key, scope, and fingerprint,
+and the running watcher carries the same canonical expression in its own
+command line, so both halves of `actual` are self-describing and no side
+index exists. That is the Kubernetes `pod-template-hash` shape, it makes
+one mechanism serve two needs, and it closes the write-ordering window
+between spawn and record by construction rather than by rule.
+
+The fallback, if measurement defeats the target, is a runtime-owned
+artifact index holding a `WatcherRecord` per watch subscription. Three
+things decide it, and all three are cheap to test early: whether a watch
+expression at the length bound still fits a Windows respawn
+registration; whether reading another process's command line is
+acceptable as a fourth host capability alongside pid, creation time, and
+image name; and whether canonical rendering is exact enough that a
+re-rendered expression always matches the one a live watcher was started
+with. If all three pass, `WatcherRecord`, the index, and the ordering
+rules below are deleted together.
 
 Convergence deliberately spans the runtime protocols, but not `state/`.
 Started state and optional assignment are inputs already resolved by the
@@ -374,7 +397,9 @@ answer to a partial failure is to run the same command again.
 `--dry-run` is the only thing the two-step surface bought, and
 `converge(..., dry_run=True)` returns it without the artifact.
 
-Watcher record ordering fails toward convergence. `converge` spawns
+Watcher record ordering fails toward convergence. These rules belong to
+the fallback design above; under the target the process and the artifact
+are their own records and none of this is needed. `converge` spawns
 the watcher, receives its `ProcessRef`, then atomically writes the
 `WatcherRecord`. If that write fails, it terminates the child and
 reports the start as failed. A crash between spawn and record is found
@@ -393,7 +418,9 @@ already carry that distinction; a full envelope, if selected, must
 preserve it.
 
 Two preconditions carry over from today's `activate`, but they belong
-one layer up rather than in the runtime: see
+one layer up rather than in the runtime: assignment never invents an
+owner, and collection abstains when the registry or the assignment
+policy cannot be read. See
 [Started state and optional assignment](#started-state-and-optional-assignment).
 
 One mapping is worth stating, because today's scheduling layer persists
@@ -468,7 +495,9 @@ declaration, and in local mode every local agent is mine without a
 registry read. Only a project that opts into the `agents_live.ownership`
 plugin adds an assignment decision. Registry-specific states such as
 wildcard, unclaimed, and transferred belong to that plugin contract,
-not to the runtime model.
+not to the runtime model. Assignment is therefore absent from the
+public kernel's pure-function tests: in a default install there is no
+decision to test, and the plugin brings its own conformance suite.
 
 Collection applies one safety question to three inputs: would treating
 this input as empty destroy working automation?
@@ -552,9 +581,13 @@ Three options were considered for whether the port streams events.
 |---|---|---|
 | A. `Runtime.events()` | Port yields fully-policied events | Every host adapter must be handed the policy engine or reimplement it. Registration and streaming are forced to share one lifetime they do not have. |
 | B. Generic loop over a raw source | Host supplies `ChangeSource`; `runtime/watchloop.py` applies policy and yields primitive firing context | One more named module. |
-| C. Two independent ports | `TriggerStore` and `ChangeSource` as peers, no facade | Every caller has to know which host capabilities exist before it can ask a question. |
+| C. Two independent ports | `TriggerStore` and `ChangeSource` exposed directly, with no module-level API over them | Every caller has to know which host capabilities exist before it can ask a question. |
 
-**Decision: B, with C's segregation kept inside the runtime module.** The port
+**Decision: B, with C's lifetime segregation preserved.** Withdrawing
+the facade object narrowed the gap between B and C, so the difference
+worth naming is not whether an object exists but who asks: the runtime
+module answers on the caller's behalf, and the three protocols keep
+their separate lifetimes underneath. The port
 surface stays small, policy stays generic and testable with no host
 present, and a host that cannot watch returns `None` from
 `change_source()` rather than raising from a method it was obliged to
@@ -890,8 +923,7 @@ other side. Making the seams explicit is what fixes that, so the test
 plan is part of the refactoring rather than a follow-up.
 
 **Tier 1 - pure, table-driven, no I/O.** The two trigger grammars, the
-selector grammar, debounce, the fire-rate breaker, dueness,
-assignment, and the
+selector grammar, debounce, the fire-rate breaker, dueness, and the
 convergence diff are all pure functions. `diff(desired, actual) ->
 operations` being pure is the unlock: every convergence scenario that
 today needs a mocked `crontab` or a mocked `Register-ScheduledTask`
@@ -974,7 +1006,12 @@ suite green, and can be released.
    retires, because pruning is what convergence does with anything
    absent from the list.
    Add the structured artifact marker before global pruning and add the
-   host conformance suite. Treat optional assignment resolution, watcher
+   host conformance suite. Settle where the watcher fingerprint lives
+   before writing either design down in code: recover a watcher's
+   subscription key and fingerprint without a side index, on POSIX and
+   on Windows, with a watch expression at the command-line length bound.
+   If that passes, `WatcherRecord` and the artifact index never ship.
+   Treat optional assignment resolution, watcher
    record ordering, unrecorded-process cleanup, and
    restart-on-fingerprint-change as phase acceptance criteria, exercised
    over the shapes that actually break: same-named agents in different
@@ -1478,7 +1515,9 @@ name is what let the ownership fields accumulate there in the first
 place. The scope argument was also respelled from `covers` to
 `complete_for`, because what it asserts is completeness - pruning is
 the consequence, and a caller that cannot assert completeness for a
-scope must leave it out rather than shorten its list.
+scope must leave it out rather than shorten its list. An eleventh pass
+removed the argument altogether once every lifecycle command
+enumerated everything; see learning 4.
 
 ## Key learnings and next steps
 
@@ -1622,21 +1661,28 @@ subscription plus primitive ingress, primitives across the seam, a pure
 diff, delegating scheduling to the OS, no asyncio. Watchman is the
 strongest confirmation: its `trigger` is durable and survives daemon
 restart while its `subscribe` dies with the client, which is
-`TriggerStore` and `ChangeSource` arrived at independently. Three
-findings remain unadopted and should be weighed in phase 2 and 3:
+`TriggerStore` and `ChangeSource` arrived at independently. One finding
+was adopted as the target design on 2026-08-08; two remain unadopted and
+should be weighed in phase 2 and 3:
 
+- **Put the fingerprint on the artifact, not in a side index.**
+  *Adopted as the target, pending phase-2 measurement.* Kubernetes
+  stores `pod-template-hash` as a label on the object it manages. Doing
+  the same makes learning 13's marker and the watcher fingerprint one
+  mechanism, and removes the write-ordering window between spawn and
+  record. It is the strongest of the three findings because it is the
+  only one that deletes a mechanism instead of adding one. See
+  [The runtime port](#the-runtime-port) for the target, the fallback,
+  and what phase 2 measures.
 - **Delegate process supervision where the host has it.** The
   `WatcherRecord` plus `owned(role=)` plus crash-ordering design is a
   small process supervisor. A Win32 **job object** makes membership
   definitional rather than enumerated (`TerminateJobObject`,
   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and a systemd user unit gives
   restart and cleanup for free. Enumerate-and-match is racy by
-  construction; a handle is not.
-- **Put the fingerprint on the artifact, not in a side index.**
-  Kubernetes stores `pod-template-hash` as a label on the object it
-  manages. Doing the same makes learning 13's marker and the watcher
-  fingerprint the same mechanism, and removes the write-ordering
-  window between spawn and record.
+  construction; a handle is not. Deliberately not taken in the same
+  phase as the finding above: it changes process ownership on both
+  platforms at once and belongs after `ProcessHost` has settled.
 - **Scope the artifact store, not the plan.** Terraform documents
   `-target` as a hazard because partial scope causes undetected drift.
   Ansible's answer is a `cron_file` per unit of management. One
