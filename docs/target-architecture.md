@@ -243,7 +243,7 @@ between them.
 
 The runtime port answers one question: what automation exists on this
 machine, and does it match what should exist. It exposes two functions
-and three protocols.
+and four protocols.
 
 `converge(subscriptions)` is the whole write surface. It is handed the
 complete set of things that should be running, compares that against
@@ -252,19 +252,47 @@ twice reports nothing to do the second time, and the remedy for a
 partial failure is to call it again. `health()` is the read surface, and
 liveness is a field on it rather than a command.
 
-Three protocols sit behind those, separated because they have genuinely
-different lifetimes:
+The protocols are separated by **lifetime**, and they form a ladder:
 
-- **`TriggerStore`** is durable. It survives reboot, because it is the
-  operating system's own scheduler: a crontab on POSIX, Task Scheduler
-  on Windows. One OS artifact per subscription.
-- **`ChangeSource`** is process-scoped. It reports raw filesystem paths
-  and dies with the process holding it. No policy, no debounce.
-- **`ProcessHost`** is per-child. Detached launch, child execution,
-  liveness, termination, and enumeration of the processes this project
-  owns.
+| Protocol | Survives | Used by |
+|---|---|---|
+| `TriggerStore` | Reboot | Convergence |
+| `Supervisor` | The spawning process, but not a reboot | Convergence |
+| `ChangeSource` | Nothing; dies with its holder | The watch loop |
+| `ChildRunner` | Nothing; dies with the call | Dispatch |
 
-A host adapter (`posix`, `wsl`, `windows`) supplies those three plus a
+- **`TriggerStore`** is the operating system's own scheduler: a crontab
+  on POSIX, Task Scheduler on Windows. One OS artifact per subscription.
+- **`Supervisor`** launches detached processes and later finds them
+  again: `spawn_detached`, `owned(role=...)`, `alive`, `terminate`.
+- **`ChangeSource`** reports raw filesystem paths. No policy, no
+  debounce.
+- **`ChildRunner`** runs one child to completion and returns what it
+  produced. It is the only one dispatch touches.
+
+The ladder is worth reading as a design statement rather than a
+taxonomy, because it explains the watcher. A watcher is the only thing
+in the system at the second rung: it outlives the process that started
+it but not a reboot. That is precisely why a watch subscription needs
+**two** pieces of actual state, a durable `@reboot` respawn artifact and
+a live process, while a schedule needs only one. The oddity that
+otherwise needs a paragraph of explanation is just a consequence of
+where the watcher sits.
+
+Splitting supervision from execution also keeps the fakes honest.
+A dispatch test needs a recording `ChildRunner` and has no business
+implementing `owned()`; a convergence test needs a scripted `Supervisor`
+and never runs a child. One protocol serving both is how a fake drifts
+into being a mock.
+
+`ProcessRef` stays a single value type across both, carrying pid,
+creation time, image name, and a role. Value records may cross freely;
+it is service objects that must not merge. The role matters no matter
+how the protocols divide, because the OS process table is shared, so a
+supervision sweep must still be able to prove it is not looking at an
+in-flight provider child.
+
+A host adapter (`posix`, `wsl`, `windows`) supplies those four plus a
 liveness report and a set of host facts: identity, state location, lock
 acquisition, executable pinning, the child environment floor. Everything
 generic lives above them in the runtime core: both trigger grammars,
@@ -289,18 +317,43 @@ liveness.
 
 ### `agent/` - a runnable unit of work
 
-Three functions:
+A run is a short pipeline, not a single call. Up to three child processes
+execute in a fixed order, each optional, plus one optional run-scoped
+resource. The port describes each piece; it runs none of them.
 
 ```python
+class Step(StrEnum):
+    PRE   = "pre"     # pre-processor script; may end the run with skip
+    AGENT = "agent"   # provider CLI; absent when runtime is none
+    POST  = "post"    # post-processor script
+
+
 def load(agent_id: str, *, root: Path) -> AgentSpec: ...
-def prepare(spec: AgentSpec, request: Request) -> Launch: ...
-def finish(spec: AgentSpec, launch: Launch, raw: RawOutput) -> Outcome: ...
+def shape(spec: AgentSpec) -> RunShape: ...
+def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch: ...
+def interpret(spec: AgentSpec, step: Step, launch: Launch,
+              raw: RawOutput) -> StepResult: ...
+def outcome(spec: AgentSpec,
+            results: Mapping[Step, StepResult]) -> Outcome: ...
 ```
 
-`load` parses the definition. `prepare` resolves the provider selector,
-narrows the spec to what a provider needs, and asks the selected
-provider to describe how to launch. `finish` takes the raw output back
-and turns it into a classified result.
+`RunShape` is four booleans: which of the three steps exist, and whether
+the run needs the pipeline MCP resource. It is a pure function of the
+definition, which is what makes the six valid pipeline shapes a table
+test rather than a narrative. `StepResult` carries `skip`, `text`, and
+`retryable`. Every one of these functions is pure, so the whole port is
+exercisable with no subprocess and no CLI installed.
+
+Only the `AGENT` step involves a provider. `PRE` and `POST` launches are
+built from a file extension and an environment dict, which is why they
+look identical at the runtime seam and why a provider plugin never learns
+that processors exist.
+
+| Step | Selected by | Failure category | Provider |
+|---|---|---|---|
+| `PRE` | `pre-processor` | `pre_processor_crash` | No |
+| `AGENT` | `runtime` other than `none` | `cli_crash`, `timeout`, `empty_output`, `output_parse_error`, `agent_output_invalid` | Yes |
+| `POST` | `post-processor` | `post_processor_crash` | No |
 
 A **provider plugin** is small, and is meant to stay that way:
 
@@ -323,78 +376,94 @@ closed.
 The agent port never creates a process. It describes one, and hands the
 description back.
 
+### Three narrowings, three consumers
+
+The definition is progressively reduced on its way outward, and each
+reduction has a different reason.
+
+| Type | Who receives it | Contents |
+|---|---|---|
+| `AgentSpec` | The agent port only | Everything parsed, all 25 fields |
+| `Subscription` | The host runtime | `key`, `scope`, `target`, `kind`, `trigger`: five primitives |
+| `ResolvedSpec` | A provider plugin | Prompt, mode, allow-tools, mcps, env overlay, resolved model and effort |
+
+```
+load(agent_id)                -> AgentSpec       everything
+  lifecycle expands triggers  -> Subscription    the host's view
+  prepare(spec, AGENT, ctx)   -> ResolvedSpec    -> Provider.prepare -> Launch
+  prepare(spec, PRE|POST, ctx)                   -> Launch, no provider
+```
+
+`Subscription` is the reduced runtime specification, and it deliberately
+does not carry "spec" in its name. It is not a projection of the agent at
+all; it is a statement about the host, which never learns that an agent
+exists and sees only a target string that wants a trigger. Naming it
+after the agent would re-couple the two.
+
+`ResolvedSpec` narrows for a different reason: the provider seam is a
+published plugin boundary, so anything crossing it becomes a
+compatibility surface. Excluding the trigger fields, `owner`, the output
+contract, and the processors keeps roughly half the definition out of a
+third party's reach.
+
 **What changes.** Today `headless.py` is 2,528 lines holding frontmatter
 parsing, path discovery, MCP resolution, argv construction, subprocess
 execution, output normalization, safe-output enforcement, logging, and
-handler invocation in one place. That splits three ways: definition and
-result handling stay in the port, provider quirks move into plugins, and
-process execution leaves the port entirely. `agent_adapters` is already
-the shape the provider plugins take.
+handler invocation in one place, with the pipeline itself orchestrated
+separately in `run.py`. That splits three ways: definition and result
+handling stay in the port, provider quirks move into plugins, and process
+execution and sequencing leave the port entirely. `agent_adapters` is
+already the shape the provider plugins take.
 
-### Why `prepare` and `finish` are separate calls
+### Why the port is called several times instead of once
 
-They run back to back with one subprocess between them, which invites the
-question: why not one `run(spec, request) -> Outcome`?
+A single `run(spec, request) -> Outcome` is the obvious alternative, and
+it fails on the first requirement: the agent port is not allowed to own a
+process. Combining would mean either creating children inside the seam,
+putting platform code back into it, or receiving a `ChildRunner` by
+injection, which invariant 3 forbids.
 
-**Because a process has to happen in between, and the agent port is not
-allowed to own one.** Combining them means the port either creates the
-child itself, putting platform code back into the agent seam, or
-receives a `ProcessHost` by injection, which invariant 3 forbids. The
-split is what keeps `providers/claude.py` free of `CREATE_NO_WINDOW`,
-pty selection, and `setsid`.
+Splitting also keeps every function pure and therefore table-testable
+with no CLI installed. Today's equivalent path is only reachable through
+`smoketest` with real credentials, and that is a direct consequence of
+the interleaving.
 
-**Because both halves are pure, and that is what makes them testable.**
-`prepare` is a function of the spec and the request. `finish` is a
-function of the spec, the launch, and the raw output. Neither performs
-I/O, so both are table-testable with no CLI installed and no subprocess
-running. A combined `run` would necessarily perform I/O, which is exactly
-why today's equivalent path is only reachable through `smoketest` with
-real credentials.
+A middle design was considered and rejected: having the port return the
+whole pipeline as one data structure, with declared bindings between
+steps and a rule vocabulary for what to do after each. It was rejected
+for inventing a general-purpose orchestrator to serve a fixed
+four-position sequence. The only thing it bought was avoiding a second
+call across the seam, and it paid for that with two closed languages, a
+state object threaded through the port, and six new types. Asking the
+port again is cheaper than a vocabulary that lets you avoid asking.
 
-**And because the sequence is not prepare, run, finish once.** It is
-prepare once, then run and finish repeatedly.
+The calls are named and made at fixed points, so nothing stateful crosses
+the seam. That is the distinction that matters, not the call count.
 
 ### Is `Launch` reusable?
 
-Within one dispatch, yes, and it has to be. Today's code already works
-this way: `command` and `env` are built once, before the retry loop, and
-every attempt re-runs the same command.
+Within the `AGENT` step, yes, and it has to be. Today's code already
+works this way: `command` and `env` are built once, before the retry
+loop, and every attempt re-runs the same command.
 
-There are two retry budgets today, and the second one settles the
-question. A timeout is detected by the runner, so a timeout retry could
-in principle live below `finish`. An **empty output** is detected only
-after the output has been parsed, and then the same command is run
-again. So the decision to retry depends on the classification that
-`finish` produces:
+There are two retry budgets, and the second settles the question. A
+timeout is detected by the runner. An **empty output** is detected only
+after parsing, and then the same command runs again. So the decision to
+retry depends on the classification `interpret` produces, which is why
+the loop lives in dispatch and the judgement lives in the port.
 
-```python
-# illustrative, not a proposed signature
-launch = prepare(spec, request)
-while True:
-    raw = run_child(launch)
-    outcome = finish(spec, launch, raw)
-    if outcome.ok or not retryable(outcome):
-        return outcome
-```
+Across steps, no. The `AGENT` step's launch cannot even be built until
+`PRE` has finished, because the pre-processor's stdout is interpolated
+into the prompt. That is precisely why dispatch calls `prepare` for each
+step at the moment it needs it rather than collecting launches up front.
 
-`Launch` is therefore an immutable description that outlives several
-attempts, and `finish` must neither consume nor invalidate it. Folding
-the two calls together would hide that loop inside the agent port, which
-would put retry, and therefore timing and inter-attempt process cleanup,
-back on the wrong side of the seam.
+Across dispatches, no. A launch is built from one specific request, and a
+watch firing's changed-file list differs every time.
 
-Across dispatches, no. A `Launch` is built from one specific `Request`,
-and a watch firing's changed-file list differs every time. It may also
-own temp config files, which is why "who cleans up what `prepare`
-created" is one of the two provider-lifecycle questions the proposal
-leaves to phase 5.
-
-**Why `finish` takes `launch` at all:** raw output cannot be interpreted
+**Why `interpret` takes `launch` at all:** raw output cannot be read
 without knowing how it was produced. Whether a pty was used, whether TUI
-noise was filtered, which provider was selected, and where the transcript
-was written all change how the bytes should be read. Passing the launch
-back is what lets `finish` stay a pure function instead of re-deriving
-any of it.
+noise was filtered, which provider ran, and where the transcript went all
+change how the bytes should be read.
 
 ### `dispatch` - the handoff
 
@@ -411,9 +480,51 @@ at firing time live:
 4. **What does the agent need?** Translate the firing context into a
    `Request`.
 
-Then it composes: `prepare`, `ProcessHost.run_child`, `finish`. It owns
-retry, streaming, and process cleanup, and it enforces the timeout that
-`Launch` carries.
+Then it runs the pipeline. The sequence is fixed, so this is
+straight-line code with three conditionals rather than an engine:
+
+```python
+def dispatch(firing):
+    spec = agent.load(firing.agent_id, root=firing.root)
+    shape = agent.shape(spec)
+    results = {}
+
+    with pipeline_mcp() if shape.needs_mcp else nullcontext() as mcp:
+        if shape.has_pre:
+            raw = run_child(agent.prepare(spec, PRE, ctx(mcp)))
+            results[PRE] = agent.interpret(spec, PRE, raw)
+            if results[PRE].skip:
+                return agent.outcome(spec, results)
+
+        if shape.has_agent:
+            launch = agent.prepare(spec, AGENT, ctx(mcp, pre=results.get(PRE)))
+            while True:                       # both retry budgets live here
+                raw = run_child(launch)       # the same launch every attempt
+                results[AGENT] = agent.interpret(spec, AGENT, launch, raw)
+                if not results[AGENT].retryable:
+                    break
+
+        if shape.has_post:
+            raw = run_child(agent.prepare(spec, POST, ctx(mcp, agent=results.get(AGENT))))
+            results[POST] = agent.interpret(spec, POST, raw)
+
+    return agent.outcome(spec, results)
+```
+
+`run_child` is `ChildRunner.run_child`. The runtime sees one operation
+and never learns which step it is or what the argv means, which is what
+keeps every command line inside the agent port.
+
+Dispatch owns process creation, the retry loop, streaming, cleanup, and
+the timeout each `Launch` carries. It owns no judgement: whether a run
+should be retried, whether a pre-processor asked to skip, and how a
+post-processor receives its input are all answered by `interpret` and
+`prepare`.
+
+The `with` block is the whole answer to MCP lifetime. The pipeline MCP
+server is run-scoped rather than step-scoped, since all three steps
+connect to the same instance, so it belongs to the one component that
+owns the run.
 
 **What changes.** New as a module, but not as behavior. `run.py` already
 runs an ownership gate, a dueness claim, an origin derivation from
@@ -441,6 +552,54 @@ tool's back becomes repairable drift instead of a silent stop.
 An **optional assignment policy** also lives here, for installations that
 opt into multi-machine ownership. In a default install it is absent and
 every local agent is simply yours.
+
+### Started state is a collection input, not just an output
+
+Convergence reads started state on every pass, which makes it subject to
+the same safety question as every other input: *would treating this as
+empty destroy working automation?* For started state the answer is yes,
+emphatically, because empty means "nothing runs here" and the response
+is to prune every trigger on the machine.
+
+So it takes its place as the fourth row of the collection table:
+
+| Input | Meaning | Absent or unreadable means |
+|---|---|---|
+| Repository registry | Where to look | Abstain |
+| Optional assignment policy | Permission to run here | Abstain |
+| Definitions in a repository | What could run | Prune that repository's triggers |
+| Started state | What should run here | Adopt if never initialized, abstain if unreadable |
+
+The last row needs its two absences kept apart, and that distinction is
+the whole of it:
+
+- **Never initialized.** No store, no marker. Convergence **adopts**:
+  every trigger this installation can identify as its own becomes a
+  started record, and the marker is written. On a fresh machine there is
+  nothing installed, so the adopted set is empty and this is
+  indistinguishable from a normal first run.
+- **Present but unreadable.** Permission denied, corrupt, caught
+  mid-write. **Abstain**, exactly as with the registry. The condition is
+  transient and guessing at it destroys working automation for a fact
+  that could not be confirmed.
+
+Adoption is not a migration step that runs once. Started state can go
+missing at any point in a machine's life: a cleared state directory, a
+restored home directory, a new user profile, a failed disk. Making
+adoption an ordinary property of convergence means the recovery path and
+the fresh-install path are the same code, which is what stops it from
+rotting unnoticed.
+
+It also cannot live only in `upgrade`. New code arrives through package
+upgrades without any interactive command running, and the maintenance
+trigger fires on a schedule regardless, so the rule has to sit where
+every path passes through.
+
+One consequence, accepted deliberately: adoption can only claim triggers
+the installation can identify as its own, which is what the structured
+marker is for. An artifact it cannot identify is left alone rather than
+adopted, so the failure mode is a surviving orphan rather than a deleted
+agent. That is the right direction to fail.
 
 **What changes.** `repos.py`, `ownership.py`, and `paths.py` are already
 close to this. The addition is started state, which does not exist
@@ -669,7 +828,7 @@ sequenceDiagram
     participant S as state/
     participant A as agent/
     participant P as provider
-    participant PH as ProcessHost
+    participant PH as ChildRunner
     participant O as obs/
 
     K->>D: exec argv (agent id, origin=clock)
@@ -677,15 +836,19 @@ sequenceDiagram
     D->>D: due this minute? already running?
     D->>A: load(link-check)
     A-->>D: AgentSpec
-    D->>A: prepare(spec, request)
+    D->>A: shape(spec)
+    A-->>D: RunShape(pre=no, agent=yes, post=no, mcp=no)
+    D->>A: prepare(spec, AGENT, ctx)
     A->>P: prepare(ResolvedSpec, request)
     P-->>A: Launch (argv, env, timeout 300)
     A-->>D: Launch
-    D->>PH: run_child(argv, ...)
+    D->>PH: run_child(launch)
     PH-->>D: ChildResult
-    D->>A: finish(spec, launch, RawOutput)
+    D->>A: interpret(spec, AGENT, launch, raw)
     A->>P: parse(raw)
     P-->>A: Completion
+    A-->>D: StepResult(retryable=false)
+    D->>A: outcome(spec, results)
     A-->>D: Outcome
     D->>O: record firing and outcome
 ```
@@ -694,10 +857,46 @@ Three checks happen before any work: still started, actually due, not
 already running. All three are cheap, and all three fail closed. Only
 then does the run begin.
 
+`link-check` is the simplest of the six shapes, one step and no
+resource. `shape()` says so, and dispatch skips straight past the two
+conditionals it does not need.
+
 Notice where the timeout comes from. `300` is a fact in the definition,
 so the agent port resolves it and puts it on `Launch`. Dispatch enforces
 it, because dispatch is the only side holding the child. Neither one owns
 both halves.
+
+### The six pipeline shapes
+
+Three optional steps give six valid combinations, all decided by the
+definition alone. Dispatch runs the same code for every one of them.
+
+| `runtime` | `pre-processor` | `post-processor` | What runs |
+|---|---|---|---|
+| a provider | no | no | Agent only; its output is logged |
+| a provider | no | yes | Agent, then post-processor fed the agent's output |
+| a provider | yes | no | Pre-processor, its output appended to the prompt, then the agent |
+| a provider | yes | yes | All three |
+| `none` | yes | yes | Pre-processor piped straight to post-processor, no model |
+| `none` | yes or no | either one present | Whichever script is declared |
+
+`runtime: none` with neither processor is the one invalid combination,
+and it is rejected when the definition loads. The shipped `handler-only`
+template is the fifth row: a scheduled automation with no model in it at
+all, which is why the selector grammar has to accept `none`.
+
+**`mode: pipeline` changes the wiring, not the shape.** Normally the
+post-processor receives the agent's stdout on stdin. In pipeline mode the
+agent publishes structured output to the pipeline MCP store and the
+post-processor fetches it with `get()`, so the agent's stdout is
+narration and non-JSON there is expected rather than an error. That is a
+different `ctx` passed to `prepare(spec, POST, ...)`, decided inside the
+agent port where the `mode` field lives. Dispatch is unaware of the
+distinction.
+
+The MCP server itself is the run-scoped resource in dispatch's `with`
+block. All three steps connect to one instance, reaching it through the
+environment, which each provider adapter turns into its own flag.
 
 ### Stage 5: a watch firing
 

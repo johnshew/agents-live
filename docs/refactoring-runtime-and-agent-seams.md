@@ -217,10 +217,22 @@ Recording it is
 what turns an externally deleted trigger into repairable drift instead
 of a silent stop.
 
-The runtime port is a module-level API over three narrow, separately
-implementable protocols. The segregation is not ceremony: the three
-have different lifetimes (durable, process-scoped, per-child), different
-failure modes, and different conformance tests.
+The runtime port is a module-level API over four narrow, separately
+implementable protocols, separated by lifetime: `TriggerStore` survives
+a reboot, `Supervisor` survives the spawning process but not a reboot,
+`ChangeSource` dies with its holder, and `ChildRunner` dies with the
+call. The segregation is not ceremony: the four have different failure
+modes and different conformance tests.
+
+The ladder explains the watcher rather than merely classifying it. A
+watcher is the only thing at the second rung, outliving its parent but
+not a reboot, which is exactly why a watch subscription carries two
+pieces of actual state - a durable respawn artifact and a live process -
+where a schedule carries one. Splitting supervision from execution also
+keeps the fakes apart: a dispatch test needs a recording `ChildRunner`
+and has no business implementing `owned()`, and a convergence test needs
+a scripted `Supervisor` and never runs a child. One protocol serving
+both is how a fake drifts into a mock.
 
 There is deliberately no `Runtime` facade object:
 [windows-support.md](windows-support.md) records building and
@@ -230,7 +242,7 @@ member was a stateless function of the host. With one idempotent
 was the likely candidate for instance state no longer exists. Phase 2
 therefore keeps the proven module-of-functions shape and introduces an
 object only if implementation evidence later finds instance state that
-cannot live in one of the three stateful implementations.
+cannot live in one of the protocol implementations.
 
 ```python
 def converge(subscriptions: Sequence[Subscription], *,
@@ -266,13 +278,19 @@ class ChangeSource(Protocol):
     def stop(self) -> None: ...
 
 
-class ProcessHost(Protocol):
-    '''Process management, called by dispatch and runtime internals.'''
+class Supervisor(Protocol):
+    '''Detached. Outlives the spawning process, not a reboot. The
+    watcher's rung: convergence uses this and never runs a child.'''
     def spawn_detached(self, argv: Sequence[str], **io) -> ProcessRef: ...
-    def run_child(self, argv: Sequence[str], **io) -> ChildResult: ...
     def alive(self, ref: ProcessRef) -> bool: ...
     def terminate(self, ref: ProcessRef) -> None: ...
     def owned(self, role: str | None = None) -> list[ProcessRef]: ...
+
+
+class ChildRunner(Protocol):
+    '''Per-call. Dies with the call. Dispatch uses this and nothing
+    else in the runtime port.'''
+    def run_child(self, argv: Sequence[str], **io) -> ChildResult: ...
 ```
 
 Primitive firing context is produced by a generic loop in
@@ -351,7 +369,7 @@ A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
 expression at spawn. `actual` for a watch subscription is therefore a
 pair - the installed respawn trigger and the running watcher - where
-the watcher is found through `ProcessHost.owned(role="watcher")` and
+the watcher is found through `Supervisor.owned(role="watcher")` and
 carries the fingerprint of the expression it was started with. A desired
 fingerprint that differs produces a stop-watcher followed by a
 start-watcher; without that, editing a watch expression would take
@@ -382,7 +400,7 @@ Convergence deliberately spans the runtime protocols, but not `state/`.
 Started state and optional assignment are inputs already resolved by the
 caller. Its operation vocabulary - install or remove a
 trigger, start or stop a watcher, repair a host prerequisite - is
-interpreted through `TriggerStore`, `ProcessHost`, and the
+interpreted through `TriggerStore`, `Supervisor`, and the
 runtime's artifact index. That vocabulary is internal: it is what `converge`
 reports and what `status` and `doctor` render into the user's words,
 never something a caller assembles. The exact `Converged`, `Health`,
@@ -447,19 +465,19 @@ Windows needs, subscription-key derivation, the pure diff
 and delegates to it; the pure function is what Tier 1 tests exercise),
 orphan detection, and the junk sweep.
 
-What a **host adapter** supplies: the three protocols above, a
+What a **host adapter** supplies: the four protocols above, a
 liveness report, and the host facts `hostruntime` answers today -
 identity, state location, runtime identity, lock acquisition,
 executable pinning, the child environment floor, shell availability,
 and native-tool detection (`hostruntime.py`). That list is longer
-than "three protocols plus liveness", so freezing the adapter contract
+than "four protocols plus liveness", so freezing the adapter contract
 starts with a capability inventory of `hostruntime`'s exports, not
 with this sketch. `wsl` is likewise more than `posix` plus liveness:
 it is a separate environment with its own runtime identity and
 interop-native tool checks; liveness is what absorbs `heartbeat.py`,
 not the whole delta.
 
-`ProcessHost` is the home for what is scattered today across
+`Supervisor` and `ChildRunner` are the home for what is scattered today across
 `hidden.py` (`CREATE_NO_WINDOW`), `spawn.py`, `hostruntime`'s pty and
 child-output decoding, and the `wslg.exe` windowless launcher.
 `ProcessRef` carries pid, creation time, and image name - the identity
@@ -467,7 +485,7 @@ triple [windows-support.md](windows-support.md) already requires
 before a termination - plus a role (`watcher` | `provider-child` |
 `maintenance`), so no seam ever passes a bare pid and no sweep ever
 guesses what a process is. `dispatch` turns the agent port's launch
-description into a `ProcessHost.run_child` call and returns the raw value
+description into a `ChildRunner.run_child` call and returns the raw value
 record to the agent port for normalization. No provider imports the
 runtime or receives a host service object.
 
@@ -507,6 +525,34 @@ this input as empty destroy working automation?
 | Repository registry | Where to look | Abstain from convergence; the desired set cannot be bounded. |
 | Optional assignment plugin | Permission to run here | Abstain rather than silently fall back to local mode. |
 | Definitions in a registered repository | What could run | An unreadable repository contributes no subscriptions, so its unusable triggers are pruned and later rebuilt from started state. A malformed definition in a readable repository is an error and aborts convergence rather than masquerading as deletion. |
+| Started state | What should run here | Adopt when never initialized; abstain when present but unreadable. |
+
+Started state is written by `start` and `stop`, but convergence reads it
+on every pass, which makes it an input subject to the same question as
+the rest. Treating it as empty means "nothing runs here", and the
+response to that is to prune every trigger on the machine, so the two
+ways it can be missing have to be kept apart:
+
+- **Never initialized** - no store, no marker. Convergence adopts:
+  every artifact this installation can identify as its own becomes a
+  started record, and the marker is written. On a fresh machine nothing
+  is installed, so the adopted set is empty and this is
+  indistinguishable from an ordinary first run.
+- **Present but unreadable** - permission denied, corrupt, caught
+  mid-write. Abstain, exactly as for the registry, because the
+  condition is transient and guessing destroys working automation for a
+  fact that could not be confirmed.
+
+Adoption is an ordinary property of convergence rather than an upgrade
+step. Started state can go missing at any point in a machine's life:
+a cleared state directory, a restored home directory, a new user
+profile, a failed disk. Keeping the recovery path and the fresh-install
+path as one code path is what stops it rotting unnoticed, and it cannot
+live only in `upgrade`, because new code arrives through package
+upgrades with no interactive command and the maintenance trigger fires
+regardless. Adoption claims only artifacts the installation can identify
+as its own, so an unrecognized artifact survives as an orphan rather
+than being deleted.
 
 After those reads succeed, collection keeps started agents that the
 optional assignment policy permits, expands their trigger declarations
@@ -586,7 +632,7 @@ Three options were considered for whether the port streams events.
 **Decision: B, with C's lifetime segregation preserved.** Withdrawing
 the facade object narrowed the gap between B and C, so the difference
 worth naming is not whether an object exists but who asks: the runtime
-module answers on the caller's behalf, and the three protocols keep
+module answers on the caller's behalf, and the four protocols keep
 their separate lifetimes underneath. The port
 surface stays small, policy stays generic and testable with no host
 present, and a host that cannot watch returns `None` from
@@ -734,24 +780,67 @@ and normalization, not trigger registration or process creation.
 Lifecycle orchestration reads trigger declarations from the loaded spec
 and produces runtime subscriptions above both ports.
 
+A run is a short pipeline rather than a single call: up to three child
+processes in a fixed order, each optional, plus one optional run-scoped
+resource. `run.py` orchestrates that today. The port describes each
+piece and runs none of them.
+
 ```python
+class Step(StrEnum):
+    PRE   = "pre"     # pre-processor script; may end the run with skip
+    AGENT = "agent"   # provider CLI; absent when runtime is none
+    POST  = "post"    # post-processor script
+
+
 def load(agent_id: str, *, root: Path) -> AgentSpec: ...
-def prepare(spec: AgentSpec, request: Request) -> Launch: ...
-def finish(spec: AgentSpec, launch: Launch, raw: RawOutput) -> Outcome: ...
+def shape(spec: AgentSpec) -> RunShape: ...
+def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch: ...
+def interpret(spec: AgentSpec, step: Step, launch: Launch,
+              raw: RawOutput) -> StepResult: ...
+def outcome(spec: AgentSpec,
+            results: Mapping[Step, StepResult]) -> Outcome: ...
 ```
+
+`RunShape` is four booleans - which steps exist, and whether the run
+needs the pipeline MCP - so the six valid pipeline shapes are a table
+test rather than a narrative. Only the `AGENT` step involves a provider;
+`PRE` and `POST` launches are built from a file extension and an
+environment dict (`_build_handler_command` today), which is why they are
+uniform at the runtime seam and why a provider plugin never learns that
+processors exist.
+
+Dispatch runs the sequence as straight-line code with three
+conditionals. A design that returned the whole pipeline as one data
+structure, with declared bindings between steps and a rule vocabulary
+for what to do after each, was considered and rejected: it invents a
+general-purpose orchestrator for a fixed four-position sequence, and the
+only thing it buys is avoiding a second call across the seam, paid for
+with two closed languages and a state object threaded through the port.
+Asking the port again is cheaper than a vocabulary that avoids asking.
+The calls are named and made at fixed points, so nothing stateful
+crosses the seam.
+
+The `AGENT` step's launch cannot be built before `PRE` finishes, because
+the pre-processor's stdout is interpolated into the prompt. That is the
+concrete reason `prepare` is called per step at the moment it is needed.
 
 `Request` carries input text, changed files, and environment overlay.
 `Outcome` is a closed union: a success with structured output, usage,
 and transcript reference, or a failure with a category drawn from a
 closed taxonomy (the categories `headless.py` already emits: `timeout`,
 `output_parse_error`, `agent_output_invalid`, `cli_crash`,
-`handler_crash`, `pre_processor_crash`, `agent_invalid`, `empty_output`, and the hierarchy's base
+`post_processor_crash`, `pre_processor_crash`, `agent_invalid`, `empty_output`, and the hierarchy's base
 `agent_error`, which stays as the explicit catch-all so the union is
 closed rather than open through inheritance).
+Today's category for a failing post-processor is `handler_crash`, an
+artifact of the field's old name. 6.0 renames it to
+`post_processor_crash` so the taxonomy is symmetric with `Step`, riding
+the same break that retires `handler`.
 Exceptions stay internal to the port; the seam returns values. `dispatch`
-is the only caller that composes `prepare`, `ProcessHost.run_child`, and
-`finish`. Phase 5 places generic retry and cleanup against the fake CLI
-evidence without widening the provider contract.
+is the only caller that composes `prepare`, `ChildRunner.run_child`, and
+`interpret`, and it owns the retry loop, because whether an output is
+empty is a judgement `interpret` makes while re-running is an action only
+dispatch can take.
 
 Trigger expansion deliberately is not an `Agent` method. Otherwise the
 agent execution port must import the runtime's `Subscription` type,
@@ -793,17 +882,24 @@ are phase-5 work; the rule is fixed here.
 `Completion` is likewise narrower than `Outcome` and not a second
 spelling of it. A provider returns what it could read out of its own
 output: the text or structured payload, usage, and a transcript
-reference. `finish` calls `parse` and turns the result into `Outcome` by
-applying the provider-independent validation and classification listed
+reference. `interpret` calls `parse` for the `AGENT` step and `outcome`
+turns the collected results into an `Outcome` by applying the
+provider-independent validation and classification listed
 below. A provider never classifies an error, which is
 what keeps the taxonomy closed.
 
-Two lifecycle questions stay open until the fake CLI (see
+One lifecycle question stays open until the fake CLI (see
 [Testing approach](#testing-approach)) shows what generic invocation
 actually needs from a provider: how streaming output is normalized
-incrementally, and who cleans up what `prepare` created. The likely
-answer is a `parse_stream` hook and a cleanup handle on `Launch`, not
-a wider protocol; that call belongs to phase 5, made against evidence.
+incrementally. The likely answer is a `parse_stream` hook rather than a
+wider protocol; that call belongs to phase 5, made against evidence.
+
+The question of who cleans up what `prepare` created is no longer open.
+Anything scoped to the whole run, the pipeline MCP server most of all,
+belongs to `dispatch`, which owns the run's lifetime and releases it on
+exit; anything scoped to one step, such as a temp config file, is
+released when that step's launch is done with. The port allocates
+nothing it has to remember.
 
 `Launch` is either a subprocess description (argv, env, temp config
 files, the resolved timeout, whether a pty is required, whether TUI
@@ -935,7 +1031,7 @@ by definition and does not belong in this tier.
 **Tier 2 - host conformance suite, plus an in-tree `fake` host.** One
 abstract test class, run against every host adapter, skipped
 when the platform is not present. The fake host (in-memory trigger
-store, scripted change source, recording process host) is selected by
+store, scripted change source, recording supervisor and child runner) is selected by
 tests through the same internal contract and is what runtime-core
 and dispatcher tests run against. Install, list, remove, install twice, remove what is not
 there, enumerate after an external edit. The conformance suite can be
@@ -1018,9 +1114,11 @@ suite green, and can be released.
    repositories, native Windows plus WSL on one machine, wildcard and
    unavailable registries, a transfer landing mid-pass, an unavailable
    repository, and watcher-only cleanup with a provider child alive.
-3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
+3. **Fold liveness into `hosts/wsl.py`.** Remove
    the `heartbeat` command. Absorb `hidden.py`, `spawn.py`, and
-   `hostruntime`'s child execution into `ProcessHost`, and add the
+   `hostruntime`'s child execution into `Supervisor` and `ChildRunner`,
+   noting that `Supervisor` is a convergence dependency and so cannot
+   trail the phase that lands convergence. Add the
   durable dispatch budget in the same phase, since the budget exists
   to bound what process spawning makes possible. Stage the replacement
   heartbeat task under a distinct name, verify a fresh beacon, then
@@ -1038,7 +1136,12 @@ suite green, and can be released.
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
    fake.py`, the fake CLI executable, and the provider conformance
-   suite; shrink `smoketest`. Extract `dispatch.py`.
+   suite; shrink `smoketest`. Extract `dispatch.py`, moving the pipeline
+   sequencing out of `run.py` and taking the pipeline MCP with it as a
+   run-scoped resource. The six pipeline shapes are the phase's
+   conformance table, and they include the two that have no model at
+   all, since `runtime: none` is a shipped template rather than an edge
+   case.
 6. **Move the CLI into `cli/`** and enforce its import boundary.
 7. **Simplify the repository's language and documentation.** Once the
    names and ports are stable, review every README, `AGENTS.md`,
@@ -1056,7 +1159,9 @@ suite green, and can be released.
 Phase 1 is low risk; phase 2 changes lifecycle behavior and is not
 mechanical. Phase 3 changes process
 management and liveness and is not; it sits early because everything
-after it builds on `ProcessHost`. Phase 4 affects existing user agents.
+after it builds on process management, and `Supervisor` in particular is
+what convergence needs to see a watcher at all. Phase 4 affects existing
+user agents.
 Phase 5 is the largest and should be
 sliced by concern (output normalization first, then argv construction,
 then MCP), each slice guarded by the fake provider and fake CLI added
@@ -1215,7 +1320,9 @@ Two things are bundled today under `spawn.py` and the `_`-prefixed
 ephemeral convention, and they belong in different places.
 
 **Process lifecycle is a host capability** and belongs in the runtime
-seam as `ProcessHost`: detached and windowless launch, child execution
+seam, split by lifetime: `Supervisor` for detached and windowless
+launch, liveness, termination, and enumeration of the processes this
+project owns, and `ChildRunner` for child execution
 with correct decoding, liveness, termination, and enumeration of the
 processes this project owns. Agent execution consumes it for the
 provider subprocess, which is what keeps `providers/claude.py` and
@@ -1234,7 +1341,7 @@ in favor of naming the rule as `headless.is_ephemeral`; this
 refactoring should give the rule a home rather than a helper.
 
 Splitting the two is what keeps the runtime seam free of the concept
-"agent": `ProcessHost` knows about argv and pids, never about
+"agent": process management knows about argv and pids, never about
 definitions.
 
 ## Circuit breakers
@@ -1262,7 +1369,7 @@ Downsides, and how each is handled:
 The scheduled case is worth naming precisely: cron and Task Scheduler
 already limit a periodic trigger to once a minute, so a durable budget
 is not protecting against a schedule. It protects against fan-out,
-which is what `ProcessHost` makes possible. The budget and the process
+which is what `ChildRunner` makes possible. The budget and the process
 seam should therefore land in the same phase.
 
 ## Open decisions
@@ -1594,9 +1701,13 @@ into the body; the body is authoritative.
    | The list of places (`repos.py`) | Where to look | `~/.config/agents-live/config.toml` | Nothing can be derived. Abstain. |
     | Assignment | Permission | Absent by default; plugin when declared | Abstain rather than fall back to local mode. |
    | Definitions in a place | Content | Inside each repository | Nothing to derive. Prune its triggers. |
+   | Started state | What should run here | Machine-local, under `paths.state_home()` | Adopt when never initialized; abstain when unreadable. |
 
-   Started state is a fourth fact, but it is an output of `start` and
-   `stop` rather than an input to be read from elsewhere.
+   Started state was described in an earlier round as "an output of
+   `start` and `stop` rather than an input to be read from elsewhere".
+   That was wrong, and the error mattered: convergence reads it on every
+   pass, so it is an input, and treating it as empty prunes every
+   trigger on the machine. It is now the fourth row above.
 
 9. **An unreadable repository should have its triggers pruned.** A crontab line is
    `cd /src/C && agents-live run --name foo`; if C is unreadable that
@@ -1682,7 +1793,7 @@ should be weighed in phase 2 and 3:
   restart and cleanup for free. Enumerate-and-match is racy by
   construction; a handle is not. Deliberately not taken in the same
   phase as the finding above: it changes process ownership on both
-  platforms at once and belongs after `ProcessHost` has settled.
+  platforms at once and belongs after `Supervisor` has settled.
 - **Scope the artifact store, not the plan.** Terraform documents
   `-target` as a hazard because partial scope causes undetected drift.
   Ansible's answer is a `cron_file` per unit of management. One
@@ -1743,7 +1854,7 @@ something below them changes.
 | What the firing contract fixes | Concurrency policy skip and misfire policy skip. Envelope versioning applies only if the full envelope is selected. | [The firing contract](#the-firing-contract) |
 | How Agent Skills relates | It is a separate packaging question, not an agent execution standard or a phase of this refactor. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
 | Generalize the circuit breaker | Yes, as one durable budget per project per host, fail-open, not per subscription. | [Circuit breakers](#circuit-breakers) |
-| Where do spawned and ephemeral agents belong | Split: process lifecycle to `ProcessHost` in the runtime seam, definition lifetime to `state/`. | [Process management](#process-management) |
+| Where do spawned and ephemeral agents belong | Split: process lifecycle to `Supervisor` and `ChildRunner` in the runtime seam, definition lifetime to `state/`. | [Process management](#process-management) |
 | Asyncio | No. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
 | Is an agent a different thing from a skill | Yes. Current agent definitions and Agent Skills are distinct client concepts; a separate proposal may define a relationship. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
 | How the pieces are tested | A fake host through the internal host contract, a fake provider through the provider plugin path, and a deterministic fake CLI for subprocess behavior. | [Testing approach](#testing-approach) |
