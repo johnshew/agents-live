@@ -36,6 +36,9 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [target-architecture.md](target-architecture.md) - reader's guide to the
   end state that proposal describes: the major pieces, where state lives,
   and the lifecycle of one agent from registration to firing.
+- [frontmatter-convergence.md](frontmatter-convergence.md) - decision to
+  make definitions conforming Agent Skills, with execution policy under
+  namespaced `metadata` keys.
 
 Design documents are added here as they are written, one file per topic,
 named after the topic.

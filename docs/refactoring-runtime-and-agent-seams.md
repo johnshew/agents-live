@@ -1073,6 +1073,10 @@ whole-package invariants of exactly the kind the backlog says pay off:
   `runtime/hosts/`.
 - Every built-in host satisfies the host conformance suite, and every
   built-in provider uses the provider registration path.
+- Every shipped template and smoke fixture passes `skills-ref validate`,
+  so conformance to the Agent Skills specification cannot drift
+  silently once [frontmatter-convergence.md](frontmatter-convergence.md)
+  lands.
 
 **Tier 6 - `smoketest` as the release gate only.** Real CLIs, real
 host, one end-to-end path per platform. It stops being a coverage
@@ -1168,7 +1172,7 @@ then MCP), each slice guarded by the fake provider and fake CLI added
 at the start of the phase. Phase 7 follows the last terminology-changing
 phase.
 
-## Agent Skills is separate work
+## Agent Skills conformance is decided
 
 The **Agent Skills** open format is specified at
 <https://agentskills.io/specification>, with the `skills-ref` reference
@@ -1176,17 +1180,44 @@ validator. Its field and layout facts below were verified on 2026-08-07.
 
 The specification defines an instruction bundle that a client loads. It
 does not define an independently runnable agent, provider invocation,
-triggers, isolation, or lifecycle. The current files under
-`.claude/agents/` and `.github/agents/` are client agent definitions, not
-conforming Agent Skills, and changing them to `<skill>/SKILL.md` would be
-a product-format migration rather than an implementation detail of the
-runtime seams.
+triggers, isolation, or lifecycle.
 
-This proposal therefore makes no agent-equals-skill claim and does not
-use Agent Skills metadata constraints to justify runtime grammars. A
-separate proposal may evaluate whether a skill bundle should become an
-additional definition source or replace current agent definitions. That
-decision is not required for any migration phase in this document.
+An earlier draft of this section left conformance open and called it
+separate work. It is no longer open.
+[frontmatter-convergence.md](frontmatter-convergence.md) takes the
+**layout-level** position on 2026-08-08: a definition becomes a
+`<skill-name>/SKILL.md` directory whose `name` and `description` have
+their standard meanings, and every Agents Live execution field moves
+under the standard `metadata` map behind an `agents-live.` prefix. The
+boundary it draws is the one this document assumes throughout: Agent
+Skills defines the portable instruction bundle, Agents Live defines
+optional unattended execution of that bundle, and host assignment,
+started state, and credentials stay outside the definition entirely.
+
+Three consequences land directly on this proposal.
+
+**The grammars stop being optional.** `metadata` values must be strings,
+so the schedule, watch, and selector grammars are now required for
+conformance rather than merely defensible on their own merits. The
+earlier reversal, that metadata no longer forces string encodings, is
+itself reversed. This does not change the grammars, which were already
+chosen on their own merits; it removes the possibility of declining
+them.
+
+**The naming hazard dissolves.** This document reserved `Runtime` for
+the host and warned that the frontmatter field of the same name meant
+something else. The field is now `agents-live.selector`, so the two
+meanings no longer share a word and the reviewer instruction is
+satisfied by the format rather than by vigilance.
+
+**The definition loader gains a specification.**
+[frontmatter-convergence.md](frontmatter-convergence.md) defines a
+restricted parsing profile and a four-stage loader: extract, parse under
+the profile, validate the standard fields and the directory-name
+invariant, then decode `agents-live.*` strings into typed configuration.
+That is the concrete design for `load()` in
+[the agent port](#the-agent-port), and it is stricter than today's
+`yaml.safe_load` followed by coercion.
 
 ### The normative frontmatter
 
@@ -1208,7 +1239,7 @@ adds `model`, `effort`, `context`, `agent`, `background`,
 `when_to_use`. Other clients add their own. A field being widely
 recognized is not the same as it being in the specification.
 
-### What a separate packaging proposal must address
+### What the conformance migration must address
 
 **The extension mechanism exists, but has a cost.** Of the 25
 fields parsed today, 24 are outside the Agent Skills specification
@@ -1308,7 +1339,7 @@ Observations that bear on the collapse decision:
   specification field outright. `allow-tools` resembles the spec's
   `allowed-tools` but deliberately does not map onto it - the two are
   different security contracts (see the conflicts under
-  [What a separate packaging proposal must address](#what-a-separate-packaging-proposal-must-address)). `tools`, `user-invocable`,
+  [What the conformance migration must address](#what-the-conformance-migration-must-address)). `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` are carried in the
   code as ecosystem-standard metadata; they are Claude Code
   extensions, not specification fields. The comment should be
@@ -1377,10 +1408,16 @@ seam should therefore land in the same phase.
 Two of the three were settled on 2026-08-08. The third is deliberately
 left to implementation.
 
-1. **Do the grammars earn a breaking release? Yes, as a clean break.**
-  The watch and selector collapses ship with the `handler` retirement in
+1. **Do the grammars earn a breaking release? Yes, as a clean break, and
+  conformance now requires them.** The watch and selector collapses ship
+  with the `handler` retirement in
   one major version bump from 5.5.2, since there is no reason to spend
-  two breaks where one will do. No compatibility period and no dual-form
+  two breaks where one will do. They no longer rest on their own merits
+  alone: [frontmatter-convergence.md](frontmatter-convergence.md) moves
+  execution policy under `metadata`, whose values must be strings, so a
+  string grammar per domain is a conformance requirement. The same
+  release carries the layout migration to `<skill-name>/SKILL.md`.
+  No compatibility period and no dual-form
   parsing: 6.0 refuses the retired names by name, with the replacement
   computed from the file's own values, and a one-shot migrator rewrites
   definitions as an explicit operator action. Coexistence was considered
@@ -1410,7 +1447,9 @@ left to implementation.
   phase 5 shows which required behavior cannot be derived inside the
   launched process.
 
-Agent Skills packaging is separate work and gates none of these decisions.
+Agent Skills conformance is settled in
+[frontmatter-convergence.md](frontmatter-convergence.md) and rides the
+same breaking release as decision 1.
 
 ## Consequences
 
@@ -1852,19 +1891,56 @@ something below them changes.
 | What crosses a scheduled firing | A stable argv ingress of primitives. Whether it needs the full proposed envelope remains open. | [Open decisions](#open-decisions) |
 | Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields primitive firing context. | [Where events are produced](#where-events-are-produced) |
 | What the firing contract fixes | Concurrency policy skip and misfire policy skip. Envelope versioning applies only if the full envelope is selected. | [The firing contract](#the-firing-contract) |
-| How Agent Skills relates | It is a separate packaging question, not an agent execution standard or a phase of this refactor. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
+| How Agent Skills relates | Decided: layout-level conformance. Definitions become `<skill-name>/SKILL.md` with execution policy under `metadata` behind an `agents-live.` prefix. | [frontmatter-convergence.md](frontmatter-convergence.md) |
 | Generalize the circuit breaker | Yes, as one durable budget per project per host, fail-open, not per subscription. | [Circuit breakers](#circuit-breakers) |
 | Where do spawned and ephemeral agents belong | Split: process lifecycle to `Supervisor` and `ChildRunner` in the runtime seam, definition lifetime to `state/`. | [Process management](#process-management) |
 | Asyncio | No. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
-| Is an agent a different thing from a skill | Yes. Current agent definitions and Agent Skills are distinct client concepts; a separate proposal may define a relationship. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
+| Is an agent a different thing from a skill | An Agents Live definition *is* a conforming Agent Skill plus `agents-live.*` execution metadata. The skill spec governs the bundle; this package governs unattended execution of it. | [frontmatter-convergence.md](frontmatter-convergence.md) |
 | How the pieces are tested | A fake host through the internal host contract, a fake provider through the provider plugin path, and a deterministic fake CLI for subprocess behavior. | [Testing approach](#testing-approach) |
 
 ### Still needing a decision
 
-1. **Whether the watch and selector grammars justify a breaking
-  release.**
-2. **How repository moves carry machine-local started state.**
-3. **Whether dispatch needs the full proposed event envelope.**
+All three of the original questions are now answered: the grammars land
+as a clean break and conformance requires them, a repository move is an
+explicit stop and start, and the event envelope is settled in phase 5
+against a prototype. What remains open is smaller and is listed here so
+it is not lost.
+
+1. **Does dispatch need the full event envelope?** Deferred to phase 5
+   deliberately, to be answered by a prototype rather than on paper.
+2. **Where does the watcher fingerprint live?** The artifact is the
+   target and a runtime-owned index is the named fallback; phase 2
+   decides by measuring a watch expression at the Windows command-line
+   length bound.
+3. **How is streaming output normalized incrementally?** The one
+   remaining provider-lifecycle question, to be answered against the
+   fake CLI.
+4. **The complete `agents-live.*` field registry.** Every key, default,
+   grammar, and validation rule has to be written down before
+   implementation, per
+   [frontmatter-convergence.md](frontmatter-convergence.md).
+
+### Findings from the 2026-08-08 audit, not yet resolved
+
+Low severity, recorded so they are not rediscovered:
+
+1. **The 6.0 canonical form restarts every watcher.** Rebuilding
+   expressions under the new grammar changes every fingerprint, so
+   convergence correctly stops and restarts every watcher on every
+   machine once. It is cheap and self-correcting, but it belongs in the
+   release note so it is not diagnosed as a fault. Avoiding it would
+   require a compatibility hash, which is the shim this release
+   declines.
+2. **Some newer responsibilities are unassigned to a phase.** The
+   `doctor` report for a registered-but-unreadable repository after a
+   move has no home in the sequence; the retired-field reporting does,
+   in phase 4.
+3. **The expected-size table predates several decisions.** It was
+   computed before started state, the structured marker, the migrator,
+   the retired-field diagnostics, and the layout migration were
+   settled. Those are additions the ~10,800 target does not account
+   for. The sizes are hypotheses checked per phase, so the numbers
+   stand with this caveat rather than being re-derived now.
 
 ### Defects found while writing this
 
@@ -1876,13 +1952,15 @@ document.
   specification's `allowed-tools`. Review showed the opposite defect:
   the two are different security contracts (narrowing headless
   execution versus pre-approving tools for any client), and renaming
-  would silently broaden interactive authority. The field keeps its
-  own name - `allow-tools` at top level, `agents-live.allow-tools` if
-  it moves under `metadata` - and the near-collision deserves a
-  warning in the docs.
+  would silently broaden interactive authority. Under
+  [frontmatter-convergence.md](frontmatter-convergence.md) the key
+  becomes `agents-live.allow-tools` under `metadata`, and the standard
+  `allowed-tools` keeps its own separate meaning at the top level. The
+  near-collision deserves a warning in the docs.
 - `headless.py` describes `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` as ecosystem-standard
-  metadata. They are Claude Code extensions, not specification fields.
+  metadata. They are Claude Code extensions, not specification fields,
+  and they leave the shared definition entirely once conformance lands.
 - `headless.py` parses `handler` as a compatibility alias for
   `post-processor` (`handler_path` resolves `post_processor or
   handler`). The repository rule forbids compatibility shims; the

@@ -32,28 +32,44 @@ other knows about agents and never touches a process or a trigger.
 
 ## What changes in the frontmatter
 
-Twenty-five fields are parsed today, not counting `name`. Almost all of
-them are untouched, because this refactor is about who reads a field,
-not about what an author writes.
+A definition becomes a conforming
+[Agent Skill](https://agentskills.io/specification): a
+`<skill-name>/SKILL.md` directory whose `name` and `description` have
+their standard meanings, with every Agents Live execution field moved
+under the standard `metadata` map behind an `agents-live.` prefix. That
+decision, its alternatives, and the parsing profile it requires are in
+[frontmatter-convergence.md](frontmatter-convergence.md).
 
-| Today | End state | What changes |
+Twenty-five fields are parsed today. They do not disappear so much as
+sort themselves into three groups that were previously mixed in one
+unqualified mapping.
+
+| Today | Becomes | Why |
 |---|---|---|
-| `handler` | Retired | An alias for `post-processor`, which the no-shims rule does not allow to persist. The only unconditional removal. |
-| `watchPath`, `watchIgnore`, `debounce` | `watch`, one string | Three fields that every consumer has to re-join become one comparable, hashable key: `watch: "docs/** !node_modules/** debounce 5s"`. |
-| `runtime`, `model` | `runtime`, one selector | `runtime: claude/sonnet:low` replaces two fields and adds a reasoning-effort level without needing a third. |
-| `schedule` | Same field, same language | One grammar parses it and each host renders it, closing the gap where `@daily` and `JAN-DEC` validate on POSIX and then fail during Windows registration. |
-| `owner` | Same field | Still a seed read the first time an agent is started, but now by an optional plugin that a default install never loads. |
-| `timeout` | Same field | Still the agent's own value. `prepare` resolves it onto `Launch` and `dispatch` enforces it, so neither side owns both halves. |
-| The other 16 | Unchanged | `mode`, `allow-tools`, `mcps`, `env`, `transcript`, both processors, the four `output-*` fields, `description`, `tools`, `user-invocable`, `disable-model-invocation`, `argument-hint`. None of them ever leaves the agent seam. |
+| `description` | `description`, unchanged | Already a standard field. It says what the skill does and when to load it, not a scheduler label. |
+| `schedule` | `agents-live.schedule` | Same language, now a quoted string under metadata. |
+| `watchPath`, `watchIgnore`, `debounce` | `agents-live.watch`, one string | Three fields every consumer must re-join become one comparable, hashable key. |
+| `runtime`, `model` | `agents-live.selector` | One grammar for provider, model, and effort. |
+| `mode`, `allow-tools`, `mcps`, `env`, `timeout`, the processors, the four `output-*` fields | `agents-live.*` equivalents | Execution policy, namespaced so it has an owner. |
+| `owner` | Leaves the definition | Host assignment is machine-local state, never portable content. |
+| `handler` | Retired | An alias for `post-processor`, which the no-shims rule does not allow to persist. |
+| `tools`, `user-invocable`, `disable-model-invocation`, `argument-hint` | Leave the shared definition | Claude Code top-level extensions, not specification fields. The strict Claude paths reject them outright. |
 
-So the count goes 25 today to 21 in 6.0. `handler` retires and both
-collapses land in the same breaking release, because there is no reason
-to spend two breaks where one will do.
+**One field is genuinely new.**
+`agents-live.schema-version` is required whenever any `agents-live.` key
+is present, so a reader can tell which encoding it is looking at and
+fail closed on a version it does not know.
 
-**No new fields are added.** The two behaviors this design pins down,
-concurrency policy and misfire policy, are both fixed in the runtime core
-rather than exposed to authors, because neither is a decision an author
-has the information to make.
+**Two things do not become fields.** Concurrency policy and misfire
+policy are fixed in the runtime core rather than exposed to authors,
+because neither is a decision an author has the information to make.
+
+**`allow-tools` and `allowed-tools` stay different on purpose.** The
+standard `allowed-tools` tells a conforming client which tools are
+pre-approved during ordinary skill use. `agents-live.allow-tools`
+narrows what an unattended run may touch and can never grant authority.
+Merging them would broaden authority in clients that know nothing about
+this package.
 
 What the fields *mean* changes more than how they are spelled, and that
 is covered in the [worked example](#a-worked-example).
@@ -108,9 +124,9 @@ Six rules travel with the grammar because EBNF cannot carry them:
    implicit.
 
 ```yaml
-watch: "docs/**"
-watch: "docs/** src/**/*.py debounce 2s"
-watch: "docs/** !node_modules/** !**/*.tmp debounce 500ms"
+agents-live.watch: "docs/**"
+agents-live.watch: "docs/** src/**/*.py debounce 2s"
+agents-live.watch: "docs/** !node_modules/** !**/*.tmp debounce 500ms"
 ```
 
 One thing this collapse is not: a rename. Today's `watchIgnore` is not
@@ -168,13 +184,17 @@ is mechanical, so the error can show the exact line to paste rather than
 a generic template:
 
 ```
-Agents/link-check.md: 'watchPath', 'watchIgnore', and 'debounce' were
-replaced in 6.0 by a single 'watch' expression.
+Agents/link-check.md: this definition uses the 5.x flat format. 6.0 reads
+<skill-name>/SKILL.md with execution policy under 'metadata'.
 
   Replace:  watchPath: docs
             watchIgnore: ["node_modules/"]
             debounce: 5
-  With:     watch: "docs/** !node_modules/** debounce 5s"
+  With:     metadata:
+              agents-live.schema-version: "1"
+              agents-live.watch: "docs/** !node_modules/** debounce 5s"
+
+  Move:     Agents/link-check.md -> Agents/link-check/SKILL.md
 ```
 
 **Report every offending file at once.** A malformed definition aborts
@@ -324,7 +344,7 @@ resource. The port describes each piece; it runs none of them.
 ```python
 class Step(StrEnum):
     PRE   = "pre"     # pre-processor script; may end the run with skip
-    AGENT = "agent"   # provider CLI; absent when runtime is none
+    AGENT = "agent"   # provider CLI; absent when the selector is none
     POST  = "post"    # post-processor script
 
 
@@ -336,6 +356,18 @@ def interpret(spec: AgentSpec, step: Step, launch: Launch,
 def outcome(spec: AgentSpec,
             results: Mapping[Step, StepResult]) -> Outcome: ...
 ```
+
+`load` addresses a skill **directory**, not a file, because `scripts/`,
+`references/`, and `assets/` resolve relative to the skill root. It runs
+four explicit stages rather than today's `yaml.safe_load` followed by
+coercion: extract the frontmatter on exact delimiter lines, parse a
+restricted YAML profile that rejects duplicate keys and unsupported
+constructs, validate the standard fields and the directory-name
+invariant, then decode recognized `agents-live.*` strings into typed
+configuration. Unknown `agents-live.*` keys and unknown schema versions
+fail closed before anything is scheduled or executed; metadata belonging
+to other clients is left alone. The profile and its rationale are in
+[frontmatter-convergence.md](frontmatter-convergence.md).
 
 `RunShape` is four booleans: which of the three steps exist, and whether
 the run needs the pipeline MCP resource. It is a pure function of the
@@ -351,9 +383,9 @@ that processors exist.
 
 | Step | Selected by | Failure category | Provider |
 |---|---|---|---|
-| `PRE` | `pre-processor` | `pre_processor_crash` | No |
-| `AGENT` | `runtime` other than `none` | `cli_crash`, `timeout`, `empty_output`, `output_parse_error`, `agent_output_invalid` | Yes |
-| `POST` | `post-processor` | `post_processor_crash` | No |
+| `PRE` | `agents-live.pre-processor` | `pre_processor_crash` | No |
+| `AGENT` | `agents-live.selector` other than `none` | `cli_crash`, `timeout`, `empty_output`, `output_parse_error`, `agent_output_invalid` | Yes |
+| `POST` | `agents-live.post-processor` | `post_processor_crash` | No |
 
 A **provider plugin** is small, and is meant to stay that way:
 
@@ -649,7 +681,7 @@ travel with them.
 |---|---|---|---|
 | Which repositories to look in | `$XDG_CONFIG_HOME/agents-live/config.toml` | Yes | Yes |
 | Started or stopped, per (repo, agent) | `$XDG_STATE_HOME/agents-live/repos/<name>-<hash8>/` | Yes | No, and deliberately: see [stage 9](#stage-9-moving-the-repository) |
-| The definition itself | `<repo>/Agents/<name>.md` | Yes | Yes, it travels with the repo |
+| The definition itself | `<repo>/Agents/<name>/SKILL.md` and its `scripts/` | Yes | Yes, it travels with the repo |
 | The OS trigger | crontab or Task Scheduler | Yes | n/a |
 | A running watcher process | The process table | No, the `@reboot` trigger restores it | n/a |
 | Run logs and outcomes | `$XDG_STATE_HOME/agents-live/repos/<name>-<hash8>/logs/` | Yes | No, old logs are abandoned |
@@ -663,42 +695,68 @@ explicit act rather than something the tool infers.
 
 ## A worked example
 
-A repository at `/src/handbook` contains one agent,
-`Agents/link-check.md`:
+A repository at `/src/handbook` contains one definition, which is a
+conforming skill directory:
+
+```text
+Agents/
+  link-check/
+    SKILL.md
+    scripts/
+      open-issues.py
+```
 
 ```markdown
 ---
 name: link-check
-description: Verify that documentation links resolve.
-runtime: claude/sonnet
-mode: write
-schedule: "0 7 * * 1"
-watch: "docs/** !node_modules/** debounce 5s"
-timeout: 300
+description: Verify that documentation links resolve. Use when checking documentation health.
+compatibility: Requires git and Python 3.12 or later.
+metadata:
+  agents-live.schema-version: "1"
+  agents-live.schedule: "0 7 * * 1"
+  agents-live.watch: "docs/** !node_modules/** debounce 5s"
+  agents-live.selector: "claude/sonnet"
+  agents-live.mode: "write"
+  agents-live.timeout: "300"
+  agents-live.post-processor: "scripts/open-issues.py"
 ---
 
-Check every relative link under docs/. For each one that does not
-resolve, open a GitHub issue naming the file and the line.
+Check every relative link under docs/. Report each one that does not
+resolve, with the file and the line.
 ```
 
 It should run every Monday at 07:00, and again whenever anything under
 `docs/` changes and then settles for five seconds.
 
-> In 5.x this was five fields rather than two: `runtime: claude` with
-> `model: sonnet`, and `watchPath: docs` with
-> `watchIgnore: ["node_modules/"]` and `debounce: 5`. Collapsing them is
-> the breaking change in 6.0. The lifecycle below is identical either
-> way.
+Three things about that file are worth naming, because each is a
+deliberate choice rather than an accident of encoding:
 
-**What changes for the author.** Two lines of this file, and the
-field-level differences are tabled under
+- **`name` matches the directory**, which the specification requires.
+  The loader addresses the directory, not `SKILL.md`, because
+  `scripts/`, `references/`, and `assets/` resolve relative to the skill
+  root. That is why the post-processor is `scripts/open-issues.py`.
+- **Every metadata value is quoted**, including `"300"`. An unquoted
+  `300`, `true`, or date-like string becomes a different type in
+  different YAML parsers, and a schedule or a security policy must not
+  depend on which parser read the file.
+- **The body is instructions, not policy.** `description` says what the
+  skill does and when to load it. It is not a scheduler label.
+
+> In 5.x this was a flat `Agents/link-check.md` with everything at the
+> top level: `runtime: claude` plus `model: sonnet`, and `watchPath:
+> docs` plus `watchIgnore: ["node_modules/"]` plus `debounce: 5`. The
+> directory move and the collapses are one breaking change in 6.0. The
+> lifecycle below is identical either way.
+
+**What changes for the author.** The file moves and the fields are
+namespaced; the field-level differences are tabled under
 [What changes in the frontmatter](#what-changes-in-the-frontmatter). What
 changes underneath them matters more:
 
 - **Who reads it.** Today `headless.py` parses the definition and also
   runs it, so frontmatter knowledge leaks into everything that calls it.
-  In the end state only the agent port loads the file, and lifecycle
-  orchestration reads nothing from it but the trigger fields.
+  In the end state only the agent port loads the directory, and lifecycle
+  orchestration reads nothing from it but the trigger keys.
 - **What it means.** Today an installed trigger is the only record that
   an agent is automated here, which is why the repair loop can delete an
   orphan but never restore one. Frontmatter now says how an agent *would*
@@ -706,6 +764,12 @@ changes underneath them matters more:
 - **Where it is authoritative.** The definition is inert. Copying this
   repository to a second machine automates nothing there until somebody
   runs `start` on that machine, which is the point stage 1 makes.
+- **Who else can see it.** `Agents/` is not a client discovery
+  directory, so an interactive client does not list this skill or invoke
+  it on its own. That is the right polarity for a definition whose body
+  commits or publishes. Making it visible is an explicit act with the
+  client's own tools, and Agents Live never writes into
+  `.claude/skills/`, `.github/skills/`, or `.agents/skills/`.
 
 ### Stage 1: the machine learns where to look
 
@@ -805,7 +869,7 @@ comes with it.
 Registry        ~/.config/agents-live/config.toml   -> /src/handbook
 Started state   ~/.local/state/agents-live/repos/handbook-a1b2c3d4/
                   link-check = started
-Definition      /src/handbook/Agents/link-check.md   (unchanged, in git)
+Definition     /src/handbook/Agents/link-check/SKILL.md  (unchanged, in git)
 crontab         0 7 * * 1   cd /src/handbook && agents-live run ...
                 @reboot     cd /src/handbook && agents-live watch ...
                 */N * * * * agents-live internal maintain
@@ -871,7 +935,7 @@ both halves.
 Three optional steps give six valid combinations, all decided by the
 definition alone. Dispatch runs the same code for every one of them.
 
-| `runtime` | `pre-processor` | `post-processor` | What runs |
+| `agents-live.selector` | `pre-processor` | `post-processor` | What runs |
 |---|---|---|---|
 | a provider | no | no | Agent only; its output is logged |
 | a provider | no | yes | Agent, then post-processor fed the agent's output |
@@ -880,10 +944,11 @@ definition alone. Dispatch runs the same code for every one of them.
 | `none` | yes | yes | Pre-processor piped straight to post-processor, no model |
 | `none` | yes or no | either one present | Whichever script is declared |
 
-`runtime: none` with neither processor is the one invalid combination,
-and it is rejected when the definition loads. The shipped `handler-only`
-template is the fifth row: a scheduled automation with no model in it at
-all, which is why the selector grammar has to accept `none`.
+A selector of `none` with neither processor is the one invalid
+combination, and it is rejected when the definition loads. The shipped
+handler-only template is the fifth row: a scheduled automation with no
+model in it at all, which is why the selector grammar has to accept
+`none`.
 
 **`mode: pipeline` changes the wiring, not the shape.** Normally the
 post-processor receives the agent's stdout on stdin. In pipeline mode the
@@ -1076,15 +1141,19 @@ Two of the three questions this document originally opened were settled
 on 2026-08-08. The argument for each is in
 [the proposal](refactoring-runtime-and-agent-seams.md#open-decisions).
 
-**Settled: the grammars land as a clean break.** The watch and selector
-collapses ship with the `handler` retirement in one major version bump
-from 5.5.2. No compatibility period and no dual-form parsing. The retired
+**Settled: the grammars and the skill layout land as one clean break.**
+The watch and selector collapses ship with the `handler` retirement and
+the move to `<skill-name>/SKILL.md` in one major version bump from
+5.5.2. No compatibility period and no dual-form parsing. The retired
 names are refused by name with the replacement computed from the file's
 own values, per
 [Retiring the old fields](#retiring-the-old-fields). Coexistence was
 considered and declined: it buys a delay at the price of two accepted
 spellings, a mixing rule, and a removal condition somebody has to
-enforce later.
+enforce later. Conformance is decided in
+[frontmatter-convergence.md](frontmatter-convergence.md), which also
+removes the option of declining the grammars, since `metadata` values
+must be strings.
 
 **Settled: moving a repository does nothing on its own.** A move is
 `stop`, `mv`, register, `repos remove`, `start`, and forgetting is safe
