@@ -63,12 +63,13 @@ if (SCRIPTS_DIR / "__init__.py").is_file():
         sys.path.insert(0, str(SCRIPTS_DIR.parent))
     from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
     from agents_live import (  # noqa: E402
-        cli_spec, dashboards, headless, hostruntime, ownership, paths,
+        dashboards, headless, hostruntime, ownership, paths,
         preflight, repos)
+    from agents_live.cli import spec as cli_spec  # noqa: E402
 else:
     if str(SCRIPTS_DIR) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_DIR))
-    import cli_spec  # noqa: E402
+    from cli import spec as cli_spec  # noqa: E402
     import dashboards  # noqa: E402
     import headless  # noqa: E402
     import hostruntime  # noqa: E402

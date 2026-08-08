@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -125,7 +126,7 @@ def task_action(distro: str, cli_path: Path | None = None,
     """
     return (launcher or windowless_launcher()), " ".join([
         subprocess.list2cmdline(["-d", current_distro(distro)]), "--",
-        shlex.join([str(cli_path or stable_cli_path()), "heartbeat"]),
+        shlex.join([str(cli_path or stable_cli_path()), "internal", "liveness"]),
     ])
 
 
@@ -139,8 +140,17 @@ def run_once() -> int:
     except OSError:
         pass
     now = datetime.now().astimezone()
-    beacon_path().write_text(
-        f"alive {now.strftime('%Y-%m-%d %H:%M %Z')}\n", encoding="utf-8")
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".liveness.", text=True)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(f"alive {now.strftime('%Y-%m-%d %H:%M %Z')}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, beacon_path())
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     with (directory / "heartbeat.log").open("a", encoding="utf-8") as stream:
         stream.write(f"{now.isoformat()} heartbeat: WSL alive\n")
     return 0
@@ -184,8 +194,8 @@ def _task_exists(name: str) -> bool:
     return answer == "true"
 
 
-def _register_task(distro: str, cli_path: Path) -> None:
-    name = task_name(distro)
+def _register_task(distro: str, cli_path: Path, *, name: str | None = None) -> None:
+    selected_name = name or task_name(distro)
     execute, arguments = task_action(distro, cli_path)
     script = (
         f"$action=New-ScheduledTaskAction -Execute {_ps_quote(execute)} "
@@ -195,7 +205,7 @@ def _register_task(distro: str, cli_path: Path) -> None:
         "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
         "-DontStopIfGoingOnBatteries -StartWhenAvailable "
         "-ExecutionTimeLimit (New-TimeSpan -Minutes 1);"
-        f"Register-ScheduledTask -TaskName {_ps_quote(name)} -Action $action "
+        f"Register-ScheduledTask -TaskName {_ps_quote(selected_name)} -Action $action "
         "-Trigger $trigger -Settings $settings "
         "-Description 'Keep this WSL distro available for Agents Live' "
         "-RunLevel Limited -Force | Out-Null")
@@ -248,13 +258,20 @@ def install(distro: str | None = None) -> None:
     except OSError:
         previous_mtime = None
     legacy_exists = _task_exists(LEGACY_TASK)
-    _register_task(selected, cli_path)
-    _start_task(task_name(selected))
-    if not _wait_for_fresh_beacon(previous_mtime):
-        raise RuntimeError(
-            "the new scheduled task did not write a fresh global heartbeat; "
-            f"the legacy {LEGACY_TASK!r} task was left unchanged")
-    if legacy_exists:
+    staged = f"{task_name(selected)}-Staged"
+    _register_task(selected, cli_path, name=staged)
+    try:
+        _start_task(staged)
+        if not _wait_for_fresh_beacon(previous_mtime):
+            raise RuntimeError(
+                "the staged liveness task did not write a fresh beacon; "
+                "the working task was left unchanged")
+        _register_task(selected, cli_path)
+        _start_task(task_name(selected))
+    finally:
+        if _task_exists(staged):
+            _unregister_task(staged)
+    if legacy_exists and _task_exists(LEGACY_TASK):
         _unregister_task(LEGACY_TASK)
     print(f"Installed {task_name(selected)} using {cli_path}")
     if legacy_exists:
@@ -276,10 +293,37 @@ def install_best_effort(operation: str) -> bool:
         install()
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"warning: could not register the Windows heartbeat during "
-              f"{operation}: {exc}; run `agents-live heartbeat install` "
+              f"{operation}: {exc}; run `agents-live doctor --repair` "
               "once the cause is resolved", file=sys.stderr)
         return False
     return True
+
+
+def ensure() -> bool:
+    """Converge the WSL liveness task, returning whether it changed."""
+    task, legacy = task_configuration()
+    fresh = False
+    try:
+        fresh = time.time() - beacon_path().stat().st_mtime <= 600
+    except OSError:
+        pass
+    expected_execute, expected_arguments = task_action(current_distro())
+    current = bool(
+        task
+        and task.get("Enabled") is True
+        and str(task.get("Execute", "")).replace("/", "\\").casefold()
+        == expected_execute.replace("/", "\\").casefold()
+        and task.get("Arguments") == expected_arguments
+        and task.get("Interval") == "PT5M"
+        and fresh
+    )
+    if not current:
+        install()
+        return True
+    if legacy:
+        _unregister_task(LEGACY_TASK)
+        return True
+    return False
 
 
 def uninstall(distro: str | None = None, *, retain_state: bool = False) -> None:

@@ -63,13 +63,43 @@ class TriggerSpec:
 BOOT = "@reboot"
 
 _FIELD_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_MONTH_NAMES = {
+    name: index for index, name in enumerate(
+        ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+         "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"), 1)
+}
+_WEEKDAY_NAMES = {
+    name: index for index, name in enumerate(
+        ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"))
+}
+_SPECIAL_SCHEDULES = {
+    "@annually": "0 0 1 1 *",
+    "@yearly": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+}
 
 
 class ScheduleSyntaxError(ValueError):
     """A cron expression this project cannot read."""
 
 
-def _field_values(field: str, low: int, high: int) -> set[int]:
+def _field_values(
+    field: str,
+    low: int,
+    high: int,
+    names: dict[str, int] | None = None,
+) -> set[int]:
+    names = names or {}
+
+    def number(value: str) -> int | None:
+        if value.isdigit():
+            return int(value)
+        return names.get(value.upper())
+
     values: set[int] = set()
     for part in field.split(","):
         item, _, step_text = part.partition("/")
@@ -81,11 +111,13 @@ def _field_values(field: str, low: int, high: int) -> set[int]:
             first, last = low, high
         elif "-" in item:
             start_text, _, end_text = item.partition("-")
-            if not (start_text.isdigit() and end_text.isdigit()):
+            start_value, end_value = number(start_text), number(end_text)
+            if start_value is None or end_value is None:
                 raise ScheduleSyntaxError(f"invalid range in cron field '{field}'")
-            first, last = int(start_text), int(end_text)
-        elif item.isdigit():
-            first = last = int(item)
+            first, last = start_value, end_value
+        elif number(item) is not None:
+            first = number(item)
+            last = high if step_text else first
         else:
             raise ScheduleSyntaxError(f"invalid cron field '{field}'")
         if not (low <= first <= high and low <= last <= high and first <= last):
@@ -103,12 +135,20 @@ def schedule_fields(expression: str) -> tuple[set[int], ...]:
     Weekday 7 is folded onto 0, as cron does, so Sunday has one
     spelling by the time anything compares against it.
     """
-    fields = expression.split()
+    text = expression.strip()
+    if text == BOOT:
+        raise ScheduleSyntaxError("@reboot does not name clock fields")
+    text = _SPECIAL_SCHEDULES.get(text.lower(), text)
+    fields = text.split()
     if len(fields) != 5:
         raise ScheduleSyntaxError(
             f"schedule '{expression}' does not have five cron fields")
-    parsed = tuple(_field_values(field, low, high)
-                   for field, (low, high) in zip(fields, _FIELD_BOUNDS))
+    names = ({}, {}, {}, _MONTH_NAMES, _WEEKDAY_NAMES)
+    parsed = tuple(
+        _field_values(field, low, high, field_names)
+        for field, (low, high), field_names
+        in zip(fields, _FIELD_BOUNDS, names, strict=True)
+    )
     weekday = {0 if value == 7 else value for value in parsed[4]}
     return parsed[:4] + (weekday,)
 
@@ -120,8 +160,9 @@ def schedule_matches(expression: str, moment: datetime) -> bool:
     ANDed otherwise, which is cron's rule and the one surprise in the
     language worth stating out loud.
     """
-    fields = expression.split()
-    minutes, hours, days, months, weekdays = schedule_fields(expression)
+    text = _SPECIAL_SCHEDULES.get(expression.strip().lower(), expression.strip())
+    fields = text.split()
+    minutes, hours, days, months, weekdays = schedule_fields(text)
     if moment.minute not in minutes or moment.hour not in hours:
         return False
     if moment.month not in months:

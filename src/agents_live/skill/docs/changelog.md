@@ -6,6 +6,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- breaking: definitions are conforming `Agents/<name>/SKILL.md` directories.
+  Execution policy is quoted `agents-live.*` metadata under schema version 1.
+  The one-shot `agents-live migrate` command converts safe 5.x definitions;
+  the runtime contains no old-format loader.
+- refactor: runtime, agent, state, observability, dispatch, provider, host, and
+  CLI seams now enforce immutable primitive records and one convergence path.
+- breaking: `handler` is retired, post-processor failures are
+  `post_processor_crash`, and the public `heartbeat` command is removed.
+  WSL liveness is converged automatically through a staged, verified task.
+- note: the 6.0 canonical watch expression changes every watcher fingerprint,
+  so each started watcher restarts once after upgrade.
 - fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
   The continuation reads the upgraded tool's receipt instead of its temporary
   environment, so declared plugins and their ownership backends are restored.

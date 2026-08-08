@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from . import hostruntime, paths, preflight
-from .cli_spec import (
+from .cli.spec import (
     COMMANDS,
     GLOBAL_ARGS,
     HELP_ARG,

@@ -9,7 +9,7 @@
 # run in THIS env. This mirrors the packaged world, where these become the
 # package's core dependencies. logs/dashboard stay out: they delegate via
 # `uv run --script` to keep DuckDB/UI deps on-demand (decision 6.4).
-"""agents-live - single-command entry point (proposal §3.1, Phase 1).
+"""Agents Live command dispatcher.
 
 One dispatcher over the existing modules; the logic stays in them. Every
 lifecycle operation is a subcommand:
@@ -44,15 +44,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from . import hostruntime
-from . import paths
-from . import preflight
-from . import update_check
-from . import __version__
-from .cli_spec import (
+from .. import state
+from .spec import (
     COMMAND_BY_NAME,
     Cmd,
     all_command_help,
@@ -61,6 +57,14 @@ from .cli_spec import (
     unknown_flag,
     validation_error,
 )
+
+try:
+    from importlib.metadata import version
+    __version__ = version("agents-live")
+except Exception:
+    __version__ = "0"
+
+JSON_ENV_VAR = "AGENTS_LIVE_JSON"
 
 # First-use adoption (§3.2 amendment, 2026-07-15): `run` and `start`
 DOCS_URL = "https://github.com/johnshew/agents-live"
@@ -90,56 +94,24 @@ def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
     return rest
 
 
-def _normalize_agent_path(command: Cmd, rest: list[str]) -> tuple[list[str], bool]:
-    """Canonicalize an explicit agent-file selector and report its presence."""
-    if not command.name_sugar:
-        return rest, False
-    index: int | None = None
-    if rest and not rest[0].startswith("-"):
-        index = 0
-    else:
-        for position, token in enumerate(rest):
-            if token == "--name" and position + 1 < len(rest):
-                index = position + 1
-                break
-    if index is None:
-        return rest, False
-    value = rest[index]
-    candidate = Path(value).expanduser()
-    is_path = (
-        candidate.suffix.lower() == ".md"
-        or any(separator in value for separator in (os.sep, os.altsep)
-               if separator)
-    )
-    if not is_path:
-        return rest, False
-    normalized = list(rest)
-    normalized[index] = str(candidate.resolve())
-    return normalized, True
-
-
 def _finish(code: int, command: Cmd | None, rest: list[str],
             *, json_mode: bool) -> int:
-    if (
-        (command is None or command.update_notice)
-        and not json_mode
-        and "--quiet" not in rest
-        and update_check.interactive()
-    ):
-        notice = update_check.consume_notice(__version__)
-        update_check.launch_if_stale()
-        if notice:
-            print(f"\n{notice}", file=sys.stderr)
+    del command, rest, json_mode
     return code
 
 
 def _emit_failure(code: str, operation: str, detail: str,
                   *, json_mode: bool) -> None:
-    preflight.emit_error(
-        preflight.CapabilityFailure(
-            code, "command", operation, detail.strip() or "command failed"),
-        json_mode=json_mode,
-    )
+    message = detail.strip() or "command failed"
+    if json_mode:
+        print(json.dumps({"error": {
+            "code": code,
+            "capability": "command",
+            "operation": operation,
+            "detail": message,
+        }}))
+    else:
+        print(f"error [{code}] {operation}: {message}", file=sys.stderr)
 
 
 def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
@@ -189,36 +161,10 @@ def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
     return code
 
 
-def _start_capabilities(rest: list[str]) -> frozenset[str] | None:
-    """Trigger-derived capability set for ``start`` (2026-07-12 finding:
-    a cron-only agent must not require a watcher). None = the default probe
-    set (``--all`` or no name to derive from); an empty set skips the
-    preflight so a nonexistent agent reports ``agent_invalid`` from the
-    operation itself, not ``dependency_missing`` from the gate."""
-    if "--all" in rest:
-        return None
-    name: str | None = None
-    for index, token in enumerate(rest):
-        if token == "--name" and index + 1 < len(rest):
-            name = rest[index + 1]
-            break
-    if not name:
-        return None
-    from . import headless
-    try:
-        config = headless.load_agent_config(name)
-    except Exception:
-        return frozenset()
-    capabilities = set()
-    if config.schedule:
-        capabilities.add("schedule")
-    if config.watch_path:
-        capabilities.add("watch")
-    return frozenset(capabilities)
-
-
 def main(argv: list[str] | None = None) -> int:
-    hostruntime.use_utf8_io()
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
 
@@ -255,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             # Layer 2 (§3.6): carry json mode into in-process subcommands
             # and their children so typed errors downstream of the
             # preflight are serialized as envelopes too.
-            os.environ[preflight.JSON_ENV_VAR] = "1"
+            os.environ[JSON_ENV_VAR] = "1"
             args = args[1:]
             continue
         if args[0] == "--repo":
@@ -265,17 +211,16 @@ def main(argv: list[str] | None = None) -> int:
                     json_mode=json_mode)
                 return 2
             try:
-                root = paths.resolve_root(args[1])
+                root = state.resolve_root(args[1])
             except ValueError as exc:
-                preflight.emit_error(preflight.CapabilityFailure(
-                    "no_project_root", "project-root", "--repo", str(exc)),
-                    json_mode=json_mode)
+                _emit_failure(
+                    "no_project_root", "--repo", str(exc), json_mode=json_mode)
                 return 2
             # Env var carries the choice into in-process resolution and any
             # child processes (watchers, handlers, subprocess subcommands).
-            os.environ[paths.ENV_VAR] = str(root)
+            os.environ[state.ENV_VAR] = str(root)
             selected_repo = root
-            paths.clear_cache()
+            state.clear_root_cache()
             args = args[2:]
             continue
         break
@@ -313,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if "--json" in rest:
         json_mode = True
-        os.environ[preflight.JSON_ENV_VAR] = "1"
+        os.environ[JSON_ENV_VAR] = "1"
         rest = [argument for argument in rest if argument != "--json"]
     # Commands without envelope support (command.json False) still accept
     # --json: the env var carries envelope mode to any typed errors, and
@@ -341,11 +286,6 @@ def main(argv: list[str] | None = None) -> int:
         _emit_failure("usage_error", cmd, invalid, json_mode=json_mode)
         return 2
 
-    rest, explicit_agent_path = _normalize_agent_path(command, rest)
-    if explicit_agent_path and not os.environ.get(paths.ENV_VAR, "").strip():
-        os.environ[paths.ENV_VAR] = str(Path.cwd().resolve())
-        paths.clear_cache()
-
     # Resolve the project root ONCE before dispatch so a missing root is a
     # structured CLI error, never a traceback from an imported or
     # delegated module. A named subcommand answers for itself: a
@@ -363,37 +303,19 @@ def main(argv: list[str] | None = None) -> int:
             active_root = child.root
     if active_root != "none" and not all_repos:
         try:
-            paths.resolve_root(
+            state.resolve_root(
                 allow_sole_registered=active_root == "registry")
         except ValueError as exc:
             allow_markerless_invocation = (
                 active_root == "markerless"
-                and not os.environ.get(paths.ENV_VAR, "").strip()
+                and not os.environ.get(state.ENV_VAR, "").strip()
             )
             if not allow_markerless_invocation:
-                preflight.emit_error(preflight.CapabilityFailure(
-                    "no_project_root", "project-root", cmd, str(exc)),
-                    json_mode=json_mode)
+                _emit_failure(
+                    "no_project_root", cmd, str(exc), json_mode=json_mode)
                 return 2
 
     rest = _apply_name_sugar(command.name_sugar, rest)
-
-    # Static capability preflight for host-mutating commands (§3.6).
-    # Advisory layer 1 of 3: the operation itself still converts failures,
-    # and post-verification confirms state. For a targeted `start` the
-    # probe set derives from the agent's own triggers.
-    if command.probes or command.dynamic_probes is not None:
-        capabilities = (
-            _start_capabilities(rest)
-            if command.dynamic_probes == "start"
-            else None
-        )
-        if capabilities is None:
-            capabilities = frozenset(command.probes)
-        failure = preflight.check(cmd, capabilities)
-        if failure is not None:
-            preflight.emit_error(failure, json_mode=json_mode)
-            return 2
 
     if command.dispatch == "subprocess":
         active = command
@@ -438,7 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
-                **({"capture_output": True, **hostruntime.CHILD_TEXT}
+                **({"capture_output": True, "text": True,
+                    "encoding": "utf-8", "errors": "replace"}
                    if capture else {}),
             )
         except KeyboardInterrupt:
@@ -470,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
                 rest = rest[1:]
     module_name = active.module
     if __package__:
-        module_name = f"{__package__}.{module_name}"
+        module_name = f"{__package__.rsplit('.', 1)[0]}.{module_name}"
     module = importlib.import_module(module_name)
     sys.argv = [f"agents-live {cmd}", *rest]
     try:
@@ -507,7 +430,9 @@ def main(argv: list[str] | None = None) -> int:
         # site stays diagnosable.
         if getattr(exc, "category", None) is None:
             raise
-        preflight.emit_typed_error(exc, cmd)
+        _emit_failure(
+            getattr(exc, "category", "operation_failed"), cmd, str(exc),
+            json_mode=json_mode)
         return 1
 
 
