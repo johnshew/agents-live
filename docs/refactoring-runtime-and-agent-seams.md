@@ -1,7 +1,7 @@
 ---
 title: Refactoring Proposal - Runtime and Agent Seams
-description: Proposal to reduce agents-live to two ports (a host runtime manager and an agent execution seam) with platform and provider plugins, plus a thin CLI
-ms.date: 2026-07-31
+description: Proposal to reduce agents-live to two seams, with host adapters, provider plugins, and a thin CLI
+ms.date: 2026-08-07
 ms.topic: concept
 ---
 
@@ -14,22 +14,22 @@ conventions in [README.md](README.md).
 To resume this work later, start at
 [Key learnings and next steps](#key-learnings-and-next-steps), then
 [Picking this up](#picking-this-up) at the end of the document. The
-first records what a long review session established and what is not
-yet folded into the body; the second lists what is decided, what is
-not, and what can begin without waiting for a decision.
+first records what the review established; the second lists what is
+decided, what is not, and what can begin without waiting for a decision.
 
 ## Problem
 
-The package is about 19,000 lines of source against 8,750 lines of
+The package is 18,952 lines of source against 8,753 lines of
 test. (Every line count in this document is non-blank lines,
 `grep -cve '^\s*$'`.)
 The two seams that matter already exist, but neither is explicit:
 
 - The **host seam** is a set of functions (`hostruntime`) plus two
-  parallel trigger stores (`crontasks`, `wintasks`) plus two parallel
-  event sources (`watchsource`, `winwatch`). It works, and
+  parallel trigger stores (`crontasks`, `wintasks`) and one event-source
+  seam (`watchsource`), whose POSIX implementation is inline and whose
+  Windows implementation lives in `winwatch`. It works, and
   [windows-support.md](windows-support.md) records why it is functions
-  rather than a protocol object, but there is no single object that
+  rather than a protocol object, but there is no single path that
   owns "the state of automation on this host".
 - The **provider seam** is `agent_adapters`, a good abstraction that is
   only half applied: adapter quirks and generic execution are
@@ -43,12 +43,13 @@ The costs follow from that:
 1. **Host state has no owner.** `activate` (833), `stop` (48),
    `health_check` (1,014), `doctor` (863), and `schedules` (194) each
    reimplement part of "what should be installed, what is installed,
-   what is the difference". The backlog theme "Host changes that cannot
-   half-finish" ([#226](https://github.com/johnshew/agents-live/issues/226),
-   [#231](https://github.com/johnshew/agents-live/issues/231)) is a
-   symptom of that missing owner, not of five separate bugs - though
-   those two issues concern plugin and executable state rather than
-   triggers: the same convergence gap on different artifacts.
+  what is the difference". The backlog theme "Host changes that cannot
+  half-finish" ([#226](https://github.com/johnshew/agents-live/issues/226),
+  [#231](https://github.com/johnshew/agents-live/issues/231), now
+  closed) illustrates the same failure shape, though those issues
+  concern plugin and executable state rather than triggers. They are
+  evidence for a reusable convergence pattern, not evidence that one
+  host-state owner can make unlike artifacts transactional.
 2. **Liveness leaked into the command surface.** `heartbeat` is a public
    verb about a WSL implementation detail. Nothing outside a WSL host
    should know the word.
@@ -93,12 +94,15 @@ Ordered. Later goals must not be bought at the cost of earlier ones.
 2. **One owner per fact.** Desired automation state, actual automation
    state, and the difference between them are computed in one pure
    function, not in five commands.
-3. **Only primitives cross a seam.** An event carries an agent
-   identifier, never an agent object, because on every supported
-   platform the process that registers a trigger is not the process
-   that services it.
-4. **Every platform and every provider is a plugin, including the
-   built-ins.** No built-in may use a private path.
+3. **Only immutable value records composed of primitives cross a seam.**
+   A firing carries an agent identifier, never an agent object, because
+   on every supported platform the process that registers a trigger is
+   not the process that services it. Host service objects do not cross
+   into the agent port.
+4. **Built-ins use the same contract as their peers.** Provider
+   built-ins register through the provider plugin path. Host built-ins
+   satisfy one internal conformance contract; dynamic host-plugin loading
+   is deferred until an external host implementation exists.
 5. **Reduce line count.** Targets in [Expected size](#expected-size).
    This is an outcome of goals 1 through 4, not an independent goal.
 
@@ -109,52 +113,53 @@ version bump, see [Open decisions](#open-decisions)).
 
 ## Target architecture
 
-Six top-level pieces, two of them ports in the ports-and-adapters
-sense:
+Two seams, composed by the command and dispatch paths:
 
 - **`runtime/`** - the port for "automation on this host": triggers,
   watches, processes, liveness, convergence. Implemented by host
-  plugins: `posix`, `wsl`, `windows`.
+  adapters: `posix`, `wsl`, `windows`.
 - **`agent/`** - the port for "a runnable unit of work": definition,
   invocation, outcome. Implemented by provider plugins: `claude`,
   `copilot`, `fake`, later `api`.
-- **`dispatch.py`** - the only module below the CLI that imports both
-  ports. Turns an event envelope into an agent run.
-- **`state/`** - repository registry, assignment, started state, and
-  the durable subscription index. Sits above both ports.
+- **`dispatch.py`** - the execution handoff between them. Lifecycle
+  commands also compose the two seams when they turn definition metadata
+  into runtime subscriptions; neither seam imports the other.
+- **`state/`** - supporting persistence for the repository registry and
+  started state. Optional assignment policy also lives here. Runtime
+  artifact tracking stays inside `runtime/`.
 - **`obs/`** - event log, timeline, query. Written by both ports,
   owned by neither.
 - **`cli/`** - inspects and changes settings through the ports and
   hands execution to `dispatch`; no execution logic of its own.
 
-The two ports never import each other, and only primitives cross a
-seam. The change lands strangler-fig - each phase releases
+The two ports never import each other, and only primitive value records
+cross a seam. The change lands strangler-fig - each phase releases
 independently over the live system, per the
 [migration sequence](#migration-sequence) - not as a rewrite. Arrows
 below point from depender to dependee.
 
 ```mermaid
 graph TD
-    CLI[cli/ - inspect and change settings] --> RT[runtime/ - port]
+    CLI[cli/ - commands and lifecycle composition] --> RT[runtime/ - port]
     CLI --> AG[agent/ - port]
+    CLI --> ST[state/ - repos and started state]
     RT --> HOSTS[hosts: posix, wsl, windows]
     AG --> PROV[providers: claude, copilot, fake, api]
-    CLI --> DISP[dispatch - the only wiring]
-    DISP -->|consumes Event envelopes from| RT
+    CLI --> DISP[dispatch - execution handoff]
+    DISP -->|consumes firing context from| RT
     DISP -->|resolves target, calls run on| AG
+    DISP --> ST
     RT --> OBS[obs/ - event log, timeline, query]
     AG --> OBS
-    RT --> ST[state/ - repos, assignment, started state, index]
-    AG --> ST
 ```
 
 ### The runtime port
 
 Intentionally small. It initializes the host, keeps itself honest,
-converges a set of subscriptions, and emits events.
+converges a set of subscriptions, and reports firings as primitives.
 
-The user model it serves is three verbs and nothing else. An agent is
-an Agent Skill whose frontmatter says how and when it should execute;
+The user model it serves is three verbs and nothing else. An agent
+definition says how and when it should execute;
 `start` means make that happen automatically here, `stop` means
 stop making it happen, and `run` means do it once now. Convergence is
 how those verbs are kept honest, never something the user is asked to
@@ -173,7 +178,7 @@ already publishes `start`, `stop`, and `run`, and only the words
 behind them lag - the module is `activate.py`, `start`'s help says
 "Activate cron and watcher triggers", and `stop`'s says "Deactivate
 triggers". That is a module rename in phase 2 and a help-text pass in
-phase 8, not a breaking change.
+phase 7, not a breaking change.
 
 One caution comes with the word, and it is narrower than it looks.
 Service managers do split the two ideas deliberately: systemd states
@@ -205,46 +210,37 @@ check-and-repair loop can prune an orphaned trigger
 (`health_check.py`) but can never restore a missing one: converging
 from frontmatter alone would undo every `stop`. The desired set is
 therefore frontmatter *times* the started set that `start` writes
-and `stop` clears, kept in `state/` beside assignment. Recording it is
+and `stop` clears, kept in `state/` beside optional assignment policy.
+Recording it is
 what turns an externally deleted trigger into repairable drift instead
 of a silent stop.
 
-`Runtime` is a facade over three narrow, separately implementable
-protocols. The segregation is not ceremony: the three have different
-lifetimes (durable, process-scoped, per-child), different failure
-modes, and different conformance tests.
+The runtime port is a module-level API over three narrow, separately
+implementable protocols. The segregation is not ceremony: the three
+have different lifetimes (durable, process-scoped, per-child), different
+failure modes, and different conformance tests.
 
-The facade itself is adopted on evidence, not upfront:
+There is deliberately no `Runtime` facade object:
 [windows-support.md](windows-support.md) records building and
 rejecting a `HostRuntime` object once already, because nearly every
 member was a stateless function of the host. With one idempotent
 `converge` and no plan held between calls, the validity window that
-was the likely candidate for instance state no longer exists, so the
-port most probably stays a module of functions plus the three
-protocols. Phase 2 lands it that way and adopts the object form only
-if the prototype produces real instance state; nothing else in this
-document changes either way.
+was the likely candidate for instance state no longer exists. Phase 2
+therefore keeps the proven module-of-functions shape and introduces an
+object only if implementation evidence later finds instance state that
+cannot live in one of the three stateful implementations.
 
 ```python
-class Runtime(Protocol):
-    id: str  # 'posix' | 'wsl' | 'windows'
-    triggers: TriggerStore
-    changes: ChangeSourceFactory | None   # None = host cannot watch
-    processes: ProcessHost
+def converge(subscriptions: Sequence[Subscription], *,
+       dry_run: bool = False) -> Converged:
+  '''Goal-seek: make this runtime match the complete desired set.
+  Host prerequisites and liveness first, then subscriptions.
+  Idempotent - a second call reports nothing to do. dry_run reports
+  the same operations without performing them.'''
 
-    def converge(self, subscriptions: Sequence[Subscription], *,
-                 complete_for: Sequence[str],
-                 dry_run: bool = False) -> Converged:
-        '''Goal-seek: make this runtime match the subscriptions.
-        `complete_for` names the scopes this list is the whole answer
-        for, and is therefore what may be pruned; a subscription
-        outside them is a caller error. Host prerequisites and
-        liveness first, then subscriptions. Idempotent - a second call
-        reports nothing to do. dry_run reports the same operations
-        without performing them, which is what `--dry-run` prints.'''
 
-    def health(self) -> Health:
-        '''Read-only. Liveness is a field here, not a command.'''
+def health() -> Health:
+    '''Read-only. Liveness is a field here, not a command.'''
 
 
 class TriggerStore(Protocol):
@@ -264,8 +260,7 @@ class ChangeSource(Protocol):
 
 
 class ProcessHost(Protocol):
-    '''Process management. `run_child` is the slice agent execution
-    receives by injection; the rest is runtime-internal.'''
+    '''Process management, called by dispatch and runtime internals.'''
     def spawn_detached(self, argv: Sequence[str], **io) -> ProcessRef: ...
     def run_child(self, argv: Sequence[str], **io) -> ChildResult: ...
     def alive(self, ref: ProcessRef) -> bool: ...
@@ -273,18 +268,20 @@ class ProcessHost(Protocol):
     def owned(self, role: str | None = None) -> list[ProcessRef]: ...
 ```
 
-`Event` is produced by a generic loop in `runtime/watchloop.py` that
-consumes a `ChangeSource` and applies debounce, ignore rules, the
-breaker, and duplicate suppression. No host plugin produces an `Event`.
+Primitive firing context is produced by a generic loop in
+`runtime/watchloop.py` that consumes a `ChangeSource` and applies
+debounce, ignore rules, the breaker, and duplicate suppression. No host
+adapter produces dispatch input. Phase 5 first tests whether the current
+argv ingress already carries everything dispatch requires.
 See [Where events are produced](#where-events-are-produced).
 
-Value types, primitives only:
+Runtime value types:
 
 ```python
 @dataclass(frozen=True)
 class Subscription:
     key: str          # stable, derived from scope + target + trigger
-    scope: str        # "runtime:<runtime-id>" (this installation)
+    scope: str        # "runtime:<installation-uuid>" (this installation)
                       # or "repo:<normalized-root>"
     target: str       # "agent:<id>", or "runtime" for the
                       # maintenance loop. Not an object, not a callable.
@@ -316,21 +313,6 @@ class Converged:
     done: tuple[Operation, ...]              # "would do" when dry_run
     failed: tuple[tuple[Operation, str], ...]  # operation, error
     health: Health
-
-@dataclass(frozen=True)
-class Event:
-    spec: str             # envelope schema version; see the firing contract
-    id: str               # correlation id, unique per firing
-    origin: str           # "clock" | "boot" | "watch" | "manual"
-    key: str | None       # subscription key; None for a manual run
-    repo: str
-    target: str           # "agent:<id>"; runtime maintenance emits no Event
-    at: datetime
-    trigger: str | None   # the matched expression, for the dueness gate
-    payload: Mapping[str, str | list[str]]
-    # Small values travel inline; large ones (a changed-file batch) by
-    # state-file reference, which the Windows command-line length
-    # bound already requires (windows-support.md).
 ```
 
 `Subscription` is desired state, computed from the frontmatter of the
@@ -341,29 +323,21 @@ respawn command, never the watch expression, so the store cannot
 reconstruct a `Subscription` and is never asked to. The diff matches
 the two by key and by a fingerprint of the rendered form.
 
-`scope` names a runtime installation, not a machine: native Windows
+The runtime scope names an installation, not a machine: native Windows
 and each WSL distribution on the same hardware are separate runtimes
 that run agents independently (`hostruntime.py`), so the runtime scope
-is spelled with the runtime identity the 2026-07-28 decision log
-already defines, never a bare "host". That identity is a name for an
-installation and has nothing to do with which agents are assigned to
-it. `complete_for` is the second half of the call, and it is what
-makes removal safe. The subscriptions say what should exist;
-`complete_for` says which scopes that list is the *whole* answer for,
-and therefore which scopes may have things removed from them.
-Starting one agent in repository A passes
-`complete_for=("repo:/src/A",)`, so a stale trigger of A's is pruned
-and repository B's entries in the same host-global crontab are not
-touched. The maintenance pass passes every registered repository plus
-the runtime scope, which is what lets it prune anywhere. A repository
-that could not be read is left out of both arguments, so its triggers
-survive untouched.
+uses the installation UUID that the 2026-07-28 identity decision already
+defines, never a host name or the implementation label `posix`. It has
+nothing to do with which agents are assigned to the installation.
 
-Deriving it from the subscriptions instead would lose exactly that
-last case: an empty list for repository B is ambiguous between "B has
-nothing started" and "B could not be read", and one of those two
-meanings deletes B's automation. Stating completeness separately is
-what forces the caller to say which it meant.
+Every lifecycle command collects the complete desired set for the
+registered repositories before calling `converge`; if the repository
+registry or optional assignment policy cannot be read, it does not call
+`converge`. That makes the desired set authoritative without a second
+scope parameter or an `ALL` sentinel. Safe global removal first requires
+each persisted artifact to carry a structured Agents Live marker; until
+that prerequisite lands, convergence removes only artifacts the current
+stores can identify unambiguously.
 
 A watch subscription has a second piece of observed state the store
 cannot see: the running watcher process, which loaded its watch
@@ -371,16 +345,17 @@ expression at spawn. `actual` for a watch subscription is therefore a
 pair - the installed respawn trigger and the running watcher - where
 the watcher is found through `ProcessHost.owned()` and carries the
 fingerprint of the expression it was started with, recorded in the
-subscription index as `WatcherRecord`. A desired fingerprint that
+runtime's artifact index as `WatcherRecord`. A desired fingerprint that
 differs produces a stop-watcher followed by a start-watcher; without
 that, editing a watch expression would take effect only at the next
 reboot.
 
-Convergence deliberately spans the runtime protocols and `state/`.
-Its operation vocabulary - install or remove a
+Convergence deliberately spans the runtime protocols, but not `state/`.
+Started state and optional assignment are inputs already resolved by the
+caller. Its operation vocabulary - install or remove a
 trigger, start or stop a watcher, repair a host prerequisite - is
 interpreted through `TriggerStore`, `ProcessHost`, and the
-subscription index. That vocabulary is internal: it is what `converge`
+runtime's artifact index. That vocabulary is internal: it is what `converge`
 reports and what `status` and `doctor` render into the user's words,
 never something a caller assembles. The exact `Converged`, `Health`,
 `RenderedSubscription`, and `ChildResult` fields are phase-2 design
@@ -406,18 +381,19 @@ in-flight provider child. Stopping does the reverse: confirm
 termination, then remove the record. No unrecorded watcher is ever
 treated as current.
 
-`Event.origin`
-distinguishes the four ways a run begins - `clock` and `boot` split
-what one "schedule" kind used to cover, because only `clock` events
-pass through the dueness gate, and a `manual` run has no subscription
-at all, which is why `key` and `trigger` are optional.
+Firing context distinguishes the four ways a run begins: `clock`,
+`boot`, `watch`, and `manual`. Only `clock` passes through the dueness
+gate. The current `--scheduled`, `--boot`, and changed-file inputs
+already carry that distinction; a full envelope, if selected, must
+preserve it.
 
 Two preconditions carry over from today's `activate`, but they belong
 one layer up rather than in the runtime: see
-[Assignment and started state](#assignment-and-started-state).
+[Started state and optional assignment](#started-state-and-optional-assignment).
 
-One mapping is worth stating, because today's store persists three
-trigger kinds (`triggers.py`: schedule, watcher-respawn, maintenance).
+One mapping is worth stating, because today's scheduling layer persists
+three trigger kinds defined by `triggers.py`: schedule,
+watcher-respawn, and maintenance.
 A `watch` subscription's durable OS artifact is its `@reboot`
 watcher-respawn entry, so `TriggerStore` still holds one artifact per
 subscription of either kind. The host-scoped check-and-repair loop is
@@ -427,7 +403,7 @@ runtime's own convergence rather than to every repository's. It is a
 special case at firing time,
 deliberately: `dispatch` resolves only `agent:` targets through the
 agent port, and the runtime-targeted subscription renders the
-scheduled invocation of `Runtime.converge()` over everything started
+scheduled invocation of `runtime.converge()` over everything started
 on this runtime (today's `internal maintain` entry
 point), so a maintenance firing never enters event dispatch at all.
 
@@ -439,12 +415,12 @@ Windows needs, subscription-key derivation, the pure diff
 and delegates to it; the pure function is what Tier 1 tests exercise),
 orphan detection, and the junk sweep.
 
-What a **host plugin** supplies: the three protocols above, a
+What a **host adapter** supplies: the three protocols above, a
 liveness report, and the host facts `hostruntime` answers today -
 identity, state location, runtime identity, lock acquisition,
 executable pinning, the child environment floor, shell availability,
 and native-tool detection (`hostruntime.py`). That list is longer
-than "three protocols plus liveness", so freezing the plugin contract
+than "three protocols plus liveness", so freezing the adapter contract
 starts with a capability inventory of `hostruntime`'s exports, not
 with this sketch. `wsl` is likewise more than `posix` plus liveness:
 it is a separate environment with its own runtime identity and
@@ -458,11 +434,10 @@ child-output decoding, and the `wslg.exe` windowless launcher.
 triple [windows-support.md](windows-support.md) already requires
 before a termination - plus a role (`watcher` | `provider-child` |
 `maintenance`), so no seam ever passes a bare pid and no sweep ever
-guesses what a process is. Agent
-execution receives the child-execution slice as an injected parameter
-(`dispatch` and the CLI pass it into `agent.run`) rather than
-importing it, which is how a provider stays free of platform knowledge
-and how `agent/` stays free of a `runtime/` import.
+guesses what a process is. `dispatch` turns the agent port's launch
+description into a `ProcessHost.run_child` call and returns the raw value
+record to the agent port for normalization. No provider imports the
+runtime or receives a host service object.
 
 WSL liveness also owns a Windows-side Task Scheduler artifact, and
 replacing it is not yet transactional: today's `heartbeat.install()`
@@ -475,117 +450,60 @@ failure), verify a fresh beacon, and only then swap and remove the old
 tasks and the public command. The migration belongs to WSL liveness
 convergence, not to the generic `TriggerStore`.
 
-### Assignment and started state
+### Started state and optional assignment
 
-Two facts decide what a runtime should be running, and neither belongs
-to the runtime. Both live in `state/`, above the port, and what they
-hand down is a set of agent keys. Nothing below reads an `owner:`
-field, consults the registry, or uses the word ownership: not
-`Runtime`, not `dispatch`, not `cli/`, and not the agent seam, which
-never did.
+One core fact decides what this installation should automate:
+**started state**. It is a machine-local record keyed by repository and
+agent. `start` writes it and `stop` clears it. Frontmatter says how an
+agent would run; it does not say whether this installation should run it.
 
-**Assignment: whose agent is this?** A pure function of the agent
-inventory, the registry snapshot, and this runtime's identity,
-answering one question per agent: is this one mine? Its key is
-`AgentKey`, repository root plus agent id, because a fleet spans
-repositories in which bare agent names collide. `*` means
-every runtime may run it, a named owner means one runtime may, and
-unclaimed means none may until someone claims it. Being pure and
-whole-fleet, it is also the report that is awkward to get today: list
-the agents, see which are wildcard and which are pinned to a single
-machine, and see which machine.
+Assignment is not a second core fact in the default product.
+`ownership.py` defines local mode as the absence of an ownership
+declaration, and in local mode every local agent is mine without a
+registry read. Only a project that opts into the `agents_live.ownership`
+plugin adds an assignment decision. Registry-specific states such as
+wildcard, unclaimed, and transferred belong to that plugin contract,
+not to the runtime model.
 
-**Started state: is it started here?** For the agents that are mine, a
-per-runtime record of started or stopped that `start` writes and
-`stop` clears. Getting a machine running is then exactly what it
-sounds like: make the agents assigned to it match their started or
-stopped state.
+Collection applies one safety question to three inputs: would treating
+this input as empty destroy working automation?
 
-**What convergence is handed.** Collection is a loop with no decisions
-left in it. Read the agent inventory, keep the ones assignment says
-are mine, keep the ones marked started, expand each through
-`Agent.triggers()`, and pass the result down. Three details keep that
-from being naive.
+| Input | Meaning | Failure rule |
+|---|---|---|
+| Repository registry | Where to look | Abstain from convergence; the desired set cannot be bounded. |
+| Optional assignment plugin | Permission to run here | Abstain rather than silently fall back to local mode. |
+| Definitions in a registered repository | What could run | An unreadable repository contributes no subscriptions, so its unusable triggers are pruned and later rebuilt from started state. A malformed definition in a readable repository is an error and aborts convergence rather than masquerading as deletion. |
 
-*It is subscriptions, not agents.* A started agent with two schedules
-and a watch expression is three subscriptions, and the expansion
-happens here, which is how `converge` avoids ever parsing frontmatter.
+After those reads succeed, collection keeps started agents that the
+optional assignment policy permits, expands their trigger declarations
+into subscriptions, and calls `converge` once with the complete set.
+A started agent with two schedules and a watch expression becomes three
+subscriptions. Anything absent is stopped or deleted, so orphan pruning
+is no longer a separate mechanism. The runtime adds its own maintenance
+subscription as a prerequisite; callers never assemble it.
 
-*The absent are the stopped.* Anything inside the authority scope and
-not in the list is removed, which is what "everything else is stopped"
-has to mean to mean anything. Orphan pruning stops being a separate
-mechanism: an agent whose file was deleted is simply not in the list.
-Today that is `activate.prune_orphans` plus a sweep in the repair
-loop; afterwards it is the absence of a line.
+Pruning an unavailable repository is recoverable because started state
+lives outside the repository. The accepted cost is that a fire due while
+the repository is unavailable is lost under the skip misfire policy. A
+repository move is different: `paths.repo_state_key` deliberately keys
+state by resolved absolute path today, so phase 2 must define how the
+existing `repos` operation carries started state to the new path before
+started state relies on that location. This is a migration requirement,
+not a current runtime-state corruption bug.
 
-*A short list is dangerous, so a partial read abstains.* If a
-repository could not be read or the registry was unavailable, the list
-does not mean "fewer agents are started", it means "unknown".
-Collection either drops what it could not read from `complete_for` or
-declines to converge at all. This is assignment's abstain rule
-again and the reason completeness is stated rather than inferred:
-without it, an unmounted drive
-would quietly stop every agent in that repository.
+The optional assignment plugin never invents an owner during a sweep.
+It may materialize a frontmatter `owner:` seed on the first targeted
+start, preserving today's behavior. `start --transfer-here` composes a
+claim followed by a start. `--transfer-to` can retire because it cannot
+complete the receiving side; the operator must run `start
+--transfer-here` there anyway. Ephemeral `_`-prefixed definitions remain
+local to the run that created them and are excluded from persistence.
 
-The runtime adds one subscription of its own, its check-and-repair
-loop, as a host prerequisite. Collection never sees it and no caller
-assembles it.
-
-Convergence therefore receives subscriptions already filtered by both
-facts and has nothing left to decide. There is no request object
-wrapping them: the call takes what should exist and the scopes that
-list is complete for, because those two are all that is left once
-assignment and started state answer upstream, and a two-field wrapper
-would be a name for nothing.
-
-The preconditions that were drafted into the planner are this layer's
-rules, which is where they belonged. Assignment never *invents* an
-owner: an unregistered agent with no frontmatter `owner:` is reported
-and excluded, and an unavailable registry means abstain rather than
-guess. It may *materialize* an owner the frontmatter explicitly
-declares, which is today's behavior at `activate.py`, preserved
-deliberately - frontmatter `owner:` is a seed read the first time an
-agent is started, never a second source of truth afterwards. Claiming
-beyond
-that stays an explicit, single-agent act, and it already has the right
-home: `start --transfer-here` claims for this runtime and then starts,
-which is the only reason anyone claims (`cli_spec.py`). Claiming is
-assignment and starting is convergence, but the user wants both in one
-breath, so the CLI composes them in that order; if the claim succeeds
-and the start fails, the claim stands and re-running the command
-finishes the job.
-
-Its sibling `--transfer-to <identity>` retires. It assigns an agent to
-another runtime and starts nothing here (`activate.py` returns without
-registering), and it does not finish the move either: the receiving
-runtime has no started record, so somebody still has to go there and
-start it. The trip it appears to save is a trip that has to happen
-anyway. What replaces it is one command on the machine that should run
-the agent - `start --transfer-here` - because the losing runtime needs
-no instruction: assignment stops answering "mine", so the agent drops
-out of that runtime's desired set and its next convergence prunes the
-trigger, with the dispatch-time check refusing in the meantime.
-Running `stop` there is a way to make that immediate, not a
-requirement. The modes are stated once,
-here: local (no registry, nothing assigned elsewhere), registry
-unavailable (abstain), wildcard, unclaimed, explicitly declared, and
-ephemeral `_`-prefixed definitions, which belong to the run that
-created them and are exempt from assignment and from sweeps.
-Assignment resolves and seeds before anything reaches the runtime, so
-a failure there converges nothing rather than half of something.
-
-One consequence deserves to be explicit, because it is the only place
-the separation could leak. Assignment can change while a trigger is
-installed: a transfer propagates by git pull, so the losing runtime's
-triggers keep firing until its next convergence prunes them. The
-barrier is at dispatch, and it is deliberately not an ownership check.
-It is the same desired-state question asked for a single key - is this
-subscription still one I should be running? - which assignment feeds
-several layers up while `dispatch` never learns the word. It costs one
-state read on the firing path and fails closed. The alternative,
-letting the losing machine run until its next maintenance pass, is a
-bounded window in which one agent runs on two machines, and for an
-agent that writes files that is not a bounded cost.
+A transfer can propagate before the losing installation next converges.
+The firing path therefore repeats the single desired-state check for the
+subscription key and fails closed. In local mode that check is only
+started state; in registry mode it also consults the optional assignment
+policy. `dispatch` needs no ownership vocabulary.
 
 ### Firing events: what the state of the art actually is here
 
@@ -595,27 +513,24 @@ serviced by a **new process** created by the operating system minutes or
 days after registration. No object graph survives that gap. The only
 things that can cross it are bytes on disk and an argv.
 
-The state of the art for that shape is a **durable subscription plus an
-event envelope**, which is what cron, systemd timers, Task Scheduler,
-EventBridge, and CloudEvents all converge on:
+The common shape is a **durable subscription plus a primitive firing
+ingress**. Cron and Task Scheduler execute argv directly; systems such
+as EventBridge and CloudEvents use richer envelopes. The shared rule is
+durability plus primitive transport, not one mandatory envelope shape:
 
 - Registration writes a **declarative, durable record** (the OS artifact
   plus an index entry). It is idempotent and reconcilable.
-- Firing produces an **envelope of primitives** - id, origin, key,
-  repo, target, timestamp, payload - which the watcher loop hands to
-  the dispatcher in-process, and which a scheduler-launched process
-  rebuilds through an ingress decoder from argv plus, for large
-  payloads, a state-file reference (`agents-live run --name X
-  --changed-files [...]` is that ingress today, in cruder form).
+- Firing supplies the dispatcher with the primitives it needs. Today
+  that is agent id, origin flags, and changed files through argv plus,
+  for large payloads, a state-file reference. A richer envelope remains
+  an option if the phase-5 prototype proves those inputs insufficient.
 - The **dispatcher** resolves target to a runnable. It is the only code
   that knows both halves exist.
 
-This confirms the leaning in the proposal: the seam carries an agent id,
-not a live agent. It also gives a property worth stating as a rule -
-**the in-process path and the cross-process path must produce the same
-envelope**, so that a watcher dispatch and a cron dispatch differ only
-in how the envelope traveled. Today they differ in more than that, which
-is why `run.py` re-derives dueness and ownership per trigger kind.
+This confirms the core rule: the seam carries an agent id, not a live
+agent. The in-process and cross-process paths must produce the same
+dispatch inputs, so a watcher firing and a scheduled firing differ only
+in transport and origin.
 
 Recommended against: asyncio. It buys nothing here (one blocking
 iterator and one reader thread per source is sufficient) and would
@@ -630,11 +545,11 @@ Three options were considered for whether the port streams events.
 
 | Option | Shape | Cost |
 |---|---|---|
-| A. `Runtime.events()` | Port yields fully-policied events | Every host plugin must be handed the policy engine or reimplement it. Registration and streaming are forced to share one lifetime they do not have. |
-| B. Generic loop over a raw source | Host supplies `ChangeSource`; `runtime/watchloop.py` applies policy and yields `Event` | One more named module. |
+| A. `Runtime.events()` | Port yields fully-policied events | Every host adapter must be handed the policy engine or reimplement it. Registration and streaming are forced to share one lifetime they do not have. |
+| B. Generic loop over a raw source | Host supplies `ChangeSource`; `runtime/watchloop.py` applies policy and yields primitive firing context | One more named module. |
 | C. Two independent ports | `TriggerStore` and `ChangeSource` as peers, no facade | Every caller has to know which host capabilities exist before it can ask a question. |
 
-**Decision: B, with C's segregation kept inside the facade.** The port
+**Decision: B, with C's segregation kept inside the runtime module.** The port
 surface stays small, policy stays generic and testable with no host
 present, and a host that cannot watch reports `changes is None` rather
 than raising from a method it was obliged to declare. Registration is
@@ -644,15 +559,13 @@ makes, and it is the mistake the current code makes implicitly.
 
 ### The firing contract
 
-Three rules the envelope needs and today's code leaves implicit. They
-are fixed in the runtime core rather than exposed as frontmatter:
-none is a decision an agent author has the information to make, and
-the field count in [Goals](#goals) should not grow. If one ever needs
-to vary per agent it becomes an option clause in the schedule
-expression, which costs no new field.
+Two behavior rules are fixed in the runtime core rather than exposed as
+frontmatter: concurrency and misfire. A third transport rule applies
+only if the full envelope is selected. None should grow the author-facing
+field count in [Goals](#goals).
 
-**The envelope is versioned.** `Event.spec` carries the envelope
-schema version, and the argv ingress carries it too. This is not
+**If the full envelope is selected, it is versioned.** Its `spec` field
+carries the envelope schema version, and the argv ingress carries it too. This is not
 bookkeeping: the process that writes a durable trigger and the process
 that services it are separated by an operating system and, across an
 upgrade, by a release boundary. A cron line written by 5.5 fires into
@@ -697,29 +610,33 @@ by each host. Sketches, deliberately close to today's behavior:
 Schedule expression:
 
 ```ebnf
-schedules   = schedule , { ";" , schedule } ;
 schedule    = special | cron ;
-special     = "@reboot" ;
+special     = "@reboot" | "@yearly" | "@annually" | "@monthly"
+            | "@weekly" | "@daily" | "@midnight" | "@hourly" ;
 cron        = minute sp hour sp dom sp month sp dow ;
 minute      = field ;   (* 0-59  *)
 hour        = field ;   (* 0-23  *)
 dom         = field ;   (* 1-31  *)
-month       = field ;   (* 1-12  *)
-dow         = field ;   (* 0-7, 7 folded onto 0 *)
+month       = field ;   (* 1-12 or JAN-DEC *)
+dow         = field ;   (* 0-7 or SUN-SAT; 7 folded onto 0 *)
 field       = item , { "," , item } ;
-item        = ( "*" | number | range ) , [ "/" , number ] ;
-range       = number , "-" , number ;
+item        = ( "*" | value | range ) , [ "/" , number ] ;
+range       = value , "-" , value ;
+value       = number | name ;
+name        = letter , { letter } ;
 number      = digit , { digit } ;
 ```
 
-This is exactly today's language - five-field cron plus `@reboot`
-(`triggers.py`) - with two additions that change no behavior: an agent
-that declares several schedules (allowed today as a YAML list) carries
-them in one string separated by `;`, each becoming its own
-subscription; and the parsed form is re-rendered canonically, so
-comparison and hashing never depend on the author's spelling. New `@`
-specials (`@hourly` and kin) were considered and dropped: they would
-change user-visible behavior, which is a non-goal.
+This preserves the language accepted today: a `schedule` field is one
+string or a YAML list of strings, and each string is five-field Vixie cron,
+including month and weekday names, plus the eight `@` keywords validated
+by `headless.py`. The shared parser currently handles only numeric fields
+and `@reboot`, so the other accepted forms do not translate on Windows;
+the grammar must close that existing portability gap rather than silently
+remove accepted POSIX behavior. Each list item becomes its own
+subscription and is re-rendered canonically, so comparison and hashing
+never depend on the author's spelling. New `@` specials beyond the eight
+already accepted remain out of scope.
 
 Watch expression:
 
@@ -747,20 +664,15 @@ yield.
 
 ### The agent port
 
-An agent builds on an Agent Skill: the definition file is a conforming
-skill, and this package adds extension frontmatter and processes it.
-Loaded, that file becomes a handle you can run.
+The agent port owns definition loading and provider-specific preparation
+and normalization, not trigger registration or process creation.
+Lifecycle orchestration reads trigger declarations from the loaded spec
+and produces runtime subscriptions above both ports.
 
 ```python
-def load(agent_id: str, *, root: Path) -> Agent: ...
-
-class Agent:
-    id: str
-    spec: AgentSpec
-    def triggers(self) -> list[Subscription]:
-        """What this agent wants registered. Value types only."""
-    def run(self, request: Request) -> Outcome:
-        """Normalized in, normalized out. Never raises for agent failure."""
+def load(agent_id: str, *, root: Path) -> AgentSpec: ...
+def prepare(spec: AgentSpec, request: Request) -> Launch: ...
+def finish(spec: AgentSpec, launch: Launch, raw: RawOutput) -> Outcome: ...
 ```
 
 `Request` carries input text, changed files, and environment overlay.
@@ -771,12 +683,16 @@ closed taxonomy (the categories `headless.py` already emits: `timeout`,
 `handler_crash`, `pre_processor_crash`, `agent_invalid`, `empty_output`, and the hierarchy's base
 `agent_error`, which stays as the explicit catch-all so the union is
 closed rather than open through inheritance).
-Exceptions stay internal to the port; the seam returns values.
+Exceptions stay internal to the port; the seam returns values. `dispatch`
+is the only caller that composes `prepare`, `ProcessHost.run_child`, and
+`finish`. Phase 5 places generic retry and cleanup against the fake CLI
+evidence without widening the provider contract.
 
-`Agent.triggers()` is the answer to "ask the agent for its schedule
-stream and filesystem stream". The agent produces `Subscription` value
-objects; the CLI or the reconciler hands them to the runtime; the
-runtime never learns what an agent is.
+Trigger expansion deliberately is not an `Agent` method. Otherwise the
+agent execution port must import the runtime's `Subscription` type,
+contradicting the port boundary. Lifecycle orchestration reads the
+definition's primitive schedule and watch declarations and constructs
+subscriptions; the runtime never learns what an agent is.
 
 ### The provider plugin
 
@@ -802,13 +718,14 @@ a wider protocol; that call belongs to phase 5, made against evidence.
 
 `Launch` is either a subprocess description (argv, env, temp config
 files, whether a pty is required, whether TUI noise must be filtered) or
-a direct call description for a future API-router provider. Everything
-else - timeout, retry, streaming, size cap, JSON extraction and repair,
-schema validation, path-root enforcement, provenance, logging, error
-classification - is generic and lives once in `agent/invocation.py`.
-That split is the single largest line reduction available in the
-package, because it is the interleaving inside `headless.py` that makes
-each of those concerns cost more than it should.
+a direct call description for a future API-router provider. `dispatch`
+owns timeout, retry, streaming, process cleanup, and conversion from
+`ChildResult` to the primitive `RawOutput` record. The agent port owns
+provider-independent size caps, JSON extraction and repair, schema and
+path-root validation, provenance, and error classification. Logging is
+through `obs/`. That split is the single largest line reduction available
+in the package, because it removes the interleaving inside `headless.py`
+without passing a process service into the agent seam.
 
 ### The runtime selector grammar
 
@@ -847,40 +764,39 @@ reject any use of the bare word for the agent side.
 ### The CLI
 
 `cli/` is a separate directory whose only permitted imports are the two
-ports, `dispatch`, `obs`, and `state`. It constructs a runtime, reads
+ports, `dispatch`, `obs`, and `state`. It calls the runtime module, reads
 health and what is started, and converges. `start`, `stop`, and
 `run` keep exactly the meanings they have today under their present
 names; `--dry-run` prints
 what would change. No verb, flag, help string, or error text names a
 plan, a diff, or a convergence pass.
-A one-shot `run` builds an envelope with origin `manual` - no
-subscription key, no trigger expression - and hands it to `dispatch`,
-so a user-invoked run and a cron-invoked run travel the same path and
-differ only in origin and how the envelope was produced. The CLI contains no event loop, no argv
+A one-shot `run` hands `dispatch` primitive context with origin
+`manual`, so a user-invoked run and a scheduled run travel the same path
+and differ only in origin and transport. The CLI contains no event loop, no argv
 construction for a provider, and no platform branch. The declarative
 `cli_spec` approach is good and should survive intact.
 
 ### state/, obs/, and dispatch
 
-`state/` and `obs/` exist today and will re-scatter across the ports
-unless they are named:
+The `state/` and `obs/` responsibilities exist today and will re-scatter
+across the ports unless they are named:
 
-- **`state/`** - the repository registry, assignment, started state,
-  and the durable subscription index. `repos.py`, `ownership.py`, and
-  `paths.py` are already close to this.
+- **`state/`** - the repository registry, started state, and optional
+  assignment policy. `repos.py`, `ownership.py`, and `paths.py` are
+  already close to this. Runtime artifact records do not live here.
 - **`obs/`** - the JSONL event schema, `qlog`, `timeline`. Both ports
   write to it; neither owns it. Keeping it separate is what lets a
   runtime test assert on emitted events without importing an agent.
 
 And one that is genuinely new: **`dispatch.py`**, roughly 150 lines,
-the only module below the CLI that imports both ports. Its surface is
-`dispatch(event, context)`: the watch loop calls it in-process, and a
-scheduler-launched process reaches it through an ingress decoder that
-rebuilds the envelope from argv and the state-file payload reference,
-refusing an envelope version it does not know.
+the execution handoff between the ports. Phase 5 chooses its smallest
+sufficient surface. The watch loop calls it in-process, and a
+scheduler-launched process reaches it through the argv ingress and any
+state-file payload reference. If the full envelope is selected, this is
+also where its decoder refuses an unknown version.
 The still-desired check, the not-due gate (`clock` events only;
 `boot`, `watch`, and `manual` are never "not due"), the concurrency
-skip, and envelope-to-request translation
+skip, and firing-context-to-request translation
 live there. The still-desired check re-reads `state/` at firing time
 and fails closed, which is what covers the window between an
 assignment change and the losing runtime's next convergence -
@@ -923,13 +839,13 @@ do - runs one tier up against the fake host, since converging is I/O
 by definition and does not belong in this tier.
 
 **Tier 2 - host conformance suite, plus an in-tree `fake` host.** One
-abstract test class, run against every registered host plugin, skipped
+abstract test class, run against every host adapter, skipped
 when the platform is not present. The fake host (in-memory trigger
-store, scripted change source, recording process host) registers
-through the same entry point as the real ones and is what runtime-core
+store, scripted change source, recording process host) is selected by
+tests through the same internal contract and is what runtime-core
 and dispatcher tests run against. Install, list, remove, install twice, remove what is not
-there, enumerate after an external edit. Shipped in the package so a
-third-party host plugin runs the same suite. This replaces per-platform
+there, enumerate after an external edit. The conformance suite can be
+published if an external host adapter appears. This replaces per-platform
 duplicate tests and gives the Windows half a real signal, which the
 backlog identifies as the platform receiving the most change and the
 least CI attention.
@@ -946,17 +862,16 @@ paired with a **deterministic fake CLI executable** - a tiny program
 the real invocation path launches - which is what exercises argv
 quoting, output decoding, kill-on-timeout, and process-tree cleanup:
 the paths [#184](https://github.com/johnshew/agents-live/issues/184)
-says keep shipping defects. The fake host and fake provider register
-through the same plugin entry points as the real implementations -
-the payoff of goal 4, and what makes the plugin rule testable rather
-than aspirational; the fake CLI is not a plugin itself but the
+says keep shipping defects. The fake provider registers through the
+same plugin entry point as the real providers; the fake host uses the
+internal host contract. The fake CLI is not a plugin itself but the
 executable the provider's `Launch` points at.
 
-**Tier 4 - seam contract tests.** The runtime emits envelopes into a
-recorded corpus; the dispatcher is tested against that corpus. Neither
+**Tier 4 - seam contract tests.** The runtime emits firing contexts into
+a recorded corpus; the dispatcher is tested against that corpus. Neither
 side is ever tested against a mock of the other. Down the road the
 corpus grows into a log-driven simulator: `obs/` records every
-envelope and outcome, so a field incident can be replayed against the
+firing and outcome, so a field incident can be replayed against the
 fakes and kept as a regression test.
 
 **Tier 5 - architecture fitness functions.** Cheap, non-flaky,
@@ -966,11 +881,8 @@ whole-package invariants of exactly the kind the backlog says pay off:
 - `cli/` does not import `hosts/` or `providers/`.
 - `sys.platform`, `os.name`, and WSL detection appear only under
   `runtime/hosts/`.
-- Every built-in host and provider is registered through the same entry
-  point mechanism a third party would use.
-- Every shipped template and smoke fixture passes `skills-ref
-  validate`, so conformance to the Agent Skills specification cannot
-  drift silently.
+- Every built-in host satisfies the host conformance suite, and every
+  built-in provider uses the provider registration path.
 
 **Tier 6 - `smoketest` as the release gate only.** Real CLIs, real
 host, one end-to-end path per platform. It stops being a coverage
@@ -981,15 +893,16 @@ mechanism.
 Strangler-fig, not a rewrite. Each phase lands independently, keeps the
 suite green, and can be released.
 
-1. **Carve out `state/` and `obs/`.** Pure moves. No behavior change.
-   Establishes the fitness-function tests early, when they are cheap to
-   satisfy.
+1. **Land architecture fitness functions around the existing modules.**
+  Move files only when a later extraction gives the move a behavioral
+  boundary; directory churn is not a prerequisite for testing imports.
 2. **Introduce the runtime port over today's stores.** Move
    `crontasks`, `wintasks`, `winwatch`, `watchsource` behind
-   `hosts/posix.py` and `hosts/windows.py`. Add the pure diff and the
-   single `converge`. Lift assignment and started state into `state/`
-   as the two facts above the port, so that the runtime receives an
-   already-filtered set and a trigger removed behind the tool's back
+  `hosts/posix.py` and `hosts/windows.py`. Add the pure diff and the
+  single `converge`. Add machine-local started state above the port and
+  treat assignment as an optional policy, so that the runtime receives
+  an already-filtered complete set and a trigger removed behind the
+  tool's back
    is repairable drift rather than a silent stop. Put
    `start`, `stop`, and `doctor` on that
    one path and delete their bespoke convergence: the verbs keep
@@ -998,92 +911,78 @@ suite green, and can be released.
    convergence reaches the command surface, and `--prune-orphans`
    retires, because pruning is what convergence does with anything
    absent from the list.
-   Add the host conformance suite. Treat assignment resolution,
-    watcher record ordering, unrecorded-process cleanup,
-    and restart-on-fingerprint-change as phase acceptance criteria,
-    exercised over the shapes that actually break: same-named agents in
-    different repositories, native Windows plus WSL on one machine,
-    wildcard and unavailable registries, a transfer landing mid-pass,
-    partial-scope reconciliation, and watcher-only
-    cleanup with a provider child alive.
+   Add the structured artifact marker before global pruning and add the
+   host conformance suite. Treat optional assignment resolution, watcher
+   record ordering, unrecorded-process cleanup, and
+   restart-on-fingerprint-change as phase acceptance criteria, exercised
+   over the shapes that actually break: same-named agents in different
+   repositories, native Windows plus WSL on one machine, wildcard and
+   unavailable registries, a transfer landing mid-pass, an unavailable
+   repository, and watcher-only cleanup with a provider child alive.
 3. **Fold liveness into `hosts/wsl.py` and land `ProcessHost`.** Remove
    the `heartbeat` command. Absorb `hidden.py`, `spawn.py`, and
    `hostruntime`'s child execution into `ProcessHost`, and add the
-   durable dispatch budget in the same phase, since the budget exists
-    to bound what process spawning makes possible. Stage the replacement
-    heartbeat task under a distinct name, verify a fresh beacon, then
-    swap and remove the old invocation - never `-Force` over a working
-    registration; removing `heartbeat` is the first visible
-    simplification for a user.
-4. **Land the grammars.** Schedule, watch, and selector,
-   with a validator and a clear failure message. This is the breaking
-   release; it needs its own migration note. `start --transfer-to`
-   retires here, since a move is one `start --transfer-here` on the
-   machine that should run the agent.
+  durable dispatch budget in the same phase, since the budget exists
+  to bound what process spawning makes possible. Stage the replacement
+  heartbeat task under a distinct name, verify a fresh beacon, then
+  swap and remove the old invocation - never `-Force` over a working
+  registration; removing `heartbeat` is the first visible
+  simplification for a user.
+4. **Resolve the author-facing grammars.** Independently unify schedule
+  validation and translation around today's accepted language. Land the
+  watch and selector grammars only if the open decision finds that they
+  simplify both authoring and implementation; that choice is the
+  breaking release and needs a migration note. `start --transfer-to`
+  can retire in phase 2 once started state makes the receiving-side gap
+  explicit.
 5. **Carve out the agent port.** Split `headless.py` into
    `definition`, `invocation`, and `result`; move quirks into
    `providers/claude.py` and `providers/copilot.py`; add `providers/
    fake.py`, the fake CLI executable, and the provider conformance
    suite; shrink `smoketest`. Extract `dispatch.py`.
 6. **Move the CLI into `cli/`** and enforce its import boundary.
-7. **Adopt the skill layout**, if the layout-level position in
-   [Open decisions](#open-decisions) is chosen: `<skill>/SKILL.md`
-   directories, handlers under `scripts/`, and the `skills-ref
-   validate` gate. A migration of what a definition is, so it gets its
-   own release and its own migration note.
-8. **Simplify the repository's language and documentation.** Once the
-    names, ports, and optional skill layout are stable, review every
-    README, `AGENTS.md`, `.agents/` guide, design document, shipped skill
-    document, template, example, CLI help string, and relevant code
-    comment. Present one consistent model: an Agent Skill is the
-    definition, Agents Live adds local automation, the runtime owns host
-    subscriptions, and providers execute runs. Remove retired terms and
-    duplicated architecture explanations, keep the root README and
-    shipped overview synchronized, and validate links, frontmatter,
-    templates, and examples. Each earlier phase still updates the docs it
-    directly changes; this final pass is for cross-repository coherence,
-    not deferred documentation.
+7. **Simplify the repository's language and documentation.** Once the
+   names and ports are stable, review every README, `AGENTS.md`,
+   `.agents/` guide, design document, shipped skill document, template,
+   example, CLI help string, and relevant code comment. Present one
+   consistent model: an agent definition describes work, Agents Live
+   adds local automation, the runtime owns host subscriptions, and
+   providers execute runs. Remove retired terms and duplicated
+   architecture explanations, keep the root README and shipped overview
+   synchronized, and validate links, frontmatter, templates, and
+   examples. Each earlier phase still updates the docs it directly
+   changes; this final pass is for cross-repository coherence, not
+   deferred documentation.
 
-Phases 1 and 2 are mechanical and low risk. Phase 3 changes process
+Phase 1 is low risk; phase 2 changes lifecycle behavior and is not
+mechanical. Phase 3 changes process
 management and liveness and is not; it sits early because everything
-after it builds on `ProcessHost`. Phases 4 and 7 are the ones that
-affect existing user agents. Phase 5 is the largest and should be
+after it builds on `ProcessHost`. Phase 4 affects existing user agents.
+Phase 5 is the largest and should be
 sliced by concern (output normalization first, then argv construction,
 then MCP), each slice guarded by the fake provider and fake CLI added
-at the start of the phase. Phase 8 follows the last terminology-changing
-phase that is selected, whether or not phase 7 is chosen.
+at the start of the phase. Phase 7 follows the last terminology-changing
+phase.
 
-## The definition standard
+## Agent Skills is separate work
 
-The target is the **Agent Skills** open format, specified at
-<https://agentskills.io/specification>. It was released by Anthropic as
-an open standard and is now implemented by Claude Code, GitHub Copilot,
-VS Code, Gemini CLI, OpenAI Codex, Cursor, Goose, OpenCode, and others.
-There is a reference validator, `skills-ref validate`, and a spec
-repository at `github.com/agentskills/agentskills`.
+The **Agent Skills** open format is specified at
+<https://agentskills.io/specification>, with the `skills-ref` reference
+validator. Its field and layout facts below were verified on 2026-08-07.
 
-One boundary keeps this honest: Agent Skills is a definition standard,
-not an execution standard. The specification defines an instruction
-bundle a client loads; it says nothing about providers, triggers,
-isolation, or invocation. The relationship is layered, and deliberate:
-**this package builds on Agent Skills** - the file stays a conforming
-skill any client can read, and this package adds extension frontmatter
-and processes it. The skill spec governs the definition; this package
-governs execution. That is the pattern the code already applies to
-native agent directories (`headless.py`: a file in `.claude/agents/`
-is a standard definition, and carrying `schedule:`/`watchPath:` makes
-it *also* a scheduled agent). Adopting the skill layout is therefore a
-migration of what a definition is, not a path rename, and the
-migration sequence gives it its own phase.
+The specification defines an instruction bundle that a client loads. It
+does not define an independently runnable agent, provider invocation,
+triggers, isolation, or lifecycle. The current files under
+`.claude/agents/` and `.github/agents/` are client agent definitions, not
+conforming Agent Skills, and changing them to `<skill>/SKILL.md` would be
+a product-format migration rather than an implementation detail of the
+runtime seams.
 
-The rationale for taking the ecosystem's word for it is already
-recorded outside this repository, in the engineering leadership repo
-plan of 2026-07-25: `SKILL.md` is an open standard and a private
-synonym would cost more than it buys. That note also draws the line
-this refactoring holds to - the definition is inert, and automating it
-on a schedule or a trigger is a separate per-machine choice made with
-additional tooling. That is precisely the `agent` / `runtime` split
-proposed here.
+This proposal therefore makes no agent-equals-skill claim and does not
+use Agent Skills metadata constraints to justify runtime grammars. A
+separate proposal may evaluate whether a skill bundle should become an
+additional definition source or replace current agent definitions. That
+decision is not required for any migration phase in this document.
 
 ### The normative frontmatter
 
@@ -1105,28 +1004,21 @@ adds `model`, `effort`, `context`, `agent`, `background`,
 `when_to_use`. Other clients add their own. A field being widely
 recognized is not the same as it being in the specification.
 
-### What this settles
+### What a separate packaging proposal must address
 
-**The extension mechanism already exists: `metadata`.** Of the 25
+**The extension mechanism exists, but has a cost.** Of the 25
 fields parsed today, 24 are outside the Agent Skills specification
 (`description` is native); retiring the `handler` alias leaves 23,
 and the watch and selector collapses reduce that to 20 extension
-keys. This count includes runtime fields, `owner`, and
-`timeout`; the nineteen fields confined to the agent seam are not the
-whole metadata surface. The extension keys belong under `metadata`
-with the `agents-live.` prefix (`agents-live.schedule`,
-`agents-live.allow-tools`, and so on - one prefix, stated once, used
-everywhere), and a conforming reader that has never heard of this
-package still reads the file correctly.
+keys. This count includes runtime fields, `owner`, and `timeout`. If a
+future format adopts Agent Skills conformance, those extension keys
+would need to live under `metadata` with a unique prefix.
 
-**`metadata` values are strings.** That constraint arrives from the
-specification, independently of anything argued in this document, and
-it is the strongest available argument for the single-string grammars
-proposed above. A schedule, a watch expression, and a provider selector
-can each be one string. A YAML list of `watchIgnore` patterns or a
-nested `output-schema` object cannot live in `metadata` at all without
-being encoded. Two of the three grammars were proposed here for a
-different reason and turn out to be required for conformance.
+**`metadata` values are strings.** A schedule, a watch expression, and a
+provider selector could each be one string. A YAML list of
+`watchIgnore` patterns or a nested `output-schema` object would require
+encoding. That is a cost of a possible packaging choice, not a reason
+for the runtime refactor to choose a string grammar.
 
 The three grammars are not the whole mapping, though. The
 metadata-level position is not implementable until every extension
@@ -1158,9 +1050,9 @@ at. That mapping is part of the open decision, not an afterthought.
   `assets/` available - the natural home for the handlers that
   `pre-processor` and `post-processor` point at today.
 
-**A free conformance test.** `skills-ref validate` becomes a tier-5
-fitness function over the shipped templates and the smoke fixtures, so
-the package cannot drift from the standard silently.
+**A conformance test is available.** If a separate migration adopts the
+skill layout, `skills-ref validate` should gate its templates and smoke
+fixtures.
 
 ## Field inventory
 
@@ -1173,20 +1065,20 @@ table; it is the input to that decision.
 
 | Field | Shape today | Role |
 |---|---|---|
-| `schedule` | string or list of cron expressions, `@reboot` | Becomes one or more schedule subscriptions. |
+| `schedule` | string or list of cron expressions or accepted `@` keywords | Becomes one or more schedule subscriptions. |
 | `watchPath` | string or list of repo-relative paths | Directories to open a `ChangeSource` on. |
 | `watchIgnore` | list of patterns | Policy input to the generic watch loop. |
 | `debounce` | seconds | Policy input to the generic watch loop. |
 
-**Consumed above both seams:**
+**Consumed by optional assignment policy:**
 
 | Field | Shape today | Role |
 |---|---|---|
 | `owner` | identity string or `*` | Seed for assignment in `state/`, read the first time an agent is started. Neither seam ever sees it. |
-| `timeout` | seconds, default 120 | Enforced generically around provider execution. A provider that owns its own timeout cannot be held to a common contract. |
 
 **Consumed by the agent seam only,** listed so the boundary is visible:
 `runtime`, `model`, `mode`, `allow-tools`, `mcps`, `env`, `transcript`,
+`timeout`,
 `pre-processor`, `post-processor`, `handler` (a compatibility alias
 for `post-processor`; see [Defects](#defects-found-while-writing-this)),
 `output-schema`, `output-max-bytes`, `output-path-roots`,
@@ -1206,13 +1098,13 @@ Observations that bear on the collapse decision:
 - `owner` is not a definition concern at all: it seeds assignment in
   `state/` the first time an agent is started, and after that the
   registry answers. Neither seam reads it.
-- Nineteen of twenty-five fields never leave the agent seam. Whatever
+- Twenty of twenty-five fields never leave the agent seam. Whatever
   the runtime refactoring does, it should not touch them.
-- Of those nineteen, only `description` is an Agent Skills
+- Of those twenty, only `description` is an Agent Skills
   specification field outright. `allow-tools` resembles the spec's
   `allowed-tools` but deliberately does not map onto it - the two are
   different security contracts (see the conflicts under
-  [What this settles](#what-this-settles)). `tools`, `user-invocable`,
+  [What a separate packaging proposal must address](#what-a-separate-packaging-proposal-must-address)). `tools`, `user-invocable`,
   `disable-model-invocation`, and `argument-hint` are carried in the
   code as ecosystem-standard metadata; they are Claude Code
   extensions, not specification fields. The comment should be
@@ -1265,7 +1157,7 @@ Downsides, and how each is handled:
 | A write on the firing path can fail or be contended, especially under a Windows file lock | Fail open. A breaker that cannot read its own state must not stop work. |
 | Corrupt or stale state silently stops every agent | Fail open, auto-reset after the window, and expose the state as a `health()` field so it is readable without parsing logs. |
 | Per-subscription counters multiply the write cost by the number of subscriptions | One global counter avoids this entirely. |
-| A tripped breaker looks like agents stopping for no reason | Trip loudly: an admin-log error, a `health()` field, and a line in `status`. This is the same gap [#123](https://github.com/johnshew/agents-live/issues/123) records. |
+| A tripped breaker looks like agents stopping for no reason | Trip loudly: an admin-log error, a `health()` field, and a line in `status`. |
 | Clock skew or reboot corrupts a sliding window | Store absolute timestamps, discard any entry in the future, and let a reboot empty the window. Emptying is the safe direction. |
 
 The scheduled case is worth naming precisely: cron and Task Scheduler
@@ -1276,40 +1168,29 @@ seam should therefore land in the same phase.
 
 ## Open decisions
 
-1. **How far to conform.** Building on Agent Skills is settled; what
-   remains is where the extension frontmatter lives and whether to
-   adopt the layout. Three positions, in increasing cost:
-   - **Field-level.** Keep the flat `Agents/<name>.md` layout and the
-     extension fields at the top level. `allow-tools` keeps its own
-     name either way: renaming it onto the spec's `allowed-tools`
-     would merge two different security contracts (see
-     [Defects](#defects-found-while-writing-this)). Cheap, and still
-     not conforming.
-   - **Metadata-level.** Move the extension fields under `metadata`
-     with the `agents-live.` prefix (20 after the documented collapses;
-     the `handler` alias is retired rather than moved). Requires the
-     string-valued grammars, which is the collapse this document
-     proposes anyway.
-   - **Layout-level.** Also adopt `<skill>/SKILL.md` with `name`
-     matching the directory, which brings `scripts/` and `references/`
-     as the home for handlers. Largest change, and the only position
-     where `skills-ref validate` passes.
+1. **Do the grammars earn a breaking release?** The watch and provider
+  selector strings must simplify authoring and implementation on their
+  own merits. Agent Skills metadata is not a justification. If selected,
+  the repository rule requires a clean break, a major version bump from
+  5.5.2, and a migration note.
+2. **What does a repository move do to started state?** The current state
+  key intentionally hashes the resolved absolute path. Before phase 2
+  stores intent there, the existing `repos` operation must either move
+  that state explicitly or document that moving a repository stops its
+  agents.
+3. **Does the full event envelope earn its fields?** A stable scheduler
+  ingress already carries agent id, origin flags, and changed files.
+  Before adding schema version, subscription key, target, timestamp, and
+  a decoder, phase 5 must show which required behavior cannot be derived
+  inside the launched process.
 
-   The layout question is the real decision; the field questions follow
-   from it.
-2. **The break itself.** Any of the three positions breaks existing
-   agent definitions, and the third breaks their file paths as well.
-   The repository rule forbids compatibility shims, so this is a major
-   version bump with a migration note and, at most, a one-release
-   validator that explains the new form when it sees the old. Current
-   version is 5.5.2. The verbs are not part of it: `start`, `stop`,
-   and `run` are already the published names.
+Agent Skills packaging is separate work and gates none of these decisions.
 
 ## Consequences
 
 Accepted costs:
 
-- One breaking release for agent authors.
+- One breaking release for agent authors only if the grammars are selected.
 - Task Scheduler XML generation stays large; the plan does not shrink
   it, and pretending otherwise would produce a worse abstraction.
 - A new named module (`dispatch.py`) whose only job is wiring, which is
@@ -1323,17 +1204,22 @@ Gains beyond line count:
   and `converge` reports per-operation results, so what remains after
   a failure is printable and the remedy is to run the same command
   again. Convergence covers
-  subscriptions; the plugin-convergence and executable-replacement
-  halves of [#226](https://github.com/johnshew/agents-live/issues/226)
-  and [#231](https://github.com/johnshew/agents-live/issues/231) need
-  the same fingerprint-and-precondition pattern applied to their own
-  artifacts - enabled here, not delivered.
-- A third-party host or provider is a first-class citizen, with a
-  conformance suite to prove it.
+  subscriptions. Open issue
+  [#226](https://github.com/johnshew/agents-live/issues/226) still needs
+  that pattern for plugin convergence; closed issue
+  [#231](https://github.com/johnshew/agents-live/issues/231) is evidence
+  that executable replacement needs its own transactional mechanism.
+- Every built-in host adapter satisfies one conformance suite; providers
+  remain extensible through their existing plugin path.
 - A future direct-to-API provider is a plugin, not a fork of the
   execution path.
 
 ## Review feedback not acted on, and why
+
+This section is a historical review log, not part of the target contract.
+It records how earlier drafts changed and therefore mentions concepts
+removed by the current body. Where it differs from the body, the body is
+authoritative.
 
 A design review on 2026-07-31 produced nine findings. The accepted
 ones are already folded into the sections above: the Agent Skills
@@ -1345,12 +1231,9 @@ acted on, or only partly, and the reasoning - recorded so the next
 reader does not re-litigate it without new evidence.
 
 **"`state/` and `obs/` are directories, not cohesive abstractions;
-moving them first is churn without a behavioral seam."** Not acted
-on. Phase 1's purpose is not a behavioral seam; it is landing the
-import-boundary fitness functions while they are cheap to satisfy,
-and pure moves are reversible. The fair kernel of the point - both
-ports free-writing JSONL couples them to a concrete schema - is an
-argument for naming `obs/` as the schema's owner, not against it.
+moving them first is churn without a behavioral seam."** Acted on in
+the 2026-08-07 review. Phase 1 now lands fitness functions around the
+existing modules; files move only with the behavior they come to own.
 
 **"Replace `prepare`/`parse` with a full provider lifecycle (start,
 events, cancel, close)."** Partly acted on. Streaming normalization
@@ -1361,31 +1244,23 @@ visible once the fake CLI exercises real invocation. Deferred to
 phase 5, decided on evidence.
 
 **"The `Runtime` facade repeats an abstraction windows-support.md
-already rejected."** Partly acted on. The history is real and is now
-cited in the port section; the response is prototype-first - planner
-as pure functions, the object form only if real instance state shows
-up - rather than withdrawing the facade. The earlier rejection
-predates the plan/apply lifecycle, which is the one candidate for
-genuine state. Round six removed that candidate by withdrawing
-plan/apply, so the module-of-functions outcome is now the expected
-one.
+already rejected."** Acted on in the 2026-08-07 review. The port keeps
+the proven module-of-functions shape; its three stateful capabilities
+retain their narrow interfaces.
 
 **"Use versioned JSON or a sidecar automation file instead of a
-whitespace-sensitive DSL."** Not acted on. If the extension fields
-move under `metadata`, the specification forces string values
-regardless, so some string encoding is unavoidable, and hashability
-comes from canonical re-rendering, which the grammar section now
-states. A sidecar file would reopen the one-file definition and
-create a second artifact to keep consistent. Revisit only if the
-metadata-level position is rejected.
+whitespace-sensitive DSL."** Reopened in the 2026-08-07 review. Agent
+Skills metadata no longer forces this refactor to use strings, so each
+grammar must justify itself against the existing YAML shapes without
+appealing to a separate packaging decision.
 
 **"Reorder the migration around contracts: event ingress, planner,
 process services, provider lifecycle, then the format break."**
 Mostly the existing order already. The one visible difference -
 dispatch landing in phase 5 - stands, because dispatch needs both
 ports, and extracting it before the agent port exists would wire it
-to `headless.py` only to rewire it a phase later. The sequence did
-gain phase 7, the layout migration, from this feedback.
+to `headless.py` only to rewire it a phase later. The unrelated layout
+migration was later removed from this proposal.
 
 A second review round (also 2026-07-31) produced seven findings and
 two corrections. All were folded in above - the
@@ -1524,11 +1399,9 @@ scope must leave it out rather than shorten its list.
 ## Key learnings and next steps
 
 Ten review rounds are summarized above as they were folded in. This
-section is different: it records what the rounds *taught*, separately
-from what they changed, and it flags the conclusions from the last
-session (2026-08-02 and 2026-08-03) that are **not yet folded into the
-body**. Where this section and the body disagree, this section is
-later and wins; the body is corrected in step 1 of the next steps.
+section records what the rounds taught, separately from what they
+changed. The 2026-08-07 verification folded the actionable conclusions
+into the body; the body is authoritative.
 
 ### Learnings already reflected in the body
 
@@ -1559,46 +1432,36 @@ later and wins; the body is corrected in step 1 of the next steps.
    fields and one call site, and deleting it was better than renaming
    it. Watch for the same shape elsewhere.
 
-4. **Name the obligation, not the consequence.** `covers` described
-   what would happen (these scopes get pruned) and left the caller to
-   infer the duty. `complete_for` states the duty (this list is the
-   whole answer for these scopes) and lets pruning follow. The rename
-   came directly from a reader asking what the argument was for -
-   which is the reliable signal that a name is not carrying its
-   meaning.
+4. **Delete a parameter when its ordinary value is constant.** Scoped
+  completeness became an `ALL` sentinel once every lifecycle command
+  enumerated every registered repository. Making collection a
+  precondition of one global convergence call deletes both the scope
+  parameter and the sentinel.
 
 5. **One word, one meaning.** Active, activated, enabled, and started
    were four spellings of one bit. The state is now started or
    stopped, and "running" is reserved for a run in flight, which the
    concurrency rule needs it to mean.
 
-6. **The firing contract had three silent holes**, all now closed in
-   the runtime core rather than as new frontmatter fields: a versioned
-   envelope the ingress decoder can refuse (a 5.5 cron line fires into
-   a 6.0 binary), concurrency policy fixed at skip, and misfire policy
-   fixed at skip. The concurrency rule unified a real split - Windows
-   sets `MultipleInstancesPolicy=IgnoreNew` while cron happily
-   overlaps the same agent.
+6. **The firing contract had three silent questions.** Concurrency and
+  misfire are fixed at skip in the runtime core. Envelope versioning is
+  required only if phase 5 selects the full envelope. The concurrency
+  rule unifies a real split: Windows sets
+  `MultipleInstancesPolicy=IgnoreNew` while cron happily overlaps the
+  same agent.
 
-### Learnings not yet folded into the body
+### Learnings folded in the 2026-08-07 review
 
-These came from the last session and supersede parts of
-[Assignment and started state](#assignment-and-started-state) and the
-`converge` signature.
-
-7. **Ownership is an optional plugin, not a core concept.** This is
-   the largest correction outstanding.
+7. **Ownership is an optional plugin, not a core concept.**
    [ownership.py](../src/agents_live/ownership.py) makes registry mode
    opt-in per project: `mode()` returns `"local"` unless the project
    config declares `ownership = "registry"`, and registry mode
    additionally requires a backend the public kernel does not ship
    ("multi-host ownership is a private plugin... the public kernel is
    local-only"). In a default install, assignment answers "yes, mine"
-   for everything in a registered repository, so it is a constant. The
-   body currently spends a paragraph on six ownership modes and states
-   the registry-revision rule as though it were core; it should lead
-   with local mode being the definition of "mine" and treat the
-   registry as a plugin that can answer differently.
+  for everything in a registered repository, so it is a constant.
+  Local mode is the definition of "mine"; registry-specific states
+  stay in the optional plugin contract.
 
 8. **Three inputs, one rule, three answers.** The rule is: *does
    removing this destroy working automation?*
@@ -1606,14 +1469,13 @@ These came from the last session and supersede parts of
    | Input | Kind | Where it lives | Unreadable means |
    |---|---|---|---|
    | The list of places (`repos.py`) | Where to look | `~/.config/agents-live/config.toml` | Nothing can be derived. Abstain. |
-   | Assignment | Permission | Absent by default; plugin when declared | Last verified answer stands. |
+    | Assignment | Permission | Absent by default; plugin when declared | Abstain rather than fall back to local mode. |
    | Definitions in a place | Content | Inside each repository | Nothing to derive. Prune its triggers. |
 
    Started state is a fourth fact, but it is an output of `start` and
    `stop` rather than an input to be read from elsewhere.
 
-9. **An unreadable repository should have its triggers pruned.** This
-   reverses the abstain rule the body still states. A crontab line is
+9. **An unreadable repository should have its triggers pruned.** A crontab line is
    `cd /src/C && agents-live run --name foo`; if C is unreadable that
    run fails anyway, so leaving the trigger installed preserves
    nothing but a failing run every interval, log noise, and a `status`
@@ -1623,7 +1485,7 @@ These came from the last session and supersede parts of
    correctly, and their triggers would be deleted for a fact that
    merely could not be confirmed.
 
-10. **Pruning is safe because the intent is not in the repository.**
+10. **Pruning is recoverable because the intent is not in the repository.**
     Started state is keyed by (repo, agent) and lives under
     `paths.state_home()`; `repo_state_dir` is already machine-local
     and outside the project tree ("runtime state never lives inside a
@@ -1632,29 +1494,24 @@ These came from the last session and supersede parts of
     frontmatter times started state. Prune and restore is automatic.
     The real fragility is elsewhere and worth checking before relying
     on this: `repo_state_key` hashes the *resolved absolute path*, so
-    a repository that is **moved** gets a fresh state directory and
-    silently loses its started set. Unreadable is recoverable; moved
-    is not.
+    a repository that is **moved** receives a new state directory. Phase
+    2 must define that move before
+    started state relies on the path-keyed directory.
 
-11. **Enumerate every registered repository on every convergence.** A
+11. **Enumerate every registered repository before every convergence.** A
     handful of repositories and tens of local definition files is
-    milliseconds. Once enumeration is unconditional, `complete_for`
-    stops varying: `start`, `stop`, and the maintenance pass all
+    milliseconds. `start`, `stop`, and the maintenance pass all
     converge everything and differ only in what they write first. That
     collapses several questions at once - orphan sweeping happens on
     every command rather than only in the background pass, and stale
     renderings written by an older version are replaced rather than
-    accumulating. The argument survives as `Sequence[str] | ALL`, with
-    `ALL` as the normal value and a narrowed list as the degraded one.
+    accumulating. If collection cannot bound the desired set, it does
+    not call `converge`.
 
-12. **Only `ALL` can sweep an unregistered repository's leftovers.** A
-    list of scopes never reaches them, by construction: every scope
-    named is honest about not covering the others, so entries under a
-    scope nobody claims survive forever. `ALL` asserts "this list is
-    the complete answer for everything this runtime owns", which is
-    the claim that licenses removing them. Its precondition is reading
-    the list of places successfully; anything less falls back to
-    naming the scopes actually read, and the sweep is simply deferred.
+12. **Global convergence can sweep an unregistered repository's
+    leftovers only after collection succeeds and artifacts identify
+    themselves structurally.** Without both conditions, the sweep
+    abstains.
 
 13. **Exhaustive pruning requires a structured marker first.** Today
     the crontab store identifies its own lines by token-matching the
@@ -1677,7 +1534,7 @@ These came from the last session and supersede parts of
 ### Prior art worth keeping in view
 
 A survey of comparable systems confirmed the core choices - durable
-subscription plus event envelope, primitives across the seam, a pure
+subscription plus primitive ingress, primitives across the seam, a pure
 diff, delegating scheduling to the OS, no asyncio. Watchman is the
 strongest confirmation: its `trigger` is durable and survives daemon
 restart while its `subscribe` dies with the client, which is
@@ -1722,34 +1579,16 @@ findings remain unadopted and should be weighed in phase 2 and 3:
 
 ### Next steps
 
-In order. Steps 1 and 2 are documentation and issue hygiene; the rest
-is the migration sequence.
-
-1. **Fold learnings 7 through 14 into the body.** Rewrite
-   [Assignment and started state](#assignment-and-started-state)
-   around the three-input table, demote ownership to an optional
-   plugin, change the `converge` signature so the scope argument is
-   `Sequence[str] | ALL` with `ALL` as the ordinary case, replace the
-   "a partial read abstains" rule with the split answer, and add
-   learnings 10 and 14 as stated costs. Update the settled-questions
-   table rows for "Where ownership lives" and "What convergence is
-   handed", which are now wrong.
-2. **File the issues.** The three defects under
-   [Defects](#defects-found-while-writing-this), plus two new ones
-   from this session: the moved-repository state-key fragility
-   (learning 10) and the trigger-marker prerequisite (learning 13).
-   Per the repository rule, a work item becomes a GitHub issue before
-   it is started.
-3. **Start phase 1** - carve out `state/` and `obs/`, land the tier-5
-   fitness functions. Nothing gates it.
-4. **Phase 2, marker first.** Land the structured trigger marker
-   before exhaustive convergence, then the rest of the phase. The
-   phase acceptance criteria already listed still apply; add
-   unreadable-repository pruning and moved-repository state to them.
-5. **Decide the Agent Skills conformance position**, which gates
-   phase 4 and phase 7 and is the one question in
-   [Still needing a decision](#still-needing-a-decision) that nothing
-   else can proceed past.
+1. **File the verified current defects** under
+  [Defects](#defects-found-while-writing-this) before implementing
+  them, per the repository rule.
+2. **Land phase 1 fitness functions** without moving modules.
+3. **Resolve repository-move semantics and land the structured artifact
+  marker** before global convergence in phase 2.
+4. **Prototype the minimum dispatch ingress** before committing to the
+  full event envelope in phase 5.
+5. **Decide the watch and selector grammars on their own merits** before
+  scheduling the breaking phase 4 release.
 
 ## Picking this up
 
@@ -1764,35 +1603,31 @@ something below them changes.
 
 | Question | Answer | Section |
 |---|---|---|
-| What the user has to understand | Three verbs. An agent is a skill whose frontmatter says how and when it runs; `start` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
+| What the user has to understand | Three verbs. An agent definition says how and when it runs; `start` makes that happen automatically, `stop` stops it, `run` does it once. Everything else is mechanism and stays invisible. | [The runtime port](#the-runtime-port) |
 | Does the port expose plan and apply | No. One idempotent `converge` plus `health`; the diff and the operation vocabulary are internal, and `--dry-run` is a flag on the pass. | [The runtime port](#the-runtime-port) |
 | What says an agent runs here | A recorded started-or-stopped fact in `state/`, not frontmatter. Otherwise convergence would undo every `stop`. | [The runtime port](#the-runtime-port) |
-| Where ownership lives | Above everything, as assignment in `state/`. It hands down a set of agent keys; the runtime, dispatch, the CLI, and the agent seam never read an owner. | [Assignment and started state](#assignment-and-started-state) |
-| What convergence is handed | Subscriptions of the agents that are assigned here and started here, plus the scopes that list is complete for. A partial read abstains rather than shortening the list. | [Assignment and started state](#assignment-and-started-state) |
-| Callbacks or something else for firing events | Neither: a durable subscription plus an envelope of primitives. The registering process is never the servicing process. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
-| Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields `Event`. | [Where events are produced](#where-events-are-produced) |
-| What the firing contract fixes | A versioned envelope the ingress decoder can refuse, concurrency policy skip, and misfire policy skip. All in the runtime core; none becomes a frontmatter field. | [The firing contract](#the-firing-contract) |
-| Which skill standard | Agent Skills, <https://agentskills.io/specification>. | [The definition standard](#the-definition-standard) |
-| How do package-specific fields fit the standard | Under `metadata`, which the specification provides for exactly this. | [What this settles](#what-this-settles) |
+| Where ownership lives | Outside the runtime as an optional assignment policy. Local mode has no assignment decision; registry mode can veto a run. | [Started state and optional assignment](#started-state-and-optional-assignment) |
+| What convergence is handed | The complete subscription set after repository collection, started-state filtering, and optional assignment. Failed collection means no convergence call. | [Started state and optional assignment](#started-state-and-optional-assignment) |
+| What crosses a scheduled firing | A stable argv ingress of primitives. Whether it needs the full proposed envelope remains open. | [Open decisions](#open-decisions) |
+| Does the port stream events | No. A host supplies a raw `ChangeSource`; a generic loop applies policy and yields primitive firing context. | [Where events are produced](#where-events-are-produced) |
+| What the firing contract fixes | Concurrency policy skip and misfire policy skip. Envelope versioning applies only if the full envelope is selected. | [The firing contract](#the-firing-contract) |
+| How Agent Skills relates | It is a separate packaging question, not an agent execution standard or a phase of this refactor. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
 | Generalize the circuit breaker | Yes, as one durable budget per project per host, fail-open, not per subscription. | [Circuit breakers](#circuit-breakers) |
 | Where do spawned and ephemeral agents belong | Split: process lifecycle to `ProcessHost` in the runtime seam, definition lifetime to `state/`. | [Process management](#process-management) |
 | Asyncio | No. | [Firing events](#firing-events-what-the-state-of-the-art-actually-is-here) |
-| Is an agent a different thing from a skill | No: an agent is a conforming Agent Skill plus extension frontmatter this package processes. The skill spec governs the definition; this package governs execution. | [The definition standard](#the-definition-standard) |
-| How the pieces are tested | A fake per plugin seam - host, provider, and a fake provider CLI executable - each registered through the same entry points as the real implementations; later, a log-driven simulator replays recorded envelopes. | [Testing approach](#testing-approach) |
+| Is an agent a different thing from a skill | Yes. Current agent definitions and Agent Skills are distinct client concepts; a separate proposal may define a relationship. | [Agent Skills is separate work](#agent-skills-is-separate-work) |
+| How the pieces are tested | A fake host through the internal host contract, a fake provider through the provider plugin path, and a deterministic fake CLI for subprocess behavior. | [Testing approach](#testing-approach) |
 
 ### Still needing a decision
 
-1. **How far to conform to Agent Skills.** Field-level, metadata-level,
-   or layout-level. The layout question gates the rest, and only the
-   third position passes `skills-ref validate`. See
-   [Open decisions](#open-decisions).
-2. **The breaking release.** Every conformance position breaks existing
-   agent definitions; the third breaks their paths. Needs a version
-   plan and a migration note. Current version is 5.5.2.
+1. **Whether the watch and selector grammars justify a breaking
+  release.**
+2. **How repository moves carry machine-local started state.**
+3. **Whether dispatch needs the full proposed event envelope.**
 
 ### Defects found while writing this
 
-Both are real today and independent of whether this refactoring
+These are real today and independent of whether this refactoring
 proceeds. They should be filed as issues rather than left in this
 document.
 
@@ -1810,19 +1645,18 @@ document.
 - `headless.py` parses `handler` as a compatibility alias for
   `post-processor` (`handler_path` resolves `post_processor or
   handler`). The repository rule forbids compatibility shims; the
-  breaking release should retire the alias rather than carry it into
-  `metadata`.
+  next breaking release should retire the alias.
+- Schedule validation accepts seven aliases beyond `@reboot` and Vixie
+  month or weekday names, while the shared parser used by Windows
+  handles only numeric fields and `@reboot`. A definition can therefore
+  validate and run on POSIX but fail during native Windows registration.
 
 ### What can start without any decision
 
-Phase 1 of the [migration sequence](#migration-sequence): carve out
-`state/` and `obs/` as pure moves, and land the tier-5 architecture
-fitness functions while they are still cheap to satisfy. Neither
-depends on a conformance position, a grammar, or a breaking release,
-and the fitness functions are what keep the later phases honest.
+Phase 1 of the [migration sequence](#migration-sequence): land the
+tier-5 architecture fitness functions around the current modules. It
+depends on none of the open decisions.
 
-Phase 2 can follow if the runtime port is wanted independently of the
-frontmatter question: moving `crontasks`, `wintasks`, `winwatch`, and
-`watchsource` behind `TriggerStore` and `ChangeSource`, and replacing
-five convergence implementations with one convergence path, requires no
-change to any agent definition.
+Phase 2 can follow after repository-move semantics and the structured
+artifact marker are settled. It requires no agent-definition format
+change.
