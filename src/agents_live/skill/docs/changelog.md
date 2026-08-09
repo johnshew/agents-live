@@ -6,44 +6,52 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- feature: discover flat `<name>.md` definitions and standard
-  `<name>/SKILL.md` bundles from repository-relative configured directories,
-  with path-derived canonical identifiers for duplicate names.
+- feat!: definitions are conforming Agent Skills with namespaced execution metadata.
+  A definition is `Agents/<name>/SKILL.md`, or `<name>.md` in a configured
+  discovery root. Execution policy is quoted `agents-live.*` metadata under
+  schema version 1, and every definition gets a path-derived canonical
+  identifier so two roots may hold the same name.
+
+  BREAKING CHANGE: the runtime contains no old-format loader. Run
+  `agents-live migrate` once per repository to convert 5.x definitions;
+  `handler` is retired in favour of `agents-live.post-processor`, whose
+  failures report `post_processor_crash`. The public `heartbeat` command is
+  removed and WSL liveness is converged automatically. The canonical watch
+  expression changes every watcher fingerprint, so each started watcher
+  restarts once after the upgrade.
+- refactor: the package is organised around a runtime port and an agent port.
+  Immutable primitive records cross each seam, one convergence path owns host
+  state, and `dispatch.py` is the single handoff. Command handlers live under
+  `cli/`, host implementations under `runtime/hosts/`, durable intent under
+  `state/`, observability under `obs/`, and one-major-cycle 5.x migration
+  code under `legacy/`.
 - fix: one unreadable definition no longer removes a repository's automation.
   Discovery stopped at the first failure, so collection reported the whole
   repository as empty and convergence withdrew every trigger and watcher it
-  owned, on the five-minute maintenance schedule and without being asked.
-  A parse failure is now isolated and reported by `status` and `doctor`, and
-  a repository that will not resolve at all keeps its installed artifacts.
-- fix: `agents-live logs timeline` starts again instead of failing on an
-  import before reading a single argument.
-- fix: `agents-live migrate` accepts `allow-tools`, names the offending file
-  in every error, and explains what to do about `owner` and about a 5.x
-  runtime that carried arguments.
-- fix: `agents-live run --json` reports the run outcome, including its status
-  and failure category, rather than the agent's text alone.
-- fix: `agents-live stop` still works once a definition file has been deleted,
-  which is when withdrawing its automation matters most.
-- fix: a run lock that cannot be read is abandoned after a day rather than
-  blocking that agent forever.
-- fix: `agents-live start` says when a definition it started declares no
-  schedule or watch, so an agent that can never fire is not reported as
-  started with nothing else said.
-- breaking: definitions are conforming `Agents/<name>/SKILL.md` directories.
-  Execution policy is quoted `agents-live.*` metadata under schema version 1.
-  The one-shot `agents-live migrate` command converts safe 5.x definitions;
-  the runtime contains no old-format loader.
-- refactor: runtime, agent, state, observability, dispatch, provider, host, and
-  CLI seams now enforce immutable primitive records and one convergence path.
-- refactor: package source follows those ownership seams: command handlers and
-  scripts live under `cli/`, host implementations under `runtime/hosts/`,
-  durable intent under `state/`, observability tools under `obs/`, and
-  one-major-cycle 5.x migration and cleanup code under `legacy/`.
-- breaking: `handler` is retired, post-processor failures are
-  `post_processor_crash`, and the public `heartbeat` command is removed.
-  WSL liveness is converged automatically through a staged, verified task.
-- note: the 6.0 canonical watch expression changes every watcher fingerprint,
-  so each started watcher restarts once after upgrade.
+  owned, on the five-minute maintenance schedule and without being asked. A
+  parse failure is now isolated and reported by `status` and `doctor`. A
+  repository that will not resolve, and a started definition that will not
+  parse, keep the artifacts they already own until they resolve again or are
+  stopped.
+- fix: `agents-live logs timeline` starts again. (#255)
+  It failed on an import before reading a single argument, which took away one
+  of the two commands the diagnostics guidance tells you to use.
+- fix: `agents-live migrate` converts the definitions it was refusing. (#255)
+  `allow-tools` was rejected as an unknown field although the converter
+  already handled it, every error now names the file it came from, and the
+  refusals for `owner` and for a runtime carrying arguments explain what to
+  do instead.
+- fix: `agents-live run --json` reports the run outcome. (#255)
+  Machine consumers received the agent's text with no status or failure
+  category, so a skip and a crash looked alike.
+- fix: `agents-live stop` works once a definition file has been deleted.
+  That is when withdrawing its automation matters most.
+- fix: `agents-live start` reports what it could not start. (#255)
+  A definition that declares no schedule or watch is called out instead of
+  reported as started, and `--all` exits nonzero when it skipped anything.
+- fix: a run lock that cannot be read is abandoned after a day. (#255)
+  An unreadable lock named no owner to wait for and blocked that agent
+  permanently.
 - fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
   The continuation reads the upgraded tool's receipt instead of its temporary
   environment, so declared plugins and their ownership backends are restored.

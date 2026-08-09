@@ -66,23 +66,26 @@ The slices done so far point at one shape worth repeating. An invariant
 that states a rule about the whole package - no subprocess capture may
 rely on the platform locale - costs less than the mock tests it replaces,
 cannot drift as the package grows, and runs on hosts where the defect it
-guards cannot be reproduced. That last property matters most on Windows,
-where the platform receiving the most change is the one CI sees least.
-An assertion about a literal in one file is the anti-pattern: it breaks
-on unrelated edits and proves nothing. A test is not finished until the
-fix has been removed and the test watched to fail.
+guards cannot be reproduced. An assertion about a literal in one file is
+the anti-pattern: it breaks on unrelated edits and proves nothing. A test
+is not finished until the fix has been removed and the test watched to
+fail.
 
 The corollary, learned the hard way: a Windows-only test that flakes is
-worse than no test, because on that platform it is the only signal and
-an untrustworthy signal invites ignoring the suite.
+worse than no test, because an untrustworthy signal invites ignoring the
+suite.
 
-What these slices have not done is change the balance #184 was filed
-about. The suite has grown from 45 classes and 420 tests to 58 and 527
-at a constant ~1.45 patch calls per test, so the mock-driven population
-is keeping pace rather than shrinking. The decision #184 poses - convert
-those classes, or state plainly that their job is import and signature
-breakage rather than behaviour - is still open, and incremental slices
-will not make it for us.
+The 6.0 architecture work retired the 527-test mock-heavy suite and
+replaced it with a small portable one over memory hosts and fake
+providers. That resolved the ratio #184 was filed about, but not the
+question behind it. The first release review found three defects the new
+suite could not see, because it verified structure where behaviour was
+what mattered: convergence removing artifacts it could not account for, a
+diagnostic command that failed at import, and a migrator that refused most
+real 5.x definitions. Structural invariants are necessary and cheap; they
+are not sufficient. What #184 still has to settle is which behaviours are
+owed an executing test, now that there is no large mock population to
+argue about.
 
 ## Safer execution modes in practice
 

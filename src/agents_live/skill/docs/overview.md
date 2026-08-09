@@ -71,9 +71,10 @@ waits for a fresh beacon, and only then replaces the prior task.
   state, process records, logs, credentials, or host assignment.
 
 Malformed definitions fail closed. An unreadable registry or started-state
-record causes convergence to abstain rather than prune. An unreadable
-registered repository contributes no desired subscriptions, so its owned
-artifacts are removed.
+record causes convergence to abstain rather than prune. Two narrower failures
+hold rather than withdraw what is already installed: a registered repository
+that cannot be read, and a started definition that no longer parses. Both are
+reported by `status` and `doctor`, and `stop` still withdraws either one.
 
 ## Architecture
 

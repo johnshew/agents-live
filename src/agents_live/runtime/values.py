@@ -34,6 +34,7 @@ class RenderedSubscription:
     fingerprint: str
     rendered: str
     watcher_argv: tuple[str, ...] = ()
+    target: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,9 @@ class InstalledTrigger:
     kind: str
     fingerprint: str
     rendered: str
+    # Empty for an artifact written before targets were recorded; such an
+    # artifact simply cannot be protected by target.
+    target: str = ""
 
 
 @dataclass(frozen=True)

@@ -83,17 +83,22 @@ diff, and convergence do not become additional user lifecycle states.
 2. load each repository's started identifiers;
 3. resolve definitions and optional ownership;
 4. translate schedules and watches into runtime subscriptions; and
-5. call `runtime.converge()` with the desired set and the scopes it could
-   not compute.
+5. call `runtime.converge()` with the desired set and whatever it could not
+   compute.
 
 Missing input is never read as an instruction to delete, but the blast radius
 is matched to what is actually unknown:
 
 | Failure | Effect |
 |---|---|
-| One definition fails to parse | Isolated and reported; the rest of its repository converges normally |
-| A repository is unreadable, or its configured discovery roots are invalid | Its scope is protected: its installed artifacts are left in place, and every other repository converges |
+| A definition fails to parse and is not started | Isolated and reported; the rest of its repository converges normally |
+| A definition fails to parse and is started | Its target is protected: its own artifacts are held, and its neighbours converge normally |
+| A repository is unreadable, or its configured discovery roots are invalid | Its scope is protected: its installed artifacts are held, and every other repository converges |
 | The registry or a started-state file is unreadable | Convergence does not run at all |
+
+Protection holds an artifact; it does not pin it. `stop` removes the
+identifier from started intent, which also removes it from the protected set,
+so withdrawing a broken definition always works.
 
 The last case is the only one that stops everything, because started intent is
 the record of what the user asked for. Without it there is no desired set to

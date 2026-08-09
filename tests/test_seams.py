@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +19,7 @@ from agents_live import (
     agent, obs, paths, runtime, state,
 )
 from agents_live.cli import lifecycle
-from agents_live.cli.commands import uninstall
+from agents_live.cli.commands import run, stop, uninstall
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import health_check, triggers
 from agents_live.state import ownership
@@ -392,6 +395,50 @@ class TestStartedState(TempRepository):
         finally:
             runtime.configure(previous)
 
+    def test_a_started_definition_that_stops_parsing_keeps_its_trigger(self) -> None:
+        """Editing a started definition into an invalid state is not a stop.
+
+        Its desired state becomes unknown rather than empty, so the artifact
+        is held until the file parses again or the user stops it.
+        """
+        directory = self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        prompt = directory / "SKILL.md"
+        good = prompt.read_text(encoding="utf-8")
+        identifier = agent.load("sample", root=self.root).identifier
+        registry = {"repos": {"sample": str(self.root)}, "default_repo": "sample"}
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with mock.patch.object(
+                    lifecycle.repos, "load", return_value=registry):
+                self.assertFalse(lifecycle.converge(
+                    additions={self.root: {identifier}}).failed)
+                started = {item.key for item in host.trigger_store.list()}
+
+                prompt.write_text(
+                    good.replace(
+                        '  agents-live.selector: "fake"\n',
+                        '  agents-live.mystery: "x"\n'),
+                    encoding="utf-8")
+                collected = lifecycle.collect(persist=False)
+                self.assertIn(
+                    f"agent:{identifier}", collected.protected_targets)
+                self.assertFalse(lifecycle.converge().failed)
+                self.assertEqual(
+                    started, {item.key for item in host.trigger_store.list()})
+
+                # Protection must not outrank an explicit stop.
+                self.assertFalse(lifecycle.converge(
+                    removals={self.root: {identifier}}).failed)
+                remaining = {item.key for item in host.trigger_store.list()}
+                self.assertEqual(1, len(remaining), "only maintenance remains")
+        finally:
+            runtime.configure(previous)
+
     def test_unreachable_repository_keeps_its_installed_triggers(self) -> None:
         self.skill("good", [
             'agents-live.selector: "fake"',
@@ -474,6 +521,21 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
             )
             self.assertTrue(lock.acquire())
             lock.release()
+
+    def test_unreadable_run_lock_expires_instead_of_blocking_forever(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = _RunLock(root, "sample")
+            lock.path.parent.mkdir(parents=True)
+            lock.path.write_text("{ this is not json", encoding="ascii")
+
+            fresh = _RunLock(root, "sample")
+            self.assertFalse(fresh.acquire(), "a fresh unreadable lock is held")
+
+            os.utime(lock.path, (0, 0))
+            aged = _RunLock(root, "sample")
+            self.assertTrue(aged.acquire(), "an aged unreadable lock is taken")
+            aged.release()
 
 
 class RecordingRunner:
@@ -563,6 +625,47 @@ class TestAgentPipeline(TempRepository):
         )
         self.assertFalse(result.ok)
         self.assertEqual("agent_invalid", result.category)
+
+    def test_run_json_reports_the_outcome_not_only_the_text(self) -> None:
+        self.skill("reported", ['agents-live.selector: "copilot:max"'])
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            mock.patch.object(run.paths, "resolve_root", return_value=self.root),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = run.main(["--name", "reported"])
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("failed", payload["status"])
+        self.assertEqual("agent_invalid", payload["category"])
+        self.assertTrue(payload["message"])
+
+    def test_stop_withdraws_a_definition_whose_file_is_gone(self) -> None:
+        directory = self.skill("departed", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        identifier = agent.load("departed", root=self.root).identifier
+        state.replace(self.root, {identifier})
+        shutil.rmtree(directory)
+        host = MemoryHost()
+        registry = {"repos": {"sample": str(self.root)}, "default_repo": "sample"}
+        previous = runtime.current()
+        runtime.configure(host)
+        stdout = io.StringIO()
+        try:
+            with (
+                mock.patch.object(stop.paths, "resolve_root", return_value=self.root),
+                mock.patch.object(lifecycle.repos, "load", return_value=registry),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = stop.main(["--name", "departed"])
+        finally:
+            runtime.configure(previous)
+        self.assertEqual(0, code, stdout.getvalue())
+        self.assertNotIn(identifier, state.load(self.root).agents)
 
 
 class TestArchitectureFitness(unittest.TestCase):

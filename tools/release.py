@@ -530,6 +530,8 @@ def _gate_commands() -> list[list[str]]:
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_smoke.py"],
+        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+         "tests/test_seams.py"],
         _smoketest_command(),
         ["uv", "build"],
     ]

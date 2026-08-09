@@ -19,6 +19,7 @@ class Collected:
     legacy: tuple[tuple[Path, str], ...] = ()
     broken_definitions: tuple[tuple[Path, str], ...] = ()
     protected_scopes: tuple[str, ...] = ()
+    protected_targets: tuple[str, ...] = ()
 
 
 def collect(
@@ -47,6 +48,7 @@ def collect(
     unavailable: list[str] = []
     protected: list[str] = []
     broken: list[tuple[Path, str]] = []
+    broken_by_root: dict[Path, tuple[agent.BrokenDefinition, ...]] = {}
     for root, readable in roots:
         if not readable:
             unavailable.append(str(root))
@@ -61,6 +63,7 @@ def collect(
             discovered[root] = {}
         else:
             broken.extend((item.path, item.message) for item in root_broken)
+            broken_by_root[root] = root_broken
 
     owners: dict[str, str] | None = None
     if not ownership.local_only():
@@ -129,12 +132,21 @@ def collect(
                     continue
             desired.extend(definitions.get(identifier, ()))
     desired.append(_maintenance())
+    # A started definition that stopped parsing has an unknown desired state,
+    # not an empty one, so its artifacts are held rather than withdrawn.
+    protected_targets = [
+        f"agent:{identifier}"
+        for root, items in broken_by_root.items()
+        for identifier in (item.identifier_in(root) for item in items)
+        if identifier in snapshots.get(root, frozenset())
+    ]
     return Collected(
         tuple(desired),
         tuple(unavailable),
         tuple(legacy),
         tuple(broken),
         tuple(protected),
+        tuple(protected_targets),
     )
 
 
@@ -153,6 +165,7 @@ def converge(
         collected.subscriptions,
         dry_run=dry_run,
         protected_scopes=collected.protected_scopes,
+        protected_targets=collected.protected_targets,
     )
     if dry_run or converged.failed:
         return converged

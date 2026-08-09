@@ -85,6 +85,7 @@ class WindowsTriggerStore:
                 marker["kind"],
                 marker["fingerprint"],
                 json.dumps(task, sort_keys=True, default=str),
+                marker.get("target", ""),
             ))
         return found
 
@@ -215,6 +216,7 @@ class WindowsHost:
             "key": subscription.key,
             "kind": subscription.kind,
             "scope": subscription.scope,
+            "target": subscription.target,
         })
         executable = shutil.which("agents-live")
         if executable is None:
@@ -253,6 +255,7 @@ class WindowsHost:
             fingerprint,
             rendered,
             watcher_argv,
+            subscription.target,
         )
 
     def legacy_agents(self, root: str) -> set[str]:

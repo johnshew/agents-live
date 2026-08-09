@@ -23,7 +23,7 @@ class MemoryTriggerStore:
     def install(self, rendered: RenderedSubscription) -> None:
         self.installed[rendered.key] = InstalledTrigger(
             rendered.key, rendered.scope, rendered.kind,
-            rendered.fingerprint, rendered.rendered)
+            rendered.fingerprint, rendered.rendered, rendered.target)
 
     def remove(self, key: str) -> None:
         self.installed.pop(key, None)
@@ -99,6 +99,7 @@ class MemoryHost:
             fingerprint,
             json.dumps({"target": subscription.target}, sort_keys=True),
             watcher_argv,
+            subscription.target,
         )
 
     def health(self) -> Health:

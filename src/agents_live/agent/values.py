@@ -71,10 +71,7 @@ class AgentSpec:
 
     @property
     def identifier(self) -> str:
-        relative = self.prompt_path.resolve().relative_to(
-            self.root.resolve()).as_posix().casefold()
-        path_hash = sha256(relative.encode("utf-8")).hexdigest()[:10]
-        return f"{self.name}-{path_hash}"
+        return identifier_for(self.root, self.prompt_path, self.name)
 
 
 @dataclass(frozen=True)
@@ -86,6 +83,17 @@ class BrokenDefinition:
     def name(self) -> str:
         """The name it would be addressed by, known without parsing it."""
         return self.path.parent.name if self.path.name == "SKILL.md" else self.path.stem
+
+    def identifier_in(self, root: Path) -> str:
+        """Its canonical identifier, which needs the path and name only."""
+        return identifier_for(root, self.path, self.name)
+
+
+def identifier_for(root: Path, prompt_path: Path, name: str) -> str:
+    relative = prompt_path.resolve().relative_to(
+        root.resolve()).as_posix().casefold()
+    path_hash = sha256(relative.encode("utf-8")).hexdigest()[:10]
+    return f"{name}-{path_hash}"
 
 
 @dataclass(frozen=True)

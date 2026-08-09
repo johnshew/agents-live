@@ -30,8 +30,11 @@ one-shot conversion.
 
 An unreadable registry, ownership source, or started-state record causes
 convergence to abstain. Repair that input rather than deleting runtime
-artifacts manually. An unreadable registered repository is different: it has
-no desired subscriptions, so its structured owned artifacts are pruned.
+artifacts manually. A registered repository that cannot be read, and a started
+definition that no longer parses, are narrower: convergence cannot compute
+what they should own, so it holds their existing artifacts and reports them.
+`status` lists a definition it cannot read as `unloadable`, and `doctor` names
+the file and the reason. Fix the file, or run `stop` to withdraw it.
 
 ## Trigger and watcher drift
 

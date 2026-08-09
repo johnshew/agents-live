@@ -46,6 +46,7 @@ class PosixTriggerStore:
                 marker["kind"],
                 marker["fingerprint"],
                 line,
+                marker.get("target", ""),
             ))
         return found
 
@@ -82,6 +83,7 @@ class PosixHost:
             "key": subscription.key,
             "kind": subscription.kind,
             "scope": subscription.scope,
+            "target": subscription.target,
         })
         if subscription.kind == "schedule":
             trigger = parse_schedule(subscription.trigger).canonical
@@ -119,6 +121,7 @@ class PosixHost:
             fingerprint,
             rendered,
             watcher_argv,
+            subscription.target,
         )
 
     def legacy_agents(self, root: str) -> set[str]:

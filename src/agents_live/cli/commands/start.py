@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Skipped '{item.name}': {item.message}", file=sys.stderr)
     for operation, message in result.failed:
         print(f"{operation.key}: {message}", file=sys.stderr)
-    return 1 if result.failed else 0
+    return 1 if result.failed or unloadable else 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

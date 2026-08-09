@@ -75,7 +75,8 @@ event envelope are deliberately separate.
   fail closed.
 - Global pruning occurs only after complete registry and started-state
   collection.
-- An unreadable registry abstains; an unreadable registered repository
-  contributes no desired subscriptions and its owned artifacts are pruned.
+- An unreadable registry abstains. A registered repository that cannot be
+  read, and a started definition that no longer parses, keep the artifacts
+  they already own until they resolve again or are stopped.
 - Concurrency and misfire policy are fixed to skip.
 - Definitions, artifacts, started state, and events have one owner each.
