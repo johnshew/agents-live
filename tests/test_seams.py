@@ -16,10 +16,11 @@ from pathlib import Path
 from unittest import mock
 
 from agents_live import (
-    agent, obs, paths, runtime, state,
+    agent, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle
-from agents_live.cli.commands import run, stop, uninstall
+from agents_live.cli.commands import init, run, stop, uninstall
+from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import health_check, triggers
 from agents_live.state import ownership
@@ -44,19 +45,31 @@ from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts import task_scheduler
 
 
+# The repository registry lives under the data home, not the state home, so
+# isolating only the latter leaves a test writing the developer's own registry.
+_ISOLATED_HOMES = {
+    "XDG_STATE_HOME": "state",
+    "XDG_DATA_HOME": "data",
+    "XDG_CONFIG_HOME": "config",
+}
+
+
 class TempRepository(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         (self.root / "Agents").mkdir()
-        self.old_state = os.environ.get("XDG_STATE_HOME")
-        os.environ["XDG_STATE_HOME"] = str(self.root / "state")
+        self.previous_homes = {
+            name: os.environ.get(name) for name in _ISOLATED_HOMES}
+        for name, directory in _ISOLATED_HOMES.items():
+            os.environ[name] = str(self.root / directory)
 
     def tearDown(self) -> None:
-        if self.old_state is None:
-            os.environ.pop("XDG_STATE_HOME", None)
-        else:
-            os.environ["XDG_STATE_HOME"] = self.old_state
+        for name, value in self.previous_homes.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         self.temporary.cleanup()
 
     def skill(self, name: str, metadata: list[str], body: str = "Do the work.") -> Path:
@@ -487,6 +500,35 @@ class TestStartedState(TempRepository):
             encoding="utf-8")
         with self.assertRaisesRegex(agent.DefinitionError, "retired"):
             agent.load("broken", root=self.root)
+
+    def test_failed_init_registers_nothing(self) -> None:
+        """A host-mutating command that cannot finish must not half-finish.
+
+        Plugin convergence is the step most likely to fail, so it runs
+        before the registry is touched rather than after it.
+        """
+        project = self.root / "candidate"
+        (project / "Agents").mkdir(parents=True)
+        before = repos.load()
+        self.assertEqual({}, before["repos"])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["agents-live init"]),
+            mock.patch.dict(
+                os.environ, {"AGENTS_LIVE_INIT_REPO": str(project)}),
+            mock.patch.object(
+                init.plugins, "converge",
+                side_effect=plugins.PluginError("declared wheel is unreachable")),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = init.main()
+        self.assertEqual(1, code)
+        self.assertIn("plugin convergence failed", stderr.getvalue())
+        after = repos.load()
+        self.assertEqual({}, after["repos"], "a failed init registered a repository")
+        self.assertIsNone(after["default_repo"])
+        self.assertFalse((project / paths.CONFIG_DOTFILE).exists())
 
 
 class TestRuntimeProcessPolicy(unittest.TestCase):

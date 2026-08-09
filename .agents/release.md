@@ -45,6 +45,17 @@ the unit suite cannot. It uses whichever agent CLI this host can launch,
 preferring `copilot`, so the gate does not require a particular vendor's
 CLI to be installed. `tools/release.py` runs all of these gates
 itself during `--prepare` and `--publish`.
+
+`uv build` resolves its build backend from PyPI, so on a network that
+intercepts TLS it fails with `HandshakeFailure` while every other gate
+passes. That is a local condition, not a release defect: the published
+artifacts are built by `.github/workflows/publish.yml` on a GitHub
+runner, which reaches PyPI normally. `uv build --offline` succeeds from
+the local cache and is enough to confirm the package still builds, but
+`release.py` deliberately offers no offline mode, because a release
+cannot be cut from a host that cannot reach the index it publishes to.
+Either run the release from a host with direct access, or dispatch the
+publish workflow against the tag.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`

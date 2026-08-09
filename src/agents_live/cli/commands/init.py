@@ -239,12 +239,29 @@ def main() -> int:
 
     selected_repo = os.environ.get("AGENTS_LIVE_INIT_REPO", "").strip()
     global_root = paths.global_root()
+    target = Path(selected_repo).resolve() if selected_repo else None
 
+    # Plugin convergence is the failure-prone step and needs no project
+    # state, so it runs before anything is registered: a failure here has
+    # nothing to undo (#226).
     try:
         global_root.mkdir(parents=True, exist_ok=True)
+        plugin_roots = [global_root]
+        if target is not None:
+            plugin_roots.append(target)
+        plugin_roots.extend(
+            Path(value) for _, value, error in repos.entries() if error is None)
+        if plugins.converge(
+                list(dict.fromkeys(plugin_roots)), trigger="init"):
+            print("Converged declared plugins in the agents-live tool environment")
+    except (OSError, ValueError, plugins.PluginError) as exc:
+        preflight.emit_failure("init", f"plugin convergence failed: {exc}")
+        return 1
+
+    try:
         global_created = initialize(global_root)
-        if selected_repo:
-            root = Path(selected_repo).resolve()
+        if target is not None:
+            root = target
             created = initialize(root)
             repos.ensure_default(root)
         else:
@@ -260,16 +277,6 @@ def main() -> int:
         print(f"{paths.config_source(root)} already up to date")
     adminlog.record("init", root=str(root), created=created,
                     global_created=global_created)
-    try:
-        plugin_roots = [global_root]
-        plugin_roots.extend(
-            Path(value) for _, value, error in repos.entries() if error is None)
-        if plugins.converge(
-                list(dict.fromkeys(plugin_roots)), trigger="init"):
-            print("Converged declared plugins in the agents-live tool environment")
-    except (OSError, ValueError, plugins.PluginError) as exc:
-        preflight.emit_failure("init", f"plugin convergence failed: {exc}")
-        return 1
     global_skill_status = install_skill(global_root)
     skill_status = (
         install_skill(root) if root != global_root else global_skill_status)
