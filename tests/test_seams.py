@@ -128,6 +128,38 @@ class TestDefinitionLoader(TempRepository):
         with self.assertRaises(MigrationError):
             convert(bad, root=self.root)
 
+    def test_migration_carries_every_field_the_loader_accepts(self) -> None:
+        source = self.root / "Agents" / "full.md"
+        source.write_text(
+            "---\n"
+            "description: A fully specified 5.x definition.\n"
+            "runtime: fake\n"
+            "schedule: 0 8 * * *\n"
+            "allow-tools:\n"
+            "  - Read\n"
+            "  - Write\n"
+            "mode: write\n"
+            "timeout: 300\n"
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        convert(source, root=self.root)
+        config = agent.load("full", root=self.root).execution
+        self.assertEqual(("Read", "Write"), config.allow_tools)
+        self.assertEqual("write", config.mode)
+        self.assertEqual(300, config.timeout)
+
+    def test_migration_failures_name_the_file(self) -> None:
+        source = self.root / "Agents" / "assigned.md"
+        source.write_text(
+            "---\ndescription: Owned.\nruntime: fake\nowner: some-host\n---\nbody\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(MigrationError) as caught:
+            convert(source, root=self.root)
+        self.assertIn("assigned.md", str(caught.exception))
+        self.assertIn("ownership registry", str(caught.exception))
+
     def test_configured_flat_skills_have_path_derived_identifiers(self) -> None:
         (self.root / ".agents-live.toml").write_text(
             'agent_directories = ["foo", "bar"]\n', encoding="utf-8")

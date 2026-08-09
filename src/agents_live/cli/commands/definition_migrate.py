@@ -21,8 +21,8 @@ _CONFLICTS = {
 _SUPPORTED = {
     "name", "description", "license", "compatibility", "metadata",
     "allowed-tools", "runtime", "model", "schedule", "watchPath",
-    "watchIgnore", "debounce", "mode", "mcps", "transcript", "timeout",
-    "pre-processor", "post-processor", "handler", "output-schema",
+    "watchIgnore", "debounce", "mode", "allow-tools", "mcps", "transcript",
+    "timeout", "pre-processor", "post-processor", "handler", "output-schema",
     "output-max-bytes", "output-path-roots", "output-provenance",
     *_CONFLICTS,
 }
@@ -34,33 +34,46 @@ class MigrationError(ValueError):
 
 def convert(path: Path, *, root: Path, dry_run: bool = False) -> Path:
     source = path.resolve()
+    # Migration is run over many files at once, so every failure has to say
+    # which one it was.
+    try:
+        return _convert(source, root=root, dry_run=dry_run)
+    except MigrationError as exc:
+        raise MigrationError(f"{source}: {exc}") from None
+
+
+def _convert(source: Path, *, root: Path, dry_run: bool) -> Path:
     agents = (root / "Agents").resolve()
     try:
         source.relative_to(agents)
     except ValueError:
-        raise MigrationError(f"definition is outside {agents}: {source}") from None
+        raise MigrationError(f"definition is outside {agents}") from None
     if source.parent != agents or source.suffix.lower() != ".md":
         raise MigrationError("only flat Agents/<name>.md definitions can be migrated")
     text = source.read_text(encoding="utf-8")
-    data, body = _frontmatter(text, source)
+    data, body = _frontmatter(text)
     conflicts = sorted(key for key in _CONFLICTS if key in data)
     if conflicts:
         raise MigrationError(
-            f"{source} requires a manual decision for: {', '.join(conflicts)}; "
-            "host assignment and secret-bearing environment values are not portable metadata")
+            f"needs a manual decision for: {', '.join(conflicts)}. "
+            "Host assignment and secret-bearing values are not portable "
+            "metadata: move 'owner' to the ownership registry by running "
+            "`agents-live start --name <name>` on the owning host, supply "
+            "'env' values from the host environment instead, then delete "
+            "the field and migrate again.")
     unknown = sorted(set(data) - _SUPPORTED)
     if unknown:
         raise MigrationError(
-            f"{source} has unsupported fields that cannot be migrated safely: "
+            "unsupported fields that cannot be migrated safely: "
             f"{', '.join(unknown)}")
     name = source.stem
     declared_name = data.get("name")
     if declared_name not in (None, name):
         raise MigrationError(
-            f"frontmatter name '{declared_name}' conflicts with directory name '{name}'")
+            f"frontmatter name '{declared_name}' conflicts with file name '{name}'")
     description = data.get("description")
     if not isinstance(description, str) or not description:
-        raise MigrationError(f"{source} needs a nonempty description before migration")
+        raise MigrationError("needs a nonempty description before migration")
     destination = agents / name
     if destination.exists():
         raise MigrationError(f"migration destination already exists: {destination}")
@@ -82,20 +95,20 @@ def convert(path: Path, *, root: Path, dry_run: bool = False) -> Path:
     return destination / "SKILL.md"
 
 
-def _frontmatter(text: str, source: Path) -> tuple[dict, str]:
+def _frontmatter(text: str) -> tuple[dict, str]:
     lines = text.splitlines()
     if not lines or lines[0] != "---":
-        raise MigrationError(f"{source} has no exact frontmatter delimiter")
+        raise MigrationError("no exact frontmatter delimiter")
     try:
         end = lines.index("---", 1)
     except ValueError:
-        raise MigrationError(f"{source} has unterminated frontmatter") from None
+        raise MigrationError("unterminated frontmatter") from None
     try:
         data = yaml.safe_load("\n".join(lines[1:end])) or {}
     except yaml.YAMLError as exc:
-        raise MigrationError(f"{source} has invalid YAML: {exc}") from exc
+        raise MigrationError(f"invalid YAML: {exc}") from exc
     if not isinstance(data, dict):
-        raise MigrationError(f"{source} frontmatter must be a mapping")
+        raise MigrationError("frontmatter must be a mapping")
     return data, "\n".join(lines[end + 1:]).strip()
 
 
@@ -118,13 +131,17 @@ def _metadata(data: dict, source: Path, destination: Path, root: Path):
     copies: list[tuple[Path, Path]] = []
     runtime = data.get("runtime")
     if not isinstance(runtime, str) or not runtime:
-        raise MigrationError(f"{source} has no runtime to convert to agents-live.selector")
+        raise MigrationError("has no runtime to convert to agents-live.selector")
     model = data.get("model")
     selector = runtime + (f"/{model}" if model else "")
     if not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)?",
             selector):
-        raise MigrationError(f"runtime/model cannot be represented as a selector: {selector}")
+        raise MigrationError(
+            f"runtime '{runtime}' has no selector spelling: a selector is "
+            "provider[/model][:effort] and cannot contain spaces. A 5.x "
+            "runtime that carried arguments has to be converted by hand to "
+            "the provider name its plugin registers under 6.0.")
     metadata["agents-live.selector"] = selector
     schedules = data.get("schedule")
     if schedules not in (None, ""):
@@ -256,7 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.resolve_root()
     selected = (
         [Path(item) for item in args.paths]
-        if args.paths else sorted((root / "Agents").glob("*.md"))
+        if args.paths else
+        [item for item in sorted((root / "Agents").glob("*.md"))
+         if item.name != "_index_.md"]
     )
     failed = False
     for item in selected:
