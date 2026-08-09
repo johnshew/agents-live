@@ -139,9 +139,10 @@ def interpret(
             skip = isinstance(parsed, dict) and bool(parsed.get("skip"))
         except json.JSONDecodeError:
             pass
-        return StepResult(step, True, skip=skip, text=text)
+        return StepResult(
+            step, True, skip=skip, text=text, message=raw.stderr.strip())
     if step is Step.POST:
-        return StepResult(step, True, text=text)
+        return StepResult(step, True, text=text, message=raw.stderr.strip())
     provider = get_provider(launch.provider or _config(spec).selector.provider)
     completion = provider.parse(raw)
     if not completion.text and completion.structured is None:
@@ -170,6 +171,7 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
         "success",
         final.text if final else "",
         final.structured if final else None,
+        message=final.message if final else "",
         usage=final.usage if final else (),
         transcript=final.transcript if final else None,
     )

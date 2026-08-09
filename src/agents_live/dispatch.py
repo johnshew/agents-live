@@ -19,6 +19,8 @@ from .runtime.hosts.processes import pid_exists
 
 # An unreadable lock is only abandoned once it outlives any plausible run.
 _LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
+# A log line, not the artifact: enough to diagnose, not enough to bloat.
+_RECORDED_MAX_CHARS = 4096
 
 
 @dataclass(frozen=True)
@@ -217,11 +219,25 @@ def _finish(spec, results, firing: Firing, run_id: str, events: Path) -> Outcome
         run_id=run_id,
         origin=firing.origin,
         category=result.category,
-        message=result.message,
+        message=_recorded(result),
         transcript=result.transcript,
         usage=result.usage,
     ))
     return result
+
+
+def _recorded(result: Outcome) -> str:
+    """What the run produced, for the durable record.
+
+    A scheduled run is invoked with --quiet and its streams go nowhere, so
+    anything not recorded here is lost. Bounded because this is a log line,
+    not the artifact.
+    """
+    parts = [part for part in (result.message.strip(), result.text.strip()) if part]
+    joined = "\n".join(parts)
+    if len(joined) <= _RECORDED_MAX_CHARS:
+        return joined
+    return joined[:_RECORDED_MAX_CHARS] + "... (truncated)"
 
 
 def _skip(events: Path, firing: Firing, run_id: str, reason: str) -> Outcome:

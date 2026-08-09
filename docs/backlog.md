@@ -48,6 +48,34 @@ Whether an upgrade should go further and restart the watchers it makes
 stale is a separate policy question, still open
 ([#204](https://github.com/johnshew/agents-live/issues/204)).
 
+## Observability a processor can contribute to
+
+A processor has three channels and all three are lossy: an exit code, stderr
+that surfaces only on failure, and stdout that 6.0 now records but bounds. 5.x
+let a handler write structured entries directly into the log; 6.0 withdrew that
+without replacing it, so the capability regressed.
+
+The replacement should not be a Python API. Processors are `.py`, `.js`, `.ts`,
+`.ps1`, or `.sh`, so a Python surface serves one of five and couples user code
+to module paths, which is exactly what broke when 6.0 moved them. The
+contract should be an environment handle naming an append-only JSONL file,
+with correlation context passed in.
+
+GitHub Actions is the closest precedent and already made this migration, from
+stdout workflow commands to environment-file handles. Its `stop-commands`
+escape hatch remains as evidence of why: content flowing through stdout can
+impersonate control syntax. That risk is sharper here, because a
+post-processor's input is model output.
+
+For correlation, W3C Trace Context is the standard and OpenTelemetry defines
+the carrier as string key-value pairs, so `traceparent` in the environment is a
+conforming adaptation. Adopting it verbatim makes a future exporter a
+translation rather than a remapping.
+
+[#105](https://github.com/johnshew/agents-live/issues/105) carries this,
+together with span identity, per-step isolation and size caps, and the
+sensitivity metadata that a redaction rule needs.
+
 ## Confidence in the test suite
 
 Every defect found in the week of 2026-07-27 shipped through a green

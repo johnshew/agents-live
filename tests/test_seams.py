@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -705,6 +706,39 @@ class TestAgentPipeline(TempRepository):
             Firing("pipeline", str(self.root), "manual"), runner=runner)
         self.assertTrue(result.ok, result)
         self.assertIsNone(runner.inputs[-1])
+
+    def test_a_quiet_run_records_what_the_processor_produced(self) -> None:
+        """A scheduled run is quiet and its streams go nowhere.
+
+        Whatever the durable record does not capture is lost, so a
+        processor's output and diagnostics have to reach the event.
+        """
+        directory = self.skill("noisy", [
+            'agents-live.selector: "none"',
+            'agents-live.schedule: "0 8 * * *"',
+            'agents-live.post-processor: "scripts/report.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "report.py").write_text(
+            "print('ok')\n", encoding="utf-8")
+        identifier = agent.load("noisy", root=self.root).identifier
+        state.replace(self.root, {identifier})
+        runner = RecordingRunner([
+            ChildResult(("post",), 0, "processed 3 files", "skipped 1 unreadable"),
+        ])
+        result = dispatch(
+            Firing(identifier, str(self.root), "clock"),
+            runner=runner,
+            now=datetime(2026, 8, 9, 8, 0).astimezone(),
+        )
+        self.assertTrue(result.ok, result)
+
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        done = [r for r in records
+                if r["agent_name"] == identifier and r["phase"] == "done"]
+        message = str(done[-1]["message"])
+        self.assertIn("processed 3 files", message)
+        self.assertIn("skipped 1 unreadable", message)
 
     def test_prepare_errors_become_failed_outcomes(self) -> None:
         self.skill("invalid-provider-options", [

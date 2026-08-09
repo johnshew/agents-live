@@ -52,6 +52,13 @@ history is retained in the source repository.
 - fix: a run lock that cannot be read is abandoned after a day.
   An unreadable lock named no owner to wait for and blocked that agent
   permanently.
+- fix: a scheduled run records what its processors produced.
+  A scheduled invocation is quiet and its streams are redirected away, so a
+  pre- or post-processor's output and warnings went nowhere at all: the run
+  event carried only success or failure. The durable record now carries the
+  output and any diagnostics, bounded, so `agents-live logs` shows what
+  happened. Structured emission from a processor remains unavailable and is
+  tracked by issue #105.
 - fix: migration rewrites a definition in place instead of relocating its processors.
   `agents-live migrate` converted every definition into a `<name>/SKILL.md`
   bundle and copied its processors into it. That silently broke any 5.x
