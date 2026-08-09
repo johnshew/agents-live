@@ -1,15 +1,34 @@
 # Changelog
 
-- feature: discover flat `<name>.md` definitions and standard
-  `<name>/SKILL.md` bundles from repository-relative configured directories,
-  with path-derived canonical identifiers for duplicate names.
-
 Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
 
+- feature: discover flat `<name>.md` definitions and standard
+  `<name>/SKILL.md` bundles from repository-relative configured directories,
+  with path-derived canonical identifiers for duplicate names.
+- fix: one unreadable definition no longer removes a repository's automation.
+  Discovery stopped at the first failure, so collection reported the whole
+  repository as empty and convergence withdrew every trigger and watcher it
+  owned, on the five-minute maintenance schedule and without being asked.
+  A parse failure is now isolated and reported by `status` and `doctor`, and
+  a repository that will not resolve at all keeps its installed artifacts.
+- fix: `agents-live logs timeline` starts again instead of failing on an
+  import before reading a single argument.
+- fix: `agents-live migrate` accepts `allow-tools`, names the offending file
+  in every error, and explains what to do about `owner` and about a 5.x
+  runtime that carried arguments.
+- fix: `agents-live run --json` reports the run outcome, including its status
+  and failure category, rather than the agent's text alone.
+- fix: `agents-live stop` still works once a definition file has been deleted,
+  which is when withdrawing its automation matters most.
+- fix: a run lock that cannot be read is abandoned after a day rather than
+  blocking that agent forever.
+- fix: `agents-live start` says when a definition it started declares no
+  schedule or watch, so an agent that can never fire is not reported as
+  started with nothing else said.
 - breaking: definitions are conforming `Agents/<name>/SKILL.md` directories.
   Execution policy is quoted `agents-live.*` metadata under schema version 1.
   The one-shot `agents-live migrate` command converts safe 5.x definitions;

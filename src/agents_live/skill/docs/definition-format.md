@@ -47,11 +47,11 @@ metadata:
 | `agents-live.mcps` | JSON string array | Empty by default. |
 | `agents-live.env` | JSON string map | Empty by default. Do not store secrets. |
 | `agents-live.transcript` | `true` or `false` | `true` by default. |
-| `agents-live.timeout` | positive decimal integer | Provider or processor timeout in seconds; `120` by default. |
+| `agents-live.timeout` | positive integer | Provider or processor timeout in seconds; `120` by default. |
 | `agents-live.pre-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.post-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.output-schema` | JSON object or relative path | Optional JSON Schema for provider output. |
-| `agents-live.output-max-bytes` | positive decimal integer | Output size cap; 10 MiB by default. |
+| `agents-live.output-max-bytes` | positive integer | Output size cap; 10 MiB by default. |
 | `agents-live.output-path-roots` | JSON string array | Optional repository-relative path allowlist. |
 | `agents-live.output-provenance` | `strict` | Optional strict whole-output JSON requirement. |
 

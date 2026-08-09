@@ -143,7 +143,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "status", "List agents and runtime state.", "cli.commands.status", "in-process",
+        "status", "List agents and whether each is started.", "cli.commands.status", "in-process",
         root="registry", json=True, all_repos=True,
         args=(
             Arg(("name",), "Optional agent name.", kind="positional"),

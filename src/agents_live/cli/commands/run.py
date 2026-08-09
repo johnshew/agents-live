@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from ... import paths
@@ -41,7 +42,20 @@ def main(argv: list[str] | None = None) -> int:
         args.subscription_key,
         changed,
     ))
-    if not args.quiet:
+    if os.environ.get("AGENTS_LIVE_JSON") == "1":
+        print(json.dumps({
+            "ok": result.ok,
+            "operation": "run",
+            "agent": args.name,
+            "status": result.status,
+            "category": result.category,
+            "message": result.message,
+            "text": result.text,
+            "structured": result.structured,
+            "transcript": result.transcript,
+            "usage": dict(result.usage),
+        }))
+    elif not args.quiet:
         if result.ok and result.text:
             print(result.text)
         elif not result.ok:

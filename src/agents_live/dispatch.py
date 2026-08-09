@@ -17,6 +17,9 @@ from .runtime import ChildRunner, parse_schedule
 from .runtime.budget import claim as claim_budget
 from .runtime.hosts.processes import pid_exists
 
+# An unreadable lock is only abandoned once it outlives any plausible run.
+_LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
+
 
 @dataclass(frozen=True)
 class Firing:
@@ -298,6 +301,14 @@ class _RunLock:
                 return True
             return not pid_exists(pid)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            # An unreadable lock names no owner to wait for, so age is the
+            # only evidence left. Without this the agent never runs again.
+            return self._older_than(_LOCK_MAX_AGE_SECONDS)
+
+    def _older_than(self, seconds: float) -> bool:
+        try:
+            return (time.time() - self.path.stat().st_mtime) > seconds
+        except OSError:
             return False
 
     def release(self) -> None:

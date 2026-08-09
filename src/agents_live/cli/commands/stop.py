@@ -16,8 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.resolve_root()
     try:
         snapshot = state.load(root)
-        identifier = args.name if args.name in snapshot.agents else (
-            agent.load(args.name, root=root).identifier)
+        identifier = _resolve(args.name, snapshot, root)
         result = lifecycle.converge(
             removals={root: {identifier}}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,
@@ -29,6 +28,29 @@ def main(argv: list[str] | None = None) -> int:
     for operation, message in result.failed:
         print(f"{operation.key}: {message}", file=sys.stderr)
     return 1 if result.failed else 0
+
+
+def _resolve(name: str, snapshot: state.StartedSnapshot, root) -> str:
+    """The started identifier for ``name``, even if its file is gone.
+
+    Stopping is how a user withdraws automation that is misbehaving, so it
+    cannot depend on the definition still loading.
+    """
+    if name in snapshot.agents:
+        return name
+    try:
+        return agent.load(name, root=root).identifier
+    except agent.DefinitionError:
+        started = sorted(
+            item for item in snapshot.agents
+            if item.rsplit("-", 1)[0] == name)
+        if len(started) == 1:
+            return started[0]
+        if len(started) > 1:
+            raise agent.DefinitionError(
+                f"'{name}' is ambiguous; stop one of: {', '.join(started)}"
+            ) from None
+        raise
 
 
 if __name__ == "__main__":

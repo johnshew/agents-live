@@ -125,7 +125,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, --scheduled, --boot, --quiet | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
-| status | in-process | registry |  | yes | yes |  | --all-repos | List agents and runtime state. |
+| status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |

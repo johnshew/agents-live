@@ -61,7 +61,8 @@ waits for a fresh beacon, and only then replaces the prior task.
 - `plan` allows read-oriented provider work and is the default.
 - `write` enables provider-side writes.
 - `pipeline` adds the run-scoped pipeline MCP resource.
-- `none` selects a processor-only run and requires at least one processor.
+- A `none` selector, not a mode, selects a processor-only run and requires at
+  least one processor.
 - `agents-live.allow-tools` narrows unattended authority. It is distinct from
   the standard Agent Skills `allowed-tools` property.
 - Output schemas, path roots, byte caps, and strict provenance are enforced

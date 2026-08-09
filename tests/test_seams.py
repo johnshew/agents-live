@@ -678,13 +678,15 @@ class TestArchitectureFitness(unittest.TestCase):
 
     def test_platform_detection_is_confined_to_host_adapters_in_new_seams(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
-        for directory in (package / "runtime", package / "agent", package / "cli"):
-            for path in directory.rglob("*.py"):
-                if (package / "runtime" / "hosts") in path.parents:
-                    continue
-                text = path.read_text(encoding="utf-8")
-                self.assertNotIn("sys.platform", text, str(path))
-                self.assertNotIn("os.name", text, str(path))
+        hosts = package / "runtime" / "hosts"
+        # Invariant 4 covers the package, not only the two ports: legacy/ is
+        # the one exception, and it is removed in 7.0.
+        for path in package.rglob("*.py"):
+            if hosts in path.parents or (package / "legacy") in path.parents:
+                continue
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("sys.platform", text, str(path))
+            self.assertNotIn("os.name", text, str(path))
 
 
 def _imports(directory: Path) -> set[str]:
