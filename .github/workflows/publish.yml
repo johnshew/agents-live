@@ -12,7 +12,29 @@ on:
 permissions: {}
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - id: target
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+    permissions:
+      contents: read
+
   publish:
+    needs: [resolve, verify]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -21,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: astral-sh/setup-uv@v5
       # The gates are declared once, in release.py, and run from there so
       # a manually dispatched tag cannot publish an unaudited artifact and

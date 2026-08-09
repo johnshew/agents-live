@@ -92,12 +92,14 @@ the release tag, followed by GitHub's generated notes (merged pull requests and
 the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
-which rebuilds, attaches the wheel and sdist to the GitHub release, and
-publishes the same artifacts to PyPI through trusted publishing. Wait for that
-workflow to succeed, verify both artifacts are attached, then follow the
-two-stage PyPI and installed-tool checks in [testing.md](testing.md). In an
-interactive terminal, `gh run watch <run-id> --exit-status` can wait for the
-workflow. Automation should use noninteractive run-status APIs or
+which resolves the release tag to one commit, runs the Test workflow against
+that exact commit on Ubuntu and Windows, then rebuilds, attaches the wheel and
+sdist to the GitHub release, and publishes the same artifacts to PyPI through
+trusted publishing. Publication cannot start unless both test jobs pass. Wait
+for the workflow to succeed, verify both artifacts are attached, then follow
+the two-stage PyPI and installed-tool checks in [testing.md](testing.md). In
+an interactive terminal, `gh run watch <run-id> --exit-status` can wait for
+the workflow. Automation should use noninteractive run-status APIs or
 `GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
 over the terminal's alternate screen.
 

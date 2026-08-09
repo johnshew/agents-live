@@ -51,6 +51,11 @@ CI runs the same suites one file at a time
 so the query tool is started rather than skipped. Reproduce that form when a
 failure appears only in CI.
 
+The Test workflow runs both Ubuntu and Windows for pushes and pull requests.
+Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
+single host needs to be isolated. The publish workflow calls the same workflow
+against the resolved release commit and cannot publish until both hosts pass.
+
 A development host has an initialized global workspace, so tests that do
 not build their own temp project still resolve a root here and fail only
 in CI. Reproduce a bare host before pushing:

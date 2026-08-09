@@ -4,6 +4,28 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Host to test"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - ubuntu-latest
+          - windows-latest
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref or commit to test"
+        required: false
+        type: string
+      os:
+        description: "Host to test"
+        required: false
+        default: all
+        type: string
 
 permissions:
   contents: read
@@ -15,10 +37,12 @@ jobs:
       # running it, so it must not be hidden by cancelling the matrix.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(inputs.os == 'ubuntu-latest' && '["ubuntu-latest"]' || inputs.os == 'windows-latest' && '["windows-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: astral-sh/setup-uv@v5
       # The audit reads the tree, not the host, so one run is the whole
       # check - and this is the host a release is cut on.
