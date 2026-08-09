@@ -13,24 +13,20 @@ description: >-
 
 # Agents Live
 
-Agents Live adds safe, local automation to the Claude Code and GitHub Copilot
-agents you already use. It does not replace or invent those agents, their
-prompts, their tools, their authentication, or their reasoning.
+Agents Live adds safe, local automation to portable Agent Skill definitions.
+It uses installed provider CLIs and does not replace their tools,
+authentication, or reasoning.
 
-- Each live agent remains one standard agent file under `.claude/agents/` or
-  `.github/agents/`, with Agents Live frontmatter defining when and how it
-  runs.
+- Each definition is a standard `<name>/SKILL.md` bundle or an Agents Live
+  flat `<name>.md` extension in a configured discovery root.
 - Deterministic pre- and post-processing scripts can prepare input and apply
   output without granting the agent direct write access.
-- Agents Live uses the installed agent CLIs, Python/uv, cron, and inotifywait.
-  It adds lifecycle management, debounce, locking, logs, recovery, and cost
-  tracking around them.
-- Agent state is computed from crontab and process lists. Runtime is the
-  source of truth. A watcher's durable "should be running" intent is its
-  `@reboot` respawn line in the crontab (it survives reboot and is removed by
-  a deliberate stop). Ownership is local by default (every agent belongs
-  to this host). With a plugin-provided registry backend, the shared state
-  file `Agents/data/agent-owners.json` records which host owns each agent.
+- Agents Live uses the host's native trigger store and filesystem change
+  source. It adds lifecycle management, debounce, locking, logs, recovery,
+  and output policy around provider execution.
+- Started intent is machine-local state. Native trigger and watcher artifacts
+  are converged from that intent and the current definitions. Ownership is
+  local by default; a plugin-provided backend may assign work across hosts.
 
 ## Load before acting
 
@@ -74,10 +70,8 @@ create -> run (test) -> start (activate) -> stop
 
 ## Commands
 
-All user-invoked lifecycle commands go through `agents-live`. Persisted
-cron/watcher entries and internal spawns still invoke the underlying scripts
-until the package migration completes; those paths are implementation details,
-not the user-facing contract.
+All user-invoked lifecycle commands go through `agents-live`. Persisted host
+artifacts use hidden internal commands and are not a user-facing contract.
 
 | Pattern | Command |
 |---------|---------|
@@ -98,12 +92,11 @@ not the user-facing contract.
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `repair` | `agents-live doctor --repair [--dry-run]` |
-| `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive; `init` registers it already) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
 | `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
 
-**Smoketest and commands that touch cron/inotifywait require `requestUnsandboxedExecution: true`.**
+**Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
 **Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
 
@@ -122,7 +115,7 @@ pre-processor -> agent -> post-processor
 
 - Pre-processor stdout is appended to the agent prompt as `pre-processor="<output>"`.
 - Output `{"skip": true}` to skip the agent call (status `skipped`).
-- With `runtime: none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
+- With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
   outside the project tree, so log writes cannot re-trigger watchers.
 - In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below).

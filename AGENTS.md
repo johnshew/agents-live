@@ -27,7 +27,8 @@ work on it.
 ## Quick commands
 
 ```bash
-uv run --with-editable . --script tests/test_smoke.py   # tests
+uv run --with-editable . python -m unittest discover -s tests -v # tests
+uv run --with-editable . agents-live smoketest          # framework smoke
 uv run --with-editable . agents-live --help              # CLI from source
 uv run --script tools/pre-release-audit.py               # release audit
 uv run --script tools/release.py --dry-run --bump patch   # release preview
@@ -69,7 +70,7 @@ The standard loop for any change that lands as commits:
   extends beyond the tree: they must not appear in GitHub issues, PR
   bodies or comments, or commit messages either. Refer to hosts
   generically (e.g. "a WSL deployment host", "the owning host").
-- **Tests must stay portable.** `tests/test_smoke.py` runs against
+- **Tests must stay portable.** The smoke and seam suites run against
   temp projects only; never couple it to this checkout's `Agents/`
   directory or any specific host.
 - **Keep README and skill docs in sync.** The README mirrors

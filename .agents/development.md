@@ -14,6 +14,8 @@ How to build, test, and change the code in this repository.
   The vendored skill payload remains under `skill/`.
 - `tests/test_smoke.py` - export-safe smoke suite. Runs against temp
   projects only; never touches this checkout's `Agents/` directory.
+- `tests/test_seams.py` - architecture, process-policy, migration, and
+  correctness invariants over memory hosts and temporary repositories.
 - `tools/pre-release-audit.py` - scans for personal information,
   secrets, and nonportable paths. Must pass before any release.
 - `Agents/` - local runtime directory (handlers, logs) used when
@@ -28,9 +30,11 @@ Always go through `uv` - never plain `python3` (system interpreters are
 often too old; the package requires Python 3.12+).
 
 ```bash
-# run the test suite (CI runs the unittest equivalent:
-# uv run --with-editable . python -m unittest tests.test_smoke)
-uv run --with-editable . --script tests/test_smoke.py
+# run every portable smoke and seam test
+uv run --with-editable . python -m unittest discover -s tests -v
+
+# run the public framework smoketest
+uv run --with-editable . agents-live smoketest
 
 # run the CLI from source
 uv run --with-editable . agents-live --help

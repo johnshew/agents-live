@@ -32,7 +32,7 @@ Semantic versioning; the version lives in `pyproject.toml`.
 
 ```bash
 uv run --script tools/pre-release-audit.py
-uv run --with-editable . --script tests/test_smoke.py
+uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
 uv build
 ```

@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-07-30
+ms.date: 2026-08-09
 ms.topic: concept
 ---
 
@@ -99,13 +99,12 @@ Linux is the primary platform, with Ubuntu on WSL as the reference setup.
 macOS is untested; broadening it is direction rather than committed work,
 so file an issue before starting.
 
-A native Windows runtime, replacing cron and inotifywait with Task
-Scheduler and Windows change notification behind a small host-runtime
-seam, is implemented and covered by CI on `windows-latest`.
-[windows-support.md](windows-support.md) is the architecture guide: what
-the seam is, why it is functions rather than a protocol object, and what
-the spikes contradicted. Whether the Windows half earns its keep in the
-long run stays an open product question; the seam itself is settled.
+A native Windows runtime, replacing cron and POSIX file notification with Task
+Scheduler and `ReadDirectoryChangesW` behind the host protocols, is implemented
+and covered by CI on `windows-latest`. [windows-support.md](windows-support.md)
+records the current native architecture. [wsl-support.md](wsl-support.md)
+records the separate WSL composition and Windows-side liveness responsibility.
+The seams are settled; installation readiness remains tracked work.
 
 The direction for keeping it settled is that a Windows defect is fixed at
 the seam, not at the call site. Three rounds of that have now landed:

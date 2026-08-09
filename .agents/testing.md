@@ -40,7 +40,8 @@ and released behavior.
 Run the portable suite and release gates:
 
 ```bash
-uv run --with-editable . --script tests/test_smoke.py
+uv run --with-editable . python -m unittest discover -s tests -v
+uv run --with-editable . agents-live smoketest
 uv run --script tools/pre-release-audit.py
 uv build
 ```
@@ -52,7 +53,7 @@ in CI. Reproduce a bare host before pushing:
 ```bash
 env -u AGENTS_LIVE_REPO XDG_DATA_HOME=/tmp/bare/data \
   XDG_STATE_HOME=/tmp/bare/state XDG_CONFIG_HOME=/tmp/bare/config \
-  uv run --with-editable . --script tests/test_smoke.py
+  uv run --with-editable . python -m unittest discover -s tests -v
 ```
 
 Exercise source behavior against a configured project by keeping `--repo`
