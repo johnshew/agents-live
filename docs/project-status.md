@@ -49,10 +49,11 @@ See [windows-support.md](windows-support.md) and
 
 As of 2026-08-09 on this branch:
 
-- 32 portable smoke and seam tests pass; one POSIX-only PTY assertion is
+- 38 portable smoke and seam tests pass; one POSIX-only PTY assertion is
   skipped on Windows;
 - the public `agents-live smoketest` passes;
-- dynamic CLI command and script targets resolve;
+- CLI command targets import and script targets are executed, not merely
+  checked for existence;
 - the pre-release export and documentation audit passes; and
 - source and wheel builds are part of the release gate.
 
@@ -61,6 +62,14 @@ architecture invariants, memory-host convergence, and fake-provider outcomes.
 Issue [#184](https://github.com/johnshew/agents-live/issues/184) and policy issue
 [#180](https://github.com/johnshew/agents-live/issues/180) remain open because
 the wider historical suite relied too heavily on mocked implementation details.
+
+A first release review found three defects that the structural coverage above
+could not see, because it verified shape rather than behavior: convergence
+removing automation it could not account for, a diagnostic command that failed
+at import, and a migrator that refused most real 5.x definitions. Each is fixed
+with a test that exercises the behavior, and the coverage gap that hid it is
+closed. That pattern, not the individual defects, is what
+[#184](https://github.com/johnshew/agents-live/issues/184) has to settle.
 
 ## Remaining work
 
