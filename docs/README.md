@@ -45,6 +45,9 @@ named after the topic.
   `ms.date`, and `ms.topic`; update `ms.date` on a material change.
 - `architecture.md` states current implementation, not aspirations.
 - A decision record states context, decision, alternatives, and consequences.
+- Retire a superseded document rather than leaving it beside the record that
+  replaced it, and name it in that record's `History` section so its
+  reasoning stays findable by path in git history.
 - `project-status.md` states verified current status and links remaining work.
 - Keep detail in GitHub issues. Link to an issue rather than restating
   its acceptance criteria here.

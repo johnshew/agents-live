@@ -104,3 +104,16 @@ Definitions are portable to Agent Skill clients while unattended execution
 retains a versioned owner. The cost is explicit string encoding, a breaking
 5.x migration, and a separate flat-file extension for compact repositories.
 The retired-field diagnostics and migration support expire in 7.0.
+
+## History
+
+`docs/frontmatter-convergence.md` preceded this record and is not maintained.
+It holds the Agent Skills conformance analysis and the field-by-field
+convergence table behind the decision above.
+
+```bash
+git log --oneline -- docs/frontmatter-convergence.md
+git show <deletion-commit>^:docs/frontmatter-convergence.md
+```
+
+Implemented in [#256](https://github.com/johnshew/agents-live/pull/256).

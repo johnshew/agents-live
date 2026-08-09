@@ -84,3 +84,29 @@ value translation at boundaries.
 The architecture is guarded by import and platform-detection fitness tests.
 `legacy/` remains a temporary exception for artifacts created by 5.x and is
 removed in 7.0.
+
+## History
+
+Two working documents preceded this record and are not maintained. Read them
+from git history when you need the option analysis behind a conclusion above
+rather than the conclusion itself.
+
+- `docs/refactoring-runtime-and-agent-seams.md` holds the original problem
+  statement with its line-count evidence, the ordered goals and their
+  measurable proxies, the rejected migration sequences, and the review rounds
+  that produced these decisions. It was refined across 23 commits, from
+  `b454d11` to its deletion.
+- `docs/target-architecture.md` holds the reader's guide to the end state:
+  what each component owns, and the lifecycle of one agent from registration
+  to firing.
+
+Both are recoverable by path. `git log` lists every commit that touched one,
+including the commit that deleted it, and the parent of that commit holds the
+final text:
+
+```bash
+git log --oneline -- docs/refactoring-runtime-and-agent-seams.md
+git show <deletion-commit>^:docs/refactoring-runtime-and-agent-seams.md
+```
+
+Implemented in [#256](https://github.com/johnshew/agents-live/pull/256).
