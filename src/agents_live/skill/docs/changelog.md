@@ -1,5 +1,9 @@
 # Changelog
 
+- feature: discover flat `<name>.md` definitions and standard
+  `<name>/SKILL.md` bundles from repository-relative configured directories,
+  with path-derived canonical identifiers for duplicate names.
+
 Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development
 history is retained in the source repository.
@@ -12,6 +16,10 @@ history is retained in the source repository.
   the runtime contains no old-format loader.
 - refactor: runtime, agent, state, observability, dispatch, provider, host, and
   CLI seams now enforce immutable primitive records and one convergence path.
+- refactor: package source follows those ownership seams: command handlers and
+  scripts live under `cli/`, host implementations under `runtime/hosts/`,
+  durable intent under `state/`, observability tools under `obs/`, and
+  one-major-cycle 5.x migration and cleanup code under `legacy/`.
 - breaking: `handler` is retired, post-processor failures are
   `post_processor_crash`, and the public `heartbeat` command is removed.
   WSL liveness is converged automatically through a staged, verified task.

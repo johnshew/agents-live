@@ -21,9 +21,10 @@ rather than papered over.
 
 ## The system in one paragraph
 
-An **agent definition** is a conforming `Agents/<name>/SKILL.md` directory.
-Its body says what work to do and its namespaced metadata says how and when
-it should run.
+An **agent definition** is either a conforming `<name>/SKILL.md` Agent Skill
+bundle or a flat `<name>.md` Agents Live extension in a configured repository
+discovery root. Its body says what work to do and its namespaced metadata says
+how and when it should run.
 Agents Live turns that last part into real automation on one machine: it
 registers a trigger with the operating system's own scheduler, and when
 that trigger fires it runs the agent through a provider CLI and records
@@ -237,7 +238,31 @@ museum, which is the failure it exists to prevent.
 | `dispatch` | The handoff: one firing becomes one run | Contain host or provider specifics |
 | `state/` | The repository registry and started state | Hold runtime artifacts |
 | `obs/` | The event schema, query, and timeline | Belong to either port |
+| `pipeline/` | Run-scoped pipeline MCP resources | Own agent or host policy |
 | `cli/` | Commands and lifecycle composition | Contain execution logic |
+| `legacy/` | Recognize, migrate, and remove 5.x artifacts | Gain new product behavior |
+
+The concrete package layout is:
+
+```text
+agents_live/
+  agent/                 definitions, selectors, providers, outcomes
+  runtime/               convergence, grammars, policy, process execution
+    hosts/               POSIX, Windows, WSL, memory, scheduler and watcher I/O
+  state/                 repository registry, ownership, started intent
+  obs/                   event schema, queries, log and timeline scripts
+  pipeline/              run-scoped MCP server and stdio bridge
+  cli/
+    commands/            importable command handlers
+    scripts/             optional-dependency PEP 723 UI tools
+    lifecycle.py         agent/state/runtime composition
+  legacy/                5.x trigger migration and cleanup, removed in 7.0
+  dispatch.py            one firing becomes one run
+```
+
+Files move to `legacy/` only when their remaining callers are migration,
+upgrade, uninstall, or old-artifact diagnosis paths. Moving mixed active code
+there is not a substitute for extracting its canonical behavior first.
 
 ```mermaid
 graph TD
@@ -628,16 +653,20 @@ upgrades without any interactive command running, and the maintenance
 trigger fires on a schedule regardless, so the rule has to sit where
 every path passes through.
 
-One consequence, accepted deliberately: adoption can only claim triggers
-the installation can identify as its own, which is what the structured
-marker is for. An artifact it cannot identify is left alone rather than
-adopted, so the failure mode is a surviving orphan rather than a deleted
-agent. That is the right direction to fail.
+Adoption recognizes both structured 6.0 markers and 5.x artifacts that
+the existing host parsers can attribute to a repository and display
+name. A unique legacy name maps to its canonical path-derived identifier.
+After canonical subscriptions converge successfully, the host adapter
+removes the replaced legacy artifacts. A failed canonical install leaves
+the legacy trigger intact for the next repair pass. Duplicate legacy
+names are ambiguous and fail closed; an artifact that cannot be identified
+is likewise left alone, so the failure mode is surviving automation rather
+than a silently deleted agent.
 
-**What changes.** `repos.py`, `ownership.py`, and `paths.py` are already
-close to this. The addition is started state, which does not exist
-today. The subtraction is that ownership becomes explicitly optional
-rather than a concept the dispatch and lifecycle paths each consult.
+**What changes.** Started intent lives under `state/`; repository
+registration still needs to move there from the mixed persistence and
+command module in `repos.py`. Ownership is explicitly optional rather
+than a concept the dispatch and lifecycle paths each consult.
 
 ### `obs/` - what happened
 

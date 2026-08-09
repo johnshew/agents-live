@@ -97,7 +97,7 @@ def record(name: str, **fields: Any) -> None:
     """Append one administrative event named *name*. Never raises."""
     try:
         try:
-            from .headless import log_event
+            from .legacy.headless import log_event
         except ImportError:  # flat import, as above
             from headless import log_event
         # `timeline` renders by phase and message; one shared phase keeps

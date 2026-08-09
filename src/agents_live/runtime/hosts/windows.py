@@ -14,7 +14,6 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from ... import wintasks, winwatch
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import (
@@ -26,6 +25,8 @@ from ..values import (
 )
 from .posix import _address
 from .processes import LocalChildRunner
+from . import task_scheduler as wintasks
+from . import windows_watch as winwatch
 
 
 class WindowsTriggerStore:
@@ -86,6 +87,12 @@ class WindowsTriggerStore:
                 json.dumps(task, sort_keys=True, default=str),
             ))
         return found
+
+    def clear(self) -> int:
+        installed = self.list()
+        for trigger in installed:
+            self.remove(trigger.key)
+        return len(installed)
 
 
 class WindowsProcesses:
@@ -248,11 +255,17 @@ class WindowsHost:
             watcher_argv,
         )
 
+    def legacy_agents(self, root: str) -> set[str]:
+        return set(wintasks.installed_names(root))
+
+    def remove_legacy(self, root: str, name: str) -> None:
+        wintasks.remove(root, name)
+
     def change_source(self, roots: Sequence[str]):
         return winwatch.WindowsEventSource(roots)
 
     def health(self) -> Health:
-        from ... import wintasks
+        from . import task_scheduler as wintasks
         problem = wintasks.probe()
         return Health(problem is None, detail=() if problem is None else (problem,))
 

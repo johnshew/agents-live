@@ -12,7 +12,7 @@ would have no standard streams at all and fail on its first write;
 started from here it gets a console of its own that simply is not
 drawn, so its output behaves exactly as it does anywhere else.
 
-Nothing but :mod:`agents_live.wintasks` names this module, and only in
+Nothing but :mod:`agents_live.runtime.hosts.task_scheduler` names this module, and only in
 the argument string it persists into a task.
 """
 from __future__ import annotations

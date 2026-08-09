@@ -14,9 +14,12 @@ observability.
 
 ## Definition
 
-Each runnable definition is `Agents/<name>/SKILL.md`. Standard Agent Skills
-properties stay at the top level; Agents Live policy uses quoted
-`agents-live.*` metadata.
+Each runnable definition is either a standard `<name>/SKILL.md` bundle or an
+Agents Live flat `<name>.md` document in `Agents/` or a configured
+repository-relative discovery directory. Standard Agent Skills properties stay
+at the top level; Agents Live policy uses quoted `agents-live.*` metadata.
+Flat documents use the same content schema but are an Agents Live extension,
+not conforming Agent Skills.
 
 ```yaml
 ---

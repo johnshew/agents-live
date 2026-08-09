@@ -12,6 +12,7 @@ Exit code 0 = pass, 1 = findings reported.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -154,13 +155,22 @@ def _declared_runtime(text: str) -> str | None:
 
 
 def _exported_adapter_runtimes(root: Path) -> set[str]:
-    """Runtimes resolvable in the released package: the packaged registry
-    minus adapters marked private (deployment-only plugins never ship)."""
-    sys.path.insert(0, str(root / "src" / "agents_live"))
-    import agent_adapters  # noqa: PLC0415
-    public = {n for n in agent_adapters.names()
-              if not agent_adapters.get(n).private}
-    return public | {"none"}
+    """Providers resolvable through the released canonical registry."""
+    names = {"none"}
+    directory = root / "src" / "agents_live" / "agent" / "providers"
+    for path in directory.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "name"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ):
+                    names.add(keyword.value.value)
+    return names
 
 
 def check_agent_adapters(root: Path, files: list[Path]) -> list[str]:

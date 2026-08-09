@@ -15,6 +15,7 @@ from . import agent, obs, runtime, state
 from .agent import Outcome, RawOutput, Request, Step, StepContext
 from .runtime import ChildRunner, parse_schedule
 from .runtime.budget import claim as claim_budget
+from .runtime.hosts.processes import pid_exists
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,7 @@ def _resource(spec, needed: bool, run_id: str):
     if not needed:
         yield ()
         return
-    from .pipeline_runtime import pipeline_runtime
+    from .pipeline import pipeline_runtime
     from .paths import repo_state_dir
     log = (
         repo_state_dir(spec.root)
@@ -295,10 +296,7 @@ class _RunLock:
             pid = int(value["pid"])
             if pid <= 0:
                 return True
-            os.kill(pid, 0)
-            return False
-        except ProcessLookupError:
-            return True
+            return not pid_exists(pid)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return False
 

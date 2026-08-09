@@ -7,10 +7,19 @@ ms.topic: reference
 
 # Definition format
 
-An Agents Live definition is a conforming Agent Skill at
-`Agents/<name>/SKILL.md`. `name` must match its directory. Standard Agent
-Skills fields remain at the top level. Optional unattended execution policy
-uses quoted string values under `metadata` with the `agents-live.` prefix.
+An Agents Live definition uses one of two layouts:
+
+- `<discovery-root>/<name>/SKILL.md` is a conforming Agent Skill. `name` must
+  match its directory.
+- `<discovery-root>/<name>.md` is the Agents Live flat-file extension. `name`
+  must match the filename stem.
+
+`Agents/` is always a discovery root. Add repository-relative roots with
+`agent_directories = ["foo"]` in `.agents-live.toml` or the
+`[tool.agents-live]` table in `pyproject.toml`. Discovery is immediate, not
+recursive. Standard Agent Skills fields remain at the top level. Optional
+unattended execution policy uses quoted string values under `metadata` with
+the `agents-live.` prefix.
 
 ```yaml
 ---
@@ -57,6 +66,13 @@ The Agents Live key can only narrow tools during an unattended run.
 
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired
-5.x names. Use `agents-live migrate` to convert flat definitions. The
-migrator refuses host assignment, client-specific fields, and environment
-values rather than copying a possible secret into portable metadata.
+5.x names. Use `agents-live migrate` to convert 5.x top-level execution fields
+to namespaced metadata. The migrator refuses host assignment, client-specific
+fields, and environment values rather than copying a possible secret into
+portable metadata.
+
+Each discovered definition receives a canonical identifier of the form
+`<name>-<path-hash>`. The hash uses the normalized repository-relative prompt
+path, so moving a checkout preserves identity while moving the definition does
+not. Commands accept a plain name when it is unique and otherwise require the
+canonical identifier.

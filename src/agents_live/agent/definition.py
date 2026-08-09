@@ -10,6 +10,7 @@ import yaml
 from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
+from .. import paths
 from .selector import parse_selector
 from .values import AgentSpec, AgentsLiveConfig, SkillProperties
 
@@ -72,36 +73,113 @@ _UniqueLoader.add_constructor(
 
 def load_definition(agent_id: str, *, root: Path) -> AgentSpec:
     repository = Path(root).resolve()
-    skill_root = _resolve_skill_root(agent_id, repository)
-    prompt = skill_root / "SKILL.md"
+    explicit = Path(agent_id)
+    if explicit.is_absolute() or len(explicit.parts) > 1:
+        prompt = _explicit_prompt(explicit, repository)
+        return _load_prompt(prompt, repository)
+    matches = [
+        spec for spec in discover_definitions(repository)
+        if spec.identifier == agent_id or spec.name == agent_id
+    ]
+    if not matches:
+        raise DefinitionError(f"definition not found: {agent_id}")
+    exact = [spec for spec in matches if spec.identifier == agent_id]
+    if exact:
+        return exact[0]
+    if len(matches) > 1:
+        choices = ", ".join(spec.identifier for spec in matches)
+        raise DefinitionError(
+            f"definition name '{agent_id}' is ambiguous; use one of: {choices}")
+    return matches[0]
+
+
+def discover_definitions(root: Path) -> tuple[AgentSpec, ...]:
+    repository = Path(root).resolve()
+    try:
+        configured = paths.validated_agent_directories(
+            repository,
+            paths.load_config(repository).get("agent_directories", []),
+        )
+    except ValueError as exc:
+        raise DefinitionError(str(exc)) from exc
+    directories = [repository / "Agents", *configured]
+    seen_directories: set[Path] = set()
+    prompts: list[Path] = []
+    for directory in directories:
+        resolved = directory.resolve()
+        if resolved in seen_directories or not directory.is_dir():
+            continue
+        seen_directories.add(resolved)
+        prompts.extend(
+            item for item in sorted(directory.glob("*.md"))
+            if item.name != "_index_.md" and _is_flat_definition(item))
+        prompts.extend(
+            item / "SKILL.md" for item in sorted(directory.iterdir())
+            if item.is_dir() and (item / "SKILL.md").is_file())
+    return tuple(_load_prompt(prompt, repository) for prompt in prompts)
+
+
+def _is_flat_definition(prompt: Path) -> bool:
+    try:
+        text = prompt.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    if not text.startswith("---\n"):
+        return False
+    try:
+        frontmatter, _body = _extract(text, prompt)
+    except DefinitionError:
+        if "agents-live." in text:
+            raise
+        return False
+    try:
+        candidate = yaml.safe_load(frontmatter)
+    except yaml.YAMLError:
+        if "agents-live." in text:
+            _parse(frontmatter, prompt)
+        return False
+    has_identity = isinstance(candidate, dict) and isinstance(
+        candidate.get("name"), str) and isinstance(
+        candidate.get("description"), str)
+    has_retired_field = isinstance(candidate, dict) and bool(
+        candidate.keys() & _RETIRED_FIELDS)
+    if not has_identity and not has_retired_field and "agents-live." not in text:
+        return False
+    _parse(frontmatter, prompt)
+    return True
+
+
+def _load_prompt(prompt: Path, repository: Path) -> AgentSpec:
+    prompt = prompt.resolve()
+    try:
+        prompt.relative_to(repository)
+    except ValueError:
+        raise DefinitionError(
+            f"definition file escapes repository: {prompt}") from None
     if not prompt.is_file():
-        legacy = repository / "Agents" / f"{agent_id}.md"
-        if legacy.is_file():
-            raise DefinitionError(_migration_message(legacy, skill_root))
         raise DefinitionError(f"definition not found: {prompt}")
+    skill_root = prompt.parent
+    expected_name = skill_root.name if prompt.name == "SKILL.md" else prompt.stem
     try:
         text = prompt.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise DefinitionError(f"definition is not readable as UTF-8: {prompt}") from exc
     frontmatter, body = _extract(text, prompt)
     data, metadata_nodes = _parse(frontmatter, prompt)
-    properties = _properties(data, metadata_nodes, skill_root)
+    properties = _properties(data, metadata_nodes, skill_root, expected_name)
     execution = _execution(dict(properties.metadata), skill_root)
     return AgentSpec(repository, skill_root, prompt, properties, execution, body)
 
 
-def _resolve_skill_root(agent_id: str, repository: Path) -> Path:
-    candidate = Path(agent_id)
-    if candidate.is_absolute() or len(candidate.parts) > 1:
-        skill = candidate.resolve()
-    else:
-        skill = (repository / "Agents" / agent_id).resolve()
-    agents = (repository / "Agents").resolve()
+def _explicit_prompt(candidate: Path, repository: Path) -> Path:
+    resolved = candidate.resolve() if candidate.is_absolute() else (
+        repository / candidate).resolve()
     try:
-        skill.relative_to(agents)
+        resolved.relative_to(repository)
     except ValueError:
-        raise DefinitionError(f"definition directory escapes {agents}: {skill}") from None
-    return skill
+        raise DefinitionError(
+            f"definition path escapes repository: {resolved}") from None
+    return resolved / "SKILL.md" if resolved.is_dir() else resolved
 
 
 def _extract(text: str, prompt: Path) -> tuple[str, str]:
@@ -151,6 +229,7 @@ def _properties(
     data: dict[str, Any],
     metadata_nodes: dict[str, ScalarNode],
     skill_root: Path,
+    expected_name: str,
 ) -> SkillProperties:
     unknown = set(data) - _STANDARD_FIELDS
     retired = sorted(unknown & _RETIRED_FIELDS)
@@ -164,9 +243,9 @@ def _properties(
     description = data.get("description")
     if not isinstance(name, str) or not 1 <= len(name) <= 64 or not _NAME.fullmatch(name):
         raise DefinitionError("name must be 1-64 lowercase alphanumeric or hyphen characters")
-    if name != skill_root.name:
+    if name != expected_name:
         raise DefinitionError(
-            f"definition name '{name}' must match directory '{skill_root.name}'")
+            f"definition name '{name}' must match source name '{expected_name}'")
     if not isinstance(description, str) or not 1 <= len(description) <= 1024:
         raise DefinitionError("description must be a string of 1-1024 characters")
     license_name = _optional_string(data, "license")

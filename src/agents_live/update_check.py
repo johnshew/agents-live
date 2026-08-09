@@ -10,7 +10,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__, hostruntime, paths
+from . import __version__, paths
+from .runtime.hosts import system as hostruntime
 
 CACHE_INTERVAL = 60 * 60  # Check hourly so available releases are reported promptly.
 NETWORK_TIMEOUT = 1.0

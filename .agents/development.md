@@ -7,9 +7,11 @@ How to build, test, and change the code in this repository.
 
 ## Layout
 
-- `src/agents_live/` - the Python package. Runtime modules (`cli.py`,
-  `run.py`, `activate.py`, `headless.py`, ...) plus the vendored skill
-  payload at `src/agents_live/skill/` (SKILL.md, docs/, templates/).
+- `src/agents_live/` - the Python package. Canonical behavior is grouped
+  under `agent/`, `runtime/`, `state/`, `obs/`, `pipeline/`, and `cli/`;
+  `dispatch.py` is the handoff between runtime firings and agent execution.
+  `legacy/` contains one-major-cycle 5.x migration and cleanup code only.
+  The vendored skill payload remains under `skill/`.
 - `tests/test_smoke.py` - export-safe smoke suite. Runs against temp
   projects only; never touches this checkout's `Agents/` directory.
 - `tools/pre-release-audit.py` - scans for personal information,

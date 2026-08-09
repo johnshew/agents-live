@@ -1,6 +1,6 @@
 """Pure runnable-unit port."""
 from .definition import DefinitionError
-from .port import interpret, load, outcome, prepare, shape
+from .port import discover, interpret, load, outcome, prepare, shape
 from .selector import parse_selector
 from .values import (
     AgentSpec,
@@ -35,6 +35,7 @@ __all__ = [
     "Step",
     "StepContext",
     "StepResult",
+    "discover",
     "interpret",
     "load",
     "outcome",

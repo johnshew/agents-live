@@ -15,6 +15,13 @@ Agents Live definitions will become conforming
 standard meanings. Agents Live adds execution policy under the standard
 `metadata` map, using keys prefixed with `agents-live.`.
 
+Agents Live also accepts `<skill-name>.md` in configured repository discovery
+roots. This flat projection uses the same frontmatter and body contract but is
+an Agents Live extension, not a conforming Agent Skill. It exists for
+repositories that want several small runnable definitions without one wrapper
+directory per file. Runtime identity is `<name>-<hash>`, where the hash comes
+from the normalized repository-relative prompt path.
+
 This chooses the layout-level position left open in
 [refactoring-runtime-and-agent-seams.md](refactoring-runtime-and-agent-seams.md).
 It supersedes flat agent files with top-level Agents Live fields. It is a

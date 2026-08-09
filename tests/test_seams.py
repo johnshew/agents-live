@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agents_live import agent, state, triggers
+from agents_live import (
+    agent, obs, paths, runtime, state,
+)
+from agents_live.cli import lifecycle
+from agents_live.cli.commands import uninstall
+from agents_live.cli.spec import COMMANDS
+from agents_live.legacy import health_check, triggers
+from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
-from agents_live.definition_migrate import MigrationError, convert
+from agents_live.cli.commands.definition_migrate import MigrationError, convert
 from agents_live.runtime import (
     ChildResult,
     Health,
@@ -18,6 +27,7 @@ from agents_live.runtime import (
     ProcessRef,
     Subscription,
     WatchSyntaxError,
+    converge,
     diff,
     parse_schedule,
     parse_watch,
@@ -25,6 +35,7 @@ from agents_live.runtime import (
 from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.hosts.posix import PosixHost
+from agents_live.runtime.hosts.memory import MemoryHost
 
 
 class TempRepository(unittest.TestCase):
@@ -114,10 +125,43 @@ class TestDefinitionLoader(TempRepository):
         with self.assertRaises(MigrationError):
             convert(bad, root=self.root)
 
-    def test_rejects_flat_and_retired_formats(self) -> None:
+    def test_configured_flat_skills_have_path_derived_identifiers(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            'agent_directories = ["foo", "bar"]\n', encoding="utf-8")
+        for directory_name in ("foo", "bar"):
+            directory = self.root / directory_name
+            directory.mkdir()
+            (directory / "README.md").write_text(
+                "# Supporting documentation\n", encoding="utf-8")
+            (directory / "verify-links.md").write_text(
+                "---\n"
+                "name: verify-links\n"
+                "description: Verify links in repository documentation.\n"
+                "metadata:\n"
+                '  agents-live.schema-version: "1"\n'
+                '  agents-live.selector: "fake"\n'
+                '  agents-live.schedule: "0 8 * * *"\n'
+                "---\n"
+                "Verify the links.\n",
+                encoding="utf-8",
+            )
+
+        specs = [spec for spec in agent.discover(self.root)
+                 if spec.name == "verify-links"]
+        self.assertEqual(2, len(specs))
+        self.assertEqual(2, len({spec.identifier for spec in specs}))
+        self.assertTrue(all(
+            spec.identifier.startswith("verify-links-") for spec in specs))
+        for spec in specs:
+            self.assertEqual(spec.prompt_path, agent.load(
+                spec.identifier, root=self.root).prompt_path)
+        with self.assertRaisesRegex(agent.DefinitionError, "ambiguous"):
+            agent.load("verify-links", root=self.root)
+
+    def test_rejects_retired_fields_in_flat_and_bundle_formats(self) -> None:
         (self.root / "Agents" / "old.md").write_text(
             "---\ndescription: old\nruntime: none\n---\nold\n", encoding="utf-8")
-        with self.assertRaisesRegex(agent.DefinitionError, "5.x flat format"):
+        with self.assertRaisesRegex(agent.DefinitionError, "retired"):
             agent.load("old", root=self.root)
         self.skill("retired", [
             'agents-live.selector: "fake"',
@@ -133,6 +177,20 @@ class TestDefinitionLoader(TempRepository):
 
 
 class TestRuntimeCore(unittest.TestCase):
+    def test_framework_smoketest_has_no_external_provider_gate(self) -> None:
+        self.assertEqual("fake", health_check._resolve_smoketest_runtime())
+
+    def test_name_keyed_ownership_rejects_duplicate_identities(self) -> None:
+        with self.assertRaisesRegex(
+            ownership.OwnershipUnavailableError,
+            "cannot distinguish duplicate agent name 'verify-links'",
+        ):
+            ownership.resolve_owners(
+                (("verify-links-111", "verify-links"),
+                 ("verify-links-222", "verify-links")),
+                {"verify-links": "host/runtime/" + "a" * 32},
+            )
+
     def test_schedule_language_is_portable_and_watch_is_canonical(self) -> None:
         self.assertEqual("0 8 * 1 1", parse_schedule("0 8 * JAN MON").canonical)
         self.assertEqual("@yearly", parse_schedule("@annually").canonical)
@@ -182,6 +240,22 @@ class TestRuntimeCore(unittest.TestCase):
             f"--subscription-key {subscription.key}", rendered.rendered)
         self.assertNotIn("--runtime-role", rendered.watcher_argv)
 
+    def test_uninstall_clears_structured_triggers_and_watchers(self) -> None:
+        host = MemoryHost()
+        subscriptions = (
+            Subscription.create(
+                scope="repo:/tmp/example", target="agent:sample",
+                kind="schedule", trigger="0 8 * * *"),
+            Subscription.create(
+                scope="repo:/tmp/example", target="agent:sample",
+                kind="watch", trigger="'src/**' debounce 1s"),
+        )
+        self.assertFalse(converge(subscriptions, _host=host).failed)
+        with mock.patch.object(uninstall.runtime, "current", return_value=host):
+            uninstall._sweep_runtime()
+        self.assertEqual([], host.trigger_store.list())
+        self.assertEqual([], host.supervisor.owned())
+
 
 def _rendered(kind: str, key: str, fingerprint: str):
     from agents_live.runtime import RenderedSubscription
@@ -190,6 +264,50 @@ def _rendered(kind: str, key: str, fingerprint: str):
 
 
 class TestStartedState(TempRepository):
+    def _converge_with_legacy(self, host: MemoryHost):
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with mock.patch.object(
+                lifecycle.repos,
+                "load",
+                return_value={
+                    "repos": {"sample": str(self.root)},
+                    "default_repo": "sample",
+                },
+            ):
+                return lifecycle.converge()
+        finally:
+            runtime.configure(previous)
+
+    def test_lifecycle_adopts_then_replaces_legacy_trigger(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        spec = agent.load("sample", root=self.root)
+        host = MemoryHost()
+        host.legacy[str(self.root)] = {"sample"}
+        result = self._converge_with_legacy(host)
+        self.assertFalse(result.failed)
+        self.assertIn(spec.identifier, state.load(self.root).agents)
+        self.assertEqual(set(), host.legacy[str(self.root)])
+        self.assertTrue(any(item.kind == "remove-legacy" for item in result.done))
+
+    def test_failed_replacement_preserves_legacy_trigger(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        host = MemoryHost()
+        host.legacy[str(self.root)] = {"sample"}
+        with mock.patch.object(
+            host.trigger_store, "install", side_effect=RuntimeError("blocked"),
+        ):
+            result = self._converge_with_legacy(host)
+        self.assertTrue(result.failed)
+        self.assertEqual({"sample"}, host.legacy[str(self.root)])
+
     def test_absent_adopts_and_unreadable_abstains(self) -> None:
         snapshot = state.load_or_adopt(self.root, {"one", "two"})
         self.assertEqual(frozenset({"one", "two"}), snapshot.agents)
@@ -290,6 +408,12 @@ class TestAgentPipeline(TempRepository):
                 Firing(name, str(self.root), "manual"), runner=runner)
             self.assertTrue(result.ok, result)
             self.assertEqual(sum(expected), len(runner.argv))
+            records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+            completed = [
+                record for record in records
+                if record["agent_name"] == name and record["phase"] == "done"
+            ]
+            self.assertEqual("ok", completed[-1]["status"])
 
     def test_pipeline_post_processor_reads_the_resource_not_agent_stdout(self) -> None:
         directory = self.skill("pipeline", [
@@ -323,6 +447,30 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_cli_targets_resolve_from_owned_packages(self) -> None:
+        package = Path(__file__).parents[1] / "src" / "agents_live"
+        for command in COMMANDS:
+            for target in (command, *command.subcommands):
+                with self.subTest(command=target.name, module=target.module):
+                    if target.dispatch == "in-process":
+                        importlib.import_module(f"agents_live.{target.module}")
+                    else:
+                        self.assertTrue((package / target.module).is_file())
+
+        retired_root_modules = {
+            "activate.py", "completions.py", "crontasks.py", "dashboard.py",
+            "dashboards.py", "definition_migrate.py", "doctor.py",
+            "headless.py", "health_check.py", "heartbeat.py", "hostruntime.py",
+            "init.py", "internal.py", "lifecycle.py", "migrate.py",
+            "ownership.py", "pipeline_mcp.py", "pipeline_runtime.py",
+            "qlog.py", "repos.py", "run.py", "schedules.py", "smoketest.py",
+            "spawn.py", "start.py", "status.py", "stop.py", "timeline.py",
+            "triggers.py", "uninstall.py", "upgrade.py", "watchpolicy.py",
+            "watchsource.py", "wintasks.py", "winwatch.py",
+        }
+        self.assertEqual(
+            set(), retired_root_modules & {path.name for path in package.glob("*.py")})
+
     def test_ports_do_not_import_each_other_and_cli_stays_on_ports(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         runtime_imports = _imports(package / "runtime")
@@ -332,6 +480,7 @@ class TestArchitectureFitness(unittest.TestCase):
         allowed = {
             "agents_live.agent", "agents_live.dispatch", "agents_live.obs",
             "agents_live.runtime", "agents_live.state", "agents_live.cli",
+            "agents_live.legacy",
         }
         for imported in _imports(package / "cli"):
             if imported.startswith("agents_live."):

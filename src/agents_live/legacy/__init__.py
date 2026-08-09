@@ -1,0 +1,1 @@
+"""One-major-cycle support for explicit 5.x artifact migration."""

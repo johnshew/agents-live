@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -67,6 +68,13 @@ class AgentSpec:
     @property
     def name(self) -> str:
         return self.properties.name
+
+    @property
+    def identifier(self) -> str:
+        relative = self.prompt_path.resolve().relative_to(
+            self.root.resolve()).as_posix().casefold()
+        path_hash = sha256(relative.encode("utf-8")).hexdigest()[:10]
+        return f"{self.name}-{path_hash}"
 
 
 @dataclass(frozen=True)

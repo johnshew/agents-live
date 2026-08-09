@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Mapping
 
-from .definition import DefinitionError, load_definition
+from .definition import DefinitionError, discover_definitions, load_definition
 from .providers import get as get_provider
 from .values import (
     AgentSpec,
@@ -28,6 +28,10 @@ DEFAULT_TIMEOUT_SECONDS = 120
 
 def load(agent_id: str, *, root: Path) -> AgentSpec:
     return load_definition(agent_id, root=root)
+
+
+def discover(root: Path) -> tuple[AgentSpec, ...]:
+    return discover_definitions(root)
 
 
 def shape(spec: AgentSpec) -> RunShape:

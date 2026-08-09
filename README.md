@@ -8,9 +8,10 @@
 scheduled and file-triggered local automations, without moving them to another
 agent platform.
 
-Each definition is a conforming Agent Skill directory. Agents Live reads its
-namespaced execution metadata, adds local triggers, and repairs drift using
-standard host tools.
+Definitions can be conforming Agent Skill directories or flat Markdown files
+in configured repository directories. Agents Live reads their namespaced
+execution metadata, adds local triggers, and repairs drift using standard host
+tools.
 
 ### `Agents/markdown-polisher/SKILL.md`
 
@@ -128,8 +129,10 @@ configuration issues.
 
 ## Go further
 
-Definitions live under a registered repository's `Agents/` directory. Register
-another repository with `agents-live init --repo <path>`.
+Definitions live under a registered repository's `Agents/` directory by
+default. Set `agent_directories = ["foo"]` in `.agents-live.toml` to also
+discover immediate `foo/<name>.md` files and `foo/<name>/SKILL.md` bundles.
+Register another repository with `agents-live init --repo <path>`.
 
 See the [command reference](src/agents_live/skill/docs/commands.md) for
 repository workflows, health checks and repair, upgrades, dashboards, shell

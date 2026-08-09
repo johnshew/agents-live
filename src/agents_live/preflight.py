@@ -28,9 +28,9 @@ import time
 from dataclasses import dataclass, asdict
 
 try:
-    from . import hostruntime
+    from .runtime.hosts import system as hostruntime
 except ImportError:  # flat execution: qlog and timeline run as scripts
-    import hostruntime  # type: ignore[no-redef]
+    from runtime.hosts import system as hostruntime  # type: ignore[no-redef]
 
 # Set by cli.py when --json is given, so in-process subcommands and their
 # children serialize typed errors as the envelope instead of prose
@@ -102,9 +102,9 @@ def _probe_schedule(operation: str) -> CapabilityFailure | None:
 
 def _probe_task_scheduler(operation: str) -> CapabilityFailure | None:
     try:
-        from . import wintasks  # noqa: PLC0415
+        from .runtime.hosts import task_scheduler as wintasks  # noqa: PLC0415
     except ImportError:  # flat execution, as at the top of this module
-        import wintasks  # type: ignore[no-redef]  # noqa: PLC0415
+        from runtime.hosts import task_scheduler as wintasks  # type: ignore[no-redef]  # noqa: PLC0415
 
     missing = wintasks.missing_dependency()
     if missing is not None:
@@ -149,9 +149,9 @@ def _probe_watch(operation: str) -> CapabilityFailure | None:
 
 def _probe_directory_changes(operation: str) -> CapabilityFailure | None:
     try:
-        from . import winwatch  # noqa: PLC0415
+        from .runtime.hosts import windows_watch as winwatch  # noqa: PLC0415
     except ImportError:  # flat execution, as at the top of this module
-        import winwatch  # type: ignore[no-redef]  # noqa: PLC0415
+        from runtime.hosts import windows_watch as winwatch  # type: ignore[no-redef]  # noqa: PLC0415
 
     reason = winwatch.probe()
     if reason is not None:

@@ -12,8 +12,9 @@ from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
-from . import __version__, adminlog, hostruntime, paths
-from .spawn import find_uv
+from . import __version__, adminlog, paths
+from .runtime.hosts import system as hostruntime
+from .runtime.spawn import find_uv
 
 # Kernel extension points a declared distribution must provide.
 ENTRY_POINT_GROUPS = frozenset({"agents_live.agents", "agents_live.ownership"})

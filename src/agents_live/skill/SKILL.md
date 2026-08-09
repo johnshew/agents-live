@@ -53,29 +53,18 @@ commit. Stale docs are worse than missing ones.
 
 ## Agent directories
 
-Canonical agent files live in the native agent directories:
-`.claude/agents/<name>.md` (the default - Claude Code, Copilot
-CLI, and VS Code all discover it) or `.github/agents/<name>.agent.md`
-(adds github.com cloud-agent exposure; pin `target: vscode` on
-write/pipeline agents there). A native-directory file WITHOUT
-`schedule`/`watchPath` is a plain interactive agent: discovery, `status`,
-`start --all`, and orphan pruning skip it. Additional agent directories
-(`Agents/`, plus `agent_directories` from the project config - root
-`.agents-live.toml` or `[tool.agents-live]` in `pyproject.toml`) still
-work; ephemeral `_` fixtures MUST stay in `Agents/` (interactive
-surfaces would list them from native dirs). Names must be unique across
-all locations.
+`Agents/` is always searched. Project configuration may add repository-relative
+discovery roots with `agent_directories = ["foo"]` in `.agents-live.toml` or
+the `[tool.agents-live]` table in `pyproject.toml`. Each root is searched one
+level deep for `<name>.md` flat definitions and `<name>/SKILL.md` Agent Skill
+bundles. Flat definitions use the Agent Skills content schema but are an
+Agents Live extension; only the bundle layout conforms to Agent Skills.
 
-Native agent directories hold no executables: agents there reference
-pre/post-processors by repo-relative path (e.g.
-`Agents/handlers/x.py`); bare names are rejected. In additional agent
-directories, bare names still resolve relative to the agent's own
-directory. Logs are centralized per repo in the user-level state home
-(`~/.local/state/agents-live/repos/<key>/logs/`), never in the project
-tree. Agents in
-`.claude/agents/` are visible to Claude Code as subagents - give each a
-description ending "Never delegate to this agent." plus
-`disable-model-invocation: true` (the doctor lints this).
+Every definition has a canonical `<name>-<path-hash>` identifier derived from
+its repository-relative prompt path. A plain name remains valid when unique.
+When names repeat, use the canonical identifier shown by `status`. Relative
+processor paths resolve from the bundle directory or, for a flat definition,
+from the containing discovery root.
 
 ## Lifecycle
 
@@ -118,26 +107,12 @@ not the user-facing contract.
 
 **Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
 
-## Prompt Frontmatter
+## Definition metadata
 
-Each agent file's YAML frontmatter is the source of truth for Agents Live
-configuration.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `runtime` | *(required)* | `claude`, `copilot`, `none`, or an adapter registered by an installed plugin (e.g. `agency claude`, `agency copilot`) |
-| `mode` | `plan` | `plan` (read-only), `pipeline` (mediated `put`/`get`), or `write` (explicit direct authority) |
-| `model` | *(agent default)* | Optional model override |
-| `pre-processor` | *(none)* | Deterministic script that runs before the agent |
-| `post-processor` | *(log-only)* | Deterministic script that runs after the agent |
-| `env` | *(none)* | Map of env vars passed to the agent process |
-| `mcps` | *(none)* | List of MCP server specs |
-| `owner` | *(registry)* | Machine ownership; used only in registry mode, which requires a plugin-provided ownership backend. `"*"` (any host) or a `hostname/runtime/uuid` identity, where the runtime is `windows` or the WSL distro name; matching reads only the uuid, so anything else is another runtime's. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
-| `schedule` | -- | Cron expression (at least one of schedule/watchPath required) |
-| `watchPath` | -- | Repo-relative directory or list of directories |
-
-Both `schedule` and `watchPath` can be set (type `multi`). Each trigger
-fires independently. On `start`/`stop`, both are activated/deactivated.
+Standard Agent Skills properties remain top-level. Agents Live execution
+policy is stored as quoted string values under `metadata` with the
+`agents-live.` prefix. Read [docs/definition-format.md](docs/definition-format.md)
+for the complete schema.
 
 ## Pre-processor pipeline
 

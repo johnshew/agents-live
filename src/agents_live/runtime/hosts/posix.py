@@ -7,11 +7,12 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
-from ... import crontasks, watchsource
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import Health, InstalledTrigger, RenderedSubscription, Subscription
 from .processes import LocalChildRunner, LocalProcesses
+from . import crontab as crontasks
+from . import filesystem as watchsource
 
 
 class PosixTriggerStore:
@@ -47,6 +48,15 @@ class PosixTriggerStore:
                 line,
             ))
         return found
+
+    def clear(self) -> int:
+        with crontasks.lock():
+            lines = crontasks.lines()
+            if lines is None:
+                raise RuntimeError("crontab is unreadable")
+            kept = [line for line in lines if artifacts.from_rendered(line) is None]
+            crontasks.write(kept)
+            return len(lines) - len(kept)
 
 
 class PosixHost:
@@ -110,6 +120,14 @@ class PosixHost:
             rendered,
             watcher_argv,
         )
+
+    def legacy_agents(self, root: str) -> set[str]:
+        return set(crontasks.installed_names(root, kind=crontasks.CLOCK)) | set(
+            crontasks.installed_names(root, kind=crontasks.WATCH))
+
+    def remove_legacy(self, root: str, name: str) -> None:
+        crontasks.remove(root, name)
+        crontasks.delete(root, name, kind=crontasks.WATCH)
 
     def health(self) -> Health:
         readable = crontasks.lines() is not None

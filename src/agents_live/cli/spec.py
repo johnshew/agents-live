@@ -64,7 +64,7 @@ POST_COMMAND_ARGS = (GLOBAL_ARGS[0], HELP_ARG)
 
 COMMANDS = (
     Cmd(
-        "run", "Execute an agent once.", "run", "in-process",
+        "run", "Execute an agent once.", "cli.commands.run", "in-process",
         json=True, name_sugar=True,
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
@@ -80,7 +80,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "start", "Start automatic runs for an agent.", "start", "in-process",
+        "start", "Start automatic runs for an agent.", "cli.commands.start", "in-process",
         probes=("schedule", "watch"), dynamic_probes="start", json=True,
         name_sugar=True,
         requires_one_of=("--name", "--all"),
@@ -91,11 +91,11 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "internal", "Run internal watcher plumbing.", "internal", "in-process",
+        "internal", "Run internal watcher plumbing.", "cli.commands.internal", "in-process",
         probes=("schedule", "watch"), hidden=True, subcommand_required=True,
         subcommands=(
             Cmd(
-                "watch-loop", "Run one watcher loop.", "internal", "in-process",
+                "watch-loop", "Run one watcher loop.", "cli.commands.internal", "in-process",
                 args=(
                     Arg(("name",), "Agent name.", kind="positional", required=True),
                     Arg(("--watch-expression",), "Canonical watch expression.",
@@ -110,7 +110,7 @@ COMMANDS = (
                 ),
             ),
             Cmd(
-                "maintain", "Run automatic host maintenance.", "internal",
+                "maintain", "Run automatic host maintenance.", "cli.commands.internal",
                 "in-process", hidden=True,
                 args=(
                     Arg(("--quiet",), "Suppress progress output."),
@@ -118,18 +118,18 @@ COMMANDS = (
                 ),
             ),
             Cmd(
-                "liveness", "Refresh host liveness.", "internal",
+                "liveness", "Refresh host liveness.", "cli.commands.internal",
                 "in-process", hidden=True,
             ),
             Cmd(
                 "migrate", "Converge persisted trigger invocations.",
-                "migrate", "in-process", hidden=True,
+                "legacy.migrate", "in-process", hidden=True,
                 args=(Arg(("--dry-run",), "Show planned trigger rewrites."),),
             ),
         ),
     ),
     Cmd(
-        "stop", "Stop automatic runs and keep the definition.", "stop",
+        "stop", "Stop automatic runs and keep the definition.", "cli.commands.stop",
         "in-process", probes=("schedule",), json=True, name_sugar=True,
         default_notice=True,
         args=(
@@ -138,7 +138,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "status", "List agents and runtime state.", "status", "in-process",
+        "status", "List agents and runtime state.", "cli.commands.status", "in-process",
         root="registry", json=True, all_repos=True,
         args=(
             Arg(("name",), "Optional agent name.", kind="positional"),
@@ -146,12 +146,12 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "logs", "Query logs and correlated event timelines.", "qlog.py",
+        "logs", "Query logs and correlated event timelines.", "obs/qlog.py",
         "subprocess", root="registry", json=True,
         json_args=("--format", "jsonl"), json_shape="records",
         subcommands=(
             Cmd(
-                "timeline", "Show a correlated event timeline.", "timeline.py",
+                "timeline", "Show a correlated event timeline.", "obs/timeline.py",
                 "subprocess", root="registry", json=True,
                 args=(
                     Arg(("filter",), "Agent or content filter.",
@@ -189,7 +189,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "smoketest", "Run end-to-end validation.", "smoketest", "in-process",
+        "smoketest", "Run end-to-end validation.", "cli.commands.smoketest", "in-process",
         probes=("schedule", "watch"), json=True, default_notice=True,
         args=(
             Arg(("--runtime",), "Agent runtime.", kind="value"),
@@ -197,7 +197,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "doctor", "Check environment and installation readiness.", "doctor",
+        "doctor", "Check environment and installation readiness.", "cli.commands.doctor",
         "in-process", root="markerless", json=True,
         all_repos=True, update_notice=False,
         mutually_exclusive=(("--all-repos", "--repair"),),
@@ -208,7 +208,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "init", "Initialize the global or repository workspace.", "init",
+        "init", "Initialize the global or repository workspace.", "cli.commands.init",
         "in-process",
         root="none", json=True,
         args=(
@@ -217,7 +217,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "upgrade", "Upgrade runtime and project skill payloads.", "upgrade",
+        "upgrade", "Upgrade runtime and project skill payloads.", "cli.commands.upgrade",
         "in-process", root="none", json=True, update_notice=False,
         mutually_exclusive=(("--runtime-only", "--skills-only"),
                             ("--from", "--skills-only")),
@@ -231,7 +231,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "migrate", "Convert 5.x flat definitions.", "definition_migrate",
+        "migrate", "Convert 5.x flat definitions.", "cli.commands.definition_migrate",
         "in-process",
         args=(
             Arg(("paths",), "Definitions to convert.", kind="positional"),
@@ -239,7 +239,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "uninstall", "Remove host integrations and the uv tool.", "uninstall",
+        "uninstall", "Remove host integrations and the uv tool.", "cli.commands.uninstall",
         "in-process", root="none",
         args=(
             Arg(("--distro",), "Distribution name.", kind="value"),
@@ -247,13 +247,13 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "repos", "Manage registered repositories.", "repos", "in-process",
+        "repos", "Manage registered repositories.", "cli.commands.repos", "in-process",
         root="none", json=True, subcommand_required=True,
         subcommands=(
-            Cmd("list", "List registered repositories.", "repos", "in-process",
+            Cmd("list", "List registered repositories.", "cli.commands.repos", "in-process",
                 root="none"),
             Cmd(
-                "add", "Register a repository.", "repos", "in-process",
+                "add", "Register a repository.", "cli.commands.repos", "in-process",
                 root="none",
                 args=(Arg(("path",),
                           "Repository root (registered under its directory "
@@ -261,13 +261,13 @@ COMMANDS = (
                           kind="positional", required=True),),
             ),
             Cmd(
-                "default", "Set the fallback repository.", "repos",
+                "default", "Set the fallback repository.", "cli.commands.repos",
                 "in-process", root="none",
                 args=(Arg(("repo",), "Repository path or alias.",
                           kind="positional", required=True),),
             ),
             Cmd(
-                "remove", "Remove a registered repository.", "repos",
+                "remove", "Remove a registered repository.", "cli.commands.repos",
                 "in-process", root="none",
                 args=(Arg(("repo",), "Repository path or alias.",
                           kind="positional", required=True),),
@@ -275,7 +275,7 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "completions", "Generate shell completion scripts.", "completions",
+        "completions", "Generate shell completion scripts.", "cli.commands.completions",
         "in-process", root="none",
         mutually_exclusive=(("shell", "--update"),),
         requires_one_of=("shell", "--update"),
@@ -317,16 +317,16 @@ boundary and never edits shell startup files.""",
         ),
     ),
     Cmd(
-        "dashboard", "Open the interactive control panel.", "dashboard.py",
+        "dashboard", "Open the interactive control panel.", "cli/scripts/dashboard.py",
         "subprocess", root="registry", all_repos=True,
         subcommands=(
             Cmd(
                 "list", "List dashboards this host is running.",
-                "dashboards.py", "subprocess", root="none",
+                "cli/scripts/dashboards.py", "subprocess", root="none",
             ),
             Cmd(
                 "stop", "Stop a dashboard this host is running.",
-                "dashboards.py", "subprocess", root="none",
+                "cli/scripts/dashboards.py", "subprocess", root="none",
                 mutually_exclusive=(("--port", "--all"),),
                 requires_one_of=("--port", "--all"),
                 args=(

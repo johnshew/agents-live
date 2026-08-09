@@ -65,9 +65,9 @@ import tomllib
 from pathlib import Path
 
 try:
-    from . import hostruntime
+    from .runtime.hosts import system as hostruntime
 except ImportError:  # flat execution: qlog and timeline run as scripts
-    import hostruntime  # type: ignore[no-redef]
+    from runtime.hosts import system as hostruntime  # type: ignore[no-redef]
 
 ENV_VAR = "AGENTS_LIVE_REPO"
 CONFIG_DOTFILE = ".agents-live.toml"
@@ -84,15 +84,15 @@ _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _repos_module():
-    """The repos module under either layout. qlog/timeline are dispatched
+    """The registry module under either layout. qlog/timeline are dispatched
     via ``uv run --script`` (decision 6.4) and import this module flat, so
-    a bare ``from . import repos`` here crashes with "no known parent
+    a package-relative import here crashes with "no known parent
     package" the moment resolution reaches the registry (issue #48)."""
     try:
-        from . import repos
+        from .state import registry
     except ImportError:
-        import repos
-    return repos
+        from state import registry
+    return registry
 
 
 def _no_root_error(allow_sole_registered: bool) -> ValueError:
