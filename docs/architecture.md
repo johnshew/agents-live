@@ -54,6 +54,10 @@ A definition is one of:
 - `<discovery-root>/<name>/SKILL.md`, a conforming Agent Skill bundle; or
 - `<discovery-root>/<name>.md`, the Agents Live flat-file extension.
 
+Both forms are discovered in every root, including `Agents/`. Processor and
+schema references are relative to the skill root, which is the bundle
+directory for a bundle and the discovery root for a flat definition.
+
 `Agents/` is always a discovery root. Repositories can add immediate,
 repository-relative roots through `agent_directories`. Execution metadata uses
 quoted `agents-live.*` values under the standard `metadata` map. The complete

@@ -70,9 +70,10 @@ agents-live stop link-check --dry-run
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload.
-- `migrate [PATHS] [--dry-run]` is the one-shot 5.x flat-definition converter.
-  It reads `Agents/<name>.md` only; definitions in configured
-  `agent_directories` roots are converted by hand.
+- `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
+  rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
+  they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.
+  Definitions in configured `agent_directories` roots are converted by hand.
 - `uninstall` removes host integration.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.

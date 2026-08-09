@@ -32,17 +32,23 @@ class MigrationError(ValueError):
     pass
 
 
-def convert(path: Path, *, root: Path, dry_run: bool = False) -> Path:
+def convert(
+    path: Path,
+    *,
+    root: Path,
+    dry_run: bool = False,
+    bundle: bool = False,
+) -> Path:
     source = path.resolve()
     # Migration is run over many files at once, so every failure has to say
     # which one it was.
     try:
-        return _convert(source, root=root, dry_run=dry_run)
+        return _convert(source, root=root, dry_run=dry_run, bundle=bundle)
     except MigrationError as exc:
         raise MigrationError(f"{source}: {exc}") from None
 
 
-def _convert(source: Path, *, root: Path, dry_run: bool) -> Path:
+def _convert(source: Path, *, root: Path, dry_run: bool, bundle: bool) -> Path:
     agents = (root / "Agents").resolve()
     try:
         source.relative_to(agents)
@@ -74,10 +80,19 @@ def _convert(source: Path, *, root: Path, dry_run: bool) -> Path:
     description = data.get("description")
     if not isinstance(description, str) or not description:
         raise MigrationError("needs a nonempty description before migration")
+    if not bundle:
+        # Default: rewrite the frontmatter and leave everything else alone.
+        # Relocating a processor changes what `__file__` resolves to, which
+        # silently breaks any script that derives paths from its own depth.
+        metadata, _ = _metadata(data, source, agents, root, bundle=False)
+        rendered = _render(name, description, data, metadata, body)
+        if not dry_run:
+            source.write_text(rendered, encoding="utf-8")
+        return source
     destination = agents / name
     if destination.exists():
         raise MigrationError(f"migration destination already exists: {destination}")
-    metadata, copies = _metadata(data, source, destination, root)
+    metadata, copies = _metadata(data, source, destination, root, bundle=True)
     rendered = _render(name, description, data, metadata, body)
     if dry_run:
         return destination / "SKILL.md"
@@ -112,7 +127,7 @@ def _frontmatter(text: str) -> tuple[dict, str]:
     return data, "\n".join(lines[end + 1:]).strip()
 
 
-def _metadata(data: dict, source: Path, destination: Path, root: Path):
+def _metadata(data: dict, source: Path, destination: Path, root: Path, *, bundle: bool):
     existing = data.get("metadata") or {}
     if not isinstance(existing, dict) or not all(
             isinstance(key, str) and isinstance(value, str)
@@ -201,9 +216,10 @@ def _metadata(data: dict, source: Path, destination: Path, root: Path):
         if new in metadata:
             raise MigrationError("handler and post-processor are both declared")
         original = _old_reference(str(data[old]), source, root)
-        relative = Path("scripts") / original.name
+        relative = _reference(original, destination, Path("scripts"), bundle=bundle)
         metadata[new] = relative.as_posix()
-        copies.append((original, relative))
+        if bundle:
+            copies.append((original, relative))
     if "output-schema" in data:
         schema = data["output-schema"]
         if isinstance(schema, dict):
@@ -211,12 +227,29 @@ def _metadata(data: dict, source: Path, destination: Path, root: Path):
                 schema, sort_keys=True, separators=(",", ":"))
         elif isinstance(schema, str):
             original = _old_reference(schema, source, root)
-            relative = Path("references") / original.name
+            relative = _reference(
+                original, destination, Path("references"), bundle=bundle)
             metadata["agents-live.output-schema"] = relative.as_posix()
-            copies.append((original, relative))
+            if bundle:
+                copies.append((original, relative))
         else:
             raise MigrationError("output-schema must be a mapping or file reference")
     return metadata, copies
+
+
+def _reference(
+    original: Path, skill_root: Path, bundled_into: Path, *, bundle: bool
+) -> Path:
+    """Where the migrated definition should point at ``original``."""
+    if bundle:
+        return bundled_into / original.name
+    try:
+        return original.relative_to(skill_root)
+    except ValueError:
+        raise MigrationError(
+            f"referenced file {original} is outside {skill_root}, so a flat "
+            "definition cannot point at it; migrate with --bundle, or move "
+            "the file under the discovery root") from None
 
 
 def _old_reference(value: str, source: Path, root: Path) -> Path:
@@ -269,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Convert 5.x flat definitions.")
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--bundle", action="store_true")
     args = parser.parse_args(argv)
     root = paths.resolve_root()
     selected = (
@@ -280,13 +314,17 @@ def main(argv: list[str] | None = None) -> int:
     failed = False
     for item in selected:
         try:
-            destination = convert(item, root=root, dry_run=args.dry_run)
+            destination = convert(
+                item, root=root, dry_run=args.dry_run, bundle=args.bundle)
         except (MigrationError, OSError, ValueError) as exc:
             failed = True
             print(str(exc), file=sys.stderr)
         else:
-            verb = "Would migrate" if args.dry_run else "Migrated"
-            print(f"{verb} {item} -> {destination}")
+            verb = "Would convert" if args.dry_run else "Converted"
+            if destination == Path(item).resolve():
+                print(f"{verb} {item}")
+            else:
+                print(f"{verb} {item} -> {destination}")
     return 1 if failed else 0
 
 

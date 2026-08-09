@@ -178,6 +178,54 @@ class TestDefinitionLoader(TempRepository):
         self.assertIn("assigned.md", str(caught.exception))
         self.assertIn("ownership registry", str(caught.exception))
 
+    def test_migration_leaves_processors_where_they_are(self) -> None:
+        """Relocating a processor changes what its own path means.
+
+        5.x handlers commonly derive the repository root from `__file__`
+        depth, so moving one into a bundle silently breaks it. The default
+        conversion rewrites frontmatter and touches nothing else.
+        """
+        handlers = self.root / "Agents" / "handlers"
+        handlers.mkdir()
+        processor = handlers / "report.py"
+        processor.write_text("print('ok')\n", encoding="utf-8")
+        source = self.root / "Agents" / "reporter.md"
+        source.write_text(
+            "---\ndescription: Reporter.\nruntime: none\n"
+            "post-processor: Agents/handlers/report.py\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(source.resolve(), convert(source, root=self.root))
+        self.assertTrue(source.is_file(), "the definition stays where it was")
+        self.assertTrue(processor.is_file(), "the processor is not moved")
+        self.assertFalse((self.root / "Agents" / "reporter").exists())
+
+        spec = agent.load("reporter", root=self.root)
+        self.assertEqual("handlers/report.py", spec.execution.post_processor)
+        self.assertEqual(
+            processor.resolve(),
+            (spec.skill_root / spec.execution.post_processor).resolve())
+
+    def test_bundle_migration_is_available_and_carries_processors(self) -> None:
+        handlers = self.root / "Agents" / "handlers"
+        handlers.mkdir()
+        (handlers / "report.py").write_text("print('ok')\n", encoding="utf-8")
+        source = self.root / "Agents" / "bundled.md"
+        source.write_text(
+            "---\ndescription: Bundled.\nruntime: none\n"
+            "post-processor: Agents/handlers/report.py\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+        destination = convert(source, root=self.root, bundle=True)
+        self.assertEqual(
+            self.root / "Agents" / "bundled" / "SKILL.md", destination)
+        self.assertFalse(source.exists())
+        spec = agent.load("bundled", root=self.root)
+        self.assertEqual("scripts/report.py", spec.execution.post_processor)
+        self.assertTrue((spec.skill_root / "scripts" / "report.py").is_file())
+
     def test_configured_flat_skills_have_path_derived_identifiers(self) -> None:
         (self.root / ".agents-live.toml").write_text(
             'agent_directories = ["foo", "bar"]\n', encoding="utf-8")

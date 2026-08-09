@@ -241,6 +241,8 @@ COMMANDS = (
         args=(
             Arg(("paths",), "Definitions to convert.", kind="positional"),
             Arg(("--dry-run",), "Preview without mutating."),
+            Arg(("--bundle",), "Convert into <name>/SKILL.md directories, "
+                "copying processors alongside."),
         ),
     ),
     Cmd(

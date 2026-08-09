@@ -70,10 +70,31 @@ explicit tags, byte-order marks, unknown top-level fields, and the retired
 
 ## Migrating from 5.x
 
-`agents-live migrate` reads `Agents/<name>.md` and writes
-`Agents/<name>/SKILL.md`. It does not convert definitions in configured
-`agent_directories` roots; convert those by hand, keeping them as flat
-`<name>.md` files, which remain a supported form in a configured root.
+`agents-live migrate` rewrites the frontmatter of `Agents/<name>.md` in place
+and changes nothing else. The definition keeps its path, and processors keep
+theirs; only the reference spelling changes, from repository-relative
+`Agents/handlers/x.py` to skill-relative `handlers/x.py`.
+
+Prefer that. It is the smallest change that makes a 5.x definition valid, and
+it is the safest: a 5.x processor commonly derives the repository root from
+its own location, so moving it silently changes what `__file__` means. Sharing
+one `Agents/handlers/` or `Agents/lib/` directory across definitions keeps
+working, because nothing is copied.
+
+`--bundle` converts to `Agents/<name>/SKILL.md` instead, copying each
+processor into the bundle's `scripts/` directory. Choose it per definition,
+when you want a self-contained skill that can be moved or published on its
+own, and check any processor that computes paths from `__file__`. A shared
+helper referenced by several definitions is copied into each one, so the
+copies can then drift.
+
+Both forms are first-class. A flat `<name>.md` and a `<name>/SKILL.md` bundle
+are discovered in `Agents/` and in every configured `agent_directories` root,
+and both use the same metadata contract. The bundle is the conforming Agent
+Skill; the flat file is the Agents Live extension.
+
+`migrate` reads `Agents/<name>.md` only. Definitions in configured
+`agent_directories` roots are converted by hand, in place, the same way.
 
 Three 5.x fields have no portable equivalent, so the conversion stops rather
 than guessing:

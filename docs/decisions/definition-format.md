@@ -28,9 +28,11 @@ Standard fields remain at the top level. Agents Live execution policy uses
 quoted string values under the standard `metadata` extension map with an
 `agents-live.` prefix.
 
-Configured discovery roots may also contain `<name>.md`. This is an explicit
-Agents Live extension using the same body and metadata contract, not a
-conforming Agent Skill bundle.
+Every discovery root may also contain `<name>.md`. This is an explicit Agents
+Live extension using the same body and metadata contract, not a conforming
+Agent Skill bundle. It exists because a repository with many small runnable
+definitions should not need one directory each, and because it is the form a
+5.x definition migrates into without its processors being relocated.
 
 Every definition receives a path-derived canonical identifier. Started state,
 ownership, credentials, and resolved environment values remain outside the

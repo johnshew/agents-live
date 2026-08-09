@@ -52,6 +52,15 @@ history is retained in the source repository.
 - fix: a run lock that cannot be read is abandoned after a day.
   An unreadable lock named no owner to wait for and blocked that agent
   permanently.
+- fix: migration rewrites a definition in place instead of relocating its processors.
+  `agents-live migrate` converted every definition into a `<name>/SKILL.md`
+  bundle and copied its processors into it. That silently broke any 5.x
+  processor deriving the repository root from its own location, left the
+  originals behind to drift from the copies, and split helpers that several
+  definitions deliberately shared. The default is now a frontmatter-only
+  rewrite: the definition and its processors stay where they are, and only
+  the reference spelling changes. `--bundle` performs the old conversion for
+  a definition that should become a self-contained skill.
 - fix: provider plugins are discovered again, and a 5.x plugin says so.
   Plugin validation accepted the retired `agents_live.agents` group while
   provider discovery read `agents_live.providers`, so a plugin declaring
