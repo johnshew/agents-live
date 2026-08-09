@@ -51,16 +51,12 @@ stale is a separate policy question, still open
 ## Confidence in the test suite
 
 Every defect found in the week of 2026-07-27 shipped through a green
-suite. That is a measured fact, and it points at structure rather than
-at missing coverage: the mock-driven population of the suite cannot
-execute the paths that keep breaking
-([#184](https://github.com/johnshew/agents-live/issues/184)), and the
-policy never required that anything assert the user-visible claim
-([#180](https://github.com/johnshew/agents-live/issues/180)).
-
-These are complements, not duplicates: one rebalances what the suite
-executes, the other changes what counts as coverage before a fix is
-called done.
+suite, and so did the three found in the 6.0 release review against a
+completely different suite. That is a measured fact, and it points at
+structure rather than at missing coverage: nothing required that the
+user-visible claim be asserted anywhere
+([#184](https://github.com/johnshew/agents-live/issues/184), which now
+absorbs the policy question first raised as #180).
 
 The slices done so far point at one shape worth repeating. An invariant
 that states a rule about the whole package - no subprocess capture may

@@ -59,8 +59,8 @@ As of 2026-08-09 on this branch:
 
 The suite deliberately emphasizes complete temporary-repository workflows,
 architecture invariants, memory-host convergence, and fake-provider outcomes.
-Issue [#184](https://github.com/johnshew/agents-live/issues/184) and policy issue
-[#180](https://github.com/johnshew/agents-live/issues/180) remain open because
+Issue [#184](https://github.com/johnshew/agents-live/issues/184) remains open
+because
 the wider historical suite relied too heavily on mocked implementation details.
 
 A first release review found three defects that the structural coverage above
@@ -77,9 +77,8 @@ closed. That pattern, not the individual defects, is what
 
 - [#255](https://github.com/johnshew/agents-live/issues/255): complete review
   and merge of the 6.0 runtime and agent seams.
-- [#184](https://github.com/johnshew/agents-live/issues/184) and
-  [#180](https://github.com/johnshew/agents-live/issues/180): settle the role
-  and policy of mock-driven tests.
+- [#184](https://github.com/johnshew/agents-live/issues/184): decide which
+  behaviours are owed an executing test.
 - [#123](https://github.com/johnshew/agents-live/issues/123): expose sustained
   agent failure in status and health.
 
