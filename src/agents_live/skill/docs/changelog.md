@@ -6,6 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: a definition written for a later release asks for an upgrade instead of failing as invalid.
+  A repository is often synced to a host before the tool on it is upgraded. A
+  definition declaring a schema version above the one the running release
+  implements is now refused with `runtime_outdated`, naming the installed
+  version and the upgrade command, and its trigger is preserved so the agent
+  resumes once the tool is upgraded. An unrecognised `agents-live.` key is no
+  longer fatal: keys are only added for additive capabilities, so an older
+  runtime honours the rest of the definition and runs it. `status --json` gains
+  the definition path and its execution policy, so a caller no longer has to
+  parse frontmatter to learn how an agent runs.
 - feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
   A definition is `Agents/<name>/SKILL.md`, or `<name>.md` in a configured
   discovery root. Execution policy is quoted `agents-live.*` metadata under

@@ -105,6 +105,21 @@ class TestDefinitionLoader(TempRepository):
         self.assertEqual("fake/echo:high", spec.execution.selector.canonical)
         self.assertIn(("other-client.value", "preserved"), spec.properties.metadata)
 
+    def test_an_unrecognised_execution_key_is_additive_not_fatal(self) -> None:
+        """A key added by a later release describes a capability this one lacks.
+
+        Ignoring it runs the rest of the definition; a change to what an
+        existing key means raises the schema version instead.
+        """
+        self.skill("forward", [
+            'agents-live.selector: "fake/echo"',
+            'agents-live.schedule: "0 8 * * *"',
+            'agents-live.sandbox: "strict"',
+        ])
+        spec = agent.load("forward", root=self.root)
+        self.assertEqual("fake/echo", spec.execution.selector.canonical)
+        self.assertEqual(("0 8 * * *",), spec.execution.schedules)
+
     def test_rejects_unquoted_metadata_duplicate_keys_and_aliases(self) -> None:
         bad = (
             ("unquoted", '  agents-live.selector: fake\n'),
@@ -739,6 +754,40 @@ class TestAgentPipeline(TempRepository):
         message = str(done[-1]["message"])
         self.assertIn("processed 3 files", message)
         self.assertIn("skipped 1 unreadable", message)
+
+    def test_a_definition_from_the_future_asks_for_an_upgrade(self) -> None:
+        """A repository can be synced ahead of the tool that runs it.
+
+        The definition is not malformed, so the run must not report it as
+        the user's mistake: the remedy is to upgrade agents-live.
+        """
+        directory = self.root / "Agents" / "ahead"
+        directory.mkdir()
+        (directory / "SKILL.md").write_text(
+            "---\nname: ahead\ndescription: Written for a later release.\n"
+            "metadata:\n"
+            f'  agents-live.schema-version: "{agent.SCHEMA_VERSION + 1}"\n'
+            '  agents-live.selector: "none"\n'
+            '  agents-live.schedule: "0 8 * * *"\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        identifier = agent.BrokenDefinition(
+            directory / "SKILL.md", "").identifier_in(self.root)
+        state.replace(self.root, {identifier})
+        result = dispatch(
+            Firing(identifier, str(self.root), "clock"),
+            runner=RecordingRunner([]),
+            now=datetime(2026, 8, 9, 8, 0).astimezone(),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual("runtime_outdated", result.category)
+        self.assertIn("upgrade", result.message.lower())
+
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        done = [r for r in records
+                if r["agent_name"] == identifier and r["phase"] == "done"]
+        self.assertIn("upgrade", str(done[-1]["message"]).lower())
 
     def test_prepare_errors_become_failed_outcomes(self) -> None:
         self.skill("invalid-provider-options", [

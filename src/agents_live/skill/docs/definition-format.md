@@ -56,9 +56,25 @@ metadata:
 | `agents-live.output-provenance` | `strict` | Optional strict whole-output JSON requirement. |
 
 Metadata keys and values must be strings, and every metadata value must be
-quoted. JSON is compact and uses stable key ordering. Unknown
-`agents-live.*` keys and schema versions fail closed. Metadata owned by other
+quoted. JSON is compact and uses stable key ordering. Metadata owned by other
 clients is preserved.
+
+## Forward compatibility
+
+A repository is often synced to a host before the tool on it is upgraded, so
+the loader has to say which of the two is behind.
+
+An `agents-live.` key this release does not recognise is ignored. A key is
+only added for a capability that is additive, so an older runtime honours the
+rest of the definition and runs it. The cost is that a misspelled key is
+silently inert.
+
+A change to what an existing key means is not additive, and raises the schema
+version instead. A definition declaring a version above the one the running
+release implements is refused: the run is abandoned and recorded under
+`runtime_outdated`, naming the installed version and the upgrade command. The
+definition is not malformed, so its trigger stays installed and the agent
+resumes once the tool is upgraded.
 
 `allowed-tools` and `agents-live.allow-tools` are different security
 contracts. The standard field pre-approves tools for interactive skill use.

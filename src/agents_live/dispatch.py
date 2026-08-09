@@ -54,6 +54,8 @@ def dispatch(
 
     try:
         spec = agent.load(firing.agent_id, root=root)
+    except agent.UnsupportedSchemaVersion as exc:
+        return _failure(events, firing, run_id, "runtime_outdated", str(exc))
     except agent.DefinitionError as exc:
         return _failure(events, firing, run_id, "agent_invalid", str(exc))
 

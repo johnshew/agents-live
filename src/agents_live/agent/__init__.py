@@ -1,5 +1,5 @@
 """Pure runnable-unit port."""
-from .definition import DefinitionError
+from .definition import SCHEMA_VERSION, DefinitionError, UnsupportedSchemaVersion
 from .port import discover, interpret, load, outcome, prepare, shape
 from .selector import parse_selector
 from .values import (
@@ -35,10 +35,12 @@ __all__ = [
     "Request",
     "ResolvedSpec",
     "RunShape",
+    "SCHEMA_VERSION",
     "SkillProperties",
     "Step",
     "StepContext",
     "StepResult",
+    "UnsupportedSchemaVersion",
     "discover",
     "interpret",
     "load",

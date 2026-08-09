@@ -11,6 +11,27 @@ from ... import agent, state
 from ...state import registry as repos
 
 
+def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
+    """How the definition runs, for callers that would otherwise parse it.
+
+    Deliberately omits env, whose values are the definition's secrets.
+    """
+    config = spec.execution
+    if config is None:
+        return None
+    return {
+        "selector": config.selector.canonical,
+        "provider": config.selector.provider,
+        "model": config.selector.model,
+        "mode": config.mode,
+        "schedules": list(config.schedules),
+        "watch": config.watch,
+        "mcps": list(config.mcps),
+        "pre_processor": config.pre_processor,
+        "post_processor": config.post_processor,
+    }
+
+
 def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     try:
         started = state.load(root)
@@ -36,11 +57,15 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     for identifier in sorted(identifiers):
         load_error = state_error
         description = None
+        policy = None
+        prompt_path = None
         name = identifier
         try:
             spec = discovered.get(identifier) or agent.load(identifier, root=root)
             name = spec.name
             description = spec.properties.description
+            policy = _policy(spec)
+            prompt_path = str(spec.prompt_path)
         except agent.DefinitionError as exc:
             load_error = str(exc)
         rows.append({
@@ -50,6 +75,8 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "state": "started" if identifier in started_names else "stopped",
             "loadable": load_error is None,
             "description": description,
+            "path": prompt_path,
+            "execution": policy,
             "error": load_error,
         })
     for item in unloadable:
@@ -62,6 +89,8 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "state": "unloadable",
             "loadable": False,
             "description": None,
+            "path": str(item.path),
+            "execution": None,
             "error": item.message,
         })
     return rows

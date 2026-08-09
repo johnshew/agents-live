@@ -11,6 +11,7 @@ from yaml.nodes import MappingNode, ScalarNode
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 from .. import paths
+from .. import __version__
 from .selector import parse_selector
 from .values import (
     AgentSpec,
@@ -23,24 +24,6 @@ from .values import (
 _STANDARD_FIELDS = {
     "name", "description", "license", "compatibility", "metadata", "allowed-tools",
 }
-_EXECUTION_FIELDS = {
-    "agents-live.schema-version",
-    "agents-live.schedule",
-    "agents-live.watch",
-    "agents-live.selector",
-    "agents-live.mode",
-    "agents-live.allow-tools",
-    "agents-live.mcps",
-    "agents-live.env",
-    "agents-live.transcript",
-    "agents-live.timeout",
-    "agents-live.pre-processor",
-    "agents-live.post-processor",
-    "agents-live.output-schema",
-    "agents-live.output-max-bytes",
-    "agents-live.output-path-roots",
-    "agents-live.output-provenance",
-}
 _RETIRED_FIELDS = {
     "runtime", "model", "schedule", "watchPath", "watchIgnore", "debounce",
     "mode", "allow-tools", "mcps", "env", "transcript", "timeout",
@@ -50,9 +33,21 @@ _RETIRED_FIELDS = {
 }
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
+# The definition format this release understands. A definition declaring a
+# higher version is not malformed, it is from the future.
+SCHEMA_VERSION = 1
+
 
 class DefinitionError(ValueError):
     pass
+
+
+class UnsupportedSchemaVersion(DefinitionError):
+    """The definition asks for a format this release does not implement.
+
+    Separate from a malformed definition because the remedy is the opposite:
+    upgrade the tool rather than edit the file.
+    """
 
 
 class _UniqueLoader(yaml.SafeLoader):
@@ -90,10 +85,11 @@ def load_definition(agent_id: str, *, root: Path) -> AgentSpec:
     ]
     if not matches:
         # Naming a definition that failed to parse has to report why it
-        # failed, not that it is absent.
+        # failed, not that it is absent. Reload it so the caller sees the
+        # real error type, not just its text.
         for item in discovery.broken:
-            if item.name == agent_id:
-                raise DefinitionError(item.message)
+            if agent_id in {item.name, item.identifier_in(repository)}:
+                return _load_prompt(item.path, repository)
         raise DefinitionError(f"definition not found: {agent_id}")
     exact = [spec for spec in matches if spec.identifier == agent_id]
     if exact:
@@ -203,7 +199,9 @@ def _load_prompt(prompt: Path, repository: Path) -> AgentSpec:
         properties = _properties(data, metadata_nodes, expected_name)
         execution = _execution(dict(properties.metadata), skill_root)
     except DefinitionError as exc:
-        raise DefinitionError(f"{prompt}: {exc}") from None
+        # Keep the subclass: the caller distinguishes a malformed definition
+        # from one written for a later release.
+        raise type(exc)(f"{prompt}: {exc}") from None
     return AgentSpec(repository, skill_root, prompt, properties, execution, body)
 
 
@@ -307,21 +305,36 @@ def _properties(
     )
 
 
+def _supported(version: str | None) -> None:
+    """Reject a definition this release cannot honour, saying which way to fix it."""
+    if version is None:
+        raise DefinitionError(
+            'agents-live.schema-version is required and must be quoted "1"')
+    if version.isdigit() and int(version) > SCHEMA_VERSION:
+        raise UnsupportedSchemaVersion(
+            f"definition declares schema version {version}, but the installed "
+            f"agents-live {__version__} implements version {SCHEMA_VERSION}; "
+            "upgrade with `uv tool upgrade agents-live`")
+    if version != str(SCHEMA_VERSION):
+        raise DefinitionError(
+            f'agents-live.schema-version must be quoted "{SCHEMA_VERSION}" '
+            "for this release")
+
+
 def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig | None:
+    """Read the execution policy, ignoring keys this release does not know.
+
+    An unrecognised ``agents-live.`` key is treated as a capability added
+    after this release: additive, so an older runtime can honour the rest.
+    A change that alters what an existing key means is not additive, and is
+    caught instead by the schema version.
+    """
     owned = {key: value for key, value in metadata.items()
              if key.startswith("agents-live.")}
     if not owned:
         return None
-    unknown = set(owned) - _EXECUTION_FIELDS
-    if unknown:
-        raise DefinitionError(
-            f"unknown agents-live.* fields for schema version "
-            f"{owned.get('agents-live.schema-version', '<missing>')}: "
-            f"{', '.join(sorted(unknown))}")
     version = owned.get("agents-live.schema-version")
-    if version != "1":
-        raise DefinitionError(
-            "agents-live.schema-version must be quoted \"1\" for this release")
+    _supported(version)
     selector_text = owned.get("agents-live.selector")
     if not selector_text:
         raise DefinitionError("agents-live.selector is required")
