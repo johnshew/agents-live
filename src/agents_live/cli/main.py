@@ -48,6 +48,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from .. import state
+from . import update_check
 from .spec import (
     COMMAND_BY_NAME,
     Cmd,
@@ -96,7 +97,16 @@ def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
 
 def _finish(code: int, command: Cmd | None, rest: list[str],
             *, json_mode: bool) -> int:
-    del command, rest, json_mode
+    if (
+        (command is None or command.update_notice)
+        and not json_mode
+        and "--quiet" not in rest
+        and update_check.interactive()
+    ):
+        notice = update_check.consume_notice(__version__)
+        update_check.launch_if_stale()
+        if notice:
+            print(f"\n{notice}", file=sys.stderr)
     return code
 
 

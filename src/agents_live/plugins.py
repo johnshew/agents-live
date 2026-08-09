@@ -12,7 +12,8 @@ from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
-from . import __version__, adminlog, paths
+from . import __version__, paths
+from .obs import admin as adminlog
 from .runtime.hosts import system as hostruntime
 from .runtime.spawn import find_uv
 

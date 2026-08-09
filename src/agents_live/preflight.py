@@ -191,10 +191,7 @@ def _record_probe(capability: str, operation: str, elapsed: float,
     scripts that run flat and must not pay for the log writer.
     """
     try:
-        try:
-            from . import adminlog  # noqa: PLC0415
-        except ImportError:  # flat execution, as at the top of this module
-            import adminlog  # type: ignore[no-redef]  # noqa: PLC0415
+        from .obs import admin as adminlog  # noqa: PLC0415
         adminlog.record(
             "capability-probe",
             status="error" if failure is not None else "ok",

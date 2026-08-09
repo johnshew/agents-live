@@ -26,10 +26,16 @@ def main(argv: list[str] | None = None) -> int:
     maintain.add_argument("--quiet", action="store_true")
     maintain.add_argument("--dry-run", action="store_true")
     commands.add_parser("liveness")
+    install_liveness = commands.add_parser("install-liveness")
+    install_liveness.add_argument("--distro")
     args = parser.parse_args(argv)
     if args.command == "liveness":
-        from ...runtime.hosts.heartbeat import run_once
+        from ...runtime.hosts.wsl_liveness import run_once
         return run_once()
+    if args.command == "install-liveness":
+        from ...runtime.hosts.wsl_liveness import install
+        install(args.distro)
+        return 0
     if args.command == "maintain":
         try:
             result = lifecycle.converge(dry_run=args.dry_run)

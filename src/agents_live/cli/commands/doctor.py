@@ -8,7 +8,7 @@ import sys
 
 from ... import runtime, state
 from ...state import registry as repos
-from .. import lifecycle
+from .. import lifecycle, update_check
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for item in checks:
             print(f"{'ok' if item['ok'] else 'ERROR'}: {item['check']}: {item['detail']}")
+        if update_check.interactive():
+            print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
 
 

@@ -36,6 +36,7 @@ from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
+from agents_live.runtime.hosts import task_scheduler
 
 
 class TempRepository(unittest.TestCase):
@@ -447,6 +448,42 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_compatibility_shim_and_lazy_host_imports_resolve(self) -> None:
+        from agents_live import hidden as legacy_hidden
+        from agents_live.runtime.hosts import crontab, hidden, wsl_liveness
+
+        self.assertIs(legacy_hidden.main, hidden.main)
+        with mock.patch.object(
+            crontab.hostruntime,
+            "exclusive_lock",
+            return_value=mock.MagicMock(),
+        ):
+            with crontab.lock():
+                pass
+        self.assertTrue(callable(wsl_liveness.state_dir))
+
+    def test_windows_hidden_actions_accept_current_and_legacy_modules(self) -> None:
+        for module in (
+            "agents_live.runtime.hosts.hidden",
+            "agents_live.hidden",
+        ):
+            with self.subTest(module=module):
+                arguments = task_scheduler.argument_string(
+                    ["-P", "-m", module, "agents-live.exe", "run", "sample"])
+                self.assertEqual(
+                    "agents-live.exe",
+                    task_scheduler._action_program("pythonw.exe", arguments),
+                )
+
+    def test_legacy_heartbeat_wrapper_uses_internal_liveness_commands(self) -> None:
+        wrapper = (
+            Path(__file__).parents[1] / "src" / "agents_live" /
+            "windows-heartbeat.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"$CLI" internal liveness', wrapper)
+        self.assertIn('"$CLI" internal install-liveness', wrapper)
+        self.assertNotIn('"$CLI" heartbeat', wrapper)
+
     def test_cli_targets_resolve_from_owned_packages(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         for command in COMMANDS:
@@ -458,14 +495,14 @@ class TestArchitectureFitness(unittest.TestCase):
                         self.assertTrue((package / target.module).is_file())
 
         retired_root_modules = {
-            "activate.py", "completions.py", "crontasks.py", "dashboard.py",
+            "activate.py", "adminlog.py", "completions.py", "crontasks.py", "dashboard.py",
             "dashboards.py", "definition_migrate.py", "doctor.py",
             "headless.py", "health_check.py", "heartbeat.py", "hostruntime.py",
             "init.py", "internal.py", "lifecycle.py", "migrate.py",
             "ownership.py", "pipeline_mcp.py", "pipeline_runtime.py",
             "qlog.py", "repos.py", "run.py", "schedules.py", "smoketest.py",
             "spawn.py", "start.py", "status.py", "stop.py", "timeline.py",
-            "triggers.py", "uninstall.py", "upgrade.py", "watchpolicy.py",
+            "triggers.py", "uninstall.py", "update_check.py", "upgrade.py", "watchpolicy.py",
             "watchsource.py", "wintasks.py", "winwatch.py",
         }
         self.assertEqual(

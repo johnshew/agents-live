@@ -15,9 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agents_live import agent, paths, state
+from agents_live import agent, obs, paths, state
 from agents_live.cli import main as cli_main
 from agents_live.cli import lifecycle
+from agents_live.cli.commands import init
 from agents_live.cli.commands import status
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import (
@@ -129,11 +130,31 @@ class TestSixRuntimeSmoke(SmokeRepository):
 
     def test_cli_help_uses_the_packaged_entry_point(self) -> None:
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        error = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(error),
+            mock.patch("agents_live.cli.update_check.interactive", return_value=True),
+            mock.patch(
+                "agents_live.cli.update_check.consume_notice",
+                return_value="new release available",
+            ),
+            mock.patch("agents_live.cli.update_check.launch_if_stale") as launch,
+        ):
             code = cli_main(["--help"])
         self.assertEqual(0, code)
         self.assertIn("agents-live", output.getvalue())
         self.assertIn("start", output.getvalue())
+        self.assertIn("new release available", error.getvalue())
+        launch.assert_called_once_with()
+
+    def test_json_help_does_not_check_for_updates(self) -> None:
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch("agents_live.cli.update_check.interactive") as interactive,
+        ):
+            self.assertEqual(0, cli_main(["--json", "--help"]))
+        interactive.assert_not_called()
 
     def test_shipped_templates_load_without_external_dependencies(self) -> None:
         templates = Path(agent.__file__).resolve().parents[1] / "skill" / "templates"
@@ -145,6 +166,20 @@ class TestSixRuntimeSmoke(SmokeRepository):
                 self.assertEqual(skill.name, spec.name)
                 self.assertTrue(spec.properties.description)
                 self.assertTrue(spec.body)
+
+    def test_init_installs_the_vendored_skill_payload(self) -> None:
+        self.assertEqual("installed", init.install_skill(self.root))
+        installed = self.root / ".claude" / "skills" / "agents-live"
+        for relative in ("SKILL.md", "VERSION", "docs", "templates"):
+            self.assertTrue((installed / relative).exists(), relative)
+
+    def test_administrative_events_use_the_observability_schema(self) -> None:
+        obs.admin.record("smoke-admin", root=str(self.root), changed=True)
+        records = obs.load((obs.admin.log_path(),))
+        self.assertEqual(1, len(records))
+        self.assertEqual("admin", records[0]["phase"])
+        self.assertEqual("smoke-admin", records[0]["operation"])
+        self.assertTrue(records[0]["changed"])
 
 
 if __name__ == "__main__":

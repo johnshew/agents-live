@@ -56,7 +56,7 @@ def normalize(raw: object) -> dict[str, object] | None:
         return None
     event = str(raw["event"])
     status = str(raw["status"])
-    return {
+    record = {
         "ts": raw["timestamp"],
         "log_schema": 1,
         "agent_name": raw["agent"],
@@ -71,3 +71,14 @@ def normalize(raw: object) -> dict[str, object] | None:
         "repository": raw.get("repository", ""),
         "changed_files": [],
     }
+    attributes = raw.get("attributes", [])
+    if isinstance(attributes, list):
+        for item in attributes:
+            if (
+                isinstance(item, list)
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and item[0] not in record
+            ):
+                record[item[0]] = item[1]
+    return record

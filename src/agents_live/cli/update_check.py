@@ -10,14 +10,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from . import __version__, paths
-from .runtime.hosts import system as hostruntime
+from .. import __version__, paths
+from ..runtime.hosts import system as hostruntime
 
-CACHE_INTERVAL = 60 * 60  # Check hourly so available releases are reported promptly.
+CACHE_INTERVAL = 60 * 60
 NETWORK_TIMEOUT = 1.0
 PYPI_URL = "https://pypi.org/pypi/agents-live/json"
-# Stable SemVer only: the absent ``-prerelease`` production deliberately
-# rejects alpha, beta, and release-candidate metadata.
 _STABLE_SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?$"
 )
@@ -77,9 +75,6 @@ def refresh(
         "checked_at": checked_at,
         "latest_version": None,
     }
-    # A refresh replaces the cache wholesale; carry the notice marker
-    # forward so an already-announced release is not re-announced after
-    # every hourly check (the notice is once per release, not per check).
     previous = _read_cache()
     if previous is not None and "notified_for" in previous:
         result["notified_for"] = previous["notified_for"]

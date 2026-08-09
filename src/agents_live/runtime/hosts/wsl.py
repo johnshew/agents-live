@@ -4,17 +4,17 @@ from __future__ import annotations
 import time
 
 from ..values import Health
-from . import heartbeat
+from . import wsl_liveness
 from .posix import PosixHost
 
 
 class WslHost(PosixHost):
     def prepare(self) -> None:
-        heartbeat.ensure()
+        wsl_liveness.ensure()
 
     def health(self) -> Health:
         base = super().health()
-        beacon = heartbeat.beacon_path()
+        beacon = wsl_liveness.beacon_path()
         fresh = False
         try:
             fresh = time.time() - beacon.stat().st_mtime <= 600

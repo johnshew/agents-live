@@ -19,7 +19,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from .. import adminlog, paths
+from .. import paths
+from ..obs import admin as adminlog
 from ..runtime.hosts import crontab as crontasks
 from ..runtime.hosts import system as hostruntime
 from ..runtime.hosts import task_scheduler as wintasks

@@ -62,7 +62,7 @@ from .headless import (
     packaged_execution,
     repo_root,
 )
-from ..runtime.hosts import heartbeat
+from ..runtime.hosts import wsl_liveness
 
 PREFIX = "[health-check]"
 HEALTH_SCHEDULES = ("@reboot", "0 * * * *")
@@ -790,7 +790,7 @@ def persisted_roots() -> list[Path]:
 def _check_windows_heartbeat(events: list[dict[str, str]]) -> None:
     if hostruntime.id() != hostruntime.WSL:
         return
-    beacon = heartbeat.beacon_path()
+    beacon = wsl_liveness.beacon_path()
     if beacon.is_file():
         age_min = (time.time() - beacon.stat().st_mtime) / 60
         if age_min > 10:

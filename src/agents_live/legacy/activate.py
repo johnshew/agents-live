@@ -46,7 +46,6 @@ from ..runtime import policy as watchpolicy
 from ..runtime.hosts import filesystem as watchsource
 
 SCRIPT_PATH = Path(__file__).resolve()
-RUN_ONCE_PATH = SCRIPT_PATH.with_name("run.py")
 
 
 # --- Content-hash cascade guard state ---

@@ -86,10 +86,10 @@ def write(new_lines: Sequence[str]) -> None:
 @contextmanager
 def lock() -> Iterator[None]:
     """Fail fast if another agents-live process is mutating the crontab."""
-    from .heartbeat import state_dir  # noqa: PLC0415 - stdlib-only module
+    from .wsl_liveness import state_dir  # noqa: PLC0415 - stdlib-only module
 
-    # One resolver for the host state dir: heartbeat.state_dir() applies
-    # expanduser() to XDG_STATE_HOME, and heartbeat.uninstall cleans up
+    # One resolver for the host state dir: wsl_liveness.state_dir() applies
+    # expanduser() to XDG_STATE_HOME, and wsl_liveness.uninstall cleans up
     # this lock file - a second inline resolution here would drift.
     held = ExitStack()
     try:

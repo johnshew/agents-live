@@ -75,7 +75,8 @@ import subprocess
 import uuid
 from collections.abc import Iterable
 
-from .. import adminlog, paths
+from .. import paths
+from ..obs import admin as adminlog
 from ..runtime.hosts import system as hostruntime
 
 

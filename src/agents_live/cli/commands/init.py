@@ -37,7 +37,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ... import adminlog, paths, plugins, preflight
+from ... import paths, plugins, preflight
+from ...obs import admin as adminlog
 from ...state import registry as repos
 from .. import lifecycle
 from . import completions
@@ -83,14 +84,9 @@ def initialize(root: Path) -> bool:
 
 
 def _skill_source() -> Path | None:
-    """Where the vendored skill payload lives: ``<module dir>/skill/``
-    in the installed package (Phase 4 layout), ``<scripts>/..`` (the
-    skill directory itself) in the life checkout."""
-    module_dir = Path(__file__).resolve().parent
-    for candidate in (module_dir / "skill", module_dir.parent):
-        if (candidate / "SKILL.md").is_file():
-            return candidate
-    return None
+    """Where the installed package keeps its vendored skill payload."""
+    candidate = Path(__file__).resolve().parents[2] / "skill"
+    return candidate if (candidate / "SKILL.md").is_file() else None
 
 
 def _payload_version(payload_dir: Path) -> str | None:

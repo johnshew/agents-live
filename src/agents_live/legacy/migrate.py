@@ -35,7 +35,8 @@ import shlex
 import sys
 from pathlib import Path
 
-from .. import adminlog, preflight
+from .. import preflight
+from ..obs import admin as adminlog
 from ..runtime.hosts import crontab as crontasks
 from ..runtime.hosts import system as hostruntime
 from . import triggers

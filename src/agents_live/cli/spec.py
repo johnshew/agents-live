@@ -122,6 +122,11 @@ COMMANDS = (
                 "in-process", hidden=True,
             ),
             Cmd(
+                "install-liveness", "Install WSL host liveness.",
+                "cli.commands.internal", "in-process", hidden=True,
+                args=(Arg(("--distro",), "WSL distribution.", kind="value"),),
+            ),
+            Cmd(
                 "migrate", "Converge persisted trigger invocations.",
                 "legacy.migrate", "in-process", hidden=True,
                 args=(Arg(("--dry-run",), "Show planned trigger rewrites."),),

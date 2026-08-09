@@ -106,8 +106,6 @@ EXCLUDED_AGENT_FILE_NAMES = {"_index_.md"}
 MAX_RAW_OUTPUT_LOG_LENGTH = 20_000
 MAX_LOG_FIELD_LENGTH = MAX_RAW_OUTPUT_LOG_LENGTH
 COPILOT_OUTPUT_MAX_LINES = 100
-SCRIPT_DIR = Path(__file__).resolve().parent
-
 # The public API - exactly what the consumer scripts (run.py, activate.py,
 # status.py, stop.py, doctor.py, smoketest.py, dashboard.py) import.
 # Everything else in this module is underscore-private implementation.

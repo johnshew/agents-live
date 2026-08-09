@@ -7,9 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import adminlog, plugins, preflight, runtime
+from ... import plugins, preflight, runtime
+from ...obs import admin as adminlog
 from ...legacy import health_check, schedules
-from ...runtime.hosts import heartbeat
+from ...runtime.hosts import wsl_liveness
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
 from . import completions
@@ -129,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if hostruntime.id() == hostruntime.WSL:
         try:
-            heartbeat.uninstall(args.distro, retain_state=args.retain_state)
+            wsl_liveness.uninstall(args.distro, retain_state=args.retain_state)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             # The runtime name is the distro name on WSL, except where
             # the distro did not say what it is called.

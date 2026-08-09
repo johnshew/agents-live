@@ -12,7 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import __version__, adminlog, paths, plugins, preflight
+from ... import __version__, paths, plugins, preflight
+from ...obs import admin as adminlog
 from ...legacy import triggers
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv

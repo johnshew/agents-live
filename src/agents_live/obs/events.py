@@ -22,6 +22,7 @@ class Event:
     message: str = ""
     transcript: str | None = None
     usage: tuple[tuple[str, str | None], ...] = ()
+    attributes: tuple[tuple[str, object], ...] = ()
     spec: int = SCHEMA_VERSION
 
 
@@ -37,6 +38,7 @@ def create(
     message: str = "",
     transcript: str | None = None,
     usage: tuple[tuple[str, str | None], ...] = (),
+    attributes: tuple[tuple[str, object], ...] = (),
 ) -> Event:
     return Event(
         datetime.now(timezone.utc).isoformat(),
@@ -50,6 +52,7 @@ def create(
         message,
         transcript,
         usage,
+        attributes,
     )
 
 

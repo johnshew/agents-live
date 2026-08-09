@@ -258,7 +258,8 @@ def argument_string(args: Sequence[str]) -> str:
 # own session, so it has to be one that has no window to show. These
 # are the interpreter that has none and the module it runs.
 _HIDDEN_HOST = "pythonw"
-_HIDDEN_MODULE = "agents_live.hidden"
+_HIDDEN_MODULE = "agents_live.runtime.hosts.hidden"
+_LEGACY_HIDDEN_MODULE = "agents_live.hidden"
 # -P keeps the working directory off sys.path, so a repository that
 # happens to contain a matching name cannot answer the import.
 _HIDDEN_ARGS = ("-P", "-m", _HIDDEN_MODULE)
@@ -286,7 +287,8 @@ def action_form(command: str, args: Sequence[str]) -> tuple[str, str]:
     so a console program named directly opens a console window - once
     per fire, on top of whatever they were doing. The action therefore
     names ``pythonw``, which has no console to show, and it starts the
-    real command with ``CREATE_NO_WINDOW`` (see :mod:`agents_live.hidden`).
+    real command with ``CREATE_NO_WINDOW``
+    (see :mod:`agents_live.runtime.hosts.hidden`).
 
     The indirection is what keeps the agent's own output working: run
     under ``pythonw`` directly it would have no standard streams at all
@@ -314,9 +316,14 @@ def _action_program(command: str, arguments: str) -> str:
     if PureWindowsPath(command).stem.casefold() != _HIDDEN_HOST:
         return command
     parts = parse_command_line(f"{_PROGRAM_TOKEN} {arguments}")[1:]
-    if _HIDDEN_MODULE not in parts:
+    module = next(
+        (name for name in (_HIDDEN_MODULE, _LEGACY_HIDDEN_MODULE)
+         if name in parts),
+        None,
+    )
+    if module is None:
         return command
-    index = parts.index(_HIDDEN_MODULE) + 1
+    index = parts.index(module) + 1
     return parts[index] if index < len(parts) else command
 
 
