@@ -6,7 +6,7 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- feat!: definitions are conforming Agent Skills with namespaced execution metadata.
+- feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
   A definition is `Agents/<name>/SKILL.md`, or `<name>.md` in a configured
   discovery root. Execution policy is quoted `agents-live.*` metadata under
   schema version 1, and every definition gets a path-derived canonical
@@ -33,25 +33,30 @@ history is retained in the source repository.
   repository that will not resolve, and a started definition that will not
   parse, keep the artifacts they already own until they resolve again or are
   stopped.
-- fix: `agents-live logs timeline` starts again. (#255)
+- fix: `agents-live logs timeline` starts again.
   It failed on an import before reading a single argument, which took away one
   of the two commands the diagnostics guidance tells you to use.
-- fix: `agents-live migrate` converts the definitions it was refusing. (#255)
+- fix: `agents-live migrate` converts the definitions it was refusing.
   `allow-tools` was rejected as an unknown field although the converter
   already handled it, every error now names the file it came from, and the
   refusals for `owner` and for a runtime carrying arguments explain what to
   do instead.
-- fix: `agents-live run --json` reports the run outcome. (#255)
+- fix: `agents-live run --json` reports the run outcome.
   Machine consumers received the agent's text with no status or failure
   category, so a skip and a crash looked alike.
 - fix: `agents-live stop` works once a definition file has been deleted.
   That is when withdrawing its automation matters most.
-- fix: `agents-live start` reports what it could not start. (#255)
+- fix: `agents-live start` reports what it could not start.
   A definition that declares no schedule or watch is called out instead of
   reported as started, and `--all` exits nonzero when it skipped anything.
-- fix: a run lock that cannot be read is abandoned after a day. (#255)
+- fix: a run lock that cannot be read is abandoned after a day.
   An unreadable lock named no owner to wait for and blocked that agent
   permanently.
+- docs: state what the 5.x migrator cannot convert, and what to do instead.
+  `owner`, `env`, and a `runtime` carrying arguments stop a conversion rather
+  than being guessed at, and `migrate` reads `Agents/<name>.md` only, so
+  definitions in configured `agent_directories` roots are converted by hand.
+  Until now the refusal messages were the only place any of that was said.
 - fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
   The continuation reads the upgraded tool's receipt instead of its temporary
   environment, so declared plugins and their ownership backends are restored.
