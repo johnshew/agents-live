@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             if root is None:
                 checks.append({
                     "check": f"repository {name}", "ok": False,
-                    "detail": "registered but cannot be read; its triggers are removed",
+                    "detail": "registered but cannot be read; its triggers are preserved",
                 })
                 continue
             try:
@@ -65,7 +65,11 @@ def main(argv: list[str] | None = None) -> int:
             for detail in collected.unavailable_repositories:
                 checks.append({
                     "check": "definition collection", "ok": False,
-                    "detail": detail,
+                    "detail": f"{detail}; its installed triggers are preserved",
+                })
+            for _, message in collected.broken_definitions:
+                checks.append({
+                    "check": "definition", "ok": False, "detail": message,
                 })
     if args.repair or args.dry_run:
         try:

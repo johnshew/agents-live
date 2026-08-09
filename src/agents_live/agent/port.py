@@ -11,6 +11,7 @@ from .providers import get as get_provider
 from .values import (
     AgentSpec,
     Completion,
+    Discovery,
     Launch,
     Outcome,
     RawOutput,
@@ -30,7 +31,7 @@ def load(agent_id: str, *, root: Path) -> AgentSpec:
     return load_definition(agent_id, root=root)
 
 
-def discover(root: Path) -> tuple[AgentSpec, ...]:
+def discover(root: Path) -> Discovery:
     return discover_definitions(root)
 
 

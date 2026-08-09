@@ -78,6 +78,26 @@ class AgentSpec:
 
 
 @dataclass(frozen=True)
+class BrokenDefinition:
+    path: Path
+    message: str
+
+    @property
+    def name(self) -> str:
+        """The name it would be addressed by, known without parsing it."""
+        return self.path.parent.name if self.path.name == "SKILL.md" else self.path.stem
+
+
+@dataclass(frozen=True)
+class Discovery:
+    """What a discovery root holds: the definitions that loaded, and why the
+    rest did not. Keeping both lets a caller act on the healthy ones."""
+
+    specs: tuple[AgentSpec, ...]
+    broken: tuple[BrokenDefinition, ...] = ()
+
+
+@dataclass(frozen=True)
 class RunShape:
     has_pre: bool
     has_agent: bool

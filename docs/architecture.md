@@ -83,16 +83,26 @@ diff, and convergence do not become additional user lifecycle states.
 2. load each repository's started identifiers;
 3. resolve definitions and optional ownership;
 4. translate schedules and watches into runtime subscriptions; and
-5. call `runtime.converge()` only when collection is complete.
+5. call `runtime.converge()` with the desired set and the scopes it could
+   not compute.
 
-An unavailable repository or unreadable started-state file aborts convergence.
-It is safer to preserve known automation than to interpret missing input as an
-instruction to delete it.
+Missing input is never read as an instruction to delete, but the blast radius
+is matched to what is actually unknown:
+
+| Failure | Effect |
+|---|---|
+| One definition fails to parse | Isolated and reported; the rest of its repository converges normally |
+| A repository is unreadable, or its configured discovery roots are invalid | Its scope is protected: its installed artifacts are left in place, and every other repository converges |
+| The registry or a started-state file is unreadable | Convergence does not run at all |
+
+The last case is the only one that stops everything, because started intent is
+the record of what the user asked for. Without it there is no desired set to
+compare against for any repository.
 
 The runtime compares desired subscriptions with structured host artifacts.
 It installs missing artifacts, repairs drift, restarts changed watchers, and
-removes owned artifacts absent from the complete desired set. Preview uses the
-same diff without applying it.
+removes owned artifacts absent from the desired set, except in protected
+scopes. Preview uses the same diff without applying it.
 
 ### Firing and dispatch
 
@@ -178,7 +188,8 @@ product behavior and is removed in 7.0.
 3. Host services never enter the agent port.
 4. Platform detection and platform APIs stay under `runtime/hosts/`.
 5. Started intent, ownership, and a live run are different facts.
-6. Convergence receives the complete desired set or does not run.
+6. Convergence never removes an artifact whose desired state could not be
+   computed.
 7. Both firing paths produce the same dispatch inputs.
 8. Concurrency and misfire policy are skip.
 9. Machine-local state never lives in a repository.

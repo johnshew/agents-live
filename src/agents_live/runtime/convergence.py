@@ -1,7 +1,7 @@
 """One idempotent convergence path over the host protocols."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from threading import RLock
 
 from .diff import diff
@@ -35,6 +35,7 @@ def converge(
     subscriptions: Sequence[Subscription],
     *,
     dry_run: bool = False,
+    protected_scopes: Collection[str] = (),
     _host: HostAdapter | None = None,
 ) -> Converged:
     host = _host or current()
@@ -59,6 +60,7 @@ def converge(
             rendered,
             host.trigger_store.list(),
             host.supervisor.owned(role="watcher"),
+            protected_scopes,
         )
         if dry_run:
             return Converged(True, operations, (), _health(host))

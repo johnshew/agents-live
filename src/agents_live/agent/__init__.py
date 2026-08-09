@@ -5,7 +5,9 @@ from .selector import parse_selector
 from .values import (
     AgentSpec,
     AgentsLiveConfig,
+    BrokenDefinition,
     Completion,
+    Discovery,
     Launch,
     Outcome,
     ProviderSelector,
@@ -22,8 +24,10 @@ from .values import (
 __all__ = [
     "AgentSpec",
     "AgentsLiveConfig",
+    "BrokenDefinition",
     "Completion",
     "DefinitionError",
+    "Discovery",
     "Launch",
     "Outcome",
     "ProviderSelector",

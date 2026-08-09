@@ -17,6 +17,8 @@ class Collected:
     subscriptions: tuple[runtime.Subscription, ...]
     unavailable_repositories: tuple[str, ...]
     legacy: tuple[tuple[Path, str], ...] = ()
+    broken_definitions: tuple[tuple[Path, str], ...] = ()
+    protected_scopes: tuple[str, ...] = ()
 
 
 def collect(
@@ -43,16 +45,22 @@ def collect(
             f"trigger store is unreadable: {exc}") from exc
     discovered: dict[Path, dict[str, tuple[runtime.Subscription, ...]]] = {}
     unavailable: list[str] = []
+    protected: list[str] = []
+    broken: list[tuple[Path, str]] = []
     for root, readable in roots:
         if not readable:
             unavailable.append(str(root))
+            protected.append(f"repo:{root}")
             discovered[root] = {}
             continue
         try:
-            discovered[root] = _discover(root)
+            discovered[root], root_broken = _discover(root)
         except (OSError, agent.DefinitionError, ValueError) as exc:
             unavailable.append(f"{root}: {exc}")
+            protected.append(f"repo:{root}")
             discovered[root] = {}
+        else:
+            broken.extend((item.path, item.message) for item in root_broken)
 
     owners: dict[str, str] | None = None
     if not ownership.local_only():
@@ -121,7 +129,13 @@ def collect(
                     continue
             desired.extend(definitions.get(identifier, ()))
     desired.append(_maintenance())
-    return Collected(tuple(desired), tuple(unavailable), tuple(legacy))
+    return Collected(
+        tuple(desired),
+        tuple(unavailable),
+        tuple(legacy),
+        tuple(broken),
+        tuple(protected),
+    )
 
 
 def converge(
@@ -135,7 +149,11 @@ def converge(
         removals=removals,
         persist=not dry_run,
     )
-    converged = runtime.converge(collected.subscriptions, dry_run=dry_run)
+    converged = runtime.converge(
+        collected.subscriptions,
+        dry_run=dry_run,
+        protected_scopes=collected.protected_scopes,
+    )
     if dry_run or converged.failed:
         return converged
     host = runtime.current()
@@ -160,9 +178,12 @@ def converge(
         False, tuple(done), tuple(failed), health)
 
 
-def _discover(root: Path) -> dict[str, tuple[runtime.Subscription, ...]]:
+def _discover(
+    root: Path,
+) -> tuple[dict[str, tuple[runtime.Subscription, ...]], tuple[agent.BrokenDefinition, ...]]:
     result: dict[str, tuple[runtime.Subscription, ...]] = {}
-    for spec in agent.discover(root):
+    discovery = agent.discover(root)
+    for spec in discovery.specs:
         config = spec.execution
         if config is None:
             continue
@@ -178,7 +199,7 @@ def _discover(root: Path) -> dict[str, tuple[runtime.Subscription, ...]]:
             subscriptions.append(runtime.Subscription.create(
                 scope=scope, target=target, kind="watch", trigger=canonical_watch))
         result[spec.identifier] = tuple(subscriptions)
-    return result
+    return result, discovery.broken
 
 
 def _maintenance() -> runtime.Subscription:

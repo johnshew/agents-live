@@ -113,7 +113,7 @@ def collect_agents() -> list[dict]:
         return []
     snapshot = state.load(REPO_ROOT)
     owners = ownership.load_owners()
-    specs = agent.discover(REPO_ROOT)
+    specs = agent.discover(REPO_ROOT).specs
     owner_by_identifier = ownership.resolve_owners(
         ((spec.identifier, spec.name) for spec in specs), owners)
     agents = []

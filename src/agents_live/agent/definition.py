@@ -12,7 +12,13 @@ from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 from .. import paths
 from .selector import parse_selector
-from .values import AgentSpec, AgentsLiveConfig, SkillProperties
+from .values import (
+    AgentSpec,
+    AgentsLiveConfig,
+    BrokenDefinition,
+    Discovery,
+    SkillProperties,
+)
 
 _STANDARD_FIELDS = {
     "name", "description", "license", "compatibility", "metadata", "allowed-tools",
@@ -77,11 +83,17 @@ def load_definition(agent_id: str, *, root: Path) -> AgentSpec:
     if explicit.is_absolute() or len(explicit.parts) > 1:
         prompt = _explicit_prompt(explicit, repository)
         return _load_prompt(prompt, repository)
+    discovery = discover_definitions(repository)
     matches = [
-        spec for spec in discover_definitions(repository)
+        spec for spec in discovery.specs
         if spec.identifier == agent_id or spec.name == agent_id
     ]
     if not matches:
+        # Naming a definition that failed to parse has to report why it
+        # failed, not that it is absent.
+        for item in discovery.broken:
+            if item.name == agent_id:
+                raise DefinitionError(item.message)
         raise DefinitionError(f"definition not found: {agent_id}")
     exact = [spec for spec in matches if spec.identifier == agent_id]
     if exact:
@@ -93,7 +105,12 @@ def load_definition(agent_id: str, *, root: Path) -> AgentSpec:
     return matches[0]
 
 
-def discover_definitions(root: Path) -> tuple[AgentSpec, ...]:
+def discover_definitions(root: Path) -> Discovery:
+    """Load every definition in the repository, isolating the ones that fail.
+
+    A definition that cannot be parsed is reported rather than raised, so one
+    bad file does not make a whole repository look empty to convergence.
+    """
     repository = Path(root).resolve()
     try:
         configured = paths.validated_agent_directories(
@@ -101,22 +118,36 @@ def discover_definitions(root: Path) -> tuple[AgentSpec, ...]:
             paths.load_config(repository).get("agent_directories", []),
         )
     except ValueError as exc:
+        # Unreadable configuration leaves the discovery roots unknown, so
+        # nothing about this repository can be trusted. That stays fatal.
         raise DefinitionError(str(exc)) from exc
     directories = [repository / "Agents", *configured]
     seen_directories: set[Path] = set()
     prompts: list[Path] = []
+    broken: list[BrokenDefinition] = []
     for directory in directories:
         resolved = directory.resolve()
         if resolved in seen_directories or not directory.is_dir():
             continue
         seen_directories.add(resolved)
-        prompts.extend(
-            item for item in sorted(directory.glob("*.md"))
-            if item.name != "_index_.md" and _is_flat_definition(item))
+        for item in sorted(directory.glob("*.md")):
+            if item.name == "_index_.md":
+                continue
+            try:
+                if _is_flat_definition(item):
+                    prompts.append(item)
+            except DefinitionError as exc:
+                broken.append(BrokenDefinition(item, str(exc)))
         prompts.extend(
             item / "SKILL.md" for item in sorted(directory.iterdir())
             if item.is_dir() and (item / "SKILL.md").is_file())
-    return tuple(_load_prompt(prompt, repository) for prompt in prompts)
+    specs: list[AgentSpec] = []
+    for prompt in prompts:
+        try:
+            specs.append(_load_prompt(prompt, repository))
+        except DefinitionError as exc:
+            broken.append(BrokenDefinition(prompt, str(exc)))
+    return Discovery(tuple(specs), tuple(broken))
 
 
 def _is_flat_definition(prompt: Path) -> bool:
@@ -166,8 +197,13 @@ def _load_prompt(prompt: Path, repository: Path) -> AgentSpec:
         raise DefinitionError(f"definition is not readable as UTF-8: {prompt}") from exc
     frontmatter, body = _extract(text, prompt)
     data, metadata_nodes = _parse(frontmatter, prompt)
-    properties = _properties(data, metadata_nodes, skill_root, expected_name)
-    execution = _execution(dict(properties.metadata), skill_root)
+    # Frontmatter rules are stated per definition; the file they apply to is
+    # named once here rather than in every message.
+    try:
+        properties = _properties(data, metadata_nodes, expected_name)
+        execution = _execution(dict(properties.metadata), skill_root)
+    except DefinitionError as exc:
+        raise DefinitionError(f"{prompt}: {exc}") from None
     return AgentSpec(repository, skill_root, prompt, properties, execution, body)
 
 
@@ -228,14 +264,13 @@ def _parse(frontmatter: str, prompt: Path) -> tuple[dict[str, Any], dict[str, Sc
 def _properties(
     data: dict[str, Any],
     metadata_nodes: dict[str, ScalarNode],
-    skill_root: Path,
     expected_name: str,
 ) -> SkillProperties:
     unknown = set(data) - _STANDARD_FIELDS
     retired = sorted(unknown & _RETIRED_FIELDS)
     if retired:
         raise DefinitionError(
-            f"{skill_root / 'SKILL.md'} uses retired 5.x fields: {', '.join(retired)}; "
+            f"retired 5.x fields: {', '.join(retired)}; "
             "move execution policy under metadata with agents-live.* keys")
     if unknown:
         raise DefinitionError(f"unknown Agent Skills fields: {', '.join(sorted(unknown))}")

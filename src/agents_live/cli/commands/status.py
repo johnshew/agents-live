@@ -20,9 +20,12 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
         started_names = frozenset()
         state_error = str(exc)
     try:
-        discovered = {spec.identifier: spec for spec in agent.discover(root)}
-    except agent.DefinitionError:
+        discovery = agent.discover(root)
+        discovered = {spec.identifier: spec for spec in discovery.specs}
+        unloadable = discovery.broken
+    except agent.DefinitionError as exc:
         discovered = {}
+        unloadable = (agent.BrokenDefinition(root, str(exc)),)
     identifiers = set(discovered) | set(started_names)
     if selected:
         try:
@@ -49,6 +52,18 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "description": description,
             "error": load_error,
         })
+    for item in unloadable:
+        if selected and item.name != selected:
+            continue
+        rows.append({
+            "repository": str(root),
+            "name": item.name,
+            "identifier": "",
+            "state": "unloadable",
+            "loadable": False,
+            "description": None,
+            "error": item.message,
+        })
     return rows
 
 
@@ -74,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for row in rows:
             suffix = f" ({row['error']})" if row["error"] else ""
-            print(f"{row['name']} ({row['identifier']}): {row['state']}{suffix}")
+            label = row["identifier"] or "unreadable"
+            print(f"{row['name']} ({label}): {row['state']}{suffix}")
     return 0
 
 

@@ -147,7 +147,7 @@ class TestDefinitionLoader(TempRepository):
                 encoding="utf-8",
             )
 
-        specs = [spec for spec in agent.discover(self.root)
+        specs = [spec for spec in agent.discover(self.root).specs
                  if spec.name == "verify-links"]
         self.assertEqual(2, len(specs))
         self.assertEqual(2, len({spec.identifier for spec in specs}))
@@ -322,6 +322,90 @@ class TestStartedState(TempRepository):
             self.root, {"existing"}, persist=False)
         self.assertEqual(frozenset({"existing"}), snapshot.agents)
         self.assertFalse(state.load(self.root).initialized)
+
+    def test_one_invalid_definition_does_not_disturb_its_neighbours(self) -> None:
+        self.skill("good", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        host = MemoryHost()
+        identifier = agent.load("good", root=self.root).identifier
+        registry = {"repos": {"sample": str(self.root)}, "default_repo": "sample"}
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with mock.patch.object(
+                    lifecycle.repos, "load", return_value=registry):
+                self.assertFalse(lifecycle.converge(
+                    additions={self.root: {identifier}}).failed)
+                installed = {item.key for item in host.trigger_store.list()}
+                self.assertEqual(2, len(installed))
+
+                (self.root / "Agents" / "broken.md").write_text(
+                    "---\ndescription: Invalid.\nruntime: claude\n---\nbody\n",
+                    encoding="utf-8")
+                collected = lifecycle.collect(persist=False)
+                # The repository still resolves, so nothing needs protecting:
+                # the healthy agent survives because discovery isolated the
+                # failure instead of reporting an empty repository.
+                self.assertEqual((), collected.protected_scopes)
+                self.assertEqual(
+                    ["broken.md"],
+                    [Path(path).name for path, _ in collected.broken_definitions])
+                self.assertFalse(lifecycle.converge().failed)
+                self.assertEqual(
+                    installed, {item.key for item in host.trigger_store.list()})
+        finally:
+            runtime.configure(previous)
+
+    def test_unreachable_repository_keeps_its_installed_triggers(self) -> None:
+        self.skill("good", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        other = self.root / "other"
+        (other / "Agents" / "second").mkdir(parents=True)
+        (other / "Agents" / "second" / "SKILL.md").write_text(
+            "---\nname: second\ndescription: A second repository definition.\n"
+            "metadata:\n"
+            '  agents-live.schema-version: "1"\n'
+            '  agents-live.selector: "fake"\n'
+            '  agents-live.schedule: "0 9 * * *"\n'
+            "---\nDo the work.\n",
+            encoding="utf-8",
+        )
+        host = MemoryHost()
+        here = agent.load("good", root=self.root).identifier
+        there = agent.load("second", root=other).identifier
+        registry = {
+            "repos": {"sample": str(self.root), "other": str(other)},
+            "default_repo": "sample",
+        }
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with mock.patch.object(
+                    lifecycle.repos, "load", return_value=registry):
+                self.assertFalse(lifecycle.converge(additions={
+                    self.root: {here}, other: {there}}).failed)
+                installed = {item.key for item in host.trigger_store.list()}
+                self.assertEqual(3, len(installed))
+
+                os.rename(other, self.root / "moved-away")
+                collected = lifecycle.collect(persist=False)
+                self.assertIn(f"repo:{other}", collected.protected_scopes)
+                self.assertFalse(lifecycle.converge().failed)
+                self.assertEqual(
+                    installed, {item.key for item in host.trigger_store.list()})
+        finally:
+            runtime.configure(previous)
+
+    def test_naming_an_invalid_definition_reports_why(self) -> None:
+        (self.root / "Agents" / "broken.md").write_text(
+            "---\ndescription: Invalid.\nruntime: claude\n---\nbody\n",
+            encoding="utf-8")
+        with self.assertRaisesRegex(agent.DefinitionError, "retired"):
+            agent.load("broken", root=self.root)
 
 
 class TestRuntimeProcessPolicy(unittest.TestCase):

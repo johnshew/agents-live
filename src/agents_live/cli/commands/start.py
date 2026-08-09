@@ -19,7 +19,14 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.resolve_root()
     repos.ensure_registered(root)
     try:
-        specs = agent.discover(root) if args.all else (agent.load(args.name, root=root),)
+        if args.all:
+            discovery = agent.discover(root)
+            specs = tuple(
+                spec for spec in discovery.specs if spec.execution is not None)
+            unloadable = discovery.broken
+        else:
+            specs = (agent.load(args.name, root=root),)
+            unloadable = ()
         identifiers = [spec.identifier for spec in specs]
         result = lifecycle.converge(
             additions={root: set(identifiers)}, dry_run=args.dry_run)
@@ -30,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
     verb = "Would start" if args.dry_run else "Started"
     for spec in specs:
         print(f"{verb} '{spec.name}' ({spec.identifier}).")
+        if not spec.execution.schedules and not spec.execution.watch:
+            print(
+                f"  note: '{spec.name}' declares no schedule or watch, so "
+                "nothing runs it automatically.",
+                file=sys.stderr,
+            )
+    for item in unloadable:
+        print(f"Skipped '{item.name}': {item.message}", file=sys.stderr)
     for operation, message in result.failed:
         print(f"{operation.key}: {message}", file=sys.stderr)
     return 1 if result.failed else 0
