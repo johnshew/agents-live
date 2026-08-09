@@ -17,6 +17,8 @@ class Provider(Protocol):
 
 _providers: dict[str, Provider] = {}
 
+ENTRY_POINT_GROUP = "agents_live.providers"
+
 
 def register(provider: Provider) -> None:
     if not provider.name:
@@ -57,7 +59,7 @@ register(FAKE)
 
 def _discover() -> None:
     from importlib.metadata import entry_points
-    for entry_point in entry_points(group="agents_live.providers"):
+    for entry_point in entry_points(group=ENTRY_POINT_GROUP):
         loaded = entry_point.load()
         provider = (
             loaded()
@@ -70,4 +72,4 @@ def _discover() -> None:
 
 _discover()
 
-__all__ = ["Provider", "get", "names", "register"]
+__all__ = ["ENTRY_POINT_GROUP", "Provider", "get", "names", "register"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import importlib
+import importlib.metadata
 import io
 import json
 import os
@@ -23,6 +24,7 @@ from agents_live.cli.commands import init, run, stop, uninstall
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import health_check, triggers
+from agents_live.agent import providers
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
 from agents_live.cli.commands.definition_migrate import MigrationError, convert
@@ -746,6 +748,63 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertIn('"$CLI" internal liveness', wrapper)
         self.assertIn('"$CLI" internal install-liveness', wrapper)
         self.assertNotIn('"$CLI" heartbeat', wrapper)
+
+    def test_plugin_validation_accepts_exactly_the_groups_that_are_read(self) -> None:
+        """A seam that validates one group and reads another connects nothing.
+
+        A provider plugin declaring the retired group passed validation and
+        was then never discovered, so a selector naming it failed at dispatch
+        as an unknown provider.
+        """
+        self.assertEqual(
+            {providers.ENTRY_POINT_GROUP, ownership.ENTRY_POINT_GROUP},
+            set(plugins.ENTRY_POINT_GROUPS),
+        )
+        self.assertNotIn(
+            "agents_live.agents", plugins.ENTRY_POINT_GROUPS)
+        self.assertIn("agents_live.agents", plugins.RETIRED_ENTRY_POINT_GROUPS)
+
+    def test_a_retired_plugin_group_is_refused_even_beside_a_current_one(self) -> None:
+        """Half-recognising a plugin is worse than refusing it.
+
+        A 5.x distribution typically declares both an adapter and an
+        ownership backend. Validating on the half that still exists left
+        the other silently undiscovered, surfacing much later as an
+        unknown provider at dispatch.
+        """
+        declaration = plugins.Plugin(
+            name="example-plugin", path=Path("."), sha256=None, version=None)
+
+        class Entry:
+            def __init__(self, group: str) -> None:
+                self.group, self.name = group, "example"
+
+            def load(self):
+                return object()
+
+        class Distribution:
+            version = "1.0.0"
+
+            def __init__(self, groups):
+                self.entry_points = [Entry(group) for group in groups]
+
+        shapes = {
+            ("agents_live.agents",): False,
+            ("agents_live.agents", "agents_live.ownership"): False,
+            ("agents_live.providers", "agents_live.ownership"): True,
+            ("console_scripts",): False,
+        }
+        for groups, expected in shapes.items():
+            with self.subTest(groups=groups):
+                with mock.patch.object(
+                    importlib.metadata, "distribution",
+                    return_value=Distribution(groups),
+                ):
+                    ok, detail = plugins._installed_state(declaration)
+                self.assertEqual(expected, ok, detail)
+                if "agents_live.agents" in groups:
+                    self.assertIn("retired", detail)
+                    self.assertIn(providers.ENTRY_POINT_GROUP, detail)
 
     def test_cli_targets_resolve_from_owned_packages(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

@@ -52,6 +52,13 @@ history is retained in the source repository.
 - fix: a run lock that cannot be read is abandoned after a day.
   An unreadable lock named no owner to wait for and blocked that agent
   permanently.
+- fix: provider plugins are discovered again, and a 5.x plugin says so.
+  Plugin validation accepted the retired `agents_live.agents` group while
+  provider discovery read `agents_live.providers`, so a plugin declaring
+  either one was rejected outright or accepted and then never loaded, which
+  surfaced much later as an unknown provider at dispatch. Each seam now owns
+  its group name and validation reads those, and a distribution still
+  declaring the retired group is refused with the group to port it to.
 - docs: state what the 5.x migrator cannot convert, and what to do instead.
   `owner`, `env`, and a `runtime` carrying arguments stop a conversion rather
   than being guessed at, and `migrate` reads `Agents/<name>.md` only, so

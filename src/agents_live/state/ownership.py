@@ -92,7 +92,7 @@ RUNTIME_ID_FILE = "runtime-id"
 
 _RUNTIME_UUID_RE = re.compile(r"[0-9a-f]{32}")
 
-_OWNERSHIP_ENTRY_POINT_GROUP = "agents_live.ownership"
+ENTRY_POINT_GROUP = "agents_live.ownership"
 _BACKEND_MODULE = "ownership_registry"
 
 _backend_cache: object | None = None
@@ -169,7 +169,7 @@ def _backend():
         return _backend_cache
     backend = None
     from importlib.metadata import entry_points
-    for ep in entry_points(group=_OWNERSHIP_ENTRY_POINT_GROUP):
+    for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == "registry":
             backend = ep.load()
             break
