@@ -25,4 +25,6 @@ jobs:
       - if: runner.os == 'Linux'
         run: uv run --script tools/pre-release-audit.py
       - run: uv run --with-editable . --script tests/test_smoke.py
-      - run: uv run --with-editable . --script tests/test_seams.py
+      # duckdb is the query tool's own PEP 723 dependency; supplying it here
+      # lets the suite actually start `agents-live logs` instead of skipping it.
+      - run: uv run --with-editable . --with duckdb --script tests/test_seams.py

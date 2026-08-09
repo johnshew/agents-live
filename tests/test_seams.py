@@ -4,6 +4,8 @@ import ast
 import importlib
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -578,6 +580,38 @@ class TestArchitectureFitness(unittest.TestCase):
                     else:
                         self.assertTrue((package / target.module).is_file())
 
+    def test_subprocess_cli_targets_run_without_import_errors(self) -> None:
+        """Existing on disk is not the same as being able to start.
+
+        These targets are dispatched as scripts, so a package-relative import
+        that only resolves in-process fails at the user, not in the suite.
+        """
+        package = Path(__file__).parents[1] / "src" / "agents_live"
+        targets = sorted({
+            target.module
+            for command in COMMANDS
+            for target in (command, *command.subcommands)
+            if target.dispatch == "subprocess"
+        })
+        self.assertTrue(targets)
+        checked = 0
+        for module in targets:
+            with self.subTest(module=module):
+                result = subprocess.run(
+                    [sys.executable, str(package / module), "--help"],
+                    capture_output=True, text=True, timeout=180,
+                )
+                output = result.stdout + result.stderr
+                if re.search(
+                        r"ModuleNotFoundError: No module named '(?!agents_live)",
+                        output):
+                    continue  # an optional third-party dependency is absent
+                self.assertNotIn(
+                    "Traceback (most recent call last)", output,
+                    f"{module}: {output}")
+                self.assertEqual(0, result.returncode, f"{module}: {output}")
+                checked += 1
+        self.assertTrue(checked, "no subprocess target could be executed")
         retired_root_modules = {
             "activate.py", "adminlog.py", "completions.py", "crontasks.py", "dashboard.py",
             "dashboards.py", "definition_migrate.py", "doctor.py",

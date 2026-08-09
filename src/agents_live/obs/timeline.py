@@ -31,17 +31,18 @@ import re
 import sys
 from pathlib import Path
 
-try:
-    from .. import preflight
-    from . import query
-    from ..paths import host_logs_dir, repo_state_dir, resolve_root
-except ImportError:
-    package_dir = Path(__file__).resolve().parent.parent
-    if str(package_dir) not in sys.path:
-        sys.path.insert(0, str(package_dir))
-    import preflight
-    from obs import query
-    from paths import host_logs_dir, repo_state_dir, resolve_root
+# Dispatched standalone, so the package root goes on sys.path and imports stay
+# absolute: a flat re-entry re-imports the package from outside and breaks it.
+PACKAGE_PARENT = Path(__file__).resolve().parents[2]
+if str(PACKAGE_PARENT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_PARENT))
+from agents_live import preflight  # noqa: E402
+from agents_live.obs import query  # noqa: E402
+from agents_live.paths import (  # noqa: E402
+    host_logs_dir,
+    repo_state_dir,
+    resolve_root,
+)
 
 HOST_LOGS = host_logs_dir()
 
