@@ -66,10 +66,26 @@ The Agents Live key can only narrow tools during an unattended run.
 
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired
-5.x names. Use `agents-live migrate` to convert 5.x top-level execution fields
-to namespaced metadata. The migrator refuses host assignment, client-specific
-fields, and environment values rather than copying a possible secret into
-portable metadata.
+5.x names.
+
+## Migrating from 5.x
+
+`agents-live migrate` reads `Agents/<name>.md` and writes
+`Agents/<name>/SKILL.md`. It does not convert definitions in configured
+`agent_directories` roots; convert those by hand, keeping them as flat
+`<name>.md` files, which remain a supported form in a configured root.
+
+Three 5.x fields have no portable equivalent, so the conversion stops rather
+than guessing:
+
+| Retired field | Where it goes |
+|---|---|
+| `owner` | Host assignment is machine-local, not repository content. Delete the field, then run `agents-live start --name <name>` on the host that should own the definition. |
+| `env` | Values may be secrets. Delete the field and supply the values from the host environment of the run. |
+| `runtime` carrying arguments | A selector is `provider[/model][:effort]` and cannot hold a space. Set `agents-live.selector` to the provider name the runtime plugin registers under 6.0. |
+
+Every refusal names the file it came from. Run `agents-live migrate --dry-run`
+first to see the whole set before changing anything.
 
 Each discovered definition receives a canonical identifier of the form
 `<name>-<path-hash>`. The hash uses the normalized repository-relative prompt

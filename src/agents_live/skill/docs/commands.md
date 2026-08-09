@@ -71,6 +71,8 @@ agents-live stop link-check --dry-run
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload.
 - `migrate [PATHS] [--dry-run]` is the one-shot 5.x flat-definition converter.
+  It reads `Agents/<name>.md` only; definitions in configured
+  `agent_directories` roots are converted by hand.
 - `uninstall` removes host integration.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.

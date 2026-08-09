@@ -12,11 +12,12 @@ description: >-
 # Changelog Maintenance
 
 This repository has **one changelog**:
-`src/agents_live/skill/docs/changelog.md`. It ships with the package,
-and the backlog lives in **GitHub issues**, not in-tree docs
-(see AGENTS.md). There are no other changelog or backlog files; if one
-appears in-tree, that is a misfiling - move its content to the
-changelog or to an issue and delete it.
+`src/agents_live/skill/docs/changelog.md`. It ships with the package.
+Work items live in **GitHub issues**. `docs/backlog.md` is the one
+in-tree backlog file: it carries themes and direction and links to the
+issues that hold the detail, never restating it (see AGENTS.md). Any
+other changelog or backlog file is a misfiling - move its content to the
+changelog, to `docs/backlog.md`, or to an issue, and delete it.
 
 ## The release contract (read first)
 
@@ -138,8 +139,9 @@ The backlog is `gh issue list`. When updating the changelog:
    the session when running this skill; a non-trivial decision to defer
    something becomes an issue with a one-line "why deferred" note.
    Label priority when the user expressed urgency.
-3. **No in-tree backlog.** Never add TODO/backlog sections to docs;
-   convert them to issues.
+3. **No scattered backlogs.** Never add TODO or backlog sections to
+   arbitrary docs; convert them to issues. `docs/backlog.md` is the one
+   exception and holds themes only.
 
 ## Commit sequencing - when to run this skill
 
