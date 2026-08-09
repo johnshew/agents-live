@@ -44,20 +44,20 @@ The standard loop for any change that lands as commits:
    `gh issue list` for related backlog.
 2. Investigate in place; reads and searches are fine in the primary
    checkout.
-3. Create a git worktree for the change. Tool-generated branch names
-   are fine; the branch is disposable.
+3. Branch in the primary checkout. Tool-generated branch names are
+   fine; the branch is disposable. Commit or land in-flight work before
+   switching, because the checkout is shared.
 4. Edit, then run the smoke tests and the release audit (Quick
    commands above).
-5. Commit with issue references, push, and open a pull request.
-6. After checks pass, merge with `gh pr merge <n> --merge`. Never pass
-   `--delete-branch` from inside a worktree: it tries to check out
-   `main`, which the primary checkout holds, and fails after the
-   merge. Delete the head branch separately
-   (`git push origin --delete <branch>`) if the repository does not
-   delete it automatically.
+5. Commit, push, and open a pull request. Reference an issue only when
+   one already covers the work.
+6. After checks pass, merge with `gh pr merge <n> --merge`.
+   `--delete-branch` works from this checkout, but it switches to
+   `main` first, so only pass it with a clean tree.
 7. Confirm the merged commits are reachable from `origin/main`, then
-   remove the worktree and fast-forward `main` in the primary
-   checkout.
+   switch to `main` and fast-forward. Delete the head branch
+   (`git push origin --delete <branch>`) if the repository did not
+   delete it already.
 
 ## Rules
 
@@ -80,12 +80,14 @@ The standard loop for any change that lands as commits:
   support local use of the tool; package behavior lives under
   `src/agents_live/`.
 - **Work items live in GitHub issues; only themes live in
-  `docs/backlog.md`.** Check `gh issue list` before starting work; file
-  new findings as issues and reference them from commits (`Fixes #N`
-  closes on merge). A task that is blocked, deferred, or handed back to
-  the developer gets an issue before moving on, so it survives the
-  session. `docs/backlog.md` records direction and links to those
-  issues; it never restates their detail.
+  `docs/backlog.md`.** Check `gh issue list` before starting work. File
+  an issue for work that outlives the current change: something
+  blocked, deferred, or handed back to the developer needs a home that
+  survives the session. Do not file one for work you are about to do,
+  or for a finding you fix in the same pull request; the commit and the
+  pull request are its record. Reference an existing issue from a
+  commit (`Fixes #N` closes on merge). `docs/backlog.md` records
+  direction and links to those issues; it never restates their detail.
 - **Never hand-parse runtime logs.** Use `agents-live logs` and
   `agents-live logs timeline` - they correlate events across log
   files and agent transcripts. Reading `Agents/logs/*.log` directly
@@ -93,11 +95,15 @@ The standard loop for any change that lands as commits:
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.
-- **Do branch work in a git worktree, not the primary checkout.**
-  Any task that creates a branch and commits (a PR, an experiment)
-  belongs in its own worktree so the primary checkout stays on a
-  clean `main` for the agents sharing it. Quick reads and
-  investigation can happen in place.
+- **Do branch work in the primary checkout, not a worktree.** A pull
+  request is developed on a branch here, where the developer's editor
+  already points. Two costs come with that and are yours to manage.
+  The checkout is shared, so never discard another agent's uncommitted
+  work. And a file the developer has open does not reload when a tool
+  rewrites it, so before editing a file this branch has already
+  rewritten, confirm the editor is not holding a stale copy: compare
+  the on-disk line count against what a read returns past that point.
+  A worktree still earns its keep when two branches must exist at once.
 - **Keep every commit meaningful and reviewable.** Plans belong in the
   session, issue, or PR description, never in empty or planning-only
   commits. Before the first push, fold superseded fixes and documentation
