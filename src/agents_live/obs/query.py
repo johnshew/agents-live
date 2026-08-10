@@ -67,6 +67,7 @@ def normalize(raw: object) -> dict[str, object] | None:
         "trigger": raw["origin"],
         "error_category": raw.get("category"),
         "transcript": raw.get("transcript"),
+        "exit_code": raw.get("exit_code"),
         "usage": raw.get("usage", []),
         "repository": raw.get("repository", ""),
         "changed_files": [],

@@ -29,6 +29,12 @@ How to build, test, and change the code in this repository.
 Always go through `uv` - never plain `python3` (system interpreters are
 often too old; the package requires Python 3.12+).
 
+On Microsoft-managed native Windows or WSL hosts where the public Python
+artifact endpoint fails TLS negotiation, configure the approved package proxy
+for that runtime before running these commands. Follow
+[diagnostics.md](../src/agents_live/skill/docs/diagnostics.md), including its
+exact-version check; the proxy may lag the public release.
+
 ```bash
 # run every portable smoke and seam test
 uv run --with-editable . python -m unittest discover -s tests -v

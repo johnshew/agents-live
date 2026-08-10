@@ -64,6 +64,9 @@ def record(name: str, **fields: Any) -> None:
         status = str(fields.pop("status", "ok"))
         message = str(fields.pop("message", name))
         category = fields.pop("error_category", None)
+        correlation_id = fields.pop("correlation_id", None)
+        transcript = fields.pop("transcript", None)
+        exit_code = fields.pop("exit_code", None)
         repository = str(fields.get("root", ""))
         attributes = {
             "scope": "host",
@@ -77,10 +80,13 @@ def record(name: str, **fields: Any) -> None:
             status,
             repository=repository,
             agent=AGENT_NAME,
-            run_id=uuid.uuid4().hex,
+                run_id=(str(correlation_id) if correlation_id is not None
+                    else uuid.uuid4().hex),
             origin="cli",
             category=str(category) if category is not None else None,
             message=message,
+                transcript=(str(transcript) if transcript is not None else None),
+                exit_code=(int(exit_code) if exit_code is not None else None),
             attributes=tuple(attributes.items()),
         )
         record_event(log_path(), event)

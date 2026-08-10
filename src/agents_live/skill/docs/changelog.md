@@ -6,6 +6,23 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: make native Windows self-upgrades observable and single-flight.
+  One correlated helper now owns each installed environment, records a bounded
+  transcript and terminal outcome, recovers after parent exit, and refuses a
+  second queued upgrade. (#281)
+- fix: refuse incompatible definitions and plugins before runtime replacement.
+  Upgrade validates registered projects, wheel integrity, retired entry-point
+  groups, and current entry points against the candidate runtime before uv can
+  mutate the installed tool.
+- fix: keep the dashboard usable when registry ownership cannot load.
+  Ownership failures now produce a CLI-owned read model with unavailable owner
+  state and disabled Start, Stop, and Claim actions instead of a traceback.
+- docs: document the approved uv package source for Microsoft-managed hosts.
+  Native Windows and WSL use separate user-level configuration, and operators
+  verify an exact release before forcing an install from a proxy that may lag.
+  A local-wheel procedure isolates core validation from dependency retrieval,
+  5.x definition migration, and private-plugin compatibility.
+
 ## 6.0.4 - 2026-08-10
 
 - fix: lifecycle collection applies ownership mode per registered repository. (#275)

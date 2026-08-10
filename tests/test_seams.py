@@ -23,7 +23,7 @@ from unittest import mock
 from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
-from agents_live.cli import lifecycle
+from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
@@ -49,7 +49,7 @@ from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
-from agents_live.runtime.hosts import task_scheduler
+from agents_live.runtime.hosts import system as hostruntime, task_scheduler
 
 
 # The repository registry lives under the data home, not the state home, so
@@ -506,6 +506,237 @@ class TestRuntimeCore(unittest.TestCase):
             ),
         ):
             ownership.load_owners()
+
+    def test_broken_ownership_backend_reports_as_unavailable(self) -> None:
+        entry = mock.Mock()
+        entry.name = "registry"
+        entry.value = "broken_plugin.registry"
+        entry.load.side_effect = ModuleNotFoundError(
+            "No module named 'agents_live.ownership'",
+            name="agents_live.ownership",
+        )
+        with (
+            mock.patch("importlib.metadata.entry_points", return_value=[entry]),
+            mock.patch.object(ownership, "_backend_resolved", False),
+            mock.patch.object(ownership, "_backend_cache", None),
+            self.assertRaisesRegex(
+                ownership.OwnershipUnavailableError,
+                "broken_plugin.registry.*agents_live.ownership",
+            ),
+        ):
+            ownership.registry_available()
+
+    def test_deferred_upgrade_is_single_flight_and_records_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                claim, existing = upgrade_handoff.claim(
+                    environment, source="agents-live", runtime_only=False)
+                self.assertIsNotNone(claim)
+                self.assertIsNone(existing)
+                assert claim is not None
+                duplicate, existing = upgrade_handoff.claim(
+                    environment, source="agents-live", runtime_only=False)
+                self.assertIsNone(duplicate)
+                self.assertEqual(claim.operation_id, existing)
+                claim.result_path.write_text(json.dumps({
+                    "schema": 1,
+                    "operation_id": claim.operation_id,
+                    "status": "terminal",
+                    "helper_pid": 123,
+                    "exit_code": 0,
+                }), encoding="utf-8")
+                with mock.patch.object(upgrade_handoff.adminlog, "record") as record:
+                    upgrade_handoff.reconcile()
+                self.assertFalse(claim.pending_path.exists())
+                record.assert_called_once()
+                self.assertEqual("ok", record.call_args.kwargs["status"])
+                self.assertEqual(
+                    claim.operation_id,
+                    record.call_args.kwargs["correlation_id"])
+
+    def test_deferred_upgrade_recovers_a_dead_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                claim, _ = upgrade_handoff.claim(
+                    environment, source="agents-live", runtime_only=False)
+                assert claim is not None
+                upgrade_handoff.spawned(claim, 321)
+                with (
+                    mock.patch.object(
+                        upgrade_handoff.hostruntime, "is_alive", return_value=False),
+                    mock.patch.object(upgrade_handoff.adminlog, "record") as record,
+                ):
+                    upgrade_handoff.reconcile()
+                self.assertFalse(claim.pending_path.exists())
+                self.assertEqual("error", record.call_args.kwargs["status"])
+
+    def test_deferred_upgrade_adopts_a_started_helper_after_parent_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                claim, _ = upgrade_handoff.claim(
+                    environment, source="agents-live", runtime_only=False)
+                assert claim is not None
+                claim.result_path.write_text(json.dumps({
+                    "schema": 1,
+                    "operation_id": claim.operation_id,
+                    "status": "started",
+                    "helper_pid": 321,
+                }), encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        upgrade_handoff.time, "time", return_value=10_000),
+                    mock.patch.object(
+                        upgrade_handoff.hostruntime, "is_alive", return_value=True),
+                    mock.patch.object(upgrade_handoff.adminlog, "record") as record,
+                ):
+                    upgrade_handoff.reconcile()
+                    self.assertTrue(claim.pending_path.exists())
+                    pending = json.loads(
+                        claim.pending_path.read_text(encoding="utf-8"))
+                    self.assertEqual(321, pending["helper_pid"])
+                    record.assert_not_called()
+                    duplicate, existing = upgrade_handoff.claim(
+                        environment, source="agents-live", runtime_only=False)
+                self.assertIsNone(duplicate)
+                self.assertEqual(claim.operation_id, existing)
+
+    def test_windows_deferred_process_writes_a_bounded_result(self) -> None:
+        process = mock.Mock(pid=42)
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.json"
+            transcript_path = Path(temporary) / "transcript.log"
+            with (
+                mock.patch.object(hostruntime, "_IS_WINDOWS", True),
+                mock.patch.object(
+                    hostruntime.shutil, "which", return_value="powershell.exe"),
+                mock.patch.object(
+                    hostruntime, "spawn_detached", return_value=process) as spawn,
+            ):
+                result = hostruntime.defer_until_environment_exits(
+                    ["uv", "tool", "upgrade", "agents-live"], Path("C:/tool"),
+                    operation_id="operation-1", result_path=result_path,
+                    transcript_path=transcript_path, transcript_limit=4096)
+        self.assertIs(process, result)
+        command = " ".join(spawn.call_args.args[0])
+        self.assertIn("status='started'", command)
+        self.assertIn("status='terminal'", command)
+        self.assertIn("4096", command)
+        self.assertIn("exit $code", command)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows only")
+    def test_windows_deferred_process_persists_terminal_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.json"
+            transcript_path = Path(temporary) / "transcript.log"
+            command_path = Path(temporary) / "command with spaces.cmd"
+            command_path.write_text(
+                "@echo off\n"
+                "echo [%~1][%~2]\n"
+                "exit /b 7\n",
+                encoding="utf-8")
+            helper = hostruntime.defer_until_environment_exits(
+                [str(command_path), "value with spaces", "apostrophe's value"],
+                Path(temporary) / "unused-environment",
+                operation_id="operation-1", result_path=result_path,
+                transcript_path=transcript_path)
+            self.assertIsNotNone(helper)
+            assert helper is not None
+            self.assertEqual(7, helper.wait(timeout=15))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual("operation-1", result["operation_id"])
+            self.assertEqual("terminal", result["status"])
+            self.assertEqual(7, result["exit_code"])
+            self.assertIn(
+                "[value with spaces][apostrophe's value]",
+                transcript_path.read_text(encoding="utf-8"))
+
+    def test_windows_deferred_process_without_powershell_returns_none(self) -> None:
+        with (
+            mock.patch.object(hostruntime, "_IS_WINDOWS", True),
+            mock.patch.object(hostruntime.shutil, "which", return_value=None),
+        ):
+            self.assertIsNone(hostruntime.defer_until_environment_exits(
+                ["uv", "tool", "upgrade", "agents-live"], Path("C:/tool")))
+
+    def test_windows_upgrade_queues_one_correlated_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            environment.mkdir(parents=True)
+            helper = mock.Mock(pid=42)
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}),
+                mock.patch.object(
+                    upgrade.hostruntime, "id", return_value=upgrade.hostruntime.WINDOWS),
+                mock.patch.object(
+                    upgrade.plugins, "tool_environment", return_value=environment),
+                mock.patch.object(upgrade.triggers, "within", return_value=True),
+                mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
+                mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
+                mock.patch.object(
+                    upgrade.hostruntime, "defer_until_environment_exits",
+                    return_value=helper) as defer,
+                mock.patch.object(
+                    upgrade.adminlog, "operation",
+                    return_value=contextlib.nullcontext({})) as operation,
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    0, upgrade._handoff_windows_upgrade(None, runtime_only=False))
+            command = defer.call_args.args[0]
+            self.assertEqual(
+                ["uv.exe", "tool", "run", "--refresh", "--from",
+                 f"agents-live>={upgrade.__version__}"],
+                command[:6])
+            self.assertIn("--continuation-environment", command)
+            self.assertIn("--upgrade-id", command)
+            operation_id = command[command.index("--upgrade-id") + 1]
+            self.assertEqual(operation_id, defer.call_args.kwargs["operation_id"])
+            self.assertEqual(
+                operation_id,
+                operation.call_args.kwargs["correlation_id"])
+            self.assertIn(operation_id, stdout.getvalue())
+            pending = list(
+                (state_home / "agents-live" / "upgrade-handoffs").glob(
+                    "*.pending.json"))
+            self.assertEqual(1, len(pending))
+            self.assertEqual(42, json.loads(
+                pending[0].read_text(encoding="utf-8"))["helper_pid"])
+
+    def test_windows_upgrade_abandons_claim_when_helper_cannot_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            environment.mkdir(parents=True)
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}),
+                mock.patch.object(
+                    upgrade.hostruntime, "id", return_value=upgrade.hostruntime.WINDOWS),
+                mock.patch.object(
+                    upgrade.plugins, "tool_environment", return_value=environment),
+                mock.patch.object(upgrade.triggers, "within", return_value=True),
+                mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
+                mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
+                mock.patch.object(
+                    upgrade.hostruntime, "defer_until_environment_exits",
+                    return_value=None),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(
+                    1, upgrade._handoff_windows_upgrade(None, runtime_only=False))
+            pending = list(
+                (state_home / "agents-live" / "upgrade-handoffs").glob(
+                    "*.pending.json"))
+            self.assertEqual([], pending)
+            self.assertIn("nothing was changed", stderr.getvalue())
 
     def test_name_keyed_ownership_rejects_duplicate_identities(self) -> None:
         with self.assertRaisesRegex(
@@ -1429,6 +1660,137 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertIn("retired", str(caught.exception))
         self.assertIn(providers.ENTRY_POINT_GROUP, str(caught.exception))
 
+    def test_upgrade_preflight_refuses_a_retired_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            agents = root / "Agents"
+            agents.mkdir()
+            (agents / "legacy.md").write_text(
+                "---\nname: legacy\ndescription: Legacy definition.\n"
+                "runtime: claude\nschedule: '0 8 * * *'\n---\nbody\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    upgrade, "_targets", return_value=([("legacy", root)], [])),
+                mock.patch.object(upgrade, "_handoff_windows_upgrade") as handoff,
+                mock.patch.dict(os.environ, {paths.ENV_VAR: ""}),
+                mock.patch.object(sys, "argv", ["agents-live upgrade"]),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(1, upgrade.main())
+        handoff.assert_not_called()
+        self.assertIn("retired 5.x fields", stderr.getvalue())
+
+    def test_upgrade_preflight_refuses_a_retired_plugin_wheel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            wheel = root / "example_plugin-1.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/entry_points.txt",
+                    "[agents_live.agents]\nexample = example_plugin:register\n")
+            (root / ".agents-live.toml").write_text(
+                "[plugins.example-plugin]\n"
+                f'path = "{wheel.name}"\n',
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    upgrade, "_targets", return_value=([("plugin", root)], [])),
+                mock.patch.object(upgrade, "_handoff_windows_upgrade") as handoff,
+                mock.patch.dict(os.environ, {paths.ENV_VAR: ""}),
+                mock.patch.object(sys, "argv", ["agents-live upgrade"]),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(1, upgrade.main())
+        handoff.assert_not_called()
+        self.assertIn("retired entry-point group", stderr.getvalue())
+
+    def test_plugin_probe_rejects_a_current_entry_point_that_cannot_load(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            wheel = Path(temporary) / "example_plugin-1.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin/__init__.py", "import agents_live.ownership\n")
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/entry_points.txt",
+                    "[agents_live.providers]\nexample = example_plugin:PROVIDER\n")
+            script = (
+                "import sys; "
+                f"sys.path.insert(0, {str(wheel)!r}); "
+                f"exec({plugins._COMPATIBILITY_PROBE!r})")
+            completed = subprocess.run(
+                [sys.executable, "-c", script, "example-plugin"],
+                capture_output=True, text=True, check=False)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("agents_live.ownership", completed.stderr)
+
+    def test_plugin_probe_uses_provider_registration_invariants(self) -> None:
+        source = (
+            "class Provider:\n"
+            "    models = None\n"
+            "    efforts = frozenset()\n"
+            "    def prepare(self, spec, request): pass\n"
+            "    def parse(self, raw): pass\n"
+            "PROVIDER = Provider()\n")
+        for provider_name, expected in (
+            ("", "provider name must not be empty"),
+            ("fake", "provider 'fake' is already registered"),
+        ):
+            with self.subTest(provider_name=provider_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    wheel = Path(temporary) / "probe_plugin-1.0-py3-none-any.whl"
+                    with zipfile.ZipFile(wheel, "w") as archive:
+                        archive.writestr(
+                            "probe_plugin/__init__.py",
+                            f"{source}PROVIDER.name = {provider_name!r}\n")
+                        archive.writestr(
+                            "probe_plugin-1.0.dist-info/METADATA",
+                            "Metadata-Version: 2.1\n"
+                            "Name: probe-plugin\nVersion: 1.0\n")
+                        archive.writestr(
+                            "probe_plugin-1.0.dist-info/entry_points.txt",
+                            "[agents_live.providers]\n"
+                            "probe = probe_plugin:PROVIDER\n")
+                    script = (
+                        "import sys; "
+                        f"sys.path.insert(0, {str(wheel)!r}); "
+                        f"exec({plugins._COMPATIBILITY_PROBE!r})")
+                    completed = subprocess.run(
+                        [sys.executable, "-c", script, "probe-plugin"],
+                        capture_output=True, text=True, check=False)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertIn(expected, completed.stderr)
+
+    def test_upgrade_plugin_probe_uses_the_candidate_runtime(self) -> None:
+        plugin = plugins.Plugin(
+            name="example-plugin", path=Path("example.whl"),
+            sha256=None, version="1.0")
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(plugins, "validation_errors", return_value=()),
+            mock.patch.object(plugins, "union", return_value={"example": plugin}),
+            mock.patch.object(plugins, "find_uv", return_value="uv"),
+            mock.patch.object(
+                plugins.subprocess, "run", return_value=completed) as run_probe,
+        ):
+            self.assertEqual((), plugins.compatibility_errors(
+                [Path("project")], runtime_requirement="candidate.whl"))
+        command = run_probe.call_args.args[0]
+        self.assertIn(
+            ["--with", "candidate.whl", "--with", "example.whl"],
+            [command[index:index + 4] for index in range(len(command) - 3)])
+
     def test_cli_targets_resolve_from_owned_packages(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         for command in COMMANDS:
@@ -1542,6 +1904,20 @@ class TestArchitectureFitness(unittest.TestCase):
                             stopped_snapshot["agents"][0]["can_pause"])
                         self.assertTrue(
                             stopped_snapshot["agents"][0]["can_activate"])
+                        with (
+                            mock.patch.object(
+                                dashboard.ownership, "local_only",
+                                return_value=False),
+                            mock.patch.object(
+                                dashboard.ownership, "load_owners",
+                                side_effect=ownership.OwnershipUnavailableError(
+                                    "registry backend unavailable")),
+                        ):
+                            unavailable = dashboard.api_agents()["agents"][0]
+                        self.assertEqual("Unavailable", unavailable["owner"])
+                        self.assertFalse(unavailable["can_activate"])
+                        self.assertFalse(unavailable["can_pause"])
+                        self.assertFalse(unavailable["can_claim"])
                         state.replace(root, {identifier})
                         self.assertEqual(
                             snapshot["agents"],

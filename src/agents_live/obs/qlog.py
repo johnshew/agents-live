@@ -121,6 +121,7 @@ NORMALIZED_COLUMN_TYPES = {
     "credits": "DOUBLE",
     "premium_requests": "DOUBLE",
     "log_schema": "INTEGER",
+    "exit_code": "INTEGER",
 }
 
 _RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
