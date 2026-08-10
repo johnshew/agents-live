@@ -125,30 +125,40 @@ than guessing:
 Every refusal names the file it came from. Run `agents-live migrate --dry-run`
 first to see the whole set before changing anything.
 
-### Upgrade the tool before the definitions
+### Upgrading a machine that is already running agents
 
-On a machine that is already running agents, the two halves of the upgrade are
-not interchangeable.
+The upgrade has two halves, the tool and the definitions, and a host spends
+some time holding one without the other. Neither order loses work.
 
-Upgrade agents-live first, then convert the definitions. 6.0 reports an
-unconverted definition as unloadable and preserves its installed trigger, so
-nothing is withdrawn while you work. Started state is not initialised from a
-repository that did not fully parse either, which keeps the one chance the
-running system has to adopt 5.x triggers. After `agents-live migrate`, those
-triggers are matched to their new canonical identifiers, and the agents that
-were started stay started.
+A 5.x runtime holding converted definitions abstains. Its orphan sweep
+compares the running set against discovered *file names*, and an in-place
+conversion does not move or rename anything, so nothing looks deleted. Behind
+that, 5.x already refuses to prune a definition whose file exists but does not
+parse. Its trigger convergence reports such a definition as missing rather
+than rewriting it. Every scheduled run fails with `no runtime: declared` and
+the health beacon degrades, which is loud and reversible; the triggers stay.
 
-Converting first, on a host still running 5.x, leaves that runtime holding
-definitions it cannot read. 5.x has no fault isolation and does not protect
-the triggers of a definition that fails to load, so its next convergence can
-withdraw the automation. The symptom is silent: the agents simply stop.
+A 6.0 runtime holding unconverted definitions abstains too. It reports each
+one as unloadable, keeps its installed trigger, and does not initialise
+started state from a repository whose definitions did not all load, which
+preserves the one chance it has to adopt the 5.x triggers. After
+`agents-live migrate`, those triggers are matched to their new canonical
+identifiers and the agents that were started stay started.
 
-If that has already happened, upgrade the tool, run `agents-live migrate`,
-confirm with `agents-live status`, and start whatever is no longer started.
+So choose the order for what else has to move. A repository that declares
+plugins in `.agents-live.toml` is easiest converted first: 6.0 refuses a
+plugin still registered under the retired `agents_live.agents` group, so
+converting first lets one `agents-live upgrade` install the runtime and the
+ported plugin together, where upgrading first needs a second run after the
+definitions arrive.
 
-From 6.0 onward the order stops mattering. A definition declaring a schema
-version the installed release does not implement is refused with an upgrade
-remedy, recorded as `runtime_outdated`, and its trigger is kept.
+Confirm either way with `agents-live status`, and start anything that is not
+started.
+
+From 6.0 onward the definitions can lead safely on their own. A definition
+declaring a schema version the installed release does not implement is refused
+with an upgrade remedy, recorded as `runtime_outdated`, and its trigger is
+kept.
 
 Each discovered definition receives a canonical identifier of the form
 `<name>-<path-hash>`. The hash uses the normalized repository-relative prompt
