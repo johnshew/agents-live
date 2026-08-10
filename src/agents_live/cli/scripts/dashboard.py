@@ -226,7 +226,7 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
     if (SCRIPTS_DIR / "__init__.py").is_file():
         if str(SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(SCRIPTS_DIR))
-        from agents_live import qlog as structured_qlog
+        from agents_live.obs import qlog as structured_qlog
     else:
         import qlog as structured_qlog
 

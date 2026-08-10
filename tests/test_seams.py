@@ -65,12 +65,24 @@ class TempRepository(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         (self.root / "Agents").mkdir()
+        self.previous_repo = os.environ.get("AGENTS_LIVE_REPO")
+        os.environ["AGENTS_LIVE_REPO"] = str(self.root)
+        self.previous_root_cache = (
+            paths._cached_default_root, paths._cached_default_source)
+        paths._cached_default_root = None
+        paths._cached_default_source = None
         self.previous_homes = {
             name: os.environ.get(name) for name in _ISOLATED_HOMES}
         for name, directory in _ISOLATED_HOMES.items():
             os.environ[name] = str(self.root / directory)
 
     def tearDown(self) -> None:
+        if self.previous_repo is None:
+            os.environ.pop("AGENTS_LIVE_REPO", None)
+        else:
+            os.environ["AGENTS_LIVE_REPO"] = self.previous_repo
+        (paths._cached_default_root,
+         paths._cached_default_source) = self.previous_root_cache
         for name, value in self.previous_homes.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -1313,6 +1325,17 @@ class TestArchitectureFitness(unittest.TestCase):
         }
         self.assertEqual(
             set(), retired_root_modules & {path.name for path in package.glob("*.py")})
+
+    def test_dashboard_structured_snapshot_uses_packaged_qlog(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+            with tempfile.TemporaryDirectory() as temp:
+                with mock.patch.object(dashboard, "LOGS_DIR", Path(temp)):
+                    self.assertEqual(
+                        ({}, {}), dashboard._structured_log_snapshot(set()))
 
     def test_ports_do_not_import_each_other_and_cli_stays_on_ports(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

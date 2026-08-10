@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: `agents-live dashboard` starts from the installed package again.
+  The dashboard now loads structured-log queries from their 6.0 observability
+  package instead of importing the retired top-level `qlog` module.
+
 ## 6.0.1 - 2026-08-09
 
 - fix: plugin convergence targets the uv tool environment even from an active virtualenv. (#262)
