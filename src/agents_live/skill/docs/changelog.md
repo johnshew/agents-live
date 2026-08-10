@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.2 - 2026-08-09
+
 - fix: `agents-live dashboard` starts from the installed package again.
   The dashboard now loads structured-log queries from their 6.0 observability
   package instead of importing the retired top-level `qlog` module.
