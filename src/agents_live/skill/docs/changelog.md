@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.0 - 2026-08-09
+
 - feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
   This release is a major refactoring of the package and an alignment of the
   definition format with Agent Skills. A definition is
