@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.1 - 2026-08-09
+
 - fix: plugin convergence targets the uv tool environment even from an active virtualenv. (#262)
   Upgrade resolves the installed tool environment before replacing the runtime
   and uses its receipt when restoring declared plugins. A missing receipt now
