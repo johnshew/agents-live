@@ -6,6 +6,29 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
+  This release is a major refactoring of the package and an alignment of the
+  definition format with Agent Skills. A definition is
+  `Agents/<name>/SKILL.md`, or `<name>.md` in a configured discovery root, and
+  it is a valid Agent Skill that other tools can read. Execution policy is
+  quoted `agents-live.*` metadata under schema version 1, so what Agents Live
+  adds sits in its own namespace rather than in fields of its own invention.
+  Every definition gets a path-derived canonical identifier, so two roots may
+  hold the same name.
+
+  BREAKING CHANGE: the runtime contains no old-format loader. Run
+  `agents-live migrate` once per repository to convert 5.x definitions;
+  `handler` is retired in favour of `agents-live.post-processor`, whose
+  failures report `post_processor_crash`. The public `heartbeat` command is
+  removed and WSL liveness is converged automatically. The canonical watch
+  expression changes every watcher fingerprint, so each started watcher
+  restarts once after the upgrade.
+- refactor: the package is organised around a runtime port and an agent port.
+  Immutable primitive records cross each seam, one convergence path owns host
+  state, and `dispatch.py` is the single handoff. Command handlers live under
+  `cli/`, host implementations under `runtime/hosts/`, durable intent under
+  `state/`, observability under `obs/`, and one-major-cycle 5.x migration
+  code under `legacy/`.
 - fix: adoption survives an upgrade that happens before the migration.
   A 5.x host has no started state, so 6.0 adopts one: it maps each installed
   legacy trigger to the canonical identifier of the definition it names. That
@@ -35,25 +58,6 @@ history is retained in the source repository.
   runtime honours the rest of the definition and runs it. `status --json` gains
   the definition path and its execution policy, so a caller no longer has to
   parse frontmatter to learn how an agent runs.
-- feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
-  A definition is `Agents/<name>/SKILL.md`, or `<name>.md` in a configured
-  discovery root. Execution policy is quoted `agents-live.*` metadata under
-  schema version 1, and every definition gets a path-derived canonical
-  identifier so two roots may hold the same name.
-
-  BREAKING CHANGE: the runtime contains no old-format loader. Run
-  `agents-live migrate` once per repository to convert 5.x definitions;
-  `handler` is retired in favour of `agents-live.post-processor`, whose
-  failures report `post_processor_crash`. The public `heartbeat` command is
-  removed and WSL liveness is converged automatically. The canonical watch
-  expression changes every watcher fingerprint, so each started watcher
-  restarts once after the upgrade.
-- refactor: the package is organised around a runtime port and an agent port.
-  Immutable primitive records cross each seam, one convergence path owns host
-  state, and `dispatch.py` is the single handoff. Command handlers live under
-  `cli/`, host implementations under `runtime/hosts/`, durable intent under
-  `state/`, observability under `obs/`, and one-major-cycle 5.x migration
-  code under `legacy/`.
 - fix: one unreadable definition no longer removes a repository's automation.
   Discovery stopped at the first failure, so collection reported the whole
   repository as empty and convergence withdrew every trigger and watcher it
