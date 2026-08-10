@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -1336,6 +1337,14 @@ class TestArchitectureFitness(unittest.TestCase):
                 with mock.patch.object(dashboard, "LOGS_DIR", Path(temp)):
                     self.assertEqual(
                         ({}, {}), dashboard._structured_log_snapshot(set()))
+            with mock.patch.object(sys, "argv", ["dashboard.py", "--help"]):
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaises(SystemExit) as stopped,
+                ):
+                    runpy.run_path(
+                        dashboard.__file__, run_name="__mp_main__")
+                self.assertEqual(0, stopped.exception.code)
 
     def test_ports_do_not_import_each_other_and_cli_stays_on_ports(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
