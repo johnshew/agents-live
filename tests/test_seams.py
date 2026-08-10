@@ -1327,16 +1327,66 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertEqual(
             set(), retired_root_modules & {path.name for path in package.glob("*.py")})
 
-    def test_dashboard_structured_snapshot_uses_packaged_qlog(self) -> None:
+    def test_dashboard_package_startup_and_agent_visibility(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
         nicegui.ui.refreshable.side_effect = lambda function: function
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
             with tempfile.TemporaryDirectory() as temp:
-                with mock.patch.object(dashboard, "LOGS_DIR", Path(temp)):
-                    self.assertEqual(
-                        ({}, {}), dashboard._structured_log_snapshot(set()))
+                root = Path(temp).resolve()
+                skill = root / "Agents" / "visible-agent"
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(
+                    "---\n"
+                    "name: visible-agent\n"
+                    "description: Verify dashboard agent rows.\n"
+                    "metadata:\n"
+                    '  agents-live.schema-version: "1"\n'
+                    '  agents-live.selector: "fake/echo"\n'
+                    '  agents-live.schedule: "0 8 * * *"\n'
+                    "---\n"
+                    "Report dashboard visibility.\n",
+                    encoding="utf-8",
+                )
+                state_home = root / "state"
+                with (
+                    mock.patch.dict(os.environ, {
+                        "AGENTS_LIVE_REPO": str(root),
+                        "XDG_STATE_HOME": str(state_home),
+                    }),
+                    mock.patch.object(dashboard, "REPO_ROOT", root),
+                    mock.patch.object(
+                        dashboard, "LOGS_DIR",
+                        paths.repo_state_dir(root) / "logs"),
+                ):
+                    paths.clear_cache()
+                    try:
+                        identifier = agent.load(
+                            "visible-agent", root=root).identifier
+                        state.replace(root, {identifier})
+                        self.assertEqual(
+                            ({}, {}),
+                            dashboard._structured_log_snapshot(
+                                {"visible-agent"}))
+                        snapshot = dashboard.api_agents()
+                        self.assertEqual(str(root), snapshot["repo"])
+                        self.assertEqual(
+                            [("visible-agent", "started")],
+                            [(row["name"], row["state"])
+                             for row in snapshot["agents"]],
+                        )
+                        self.assertEqual(
+                            snapshot["agents"],
+                            dashboard._filtered_agent_rows(
+                                snapshot["agents"], {
+                                    "name": "", "state": "All",
+                                    "owner": "All", "runtime": "All",
+                                    "failing": False,
+                                }),
+                        )
+                    finally:
+                        paths.clear_cache()
             with mock.patch.object(sys, "argv", ["dashboard.py", "--help"]):
                 with (
                     contextlib.redirect_stdout(io.StringIO()),
