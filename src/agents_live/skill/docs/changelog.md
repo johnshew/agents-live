@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: plugin convergence targets the uv tool environment even from an active virtualenv. (#262)
+  Upgrade resolves the installed tool environment before replacing the runtime
+  and uses its receipt when restoring declared plugins. A missing receipt now
+  names the searched environment and recommends leaving a shadowing virtualenv.
+- fix: retired plugin registration failures no longer crash `upgrade`. (#270)
+  Compatibility discovery now catches both entry-point import failures and
+  exceptions raised by a returned 5.x registration callable, preserving the
+  command needed to install the replacement plugin.
 - fix: POSIX watcher reboot entries stay below cron command-length limits. (#267)
   The durable command loads its watch expression from the definition and keeps
   the encoded artifact marker only in the ownership comment. Immediate watcher
