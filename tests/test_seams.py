@@ -23,7 +23,7 @@ from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle
-from agents_live.cli.commands import init, run, stop, uninstall
+from agents_live.cli.commands import doctor, init, internal, run, stop, uninstall
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import health_check, triggers
@@ -186,6 +186,35 @@ class TestDefinitionLoader(TempRepository):
         self.assertEqual("write", config.mode)
         self.assertEqual(300, config.timeout)
 
+    def test_migration_preserves_files_and_expands_directories(self) -> None:
+        (self.root / "watched.md").write_text("watched\n", encoding="utf-8")
+        (self.root / "docs").mkdir()
+        source = self.root / "Agents" / "watcher.md"
+        source.write_text(
+            "---\ndescription: Watch fixture.\nruntime: fake\nwatchPath:\n"
+            "  - watched.md\n"
+            "  - docs\n"
+            "  - src/*.py\n"
+            "  - later.md\n"
+            "  - 'win\\*.txt'\n"
+            "  - 'archive\\'\n"
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+
+        convert(source, root=self.root)
+        watch = parse_watch(agent.load("watcher", root=self.root).execution.watch)
+        self.assertEqual((
+            "archive/**",
+            "docs/**",
+            "later.md",
+            "src/*.py",
+            "watched.md",
+            "win/*.txt",
+        ), watch.includes)
+        self.assertTrue(watch.matches("watched.md"))
+        self.assertFalse(watch.matches("watched.md/child"))
+
     def test_migration_failures_name_the_file(self) -> None:
         source = self.root / "Agents" / "assigned.md"
         source.write_text(
@@ -245,9 +274,14 @@ class TestDefinitionLoader(TempRepository):
         )
         (extra / "report.py").write_text("print('ok')\n", encoding="utf-8")
 
-        self.assertEqual(source.resolve(), convert(source, root=self.root))
-        spec = agent.load("outlying", root=self.root)
-        self.assertEqual("report.py", spec.execution.post_processor)
+        with (
+            mock.patch.object(
+                definition_migrate.paths, "resolve_root", return_value=self.root),
+            contextlib.redirect_stdout(io.StringIO()) as scanned,
+        ):
+            self.assertEqual(0, definition_migrate.main(["--dry-run"]))
+        self.assertIn("Would convert", scanned.getvalue())
+        self.assertNotIn("agents-live.", source.read_text(encoding="utf-8"))
 
         with (
             mock.patch.object(
@@ -255,7 +289,9 @@ class TestDefinitionLoader(TempRepository):
             contextlib.redirect_stdout(io.StringIO()) as scanned,
         ):
             self.assertEqual(0, definition_migrate.main([]))
-        self.assertIn("No 5.x definitions", scanned.getvalue())
+        self.assertIn("Converted", scanned.getvalue())
+        spec = agent.load("outlying", root=self.root)
+        self.assertEqual("report.py", spec.execution.post_processor)
 
     def test_bundle_migration_is_available_and_carries_processors(self) -> None:
         handlers = self.root / "Agents" / "handlers"
@@ -327,9 +363,80 @@ class TestDefinitionLoader(TempRepository):
             agent.load("retired", root=self.root)
 
 
+class TestDoctor(unittest.TestCase):
+    def _run(self, argv: list[str], initial: Health, result,
+             *, json_mode: bool = False) -> tuple[int, str]:
+        collected = mock.Mock(
+            unavailable_repositories=(), broken_definitions=())
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"AGENTS_LIVE_JSON": "1" if json_mode else ""},
+            ),
+            mock.patch.object(
+                doctor.repos, "load", return_value={"repos": {}}),
+            mock.patch.object(doctor.runtime, "health", return_value=initial),
+            mock.patch.object(
+                doctor.lifecycle, "collect", return_value=collected),
+            mock.patch.object(
+                doctor.lifecycle, "converge", return_value=result),
+            mock.patch.object(
+                doctor.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = doctor.main(argv)
+        return code, stdout.getvalue()
+
+    def test_repair_reports_post_convergence_health_in_text_and_json(self) -> None:
+        stale = Health(False, "stale", detail=("liveness beacon is stale",))
+        fresh = Health(True, "fresh")
+        result = mock.Mock(done=(object(),), failed=(), health=fresh)
+
+        code, output = self._run(["--repair"], stale, result)
+        self.assertEqual(0, code)
+        self.assertIn("ok: host runtime: fresh", output)
+        self.assertNotIn("liveness beacon is stale", output)
+
+        code, output = self._run(
+            ["--repair"], stale, result, json_mode=True)
+        payload = json.loads(output)
+        self.assertEqual(0, code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("fresh", next(
+            item["detail"] for item in payload["checks"]
+            if item["check"] == "host runtime"))
+
+    def test_failed_repair_and_dry_run_keep_unhealthy_status(self) -> None:
+        stale = Health(False, "stale", detail=("liveness beacon is stale",))
+        failed = mock.Mock(
+            done=(), failed=((object(), "repair failed"),), health=stale)
+        code, output = self._run(["--repair"], stale, failed)
+        self.assertEqual(1, code)
+        self.assertIn("ERROR: host runtime", output)
+        self.assertIn("ERROR: repair", output)
+
+        preview = mock.Mock(done=(object(),), failed=(), health=Health(True, "fresh"))
+        code, output = self._run(["--dry-run"], stale, preview)
+        self.assertEqual(1, code)
+        self.assertIn("ERROR: host runtime", output)
+        self.assertIn("ok: repair", output)
+
+
 class TestRuntimeCore(unittest.TestCase):
     def test_framework_smoketest_has_no_external_provider_gate(self) -> None:
         self.assertEqual("fake", health_check._resolve_smoketest_runtime())
+
+    def test_missing_ownership_backend_reports_the_required_entry_point(self) -> None:
+        with (
+            mock.patch.object(ownership, "mode", return_value="registry"),
+            mock.patch.object(ownership, "_backend", return_value=None),
+            self.assertRaisesRegex(
+                ownership.OwnershipUnavailableError,
+                "agents_live.ownership",
+            ),
+        ):
+            ownership.load_owners()
 
     def test_name_keyed_ownership_rejects_duplicate_identities(self) -> None:
         with self.assertRaisesRegex(
@@ -389,7 +496,66 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertIn("--runtime-role watcher", rendered.rendered)
         self.assertIn(
             f"--subscription-key {subscription.key}", rendered.rendered)
+        self.assertNotIn("--watch-expression", rendered.rendered)
+        self.assertNotIn("--artifact-marker", rendered.rendered)
+        self.assertIn("--watch-expression", rendered.watcher_argv)
         self.assertNotIn("--runtime-role", rendered.watcher_argv)
+
+    def test_long_watcher_renders_a_bounded_crontab_line(self) -> None:
+        expression = " ".join(
+            f"workspace/component-{index}/generated/**"
+            for index in range(80)
+        ) + " debounce 1s"
+        subscription = Subscription.create(
+            scope="repo:/tmp/example",
+            target="agent:sample",
+            kind="watch",
+            trigger=expression,
+        )
+        host = PosixHost()
+        rendered = host.render(subscription)
+        self.assertLess(len(rendered.rendered), 1000)
+        self.assertGreater(len(" ".join(rendered.watcher_argv)), 1000)
+        self.assertIsNotNone(runtime.artifacts.from_rendered(rendered.rendered))
+
+    def test_internal_maintain_refreshes_the_host_health_beacon(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            beacon = root / "health.ok"
+            subscriptions = (
+                Subscription.create(
+                    scope=f"repo:{root}", target="agent:watcher",
+                    kind="watch", trigger="src/** debounce 1s"),
+                Subscription.create(
+                    scope=f"repo:{root}", target="agent:scheduled",
+                    kind="schedule", trigger="0 8 * * *"),
+            )
+            result = mock.Mock(
+                failed=(), health=Health(True, "not-required"))
+            collected = mock.Mock(subscriptions=subscriptions)
+            converge_maintenance = mock.Mock(return_value=result)
+            with (
+                mock.patch.object(
+                    internal.lifecycle, "converge", converge_maintenance),
+                mock.patch.object(
+                    internal.lifecycle, "collect", return_value=collected),
+                mock.patch.object(
+                    internal.paths, "health_beacon_path", return_value=beacon),
+            ):
+                self.assertEqual(0, internal.main(["maintain", "--quiet"]))
+                original = beacon.read_text(encoding="utf-8")
+                self.assertEqual(0, internal.main(["maintain", "--dry-run"]))
+                self.assertEqual(original, beacon.read_text(encoding="utf-8"))
+                converge_maintenance.return_value = mock.Mock(
+                    failed=(), health=Health(False, "stale"))
+                self.assertEqual(1, internal.main(["maintain", "--quiet"]))
+                self.assertEqual(original, beacon.read_text(encoding="utf-8"))
+
+            payload = json.loads(beacon.read_text(encoding="utf-8"))
+            self.assertEqual("healthy", payload["status"])
+            self.assertEqual(1, payload["watchers"])
+            self.assertEqual(1, payload["cron"])
+            self.assertEqual({str(root): {"status": "ok"}}, payload["repos"])
 
     def test_uninstall_clears_structured_triggers_and_watchers(self) -> None:
         host = MemoryHost()

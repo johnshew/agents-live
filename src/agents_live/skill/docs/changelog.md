@@ -6,6 +6,25 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: POSIX watcher reboot entries stay below cron command-length limits. (#267)
+  The durable command loads its watch expression from the definition and keeps
+  the encoded artifact marker only in the ownership comment. Immediate watcher
+  starts still receive the canonical expression and process fingerprint.
+- fix: automatic maintenance refreshes the documented host health beacon again. (#268)
+  `agents-live internal maintain` now runs 6.0 lifecycle convergence and
+  atomically writes `health.ok` with current repository, watcher, and schedule
+  counts. Failed checks and dry-runs do not refresh the beacon.
+- fix: a missing ownership plugin reports the required entry point instead of crashing.
+  An isolated wheel or incomplete multi-host install now fails closed with an
+  actionable `agents_live.ownership` diagnostic rather than a `NameError`.
+- fix: migration preserves exact-file watches instead of converting them to directory globs. (#265)
+  Existing directories and paths with a trailing separator still become
+  recursive watches, explicit globs remain unchanged, and an absent ambiguous
+  path stays exact rather than silently becoming a pattern that cannot match.
+- fix: `doctor --repair` reports post-repair host health and exits accordingly. (#266)
+  A successful WSL liveness repair no longer prints the stale pre-repair error
+  or requires a second invocation to return success. Dry-run continues to
+  report current health because it does not change the host.
 - fix: a 5.x plugin no longer crashes the CLI, and is refused before installation. (#263)
   A distribution still declaring the retired `agents_live.agents` group was
   installed by convergence, because the group was only checked when validating
@@ -59,7 +78,8 @@ history is retained in the source repository.
   and spent the adoption on nothing; every agent then had to be started again
   by hand after migrating. Started state is no longer initialised from a
   repository whose definitions did not all load, unless the caller asked for a
-  specific change. (#261)- fix: migration reaches definitions in configured agent_directories roots. (#257)
+  specific change. (#261)
+- fix: migration reaches definitions in configured `agent_directories` roots. (#257)
   6.0 ships no old-format loader, so `agents-live migrate` is the only way to
   convert a repository. It scanned `Agents/` alone, leaving definitions in
   configured roots unrunnable after an upgrade that reported success. A scan
@@ -131,9 +151,8 @@ history is retained in the source repository.
   declaring the retired group is refused with the group to port it to.
 - docs: state what the 5.x migrator cannot convert, and what to do instead.
   `owner`, `env`, and a `runtime` carrying arguments stop a conversion rather
-  than being guessed at, and `migrate` reads `Agents/<name>.md` only, so
-  definitions in configured `agent_directories` roots are converted by hand.
-  Until now the refusal messages were the only place any of that was said.
+  than being guessed at. Until now the refusal messages were the only place
+  any of that was said.
 - fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
   The continuation reads the upgraded tool's receipt instead of its temporary
   environment, so declared plugins and their ownership backends are restored.

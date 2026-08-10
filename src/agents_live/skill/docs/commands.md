@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-08
+ms.date: 2026-08-09
 ms.topic: reference
 ---
 
@@ -73,7 +73,7 @@ agents-live stop link-check --dry-run
 - `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.
-  Definitions in configured `agent_directories` roots are converted by hand.
+  A scan covers `Agents/` and every configured `agent_directories` root.
 - `uninstall` removes host integration.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.

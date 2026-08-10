@@ -96,16 +96,15 @@ class PosixHost:
         else:
             watch = parse_watch(subscription.trigger)
             trigger = "@reboot"
-            watcher_argv = (
+            watcher_base = (
                 "agents-live", "--repo", root, "internal", "watch-loop", target,
-                "--watch-expression", watch.canonical,
             )
+            watcher_argv = (*watcher_base, "--watch-expression", watch.canonical)
             argv = [
-                *watcher_argv,
+                *watcher_base,
                 "--runtime-role", "watcher",
                 "--subscription-key", subscription.key,
                 "--subscription-fingerprint", fingerprint,
-                "--artifact-marker", marker,
             ]
         if subscription.target == "runtime":
             rendered = f"{trigger} {shlex.join(argv)} 2>&1 # {marker}"

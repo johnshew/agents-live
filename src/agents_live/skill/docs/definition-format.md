@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-08-08
+ms.date: 2026-08-09
 ms.topic: reference
 ---
 
@@ -108,6 +108,12 @@ Both forms are first-class. A flat `<name>.md` and a `<name>/SKILL.md` bundle
 are discovered in `Agents/` and in every configured `agent_directories` root,
 and both use the same metadata contract. The bundle is the conforming Agent
 Skill; the flat file is the Agents Live extension.
+
+Migration preserves an exact file watch as an exact pattern. A path ending in
+`/` or `\\`, or one that names an existing directory, becomes a recursive
+`/**` pattern. Explicit globs are preserved. A path that does not exist yet and
+has no trailing directory separator stays exact rather than being guessed to
+be a directory.
 
 `migrate` scans `Agents/` and every configured `agent_directories` root. A
 file that already carries `agents-live.` metadata is skipped, so a scan

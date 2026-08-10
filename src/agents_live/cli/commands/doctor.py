@@ -26,17 +26,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         checks.append({"check": "repository registry", "ok": True,
                        "detail": f"{len(registry['repos'])} registered"})
+    host_check_index = len(checks)
     try:
         health = runtime.health()
     except (OSError, RuntimeError, ValueError) as exc:
         checks.append({
             "check": "host runtime", "ok": False, "detail": str(exc)})
     else:
-        checks.append({
-            "check": "host runtime",
-            "ok": health.healthy,
-            "detail": "; ".join(health.detail) or health.liveness,
-        })
+        checks.append(_host_check(health))
     if registry is not None:
         for name, value in sorted(registry["repos"].items()):
             root = state.resolve_root(value) if os.path.isdir(value) else None
@@ -77,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         except lifecycle.CollectionUnavailable as exc:
             checks.append({"check": "repair", "ok": False, "detail": str(exc)})
         else:
+            if not args.dry_run:
+                checks[host_check_index] = _host_check(result.health)
             checks.append({
                 "check": "repair",
                 "ok": not result.failed,
@@ -91,6 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         if update_check.interactive():
             print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
+
+
+def _host_check(health: runtime.Health) -> dict[str, object]:
+    return {
+        "check": "host runtime",
+        "ok": health.healthy,
+        "detail": "; ".join(health.detail) or health.liveness,
+    }
 
 
 if __name__ == "__main__":
