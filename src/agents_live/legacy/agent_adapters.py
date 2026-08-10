@@ -251,8 +251,8 @@ register(AgentAdapter(name="copilot", binary=("copilot",), family="copilot",
 # 1. Entry points: an installed plugin package exposes the
 #    ``agents_live.agents`` group; each entry point resolves to a module
 #    (or callable) whose load registers its adapters via ``register()``.
-#    A broken INSTALLED plugin raises - a deployment that installed
-#    private adapters must never silently lose them.
+#    A broken retired plugin is reported and skipped so the upgrade command
+#    remains available to replace it.
 # 2. Flat sibling import of ``agency_adapters`` (this repository's
 #    pre-flip deployment). The public export omits the file, so the
 #    hook is a no-op there; only that module's own absence is
@@ -262,17 +262,16 @@ def _discover_plugins() -> None:
     for ep in entry_points(group="agents_live.agents"):
         try:
             loaded = ep.load()
+            if callable(loaded):
+                loaded()
         except Exception as exc:
-            # A 5.x plugin cannot import under 6.0, and this runs at import
-            # time: raising takes down commands that never wanted an adapter,
-            # including the upgrade that would replace the plugin.
+            # A 5.x plugin can fail while importing or while registering
+            # against the 6.0 API. This runs at import time, so either failure
+            # must leave upgrade available to replace the retired plugin.
             print(
                 f"warning: ignoring plugin {ep.value!r} from the retired "
                 f"agents_live.agents group: {exc}",
                 file=sys.stderr)
-            continue
-        if callable(loaded):
-            loaded()
     try:
         import importlib
         importlib.import_module("agency_adapters")

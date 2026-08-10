@@ -23,10 +23,10 @@ from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle
-from agents_live.cli.commands import doctor, init, internal, run, stop, uninstall
+from agents_live.cli.commands import doctor, init, internal, run, stop, uninstall, upgrade
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
-from agents_live.legacy import health_check, triggers
+from agents_live.legacy import agent_adapters, health_check, triggers
 from agents_live.agent import providers
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
@@ -1140,6 +1140,49 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertNotIn(
             "agents_live.agents", plugins.ENTRY_POINT_GROUPS)
         self.assertIn("agents_live.agents", plugins.RETIRED_ENTRY_POINT_GROUPS)
+
+    def test_retired_plugin_registration_failure_does_not_crash_discovery(self) -> None:
+        class Entry:
+            value = "retired_plugin:register"
+
+            @staticmethod
+            def load():
+                def register_plugin() -> None:
+                    raise RuntimeError("registration failed")
+                return register_plugin
+
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "importlib.metadata.entry_points", return_value=[Entry()]),
+            mock.patch("importlib.import_module"),
+            contextlib.redirect_stderr(stderr),
+        ):
+            agent_adapters._discover_plugins()
+        self.assertIn("retired agents_live.agents group", stderr.getvalue())
+        self.assertIn("registration failed", stderr.getvalue())
+
+    def test_upgrade_uses_tool_environment_receipt_outside_active_venv(self) -> None:
+        tool_environment = Path("/uv/tools/agents-live")
+        operation = mock.MagicMock()
+        operation.__enter__.return_value = {}
+        with (
+            mock.patch.object(upgrade, "find_uv", return_value="uv"),
+            mock.patch.object(upgrade.adminlog, "operation", return_value=operation),
+            mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
+            mock.patch.object(upgrade.plugins, "launcher_stamp", return_value=None),
+            mock.patch.object(upgrade, "_running_watchers", return_value=[]),
+            mock.patch.object(upgrade.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(upgrade, "_report_stale_watchers"),
+            mock.patch.object(
+                upgrade.plugins, "tool_environment", return_value=tool_environment),
+            mock.patch.object(upgrade.plugins, "converge") as converge_plugins,
+            mock.patch.object(upgrade.plugins, "installed_version", return_value="6.0.1"),
+        ):
+            self.assertEqual(0, upgrade._upgrade_runtime([]))
+        converge_plugins.assert_called_once_with(
+            [], trigger="upgrade", pin_primary=False,
+            receipt_environment=tool_environment)
 
     def test_a_retired_plugin_group_is_refused_even_beside_a_current_one(self) -> None:
         """Half-recognising a plugin is worse than refusing it.

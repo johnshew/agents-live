@@ -223,6 +223,8 @@ def _upgrade_runtime(roots: list[Path] | None = None,
     with adminlog.operation("upgrade-runtime",
                             version_before=__version__,
                             source=str(source) if source else "pypi") as end:
+        if receipt_environment is None:
+            receipt_environment = plugins.tool_environment()
         # Before uv is invoked at all: a rebuild it cannot finish leaves
         # the environment neither on the old version nor the new (#231).
         if _refuse_while_held(end):
@@ -252,12 +254,9 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         if kept_launcher:
             _warn_launcher_kept()
         try:
-            converge_options = {}
-            if receipt_environment is not None:
-                converge_options["receipt_environment"] = receipt_environment
             plugins.converge(
                 roots or [], trigger="upgrade", pin_primary=False,
-                **converge_options)
+                receipt_environment=receipt_environment)
         except (OSError, ValueError, plugins.PluginError) as exc:
             end["status"] = "error"
             end["level"] = "error"

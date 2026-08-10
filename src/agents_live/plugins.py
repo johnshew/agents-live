@@ -313,9 +313,11 @@ def _receipt_requirements(*, pin_primary: bool = True,
         ReceiptRequirement, dict[str, ReceiptRequirement]]:
     receipt = _receipt_path(environment)
     if receipt is None:
+        searched = Path(environment or sys.prefix)
         raise PluginError(
             "plugin convergence requires an uv tool installation of agents-live; "
-            "run `uv tool install agents-live`, then retry")
+            f"no uv receipt was found in {searched}. Deactivate any active "
+            "virtualenv so the uv-managed agents-live command is used, then retry")
     try:
         with receipt.open("rb") as handle:
             requirements = tomllib.load(handle)["tool"]["requirements"]
