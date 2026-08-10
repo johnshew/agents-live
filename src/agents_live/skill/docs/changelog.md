@@ -16,8 +16,7 @@ history is retained in the source repository.
 - fix: unknown `agents-live.*` metadata is visible without blocking execution. (#260)
   `status --json` carries the unknown keys and `doctor` explains that they may
   be misspelled or require a newer runtime.
-- fix: release-note diagnostics distinguish unassociated pull requests from
-  missing changelog entries. (#277)
+- fix: release-note diagnostics distinguish unassociated pull requests from missing changelog entries. (#277)
   Curated entries whose wording differs from their pull request title no
   longer produce a false claim that no changelog entry exists.
 
