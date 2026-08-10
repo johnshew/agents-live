@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.4 - 2026-08-10
+
 - fix: lifecycle collection applies ownership mode per registered repository. (#275)
   Local repositories remain local while registry-managed repositories filter
   subscriptions through the ownership backend, regardless of the selected
