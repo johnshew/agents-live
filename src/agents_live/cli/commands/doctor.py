@@ -68,6 +68,16 @@ def main(argv: list[str] | None = None) -> int:
                 checks.append({
                     "check": "definition", "ok": False, "detail": message,
                 })
+            for path, keys in collected.unknown_metadata:
+                checks.append({
+                    "check": "definition metadata",
+                    "ok": False,
+                    "detail": (
+                        f"{path}: unrecognized metadata "
+                        f"{', '.join(keys)}; this may be a typo or require "
+                        "a newer agents-live runtime"
+                    ),
+                })
     if args.repair or args.dry_run:
         try:
             result = lifecycle.converge(dry_run=args.dry_run)

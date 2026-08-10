@@ -636,8 +636,8 @@ def agent_rows() -> list[dict]:
         agent_display = runtime if runtime != "none" else "handler"
         cost_day, cost_week = (agent_cost(name) if runtime != "none" else ("-", "-"))
         model = _agent_model(agent, STATE["models"])
-        can_pause = state.startswith("active") or state == "partial"
-        can_activate = local and not state.startswith("active")
+        can_pause = local and state == "started"
+        can_activate = local and state == "stopped"
         rows.append({
             "name": name,
             "identifier": identifier,

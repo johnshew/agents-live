@@ -35,6 +35,21 @@ Do not use `uv tool install --editable .` for routine source testing. It makes
 bare `agents-live` follow the checkout and hides the distinction between source
 and released behavior.
 
+Interactive commands need a readiness assertion, not only `--help`. For the
+dashboard, launch the built-wheel command against a temporary repository, wait
+for `/api/agents`, assert the expected agent row and action flags, then stop the
+process. A successful GET of `/` proves only that NiceGUI bound a port; the
+websocket-rendered table is not present in that response. Run this check with
+development reload enabled as well, because NiceGUI starts that worker as
+`__mp_main__`.
+
+Tests at translation boundaries must assert decisions as well as serialized
+values. In particular, dashboard fixtures cover both `started` and `stopped`
+rows and their Start/Stop availability. Multi-repository lifecycle fixtures
+must include heterogeneous project configuration, including local and
+registry ownership in the same collection. Release-tool diagnostics must be
+tested for factual wording when an association cannot be inferred.
+
 ## Validate the current checkout
 
 Run the portable suite and release gates:
@@ -98,6 +113,11 @@ uvx --from "$wheel" agents-live --repo ~/repos/<target-project> dashboard --help
 uvx --from "$wheel" agents-live repos list
 uvx --from "$wheel" agents-live status --all-repos
 ```
+
+The dashboard `--help` check is an import-only precursor. The release candidate
+is not validated until the built-wheel dashboard reaches `/api/agents` and
+returns the expected temporary-project rows and action flags in normal and
+`--dev` modes.
 
 Inspect both artifacts before publication:
 

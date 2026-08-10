@@ -6,6 +6,21 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: lifecycle collection applies ownership mode per registered repository. (#275)
+  Local repositories remain local while registry-managed repositories filter
+  subscriptions through the ownership backend, regardless of the selected
+  default repository.
+- fix: dashboard Start, Stop, and Stop-all actions follow started state. (#276)
+  Started local agents can now be stopped and cannot be started again; stopped
+  local agents expose the inverse actions.
+- fix: unknown `agents-live.*` metadata is visible without blocking execution. (#260)
+  `status --json` carries the unknown keys and `doctor` explains that they may
+  be misspelled or require a newer runtime.
+- fix: release-note diagnostics distinguish unassociated pull requests from
+  missing changelog entries. (#277)
+  Curated entries whose wording differs from their pull request title no
+  longer produce a false claim that no changelog entry exists.
+
 ## 6.0.3 - 2026-08-09
 
 - fix: `agents-live dashboard --dev` starts its reload worker.

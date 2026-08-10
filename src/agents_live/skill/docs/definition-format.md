@@ -66,8 +66,9 @@ the loader has to say which of the two is behind.
 
 An `agents-live.` key this release does not recognise is ignored. A key is
 only added for a capability that is additive, so an older runtime honours the
-rest of the definition and runs it. The cost is that a misspelled key is
-silently inert.
+rest of the definition and runs it. `status --json` reports such keys in
+`unknown_metadata`, and `doctor` fails with a diagnostic explaining that each
+key may be a typo or may require a newer runtime.
 
 A change to what an existing key means is not additive, and raises the schema
 version instead. A definition declaring a version above the one the running

@@ -24,7 +24,7 @@ from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle
-from agents_live.cli.commands import doctor, init, internal, run, stop, uninstall, upgrade
+from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import agent_adapters, health_check, triggers
@@ -135,6 +135,11 @@ class TestDefinitionLoader(TempRepository):
         spec = agent.load("forward", root=self.root)
         self.assertEqual("fake/echo", spec.execution.selector.canonical)
         self.assertEqual(("0 8 * * *",), spec.execution.schedules)
+        self.assertEqual(("agents-live.sandbox",), spec.unknown_metadata)
+
+        rows = status._rows(self.root)
+        self.assertEqual(
+            ["agents-live.sandbox"], rows[0]["unknown_metadata"])
 
     def test_rejects_unquoted_metadata_duplicate_keys_and_aliases(self) -> None:
         bad = (
@@ -380,7 +385,8 @@ class TestDoctor(unittest.TestCase):
     def _run(self, argv: list[str], initial: Health, result,
              *, json_mode: bool = False) -> tuple[int, str]:
         collected = mock.Mock(
-            unavailable_repositories=(), broken_definitions=())
+            unavailable_repositories=(), broken_definitions=(),
+            unknown_metadata=())
         stdout = io.StringIO()
         with (
             mock.patch.dict(
@@ -400,6 +406,29 @@ class TestDoctor(unittest.TestCase):
         ):
             code = doctor.main(argv)
         return code, stdout.getvalue()
+
+    def test_unknown_metadata_reports_both_possible_remedies(self) -> None:
+        collected = mock.Mock(
+            unavailable_repositories=(), broken_definitions=(),
+            unknown_metadata=((Path("Agents/sample/SKILL.md"),
+                               ("agents-live.schedul",)),),
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                doctor.repos, "load", return_value={"repos": {}}),
+            mock.patch.object(
+                doctor.runtime, "health", return_value=Health(True, "fresh")),
+            mock.patch.object(
+                doctor.lifecycle, "collect", return_value=collected),
+            mock.patch.object(doctor.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = doctor.main([])
+        self.assertEqual(1, code)
+        self.assertIn("agents-live.schedul", stdout.getvalue())
+        self.assertIn("typo", stdout.getvalue())
+        self.assertIn("newer agents-live runtime", stdout.getvalue())
 
     def test_repair_reports_post_convergence_health_in_text_and_json(self) -> None:
         stale = Health(False, "stale", detail=("liveness beacon is stale",))
@@ -434,6 +463,33 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("ERROR: host runtime", output)
         self.assertIn("ok: repair", output)
+
+
+class TestReleaseTool(unittest.TestCase):
+    def test_unmatched_pull_does_not_claim_changelog_entry_is_missing(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+        build_notes = release["_release_notes"]
+        entry = mock.Mock(
+            summary="Fix packaged dashboard startup",
+            issues=(), migration=None,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(build_notes.__globals__, {
+                "_version_notes": lambda _version: "notes",
+                "_changelog_entries": lambda _notes, _version: [entry],
+                "_previous_tag": lambda _tag: "v6.0.1",
+                "_merged_pulls": lambda _base, _tag: {
+                    272: ("fix: load qlog from packaged dashboard", ()),
+                },
+                "_entry_rank": lambda _entry: 1,
+            }),
+            contextlib.redirect_stderr(stderr),
+        ):
+            build_notes("6.0.2")
+        self.assertIn("could not be associated", stderr.getvalue())
+        self.assertNotIn("has no changelog entry", stderr.getvalue())
 
 
 class TestRuntimeCore(unittest.TestCase):
@@ -623,6 +679,108 @@ class TestStartedState(TempRepository):
         self.assertIn(spec.identifier, state.load(self.root).agents)
         self.assertEqual(set(), host.legacy[str(self.root)])
         self.assertTrue(any(item.kind == "remove-legacy" for item in result.done))
+
+    def test_collection_applies_ownership_mode_per_repository(self) -> None:
+        self.skill("local-agent", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        with tempfile.TemporaryDirectory() as temporary:
+            registry_root = Path(temporary).resolve()
+            skill = registry_root / "Agents" / "remote-agent"
+            skill.mkdir(parents=True)
+            (registry_root / ".agents-live.toml").write_text(
+                'ownership = "registry"\n', encoding="utf-8")
+            (skill / "SKILL.md").write_text(
+                "---\n"
+                "name: remote-agent\n"
+                "description: Registry-managed definition.\n"
+                "metadata:\n"
+                '  agents-live.schema-version: "1"\n'
+                '  agents-live.selector: "fake"\n'
+                '  agents-live.schedule: "0 9 * * *"\n'
+                "---\nbody\n",
+                encoding="utf-8",
+            )
+            local = agent.load("local-agent", root=self.root)
+            remote = agent.load("remote-agent", root=registry_root)
+            state.replace(self.root, {local.identifier})
+            state.replace(registry_root, {remote.identifier})
+            host = MemoryHost()
+            previous = runtime.current()
+            runtime.configure(host)
+            try:
+                with (
+                    mock.patch.object(lifecycle.repos, "load", return_value={
+                        "repos": {
+                            "local": str(self.root),
+                            "registry": str(registry_root),
+                        },
+                        "default_repo": "local",
+                    }),
+                    mock.patch.object(
+                        ownership, "load_owners",
+                        return_value={"remote-agent": "other/runtime/uuid"}),
+                    mock.patch.object(ownership, "owns", return_value=False),
+                ):
+                    collected = lifecycle.collect(persist=False)
+            finally:
+                runtime.configure(previous)
+            targets = {item.target for item in collected.subscriptions}
+            self.assertIn(f"agent:{local.identifier}", targets)
+            self.assertNotIn(f"agent:{remote.identifier}", targets)
+
+    def test_missing_ownership_backend_blocks_only_registry_roots(self) -> None:
+        self.skill("local-agent", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        with tempfile.TemporaryDirectory() as temporary:
+            registry_root = Path(temporary).resolve()
+            skill = registry_root / "Agents" / "registry-agent"
+            skill.mkdir(parents=True)
+            (registry_root / ".agents-live.toml").write_text(
+                'ownership = "registry"\n', encoding="utf-8")
+            (skill / "SKILL.md").write_text(
+                "---\nname: registry-agent\n"
+                "description: Registry-managed definition.\nmetadata:\n"
+                '  agents-live.schema-version: "1"\n'
+                '  agents-live.selector: "fake"\n'
+                '  agents-live.schedule: "0 9 * * *"\n'
+                "---\nbody\n",
+                encoding="utf-8",
+            )
+            local = agent.load("local-agent", root=self.root)
+            remote = agent.load("registry-agent", root=registry_root)
+            state.replace(self.root, {local.identifier})
+            state.replace(registry_root, {remote.identifier})
+            host = MemoryHost()
+            previous = runtime.current()
+            runtime.configure(host)
+            try:
+                with (
+                    mock.patch.object(lifecycle.repos, "load", return_value={
+                        "repos": {
+                            "local": str(self.root),
+                            "registry": str(registry_root),
+                        },
+                        "default_repo": "local",
+                    }),
+                    mock.patch.object(
+                        ownership, "load_owners",
+                        side_effect=ownership.OwnershipUnavailableError(
+                            "registry backend unavailable")),
+                ):
+                    collected = lifecycle.collect(persist=False)
+            finally:
+                runtime.configure(previous)
+            targets = {item.target for item in collected.subscriptions}
+            self.assertIn(f"agent:{local.identifier}", targets)
+            self.assertNotIn(f"agent:{remote.identifier}", targets)
+            self.assertIn(f"repo:{registry_root}", collected.protected_scopes)
+            self.assertTrue(any(
+                str(registry_root) in detail
+                for detail in collected.unavailable_repositories))
 
     def test_failed_replacement_preserves_legacy_trigger(self) -> None:
         self.skill("sample", [
@@ -1376,6 +1534,15 @@ class TestArchitectureFitness(unittest.TestCase):
                             [(row["name"], row["state"])
                              for row in snapshot["agents"]],
                         )
+                        self.assertTrue(snapshot["agents"][0]["can_pause"])
+                        self.assertFalse(snapshot["agents"][0]["can_activate"])
+                        state.replace(root, set())
+                        stopped_snapshot = dashboard.api_agents()
+                        self.assertFalse(
+                            stopped_snapshot["agents"][0]["can_pause"])
+                        self.assertTrue(
+                            stopped_snapshot["agents"][0]["can_activate"])
+                        state.replace(root, {identifier})
                         self.assertEqual(
                             snapshot["agents"],
                             dashboard._filtered_agent_rows(

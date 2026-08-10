@@ -35,7 +35,8 @@ Public API (see ``__all__``):
 * ``OwnershipUnavailableError`` - registry mode declared but the
   registry (or its backend) is missing/malformed; callers must abstain,
   never assume local.
-* ``mode()`` / ``local_only()`` - declared mode ("registry" | "local").
+* ``mode(root=None)`` / ``local_only(root=None)`` - declared mode
+    ("registry" | "local") for an explicit repository or the selected one.
 * ``registry_available()`` - whether a registry backend is installed
   (gate multi-host bootstrap on this before declaring registry mode).
 * ``current_host()`` - ``hostname -s``, lowercased; the first part of
@@ -47,7 +48,7 @@ Public API (see ``__all__``):
   an unmatchable value is never ours.
 * ``owner_uuid(value)`` / ``display_owner(value)`` - the matching part
   and the readable part of an owner value.
-* ``load_owners(rate_limit_secs=60)`` - registry mode: the backend's
+* ``load_owners(rate_limit_secs=60, root=None)`` - registry mode: the backend's
     pulled, strictly validated ``{agent_name: owner}`` mapping; local
   mode: ``{}`` (nothing is owned elsewhere by definition; no file read,
   no network).
@@ -108,7 +109,7 @@ class OwnershipUnavailableError(RuntimeError):
     silently flip a multi-host deployment to run-everything-here."""
 
 
-def _declared_mode() -> str | None:
+def _declared_mode(root: Path | None = None) -> str | None:
     """The optional ``ownership`` key in the project config
     (``paths.load_config`` - root dotfile or pyproject table).
 
@@ -118,7 +119,8 @@ def _declared_mode() -> str | None:
     with an unknown value, raises: a declared-registry host must never
     silently downgrade because its config got corrupted."""
     try:
-        value = paths.load_config(paths.resolve_root()).get("ownership")
+        repository = paths.resolve_root(root) if root is not None else paths.resolve_root()
+        value = paths.load_config(repository).get("ownership")
     except ValueError as exc:
         raise OwnershipUnavailableError(
             f"ownership declaration unreadable: {exc}") from exc
@@ -130,27 +132,27 @@ def _declared_mode() -> str | None:
         # any other value is malformed and must abstain, not guess.
         raise OwnershipUnavailableError(
             f"ownership declaration invalid: "
-            f"{paths.config_source(paths.resolve_root())}: {value!r} "
+            f"{paths.config_source(repository)}: {value!r} "
             f"(the only declared mode is 'registry'; local is the "
             f"absence of the key)")
     return value
 
 
-def mode() -> str:
+def mode(root: Path | None = None) -> str:
     """``"registry"`` or ``"local"``. Registry mode exists ONLY by
     declaration (``ownership = "registry"`` in the project config); an
     undeclared project is local by definition - so zero-init and
     greenfield repos work with no config at all. There is no
     file-presence inference (removed 2026-07-12; it let ambient
     filesystem state pick the security policy)."""
-    return _declared_mode() or "local"
+    return _declared_mode(root) or "local"
 
 
-def local_only() -> bool:
+def local_only(root: Path | None = None) -> bool:
     """True when this project runs without an ownership registry: every
     agent is owned by the local host and transfer/registry operations are
     unavailable."""
-    return mode() == "local"
+    return mode(root) == "local"
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +399,8 @@ def _runtime_uuid() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_owners(*, rate_limit_secs: int = 60) -> dict[str, str]:
+def load_owners(*, rate_limit_secs: int = 60,
+                root: Path | None = None) -> dict[str, str]:
     """Return the ``{agent_name: owner}`` mapping.
 
     Registry mode (see :func:`mode`): the backend pulls the registry
@@ -413,7 +416,7 @@ def load_owners(*, rate_limit_secs: int = 60) -> dict[str, str]:
     file is read and no network is touched (an ambient owners file must
     not leak policy into an undeclared project).
     """
-    if mode() == "registry":
+    if mode(root) == "registry":
         return _require_backend().load_owners(rate_limit_secs=rate_limit_secs)
     return {}
 

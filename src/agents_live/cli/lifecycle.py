@@ -20,6 +20,7 @@ class Collected:
     broken_definitions: tuple[tuple[Path, str], ...] = ()
     protected_scopes: tuple[str, ...] = ()
     protected_targets: tuple[str, ...] = ()
+    unknown_metadata: tuple[tuple[Path, tuple[str, ...]], ...] = ()
 
 
 def collect(
@@ -45,6 +46,7 @@ def collect(
         raise CollectionUnavailable(
             f"trigger store is unreadable: {exc}") from exc
     discovered: dict[Path, dict[str, tuple[runtime.Subscription, ...]]] = {}
+    specs_by_root: dict[Path, dict[str, agent.AgentSpec]] = {}
     unavailable: list[str] = []
     protected: list[str] = []
     broken: list[tuple[Path, str]] = []
@@ -56,32 +58,52 @@ def collect(
             discovered[root] = {}
             continue
         try:
-            discovered[root], root_broken = _discover(root)
+            root_specs, discovered[root], root_broken = _discover(root)
         except (OSError, agent.DefinitionError, ValueError) as exc:
             unavailable.append(f"{root}: {exc}")
             protected.append(f"repo:{root}")
             discovered[root] = {}
         else:
+            specs_by_root[root] = {
+                spec.identifier: spec for spec in root_specs}
             broken.extend((item.path, item.message) for item in root_broken)
             broken_by_root[root] = root_broken
 
-    owners: dict[str, str] | None = None
-    if not ownership.local_only():
+    registry_roots: set[Path] = set()
+    blocked_ownership_roots: set[Path] = set()
+    for root, readable in roots:
+        if not readable:
+            continue
         try:
-            owners = ownership.load_owners()
+            if not ownership.local_only(root):
+                registry_roots.add(root)
         except ownership.OwnershipUnavailableError as exc:
-            raise CollectionUnavailable(str(exc)) from exc
+            unavailable.append(f"{root}: {exc}")
+            protected.append(f"repo:{root}")
+            blocked_ownership_roots.add(root)
+
+    owners: dict[str, str] | None = None
+    if registry_roots:
+        try:
+            owners = ownership.load_owners(root=next(iter(registry_roots)))
+        except ownership.OwnershipUnavailableError as exc:
+            for root in registry_roots:
+                unavailable.append(f"{root}: {exc}")
+                protected.append(f"repo:{root}")
+            blocked_ownership_roots.update(registry_roots)
 
     owner_by_identifier: dict[str, str | None] = {}
-    if owners is not None:
+    if owners is not None and not blocked_ownership_roots:
         try:
-            for root, definitions in discovered.items():
-                specs = [agent.load(identifier, root=root)
-                         for identifier in definitions]
+            for root in registry_roots:
+                specs = specs_by_root.get(root, {}).values()
                 owner_by_identifier.update(ownership.resolve_owners(
                     ((spec.identifier, spec.name) for spec in specs), owners))
         except ownership.OwnershipUnavailableError as exc:
-            raise CollectionUnavailable(str(exc)) from exc
+            for root in registry_roots:
+                unavailable.append(f"{root}: {exc}")
+                protected.append(f"repo:{root}")
+            blocked_ownership_roots.update(registry_roots)
 
     snapshots: dict[Path, frozenset[str]] = {}
     initialized: dict[Path, bool] = {}
@@ -97,8 +119,7 @@ def collect(
             raise CollectionUnavailable(
                 f"legacy trigger store is unreadable for {root}: {exc}") from exc
         identifiers_by_name: dict[str, list[str]] = {}
-        for identifier in definitions:
-            spec = agent.load(identifier, root=root)
+        for identifier, spec in specs_by_root.get(root, {}).items():
             identifiers_by_name.setdefault(spec.name, []).append(identifier)
         for name in legacy_names:
             matches = identifiers_by_name.get(name, [])
@@ -137,8 +158,10 @@ def collect(
 
     desired: list[runtime.Subscription] = []
     for root, definitions in discovered.items():
+        if root in blocked_ownership_roots:
+            continue
         for identifier in sorted(snapshots[root]):
-            if owners is not None:
+            if root in registry_roots:
                 owner = owner_by_identifier.get(identifier)
                 if owner is not None and not ownership.owns(owner):
                     continue
@@ -159,6 +182,12 @@ def collect(
         tuple(broken),
         tuple(protected),
         tuple(protected_targets),
+        tuple(
+            (spec.prompt_path, spec.unknown_metadata)
+            for specs in specs_by_root.values()
+            for spec in specs.values()
+            if spec.unknown_metadata
+        ),
     )
 
 
@@ -205,7 +234,11 @@ def converge(
 
 def _discover(
     root: Path,
-) -> tuple[dict[str, tuple[runtime.Subscription, ...]], tuple[agent.BrokenDefinition, ...]]:
+) -> tuple[
+    tuple[agent.AgentSpec, ...],
+    dict[str, tuple[runtime.Subscription, ...]],
+    tuple[agent.BrokenDefinition, ...],
+]:
     result: dict[str, tuple[runtime.Subscription, ...]] = {}
     discovery = agent.discover(root)
     for spec in discovery.specs:
@@ -224,7 +257,7 @@ def _discover(
             subscriptions.append(runtime.Subscription.create(
                 scope=scope, target=target, kind="watch", trigger=canonical_watch))
         result[spec.identifier] = tuple(subscriptions)
-    return result, discovery.broken
+    return discovery.specs, result, discovery.broken
 
 
 def _maintenance() -> runtime.Subscription:

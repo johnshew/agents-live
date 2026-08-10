@@ -36,6 +36,15 @@ _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # The definition format this release understands. A definition declaring a
 # higher version is not malformed, it is from the future.
 SCHEMA_VERSION = 1
+_EXECUTION_FIELDS = {
+    "agents-live.schema-version", "agents-live.selector", "agents-live.mode",
+    "agents-live.schedule", "agents-live.watch", "agents-live.allow-tools",
+    "agents-live.mcps", "agents-live.env", "agents-live.transcript",
+    "agents-live.timeout", "agents-live.pre-processor",
+    "agents-live.post-processor", "agents-live.output-schema",
+    "agents-live.output-max-bytes", "agents-live.output-path-roots",
+    "agents-live.output-provenance",
+}
 
 
 class DefinitionError(ValueError):
@@ -202,7 +211,12 @@ def _load_prompt(prompt: Path, repository: Path) -> AgentSpec:
         # Keep the subclass: the caller distinguishes a malformed definition
         # from one written for a later release.
         raise type(exc)(f"{prompt}: {exc}") from None
-    return AgentSpec(repository, skill_root, prompt, properties, execution, body)
+    unknown_metadata = tuple(sorted(
+        key for key, _ in properties.metadata
+        if key.startswith("agents-live.") and key not in _EXECUTION_FIELDS))
+    return AgentSpec(
+        repository, skill_root, prompt, properties, execution, body,
+        unknown_metadata)
 
 
 def _explicit_prompt(candidate: Path, repository: Path) -> Path:

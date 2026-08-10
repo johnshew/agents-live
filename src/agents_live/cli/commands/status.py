@@ -59,6 +59,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
         description = None
         policy = None
         prompt_path = None
+        unknown_metadata: list[str] = []
         name = identifier
         try:
             spec = discovered.get(identifier) or agent.load(identifier, root=root)
@@ -66,6 +67,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             description = spec.properties.description
             policy = _policy(spec)
             prompt_path = str(spec.prompt_path)
+            unknown_metadata = list(spec.unknown_metadata)
         except agent.DefinitionError as exc:
             load_error = str(exc)
         rows.append({
@@ -77,6 +79,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "description": description,
             "path": prompt_path,
             "execution": policy,
+            "unknown_metadata": unknown_metadata,
             "error": load_error,
         })
     for item in unloadable:
@@ -91,6 +94,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "description": None,
             "path": str(item.path),
             "execution": None,
+            "unknown_metadata": [],
             "error": item.message,
         })
     return rows
