@@ -109,8 +109,9 @@ are discovered in `Agents/` and in every configured `agent_directories` root,
 and both use the same metadata contract. The bundle is the conforming Agent
 Skill; the flat file is the Agents Live extension.
 
-`migrate` reads `Agents/<name>.md` only. Definitions in configured
-`agent_directories` roots are converted by hand, in place, the same way.
+`migrate` scans `Agents/` and every configured `agent_directories` root. A
+file that already carries `agents-live.` metadata is skipped, so a scan
+reports only what is still to do and a converted repository reports nothing.
 
 Three 5.x fields have no portable equivalent, so the conversion stops rather
 than guessing:
@@ -123,6 +124,29 @@ than guessing:
 
 Every refusal names the file it came from. Run `agents-live migrate --dry-run`
 first to see the whole set before changing anything.
+
+### Upgrade the tool before the definitions
+
+On a machine that is already running agents, the two halves of the upgrade are
+not interchangeable.
+
+Upgrade agents-live first, then convert the definitions. 6.0 reports an
+unconverted definition as unloadable and preserves its installed trigger, so
+nothing is withdrawn while you work. After `agents-live migrate`, the 5.x
+triggers are adopted by matching each one to its new canonical identifier, and
+the agents that were started stay started.
+
+Converting first, on a host still running 5.x, leaves that runtime holding
+definitions it cannot read. 5.x has no fault isolation and does not protect
+the triggers of a definition that fails to load, so its next convergence can
+withdraw the automation. The symptom is silent: the agents simply stop.
+
+If that has already happened, upgrade the tool, run `agents-live migrate`,
+confirm with `agents-live status`, and start whatever is no longer started.
+
+From 6.0 onward the order stops mattering. A definition declaring a schema
+version the installed release does not implement is refused with an upgrade
+remedy, recorded as `runtime_outdated`, and its trigger is kept.
 
 Each discovered definition receives a canonical identifier of the form
 `<name>-<path-hash>`. The hash uses the normalized repository-relative prompt

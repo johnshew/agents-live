@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: migration reaches definitions in configured agent_directories roots. (#257)
+  6.0 ships no old-format loader, so `agents-live migrate` is the only way to
+  convert a repository. It scanned `Agents/` alone, leaving definitions in
+  configured roots unrunnable after an upgrade that reported success. A scan
+  now covers every discovery root and skips files that already carry
+  `agents-live.` metadata, so it reports what is left rather than re-reporting
+  what is done. The migration documentation also states the required upgrade
+  order: upgrade the tool before converting the definitions, because a 5.x
+  runtime holding converted definitions can withdraw their triggers. (#261)
 - feat: a definition written for a later release asks for an upgrade instead of failing as invalid.
   A repository is often synced to a host before the tool on it is upgraded. A
   definition declaring a schema version above the one the running release

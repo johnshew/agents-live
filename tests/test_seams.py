@@ -28,6 +28,7 @@ from agents_live.legacy import health_check, triggers
 from agents_live.agent import providers
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
+from agents_live.cli.commands import definition_migrate
 from agents_live.cli.commands.definition_migrate import MigrationError, convert
 from agents_live.runtime import (
     ChildResult,
@@ -222,6 +223,37 @@ class TestDefinitionLoader(TempRepository):
         self.assertEqual(
             processor.resolve(),
             (spec.skill_root / spec.execution.post_processor).resolve())
+
+    def test_migration_reaches_every_discovery_root(self) -> None:
+        """6.0 ships no old-format loader, so migration is the only door.
+
+        A repository with configured roots was told to migrate and then had
+        the definitions in those roots left behind, unrunnable.
+        """
+        (self.root / ".agents-live.toml").write_text(
+            'agent_directories = ["Extra/agents"]\n', encoding="utf-8")
+        extra = self.root / "Extra" / "agents"
+        extra.mkdir(parents=True)
+        source = extra / "outlying.md"
+        source.write_text(
+            "---\ndescription: Outside Agents/.\nruntime: none\n"
+            'schedule: "0 8 * * *"\npost-processor: Extra/agents/report.py\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        (extra / "report.py").write_text("print('ok')\n", encoding="utf-8")
+
+        self.assertEqual(source.resolve(), convert(source, root=self.root))
+        spec = agent.load("outlying", root=self.root)
+        self.assertEqual("report.py", spec.execution.post_processor)
+
+        with (
+            mock.patch.object(
+                definition_migrate.paths, "resolve_root", return_value=self.root),
+            contextlib.redirect_stdout(io.StringIO()) as scanned,
+        ):
+            self.assertEqual(0, definition_migrate.main([]))
+        self.assertIn("No 5.x definitions", scanned.getvalue())
 
     def test_bundle_migration_is_available_and_carries_processors(self) -> None:
         handlers = self.root / "Agents" / "handlers"

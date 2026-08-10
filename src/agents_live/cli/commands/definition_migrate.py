@@ -48,14 +48,41 @@ def convert(
         raise MigrationError(f"{source}: {exc}") from None
 
 
-def _convert(source: Path, *, root: Path, dry_run: bool, bundle: bool) -> Path:
-    agents = (root / "Agents").resolve()
+def _discovery_roots(root: Path) -> list[Path]:
+    """Every directory a definition may live in, matching discovery."""
+    configured = paths.validated_agent_directories(
+        root, paths.load_config(root).get("agent_directories", []))
+    found: list[Path] = []
+    for directory in [root / "Agents", *configured]:
+        resolved = directory.resolve()
+        if resolved not in found and resolved.is_dir():
+            found.append(resolved)
+    return found
+
+
+def _unmigrated(path: Path) -> bool:
+    """False once the file carries agents-live metadata of its own.
+
+    An unreadable file is left for the converter, which says what is wrong.
+    """
     try:
-        source.relative_to(agents)
-    except ValueError:
-        raise MigrationError(f"definition is outside {agents}") from None
-    if source.parent != agents or source.suffix.lower() != ".md":
-        raise MigrationError("only flat Agents/<name>.md definitions can be migrated")
+        data, _ = _frontmatter(path.read_text(encoding="utf-8"))
+    except (MigrationError, OSError, UnicodeError):
+        return True
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return True
+    return not any(
+        isinstance(key, str) and key.startswith("agents-live.")
+        for key in metadata)
+
+
+def _convert(source: Path, *, root: Path, dry_run: bool, bundle: bool) -> Path:
+    home = source.parent
+    if home not in _discovery_roots(root) or source.suffix.lower() != ".md":
+        raise MigrationError(
+            "only a flat <root>/<name>.md definition in a discovery root "
+            "can be migrated")
     text = source.read_text(encoding="utf-8")
     data, body = _frontmatter(text)
     conflicts = sorted(key for key in _CONFLICTS if key in data)
@@ -84,12 +111,12 @@ def _convert(source: Path, *, root: Path, dry_run: bool, bundle: bool) -> Path:
         # Default: rewrite the frontmatter and leave everything else alone.
         # Relocating a processor changes what `__file__` resolves to, which
         # silently breaks any script that derives paths from its own depth.
-        metadata, _ = _metadata(data, source, agents, root, bundle=False)
+        metadata, _ = _metadata(data, source, home, root, bundle=False)
         rendered = _render(name, description, data, metadata, body)
         if not dry_run:
             source.write_text(rendered, encoding="utf-8")
         return source
-    destination = agents / name
+    destination = home / name
     if destination.exists():
         raise MigrationError(f"migration destination already exists: {destination}")
     metadata, copies = _metadata(data, source, destination, root, bundle=True)
@@ -305,12 +332,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bundle", action="store_true")
     args = parser.parse_args(argv)
     root = paths.resolve_root()
-    selected = (
-        [Path(item) for item in args.paths]
-        if args.paths else
-        [item for item in sorted((root / "Agents").glob("*.md"))
-         if item.name != "_index_.md"]
-    )
+    if args.paths:
+        selected = [Path(item) for item in args.paths]
+    else:
+        # A scan reports what still needs converting; a file that already
+        # carries agents-live metadata is not a 5.x definition.
+        selected = [
+            item
+            for directory in _discovery_roots(root)
+            for item in sorted(directory.glob("*.md"))
+            if item.name != "_index_.md" and _unmigrated(item)
+        ]
+        if not selected:
+            print("No 5.x definitions to migrate.")
+            return 0
     failed = False
     for item in selected:
         try:
