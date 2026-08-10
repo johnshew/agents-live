@@ -12,12 +12,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import __version__, paths, plugins, preflight
+from ... import __version__, agent, paths, plugins, preflight
 from ...obs import admin as adminlog
 from ...legacy import triggers
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
 from ...state import registry as repos
+from .. import upgrade_handoff
 from ..scripts import dashboards
 from . import init
 
@@ -90,6 +91,35 @@ def _install_command(uv: str, source: Path | None) -> list[str]:
         return [uv, "tool", "upgrade", "agents-live"]
     return [uv, "tool", "install", "--force",
             "--reinstall-package", "agents-live", str(source)]
+
+
+def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
+                          source: Path | None
+                          ) -> tuple[str, ...]:
+    """Unsafe registered state that must be resolved before replacement."""
+    errors = [f"registered repository is unavailable: {item}"
+              for item in registry_errors]
+    readable = []
+    for root in dict.fromkeys(path.resolve() for path in roots):
+        if not root.is_dir():
+            errors.append(f"registered repository is unavailable: {root}")
+            continue
+        readable.append(root)
+        try:
+            discovery = agent.discover(root)
+        except (OSError, ValueError, agent.DefinitionError) as exc:
+            errors.append(f"cannot inspect {root}: {exc}")
+            continue
+        errors.extend(
+            f"{item.path}: {item.message}"
+            for item in discovery.broken
+            if "retired 5.x fields:" in item.message
+        )
+    runtime_requirement = (str(source) if source is not None
+                           else f"agents-live>={__version__}")
+    errors.extend(plugins.compatibility_errors(
+        readable, runtime_requirement=runtime_requirement))
+    return tuple(dict.fromkeys(errors))
 
 
 def _holders(environment: Path) -> list[str]:
@@ -184,20 +214,34 @@ def _handoff_windows_upgrade(
     except FileNotFoundError as exc:
         preflight.emit_failure("upgrade", str(exc))
         return 1
-    package = str(source) if source is not None else "agents-live"
-    command = [uv, "tool", "run", "--from", package,
+    package = (str(source) if source is not None
+               else f"agents-live>={__version__}")
+    claim, existing = upgrade_handoff.claim(
+        environment, source=package, runtime_only=runtime_only)
+    if claim is None:
+        preflight.emit_failure(
+            "upgrade", f"a Windows upgrade is already queued ({existing}); "
+            "run `agents-live logs admin` for its outcome")
+        return 1
+    command = [uv, "tool", "run", "--refresh", "--from", package,
                "agents-live", "upgrade", "--continuation-environment",
-               str(environment)]
+               str(environment), "--upgrade-id", claim.operation_id]
     if source is not None:
         command.extend(["--from", str(source)])
     if runtime_only:
         command.append("--runtime-only")
     with adminlog.operation(
             "upgrade-runtime", version_before=__version__, source=package,
-            deferred=True) as end:
+            deferred=True, correlation_id=claim.operation_id) as end:
         if _refuse_while_held(end):
+            upgrade_handoff.abandon(claim)
             return 1
-        if not hostruntime.defer_until_environment_exits(command, environment):
+        helper = hostruntime.defer_until_environment_exits(
+            command, environment, operation_id=claim.operation_id,
+            result_path=claim.result_path,
+            transcript_path=claim.transcript_path)
+        if helper is None:
+            upgrade_handoff.abandon(claim)
             end["status"] = "error"
             end["level"] = "error"
             end["message"] = "Windows upgrade helper could not start"
@@ -206,15 +250,19 @@ def _handoff_windows_upgrade(
                 "helper could not start; run `uv tool run --from agents-live "
                 "agents-live upgrade` after this command exits")
             return 1
+        upgrade_handoff.spawned(claim, helper.pid)
         end["status"] = "deferred"
-        end["message"] = "upgrade deferred until this process exits"
-    print("Upgrade will complete after this command exits")
+        end["transcript"] = str(claim.transcript_path)
+        end["message"] = "upgrade queued until this process exits"
+    print(f"Upgrade queued as {claim.operation_id}; run `agents-live logs admin` "
+          "after this process exits to see its outcome")
     return 0
 
 
 def _upgrade_runtime(roots: list[Path] | None = None,
                      source: Path | None = None,
-                     receipt_environment: Path | None = None) -> int:
+                     receipt_environment: Path | None = None,
+                     correlation_id: str | None = None) -> int:
     try:
         uv = find_uv()
     except FileNotFoundError as exc:
@@ -222,7 +270,8 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         return 1
     with adminlog.operation("upgrade-runtime",
                             version_before=__version__,
-                            source=str(source) if source else "pypi") as end:
+                            source=str(source) if source else "pypi",
+                            correlation_id=correlation_id) as end:
         if receipt_environment is None:
             receipt_environment = plugins.tool_environment()
         # Before uv is invoked at all: a rebuild it cannot finish leaves
@@ -407,6 +456,7 @@ def main() -> int:
         "--continuation-environment", type=Path,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--upgrade-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
     print(f"Installed agents-live version: {__version__}")
 
@@ -457,6 +507,13 @@ def main() -> int:
         return 1
 
     if not args.skills_only:
+        compatibility_errors = _compatibility_errors(
+            target_roots, errors, source=source)
+        if compatibility_errors:
+            for error in compatibility_errors:
+                preflight.emit_failure("upgrade", error,
+                                       code="upgrade_preflight_failed")
+            return 1
         deferred = _handoff_windows_upgrade(
             source, runtime_only=args.runtime_only)
         if deferred is not None:
@@ -464,6 +521,7 @@ def main() -> int:
         runtime_options = {}
         if continuation_environment is not None:
             runtime_options["receipt_environment"] = continuation_environment
+            runtime_options["correlation_id"] = args.upgrade_id
         runtime_status = _upgrade_runtime(
             list(dict.fromkeys(target_roots)), source=source,
             **runtime_options)

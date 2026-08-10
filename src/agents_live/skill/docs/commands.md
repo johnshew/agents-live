@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-09
+ms.date: 2026-08-10
 ms.topic: reference
 ---
 
@@ -69,7 +69,10 @@ agents-live stop link-check --dry-run
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
-- `upgrade` upgrades the tool or its installed skill payload.
+- `upgrade` upgrades the tool or its installed skill payload. An installed
+  native Windows tool queues runtime replacement until the invoking process
+  exits. The command prints an operation ID; use `agents-live logs admin` on
+  the next invocation to inspect the correlated terminal outcome.
 - `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.

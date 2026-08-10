@@ -233,6 +233,8 @@ COMMANDS = (
                 "instead of PyPI.", kind="value"),
             Arg(("--continuation-environment",), "Installed tool environment.",
                 kind="value", hidden=True),
+            Arg(("--upgrade-id",), "Deferred upgrade correlation identifier.",
+                kind="value", hidden=True),
         ),
     ),
     Cmd(

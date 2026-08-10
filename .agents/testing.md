@@ -119,6 +119,14 @@ is not validated until the built-wheel dashboard reaches `/api/agents` and
 returns the expected temporary-project rows and action flags in normal and
 `--dev` modes.
 
+On a Microsoft-managed host whose proxy does not yet expose the candidate,
+install the local wheel by path and let the proxy resolve only its
+dependencies. Follow the Windows and WSL procedure in
+[diagnostics.md](../src/agents_live/skill/docs/diagnostics.md). Keep the test
+repository explicit and temporary. In 6.0, the ownership module is
+`agents_live.state.ownership`; the removed `agents_live.ownership` path is not
+a wheel-integrity check.
+
 Inspect both artifacts before publication:
 
 ```bash

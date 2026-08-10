@@ -30,6 +30,46 @@ ENTRY_POINT_GROUPS = frozenset({
 # 5.x adapter plugins named this group. Recognised only to say so; the
 # diagnostic expires with the rest of the 5.x support in 7.0.
 RETIRED_ENTRY_POINT_GROUPS = frozenset({"agents_live.agents"})
+_COMPATIBILITY_PROBE_TIMEOUT_S = 120
+_COMPATIBILITY_PROBE = r"""
+import importlib.metadata
+import sys
+
+from agents_live.agent import providers as provider_registry
+
+PROVIDERS = "agents_live.providers"
+OWNERSHIP = "agents_live.ownership"
+
+for distribution_name in sys.argv[1:]:
+    distribution = importlib.metadata.distribution(distribution_name)
+    supported = [
+        entry_point for entry_point in distribution.entry_points
+        if entry_point.group == PROVIDERS
+        or (entry_point.group == OWNERSHIP and entry_point.name == "registry")
+    ]
+    if not supported:
+        raise RuntimeError(
+            f"{distribution_name} exposes no supported agents-live entry points")
+    for entry_point in supported:
+        try:
+            if entry_point.group == PROVIDERS:
+                # Importing the candidate registry above discovers and
+                # registers every provider entry point with the exact runtime
+                # semantics normal command startup uses.
+                continue
+            else:
+                loaded = entry_point.load()
+                for method in (
+                    "registry_file_exists", "load_owners", "set_owner",
+                    "remove_owner",
+                ):
+                    if not callable(getattr(loaded, method, None)):
+                        raise TypeError(f"ownership backend {method} must be callable")
+        except Exception as exc:
+            raise RuntimeError(
+                f"{distribution_name} entry point "
+                f"{entry_point.group}:{entry_point.name} failed: {exc}") from exc
+"""
 
 
 class PluginError(RuntimeError):
@@ -264,6 +304,73 @@ def checks(root: Path, *, require_exists: bool = True) -> list[tuple[str, bool, 
     ]
 
 
+def validation_errors(roots: list[Path]) -> tuple[str, ...]:
+    """Problems that make declared plugin artifacts unsafe to install."""
+    try:
+        declarations = union(roots, require_exists=False)
+    except (OSError, ValueError, PluginError) as exc:
+        return (str(exc),)
+    errors = []
+    for plugin in declarations.values():
+        if plugin.metadata_error:
+            errors.append(plugin.metadata_error)
+            continue
+        if not plugin.path.is_file():
+            errors.append(
+                f"plugin {plugin.name!r} wheel does not exist: {plugin.path}")
+            continue
+        integrity_error = _integrity_error(plugin)
+        if integrity_error:
+            errors.append(f"plugin {plugin.name!r}: {integrity_error}")
+            continue
+        retired = _retired_groups_in_wheel(plugin)
+        if retired:
+            errors.append(
+                f"plugin {plugin.name!r} declares retired entry-point group "
+                f"{', '.join(retired)} and cannot run under this release; "
+                f"update the declaration in .agents-live.toml to a wheel "
+                f"ported to {provider_plugins.ENTRY_POINT_GROUP}")
+    return tuple(errors)
+
+
+def compatibility_errors(
+        roots: list[Path], *, runtime_requirement: str) -> tuple[str, ...]:
+    """Declared plugins that cannot load with the candidate runtime."""
+    errors = validation_errors(roots)
+    if errors:
+        return errors
+    try:
+        declarations = union(roots, require_exists=True)
+    except (OSError, ValueError, PluginError) as exc:
+        return (str(exc),)
+    if not declarations:
+        return ()
+    try:
+        uv = find_uv()
+        command = [
+            uv, "run", "--isolated", "--no-project", "--quiet", "--refresh",
+            "--with", runtime_requirement,
+        ]
+        for plugin in declarations.values():
+            command.extend(["--with", str(plugin.path)])
+        command.extend([
+            "python", "-c", _COMPATIBILITY_PROBE,
+            *(plugin.name for plugin in declarations.values()),
+        ])
+        completed = subprocess.run(
+            command, capture_output=True, **hostruntime.CHILD_TEXT,
+            check=False, timeout=_COMPATIBILITY_PROBE_TIMEOUT_S)
+    except FileNotFoundError as exc:
+        return (str(exc),)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (f"plugin compatibility probe failed: {exc}",)
+    if completed.returncode == 0:
+        return ()
+    output = (completed.stderr or completed.stdout).strip()
+    detail = output.splitlines()[-1] if output else "no diagnostic output"
+    return (f"plugin compatibility probe failed: {detail}",)
+
+
 def _receipt_path(environment: Path | None = None) -> Path | None:
     candidate = Path(environment or sys.prefix) / "uv-receipt.toml"
     return candidate if candidate.is_file() else None
@@ -402,27 +509,9 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
     }
     if not pending:
         return False
-    for plugin in declarations.values():
-        if plugin.metadata_error:
-            raise PluginError(plugin.metadata_error)
-        if not plugin.path.is_file():
-            raise PluginError(
-                f"plugin {plugin.name!r} wheel does not exist: {plugin.path}")
-    # An install will consume the artifacts: an integrity mismatch must
-    # fail before uv sees any of them rather than being treated like an
-    # installable stale plugin.
-    for plugin in declarations.values():
-        integrity_error = _integrity_error(plugin)
-        if integrity_error:
-            raise PluginError(integrity_error)
-    for key, plugin in pending.items():
-        retired = _retired_groups_in_wheel(plugin)
-        if retired:
-            raise PluginError(
-                f"plugin {plugin.name!r} declares retired entry-point group "
-                f"{', '.join(retired)} and cannot run under this release; "
-                f"update the declaration in .agents-live.toml to a wheel "
-                f"ported to {provider_plugins.ENTRY_POINT_GROUP}")
+    validation = validation_errors(roots)
+    if validation:
+        raise PluginError(validation[0])
     primary, requirements = _receipt_requirements(
         pin_primary=pin_primary, environment=receipt_environment)
     requirements.update({

@@ -35,6 +35,7 @@ authentication, or reasoning.
 | Explaining the system or comparing it to other offerings | [docs/overview.md](docs/overview.md) |
 | `create` (building a new agent) | [docs/commands.md](docs/commands.md) section "create" |
 | `install` or `doctor` | [docs/commands.md](docs/commands.md) -- or just run the command; output is self-documenting |
+| Installing or upgrading on Microsoft-managed Windows or WSL | [docs/diagnostics.md](docs/diagnostics.md) section "Microsoft-managed package source" |
 | `smoketest` | [docs/commands.md](docs/commands.md) section "smoketest" |
 | `release` | [docs/release-process.md](docs/release-process.md) |
 | Editing any script | [docs/approach.md](docs/approach.md) (architecture) |

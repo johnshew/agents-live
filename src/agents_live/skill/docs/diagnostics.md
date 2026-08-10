@@ -1,11 +1,9 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-08
+ms.date: 2026-08-10
 ms.topic: troubleshooting
 ---
-
-# Diagnostics
 
 Start with read-only commands:
 
@@ -17,6 +15,245 @@ agents-live logs timeline --all
 
 Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
 and `agents-live doctor --repair` to apply it.
+
+## Microsoft-managed package source
+
+On a Microsoft-managed, domain-joined host, direct TLS negotiation with
+`files.pythonhosted.org` may be rejected by network policy. Confirm that path
+before changing uv. On native Windows, use PowerShell:
+
+```powershell
+Invoke-WebRequest "https://files.pythonhosted.org" -Method Head
+```
+
+Inside WSL, test the WSL network path separately:
+
+```bash
+curl --head https://files.pythonhosted.org
+```
+
+If the request fails with a TLS handshake alert and the Microsoft package
+proxy is available, configure uv through its user-level `uv.toml`. Use
+`%APPDATA%\uv\uv.toml` on native Windows and `~/.config/uv/uv.toml` inside
+WSL. Windows and WSL are separate runtimes; configure each one independently.
+Use this content in both files:
+
+```toml
+keyring-provider = "subprocess"
+
+[[index]]
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+default = true
+```
+
+The file-based setting applies to interactive commands and unattended uv
+children. For a one-shell diagnostic before writing the file, set the
+equivalent environment variables.
+
+Native Windows PowerShell:
+
+```powershell
+$env:UV_DEFAULT_INDEX = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+$env:UV_KEYRING_PROVIDER = "subprocess"
+```
+
+WSL:
+
+```bash
+export UV_DEFAULT_INDEX="https://packagefeedproxy.microsoft.io/pypi/simple/"
+export UV_KEYRING_PROVIDER="subprocess"
+```
+
+Do not disable TLS validation, add a trusted-host bypass, or add public PyPI
+as a fallback on a managed host. Authenticate through the approved keyring
+bootstrap when the proxy requests credentials.
+
+The proxy can lag a public release. Before a forced reinstall, verify that it
+serves the intended version through an isolated exact-version check:
+
+```bash
+uvx --refresh --from "agents-live==<expected-version>" agents-live --version
+```
+
+If the expected version is unavailable, wait for proxy synchronization or use
+a locally built artifact from the exact release tag. Do not run
+`uv tool install --force agents-live` against a lagging proxy; it can replace a
+newer working installation with the older mirrored release. Keep public PyPI
+verification in the release workflow so the published consumer artifact is
+still tested independently of Microsoft infrastructure.
+
+### Diagnose a queued Windows upgrade
+
+An installed native Windows tool cannot replace the interpreter from which
+the current command is running. `agents-live upgrade` therefore queues one
+external helper for that tool environment, prints its operation ID, and exits.
+It does not report the runtime replacement as complete at that point. A second
+upgrade for the same environment is refused while that helper is pending.
+
+Run any Agents Live command after the helper finishes, then query the admin
+events:
+
+```powershell
+agents-live logs admin --since 30m --all `
+	--columns ts,run_id,status,message,exit_code,transcript
+```
+
+The queued and terminal events carry the printed correlation ID in `run_id`.
+A failed terminal event includes the helper exit code and the path to a bounded
+local transcript. If the helper exits without writing a terminal result, the
+next CLI invocation records that condition as an error and releases the
+pending slot.
+
+The helper bootstraps a runtime at least as new as the installed version. A
+lagging package proxy therefore produces a recorded failure rather than
+running older upgrade code or downgrading the tool. Use the local-wheel path
+below when the intended release is not yet available from the proxy.
+
+Before any runtime mutation, upgrade also inspects registered repositories and
+declared plugin wheels. Retired 5.x definitions, unavailable registered
+repositories, missing or modified wheels, and retired plugin entry points stop
+the upgrade. Current plugin entry points are installed with the candidate
+runtime in an isolated environment and must load with the expected provider or
+ownership protocol. Migrate or repair unsafe inputs, then run the command
+again.
+
+### Validate a local wheel through the proxy
+
+This check separates the local Agents Live artifact from its dependencies. It
+installs Agents Live from a wheel path while uv resolves dependencies through
+the configured Microsoft proxy. It does not modify the user-level tool.
+
+Record the source revision before building. A wheel built from an uncommitted
+branch still carries the package version from `pyproject.toml`, so a `6.0.4`
+version string alone does not prove that it matches the published 6.0.4 tag.
+
+Native Windows PowerShell:
+
+```powershell
+Test-Path .\pyproject.toml
+git status --short --branch
+git rev-parse HEAD
+
+$testRoot = Join-Path $env:TEMP "agents-live-wheel-test"
+Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path "$testRoot\dist" -Force | Out-Null
+
+uv build --wheel --out-dir "$testRoot\dist" .
+$wheel = Get-ChildItem "$testRoot\dist\agents_live-*.whl" |
+		Sort-Object LastWriteTime -Descending |
+		Select-Object -First 1
+if (-not $wheel) { throw "Agents Live wheel was not built" }
+
+uv venv "$testRoot\venv" --python 3.13
+uv pip install --python "$testRoot\venv\Scripts\python.exe" $wheel.FullName
+```
+
+WSL:
+
+```bash
+test -f ./pyproject.toml
+git status --short --branch
+git rev-parse HEAD
+
+test_root="$(mktemp -d)"
+mkdir -p "$test_root/dist"
+uv build --wheel --out-dir "$test_root/dist" .
+wheel="$(find "$test_root/dist" -maxdepth 1 -name 'agents_live-*.whl' -print -quit)"
+test -n "$wheel"
+
+uv venv "$test_root/venv" --python 3.13
+uv pip install --python "$test_root/venv/bin/python" "$wheel"
+```
+
+Verify the 6.0 ownership module at its current path. The retired
+`agents_live.ownership` path returning `None` is expected; 6.0 moved the
+implementation under `agents_live.state` and does not ship compatibility
+shims.
+
+Native Windows PowerShell:
+
+```powershell
+$python = "$testRoot\venv\Scripts\python.exe"
+& $python -c "import importlib.metadata as m; print(m.version('agents-live'))"
+& $python -c "import importlib.util as u; print(u.find_spec('agents_live.ownership')); print(u.find_spec('agents_live.state.ownership'))"
+```
+
+WSL:
+
+```bash
+python="$test_root/venv/bin/python"
+"$python" -c "import importlib.metadata as m; print(m.version('agents-live'))"
+"$python" -c "import importlib.util as u; print(u.find_spec('agents_live.ownership')); print(u.find_spec('agents_live.state.ownership'))"
+```
+
+Test status and dashboard against an explicit temporary repository containing
+6.0 definitions. Do not let repository fallback select an older registered
+project: that mixes artifact validation with definition migration and plugin
+compatibility. Invoke the dashboard through the only console entry point,
+`agents-live`; there is no `dashboard.exe`.
+
+Create this temporary layout under the test root. `.agents-live.toml` may be
+empty; its presence marks the project root.
+
+```text
+project/
+|-- .agents-live.toml
+`-- Agents/
+		`-- wheel-check/
+				`-- SKILL.md
+```
+
+Use this definition. The status and dashboard checks inspect it but do not
+invoke the placeholder provider.
+
+```yaml
+---
+name: wheel-check
+description: Verify the locally built Agents Live wheel.
+metadata:
+	agents-live.schema-version: "1"
+	agents-live.selector: "fake/echo"
+	agents-live.schedule: "0 8 * * *"
+---
+
+Verify local wheel startup.
+```
+
+Run the clean environment's console entry point with that project:
+
+```text
+<venv-agents-live> --repo <temporary-6.0-project> status --json
+<venv-agents-live> --repo <temporary-6.0-project> dashboard --dev --port 8247
+```
+
+After the dashboard reports readiness, query its rendered-data contract from
+another shell:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8247/api/agents"
+```
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8247/api/agents
+```
+
+The core wheel does not install a private ownership or provider plugin. An
+isolated core test should report `agents-live-private` as absent. Test a
+private plugin separately against its declared entry points. In particular,
+an older plugin that imports `agents_live.ownership` or declares the retired
+`agents_live.agents` entry-point group is a 5.x plugin and is incompatible
+with 6.0; a successful core-wheel test does not make that plugin compatible.
+
+Interpret the result in layers:
+
+* A build failure is a source or build-dependency problem.
+* A dependency-resolution failure with a local wheel is a proxy or
+	authentication problem.
+* A successful isolated status and dashboard check validates the local core
+	wheel at the recorded commit.
+* Failure only in a registered 5.x repository is a definition migration or
+	private-plugin compatibility problem, not evidence that the core wheel
+	omitted `agents_live.ownership`.
 
 ## Definition failures
 

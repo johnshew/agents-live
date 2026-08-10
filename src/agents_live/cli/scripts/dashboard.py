@@ -43,7 +43,8 @@ PACKAGE_PARENT = SCRIPTS_DIR.parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
-from agents_live import agent, obs, paths, preflight, state  # noqa: E402
+from agents_live import obs, paths, preflight  # noqa: E402
+from agents_live.cli import agent_view  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
@@ -111,29 +112,20 @@ def collect_agents() -> list[dict]:
     """Return agent details for every configured agent, sorted by name."""
     if REPO_ROOT is None:
         return []
-    snapshot = state.load(REPO_ROOT)
-    owners = ownership.load_owners()
-    specs = agent.discover(REPO_ROOT).specs
-    owner_by_identifier = ownership.resolve_owners(
-        ((spec.identifier, spec.name) for spec in specs), owners)
-    agents = []
-    for spec in specs:
-        config = spec.execution
-        owner = owner_by_identifier[spec.identifier]
-        agents.append({
-            "name": spec.name,
-            "identifier": spec.identifier,
-            "description": spec.properties.description,
-            "state": "started" if spec.identifier in snapshot.agents else "stopped",
-            "owner": owner,
-            "isOwner": ownership.owns(owner) if owner is not None else True,
-            "runtime": config.selector.provider if config else None,
-            "model": config.selector.model if config else None,
-            "mode": config.mode if config else None,
-            "schedule": list(config.schedules) if config else [],
-            "watch": config.watch if config else None,
-        })
-    return sorted(agents, key=lambda item: (item["name"], item["identifier"]))
+    return [{
+        "name": row.name,
+        "identifier": row.identifier,
+        "description": row.description,
+        "state": row.state,
+        "owner": row.owner,
+        "isOwner": row.is_owner,
+        "ownershipAvailable": row.ownership_available,
+        "runtime": row.runtime,
+        "model": row.model,
+        "mode": row.mode,
+        "schedule": list(row.schedules),
+        "watch": row.watch,
+    } for row in agent_view.repository_agents(REPO_ROOT)]
 
 
 def last_runs(identifier: str) -> tuple[str, str, str]:
@@ -344,9 +336,9 @@ def _is_local(agent: dict) -> bool:
     """True when this runtime already owns (or shares) the agent."""
     owner = agent.get("owner")
     is_owner = agent.get("isOwner")
-    if is_owner is None or owner is None:
-        return True
-    return ownership.owns(owner)
+    if is_owner is not None:
+        return bool(is_owner)
+    return owner is None or ownership.owns(owner)
 
 
 def trigger_summary(agent: dict) -> str:
@@ -621,8 +613,11 @@ def agent_rows() -> list[dict]:
         identifier = agent["identifier"]
         state = re.sub(r"\s*\(pid \d+\)", "", agent.get("state", "?"))
         owner_value = agent.get("owner")
-        owner = (ownership.display_owner(owner_value)
-                 if owner_value else "-")
+        ownership_available = agent.get("ownershipAvailable", True)
+        owner = (
+            ownership.display_owner(owner_value) if owner_value else
+            "-" if ownership_available else "Unavailable"
+        )
         ok_ago, err_ago, last_status = last_runs(identifier)
         # A failed last run only makes this host's view unhealthy while
         # the agent is still registered here. "stopped" means no trigger
@@ -638,6 +633,8 @@ def agent_rows() -> list[dict]:
         model = _agent_model(agent, STATE["models"])
         can_pause = local and state == "started"
         can_activate = local and state == "stopped"
+        can_claim = ownership_available and not local
+        unavailable_tip = "Ownership registry unavailable"
         rows.append({
             "name": name,
             "identifier": identifier,
@@ -654,16 +651,21 @@ def agent_rows() -> list[dict]:
             "local": local,
             "can_pause": can_pause,
             "can_activate": can_activate,
-            "can_claim": not local,
+            "can_claim": can_claim,
             "run_tip": "Run this agent once now",
             "activate_tip": (
                 "Register this host's cron/watcher for this agent"
                 if can_activate else
-                ("Already active" if local else
+                (unavailable_tip if not ownership_available else
+                 "Already active" if local else
                  f"Owned by another host - use Claim to move it onto {host}")),
-            "pause_tip": ("Stop this host's cron/watcher (config preserved)"
-                          if can_pause else "Not running on this host"),
-            "claim_tip": ("Already local" if local else
+            "pause_tip": (
+                "Stop this host's cron/watcher (config preserved)"
+                if can_pause else
+                unavailable_tip if not ownership_available else
+                "Not running on this host"),
+            "claim_tip": (unavailable_tip if not ownership_available else
+                          "Already local" if local else
                           f"Claim onto {host} (transfer ownership + register trigger)"),
         })
     return rows

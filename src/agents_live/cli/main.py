@@ -175,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    from . import upgrade_handoff
+    upgrade_handoff.reconcile()
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
 

@@ -21,6 +21,7 @@ class Event:
     category: str | None = None
     message: str = ""
     transcript: str | None = None
+    exit_code: int | None = None
     usage: tuple[tuple[str, str | None], ...] = ()
     attributes: tuple[tuple[str, object], ...] = ()
     spec: int = SCHEMA_VERSION
@@ -37,22 +38,24 @@ def create(
     category: str | None = None,
     message: str = "",
     transcript: str | None = None,
+    exit_code: int | None = None,
     usage: tuple[tuple[str, str | None], ...] = (),
     attributes: tuple[tuple[str, object], ...] = (),
 ) -> Event:
     return Event(
-        datetime.now(timezone.utc).isoformat(),
-        event,
-        status,
-        repository,
-        agent,
-        run_id,
-        origin,
-        category,
-        message,
-        transcript,
-        usage,
-        attributes,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        event=event,
+        status=status,
+        repository=repository,
+        agent=agent,
+        run_id=run_id,
+        origin=origin,
+        category=category,
+        message=message,
+        transcript=transcript,
+        exit_code=exit_code,
+        usage=usage,
+        attributes=attributes,
     )
 
 

@@ -972,21 +972,76 @@ def spawn_detached(
 
 
 def defer_until_environment_exits(
-        argv: Sequence[str], environment: Path | str) -> bool:
+    argv: Sequence[str], environment: Path | str, *,
+    operation_id: str | None = None,
+    result_path: Path | str | None = None,
+    transcript_path: Path | str | None = None,
+    transcript_limit: int = 65536) -> subprocess.Popen | None:
     """Start *argv* after no process executes from *environment*.
 
     Windows will not remove an executable while it is running. The helper
     itself must therefore live outside the environment being removed. Other
-    hosts do not need this handoff and return ``False``.
+    hosts do not need this handoff and return ``None``.
     """
     if not _IS_WINDOWS:
-        return False
+        return None
     powershell = (shutil.which("powershell.exe")
                   or shutil.which("pwsh.exe"))
-    if powershell is None:
-        return False
+    if powershell is None or not argv:
+        return None
+    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
     escaped_environment = str(environment).replace("'", "''")
-    command = subprocess.list2cmdline(list(argv)).replace("'", "''")
+    command = (
+        f"$program = {quote(argv[0])}; "
+        "$arguments = @(" + ", ".join(quote(value) for value in argv[1:])
+        + "); "
+    )
+    durable = all((operation_id, result_path, transcript_path))
+    if durable:
+        result = str(result_path).replace("'", "''")
+        transcript = str(transcript_path).replace("'", "''")
+        operation = str(operation_id).replace("'", "''")
+        Path(str(result_path)).parent.mkdir(parents=True, exist_ok=True)
+        durable_prefix = (
+            f"$result = '{result}'; $transcript = '{transcript}'; "
+            "$temporary = $result + '.' + $PID + '.tmp'; "
+            f"$operation = '{operation}'; "
+            "$started = @{schema=1; operation_id=$operation; status='started'; "
+            "helper_pid=$PID} | ConvertTo-Json -Compress; "
+            "[IO.File]::WriteAllText($temporary, $started, "
+            "[Text.UTF8Encoding]::new($false)); "
+            "Move-Item -LiteralPath $temporary -Destination $result -Force; "
+            "try { "
+        )
+        durable_suffix = (
+            "; $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE } "
+            "} catch { $_ | Out-File -FilePath $transcript -Append -Encoding utf8; "
+            "$code = 1 }; "
+            "if (Test-Path -LiteralPath $transcript) { "
+            "$utf8 = [Text.UTF8Encoding]::new($false); "
+            "$content = [IO.File]::ReadAllText($transcript); "
+            "$bytes = $utf8.GetBytes($content); "
+            f"if ($bytes.Length -gt {transcript_limit}) {{ "
+            f"$offset = $bytes.Length - {transcript_limit}; "
+            "while ($offset -lt $bytes.Length -and "
+            "($bytes[$offset] -band 0xC0) -eq 0x80) { $offset++ }; "
+            "$length = $bytes.Length - $offset; "
+            "$tail = [byte[]]::new($length); "
+            "[Array]::Copy($bytes, $offset, $tail, 0, $length); "
+            "[IO.File]::WriteAllBytes($transcript, $tail) "
+            "} else { [IO.File]::WriteAllBytes($transcript, $bytes) } }; "
+            "$finished = @{schema=1; operation_id=$operation; status='terminal'; "
+            "helper_pid=$PID; exit_code=$code} | ConvertTo-Json -Compress; "
+            "[IO.File]::WriteAllText($temporary, $finished, "
+            "[Text.UTF8Encoding]::new($false)); "
+            "Move-Item -LiteralPath $temporary -Destination $result -Force; "
+        )
+        invocation = (
+            f"{command}& $program @arguments *> $transcript"
+        )
+    else:
+        durable_prefix = durable_suffix = ""
+        invocation = f"{command}& $program @arguments"
     script = (
         f"$root = '{escaped_environment}'; "
         "do { "
@@ -997,13 +1052,12 @@ def defer_until_environment_exits(
         "catch { $false } }); "
         "if ($running.Count) { Start-Sleep -Milliseconds 100 } "
         "} while ($running.Count); "
-        f"& ([scriptblock]::Create('{command}')); "
-        "exit $LASTEXITCODE"
+        f"{durable_prefix}{invocation}{durable_suffix}"
+        f"exit {'$code' if durable else '$LASTEXITCODE'}"
     )
     try:
-        spawn_detached(
+        return spawn_detached(
             powershell_argv(powershell, script),
             stdin=subprocess.DEVNULL, stdout=None, stderr=None)
     except OSError:
-        return False
-    return True
+        return None

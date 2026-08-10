@@ -174,12 +174,18 @@ class TestSixRuntimeSmoke(SmokeRepository):
             self.assertTrue((installed / relative).exists(), relative)
 
     def test_administrative_events_use_the_observability_schema(self) -> None:
-        obs.admin.record("smoke-admin", root=str(self.root), changed=True)
+        obs.admin.record(
+            "smoke-admin", root=str(self.root), changed=True,
+            correlation_id="operation-1", exit_code=7,
+            transcript="transcript.log")
         records = obs.load((obs.admin.log_path(),))
         self.assertEqual(1, len(records))
         self.assertEqual("admin", records[0]["phase"])
         self.assertEqual("smoke-admin", records[0]["operation"])
         self.assertTrue(records[0]["changed"])
+        self.assertEqual("operation-1", records[0]["run_id"])
+        self.assertEqual(7, records[0]["exit_code"])
+        self.assertEqual("transcript.log", records[0]["transcript"])
 
 
 if __name__ == "__main__":

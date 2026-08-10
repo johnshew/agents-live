@@ -173,7 +173,12 @@ def _backend():
     from importlib.metadata import entry_points
     for ep in entry_points(group=ENTRY_POINT_GROUP):
         if ep.name == "registry":
-            backend = ep.load()
+            try:
+                backend = ep.load()
+            except Exception as exc:
+                raise OwnershipUnavailableError(
+                    f"ownership registry backend {ep.value!r} failed to "
+                    f"load: {exc}") from exc
             break
     if backend is None:
         try:
