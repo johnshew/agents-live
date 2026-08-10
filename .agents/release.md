@@ -37,6 +37,10 @@ uv run --with-editable . agents-live smoketest
 uv build
 ```
 
+After the build, run the built-wheel dashboard readiness check described in
+[testing.md](testing.md), including `--dev`, `/api/agents`, and started/stopped
+action assertions. `dashboard --help` is not a release gate by itself.
+
 The audit must report no personal information, secrets, or nonportable
 paths, and its adapter-resolution and doc-link checks must pass.
 The framework smoketest must pass end to end: it exercises the real

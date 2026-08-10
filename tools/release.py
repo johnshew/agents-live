@@ -329,8 +329,9 @@ def _release_notes(version: str) -> str:
             continue
         if not closes:
             print(
-                f"Note: pull request #{number} ({title}) has no changelog entry "
-                "and closes no issue; it is left out of the notes.",
+                f"Note: pull request #{number} ({title}) could not be associated "
+                "with a changelog entry and closes no issue; it is left out "
+                "of the notes.",
                 file=sys.stderr,
             )
             continue

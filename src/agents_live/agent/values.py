@@ -64,6 +64,7 @@ class AgentSpec:
     properties: SkillProperties
     execution: AgentsLiveConfig | None
     body: str
+    unknown_metadata: tuple[str, ...] = ()
 
     @property
     def name(self) -> str:
