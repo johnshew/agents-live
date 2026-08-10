@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.3 - 2026-08-09
+
 - fix: `agents-live dashboard --dev` starts its reload worker.
   The NiceGUI child process now enters the dashboard main routine when Python
   launches it as `__mp_main__`, allowing the development server to bind.
