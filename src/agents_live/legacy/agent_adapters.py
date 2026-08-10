@@ -31,6 +31,7 @@ stdlib-only; sibling scripts import it flat. Must not import headless
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 
 
@@ -259,7 +260,17 @@ register(AgentAdapter(name="copilot", binary=("copilot",), family="copilot",
 def _discover_plugins() -> None:
     from importlib.metadata import entry_points
     for ep in entry_points(group="agents_live.agents"):
-        loaded = ep.load()
+        try:
+            loaded = ep.load()
+        except Exception as exc:
+            # A 5.x plugin cannot import under 6.0, and this runs at import
+            # time: raising takes down commands that never wanted an adapter,
+            # including the upgrade that would replace the plugin.
+            print(
+                f"warning: ignoring plugin {ep.value!r} from the retired "
+                f"agents_live.agents group: {exc}",
+                file=sys.stderr)
+            continue
         if callable(loaded):
             loaded()
     try:

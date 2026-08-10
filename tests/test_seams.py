@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import importlib
 import importlib.metadata
 import io
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -480,6 +482,27 @@ class TestStartedState(TempRepository):
         convert(legacy_file, root=self.root)
         identifier = agent.load("sample", root=self.root).identifier
         self.assertFalse(self._converge_with_legacy(host).failed)
+        self.assertIn(identifier, state.load(self.root).agents)
+
+    def test_partial_adoption_is_visible_to_status(self) -> None:
+        """A repository can hold one definition that is not converted yet.
+
+        Convergence adopts the legacy triggers it can map and installs their
+        subscriptions, so started state has to record what is running.
+        """
+        self.skill("good", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        (self.root / "Agents" / "stale.md").write_text(
+            "---\nname: stale\ndescription: Still 5.x.\n"
+            'runtime: fake\nschedule: "0 9 * * *"\n---\nbody\n',
+            encoding="utf-8")
+        host = MemoryHost()
+        host.legacy[str(self.root)] = {"good", "stale"}
+
+        self.assertFalse(self._converge_with_legacy(host).failed)
+        identifier = agent.load("good", root=self.root).identifier
         self.assertIn(identifier, state.load(self.root).agents)
 
     def test_absent_adopts_and_unreadable_abstains(self) -> None:
@@ -993,6 +1016,38 @@ class TestArchitectureFitness(unittest.TestCase):
                 if "agents_live.agents" in groups:
                     self.assertIn("retired", detail)
                     self.assertIn(providers.ENTRY_POINT_GROUP, detail)
+
+    def test_a_retired_wheel_is_refused_before_it_is_installed(self) -> None:
+        """Installing a plugin the release cannot load is worse than refusing.
+
+        The installed one crashes every command that imports the legacy
+        adapters, including the upgrade that would replace it, and it stays
+        pending forever so convergence reinstalls it on each run.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            directory = root / "Agents" / "plugins"
+            directory.mkdir(parents=True)
+            wheel = directory / "example_plugin-1.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
+                archive.writestr(
+                    "example_plugin-1.0.dist-info/entry_points.txt",
+                    "[agents_live.agents]\nexample = example_plugin:register\n")
+            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            (root / ".agents-live.toml").write_text(
+                "[plugins.example-plugin]\n"
+                f'path = "Agents/plugins/{wheel.name}"\n'
+                f'sha256 = "{digest}"\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(plugins.PluginError) as caught:
+                plugins.converge([root], trigger="test")
+        self.assertIn("retired", str(caught.exception))
+        self.assertIn(providers.ENTRY_POINT_GROUP, str(caught.exception))
 
     def test_cli_targets_resolve_from_owned_packages(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

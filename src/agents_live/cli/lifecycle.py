@@ -127,10 +127,11 @@ def collect(
                 f"repo:{root}" not in protected
                 and not broken_by_root.get(root))
             explicit = bool(additions.get(root) or removals.get(root))
-            if not initialized.get(root) and not complete and not explicit:
-                # Adoption runs once, and only what parsed can be mapped onto
-                # a canonical identifier. Initialising from a partial read
-                # would strand every legacy trigger it could not see.
+            if (not agents and not initialized.get(root)
+                    and not complete and not explicit):
+                # An adoption that found nothing, in a repository that did not
+                # read completely, is not a fact about what the user started.
+                # Recording it would spend the one chance to adopt.
                 continue
             state.replace(root, agents)
 

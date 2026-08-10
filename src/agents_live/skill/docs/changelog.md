@@ -6,6 +6,25 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: a 5.x plugin no longer crashes the CLI, and is refused before installation. (#263)
+  A distribution still declaring the retired `agents_live.agents` group was
+  installed by convergence, because the group was only checked when validating
+  what was already installed. Loading it then failed at import time inside the
+  legacy adapters and took the whole process with it, including `upgrade`,
+  which is the command that would have replaced it. It also stayed pending
+  forever, so every convergence reinstalled it. A declared wheel is now read
+  before installing and refused with the declaration to update, and an
+  entry point that will not load is reported and skipped rather than raised.
+  Reached by upgrading a host whose checkout had not yet synced the commit
+  that bumps the plugin declaration.
+- fix: a partly converted repository records what it adopted. (#261)
+  Started state was withheld from any repository holding a definition that
+  did not parse, which was too broad: convergence still adopted the legacy
+  triggers it could map and installed their subscriptions, so the host ran
+  agents that `status` reported as stopped. Only an adoption that found
+  nothing at all is now withheld, which is the case that would otherwise
+  spend the one chance to adopt.
+
 ## 6.0.0 - 2026-08-09
 
 - feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)

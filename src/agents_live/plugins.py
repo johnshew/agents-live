@@ -1,6 +1,7 @@
 """Project-declared plugin inspection and uv tool-environment convergence."""
 from __future__ import annotations
 
+import configparser
 import hashlib
 import importlib.metadata
 import re
@@ -191,6 +192,24 @@ def inspect(plugin: Plugin) -> tuple[bool, str]:
         if integrity_error:
             return False, integrity_error
     return _installed_state(plugin)
+
+
+def _retired_groups_in_wheel(plugin: Plugin) -> list[str]:
+    """Retired entry-point groups a wheel declares, read without installing."""
+    try:
+        with zipfile.ZipFile(plugin.path) as archive:
+            names = [
+                name for name in archive.namelist()
+                if name.endswith(".dist-info/entry_points.txt")]
+            if not names:
+                return []
+            parser = configparser.ConfigParser()
+            parser.read_string(archive.read(names[0]).decode("utf-8"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile,
+            UnicodeDecodeError, configparser.Error):
+        # Unreadable metadata is the installed-state check's problem.
+        return []
+    return sorted(set(parser.sections()) & RETIRED_ENTRY_POINT_GROUPS)
 
 
 def _installed_state(plugin: Plugin) -> tuple[bool, str]:
@@ -394,6 +413,14 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
         integrity_error = _integrity_error(plugin)
         if integrity_error:
             raise PluginError(integrity_error)
+    for key, plugin in pending.items():
+        retired = _retired_groups_in_wheel(plugin)
+        if retired:
+            raise PluginError(
+                f"plugin {plugin.name!r} declares retired entry-point group "
+                f"{', '.join(retired)} and cannot run under this release; "
+                f"update the declaration in .agents-live.toml to a wheel "
+                f"ported to {provider_plugins.ENTRY_POINT_GROUP}")
     primary, requirements = _receipt_requirements(
         pin_primary=pin_primary, environment=receipt_environment)
     requirements.update({
