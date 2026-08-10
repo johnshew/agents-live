@@ -132,9 +132,11 @@ not interchangeable.
 
 Upgrade agents-live first, then convert the definitions. 6.0 reports an
 unconverted definition as unloadable and preserves its installed trigger, so
-nothing is withdrawn while you work. After `agents-live migrate`, the 5.x
-triggers are adopted by matching each one to its new canonical identifier, and
-the agents that were started stay started.
+nothing is withdrawn while you work. Started state is not initialised from a
+repository that did not fully parse either, which keeps the one chance the
+running system has to adopt 5.x triggers. After `agents-live migrate`, those
+triggers are matched to their new canonical identifiers, and the agents that
+were started stay started.
 
 Converting first, on a host still running 5.x, leaves that runtime holding
 definitions it cannot read. 5.x has no fault isolation and does not protect

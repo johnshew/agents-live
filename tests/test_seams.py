@@ -457,6 +457,31 @@ class TestStartedState(TempRepository):
         self.assertTrue(result.failed)
         self.assertEqual({"sample"}, host.legacy[str(self.root)])
 
+    def test_upgrading_before_migrating_still_adopts(self) -> None:
+        """The documented upgrade order puts a converge before the migration.
+
+        Adoption is the only thing that carries a 5.x trigger onto its
+        canonical identifier, and it has one chance: once started state
+        exists it is never adopted again.
+        """
+        legacy_file = self.root / "Agents" / "sample.md"
+        legacy_file.write_text(
+            "---\nname: sample\ndescription: Not yet migrated.\n"
+            'runtime: fake\nschedule: "0 8 * * *"\n---\nbody\n',
+            encoding="utf-8")
+        host = MemoryHost()
+        host.legacy[str(self.root)] = {"sample"}
+
+        self.assertFalse(self._converge_with_legacy(host).failed)
+        self.assertEqual(
+            {"sample"}, host.legacy[str(self.root)],
+            "a definition that will not parse keeps its legacy trigger")
+
+        convert(legacy_file, root=self.root)
+        identifier = agent.load("sample", root=self.root).identifier
+        self.assertFalse(self._converge_with_legacy(host).failed)
+        self.assertIn(identifier, state.load(self.root).agents)
+
     def test_absent_adopts_and_unreadable_abstains(self) -> None:
         snapshot = state.load_or_adopt(self.root, {"one", "two"})
         self.assertEqual(frozenset({"one", "two"}), snapshot.agents)

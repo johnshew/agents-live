@@ -6,6 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: adoption survives an upgrade that happens before the migration.
+  A 5.x host has no started state, so 6.0 adopts one: it maps each installed
+  legacy trigger to the canonical identifier of the definition it names. That
+  happens once, and only definitions that parse can be mapped. Upgrading the
+  tool before converting the definitions meant the first convergence saw a
+  repository where nothing parsed, initialised started state to the empty set,
+  and spent the adoption on nothing; every agent then had to be started again
+  by hand after migrating. Started state is no longer initialised from a
+  repository whose definitions did not all load, unless the caller asked for a
+  specific change. (#261)
 - fix: migration reaches definitions in configured agent_directories roots. (#257)
   6.0 ships no old-format loader, so `agents-live migrate` is the only way to
   convert a repository. It scanned `Agents/` alone, leaving definitions in

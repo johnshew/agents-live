@@ -84,6 +84,7 @@ def collect(
             raise CollectionUnavailable(str(exc)) from exc
 
     snapshots: dict[Path, frozenset[str]] = {}
+    initialized: dict[Path, bool] = {}
     legacy: list[tuple[Path, str]] = []
     for root, definitions in discovered.items():
         adopted = {
@@ -108,6 +109,7 @@ def collect(
             if matches:
                 adopted.add(matches[0])
         try:
+            initialized[root] = state.load(root).initialized
             snapshot = state.load_or_adopt(root, adopted, persist=False)
         except state.StartedStateUnavailable as exc:
             raise CollectionUnavailable(str(exc)) from exc
@@ -121,6 +123,15 @@ def collect(
 
     if persist:
         for root, agents in snapshots.items():
+            complete = (
+                f"repo:{root}" not in protected
+                and not broken_by_root.get(root))
+            explicit = bool(additions.get(root) or removals.get(root))
+            if not initialized.get(root) and not complete and not explicit:
+                # Adoption runs once, and only what parsed can be mapped onto
+                # a canonical identifier. Initialising from a partial read
+                # would strand every legacy trigger it could not see.
+                continue
             state.replace(root, agents)
 
     desired: list[runtime.Subscription] = []
