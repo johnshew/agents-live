@@ -191,7 +191,7 @@ def _require_backend():
     if backend is None:
         raise OwnershipUnavailableError(
             "no ownership registry backend installed (multi-host ownership "
-            f"is a private plugin exposing the '{_OWNERSHIP_ENTRY_POINT_GROUP}' "
+            f"is a private plugin exposing the '{ENTRY_POINT_GROUP}' "
             "entry point; the public kernel is local-only)")
     return backend
 

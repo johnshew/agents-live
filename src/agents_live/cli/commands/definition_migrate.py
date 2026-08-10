@@ -195,7 +195,7 @@ def _metadata(data: dict, source: Path, destination: Path, root: Path, *, bundle
     watch_paths = data.get("watchPath")
     if watch_paths not in (None, ""):
         values = watch_paths if isinstance(watch_paths, list) else [watch_paths]
-        includes = [_watch_include(str(item)) for item in values]
+        includes = [_watch_include(str(item), root) for item in values]
         ignores = data.get("watchIgnore") or []
         if isinstance(ignores, str):
             ignores = [ignores]
@@ -294,9 +294,15 @@ def _old_reference(value: str, source: Path, root: Path) -> Path:
     return original
 
 
-def _watch_include(value: str) -> str:
-    normalized = value.replace("\\", "/").rstrip("/")
-    return normalized if any(char in normalized for char in "*?[") else f"{normalized}/**"
+def _watch_include(value: str, root: Path) -> str:
+    normalized = value.replace("\\", "/")
+    if any(char in normalized for char in "*?["):
+        return normalized
+    directory_hint = normalized.endswith("/")
+    normalized = normalized.rstrip("/")
+    if directory_hint or (root / normalized).is_dir():
+        return f"{normalized}/**"
+    return normalized
 
 
 def _watch_exclude(value: str) -> str:

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ... import agent, paths, runtime
@@ -37,13 +39,57 @@ def main(argv: list[str] | None = None) -> int:
         install(args.distro)
         return 0
     if args.command == "maintain":
-        try:
-            result = lifecycle.converge(dry_run=args.dry_run)
-        except lifecycle.CollectionUnavailable as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
-        return 1 if result.failed else 0
+        return _maintain(dry_run=args.dry_run)
     return _watch(args)
+
+
+def _maintain(*, dry_run: bool) -> int:
+    try:
+        result = lifecycle.converge(dry_run=dry_run)
+        collected = lifecycle.collect(persist=False)
+    except lifecycle.CollectionUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if result.failed or not result.health.healthy:
+        for operation, detail in result.failed:
+            print(f"{operation.key}: {detail}", file=sys.stderr)
+        return 1
+    if dry_run:
+        return 0
+    watchers = {
+        item.target for item in collected.subscriptions
+        if item.kind == "watch" and item.target != "runtime"
+    }
+    clocks = {
+        item.target for item in collected.subscriptions
+        if item.kind == "schedule" and item.target != "runtime"
+    }
+    repositories = {
+        item.scope.removeprefix("repo:")
+        for item in collected.subscriptions
+        if item.scope.startswith("repo:")
+    }
+    payload = {
+        "status": "healthy",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "watchers": len(watchers),
+        "cron": len(clocks),
+        "repos": {root: {"status": "ok"} for root in sorted(repositories)},
+    }
+    previous = _health_beacon()
+    if isinstance(previous.get("smoketest"), dict):
+        payload["smoketest"] = previous["smoketest"]
+    paths.atomic_write_text(
+        paths.health_beacon_path(), json.dumps(payload, indent=2) + "\n")
+    return 0
+
+
+def _health_beacon() -> dict:
+    try:
+        payload = json.loads(paths.health_beacon_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _watch(args) -> int:
