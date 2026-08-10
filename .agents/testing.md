@@ -40,10 +40,21 @@ and released behavior.
 Run the portable suite and release gates:
 
 ```bash
-uv run --with-editable . --script tests/test_smoke.py
+uv run --with-editable . python -m unittest discover -s tests -v
+uv run --with-editable . agents-live smoketest
 uv run --script tools/pre-release-audit.py
 uv build
 ```
+
+CI runs the same suites one file at a time
+(`uv run --with-editable . --script tests/<file>.py`), adding `--with duckdb`
+so the query tool is started rather than skipped. Reproduce that form when a
+failure appears only in CI.
+
+The Test workflow runs both Ubuntu and Windows for pushes and pull requests.
+Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
+single host needs to be isolated. The publish workflow calls the same workflow
+against the resolved release commit and cannot publish until both hosts pass.
 
 A development host has an initialized global workspace, so tests that do
 not build their own temp project still resolve a root here and fail only
@@ -52,7 +63,7 @@ in CI. Reproduce a bare host before pushing:
 ```bash
 env -u AGENTS_LIVE_REPO XDG_DATA_HOME=/tmp/bare/data \
   XDG_STATE_HOME=/tmp/bare/state XDG_CONFIG_HOME=/tmp/bare/config \
-  uv run --with-editable . --script tests/test_smoke.py
+  uv run --with-editable . python -m unittest discover -s tests -v
 ```
 
 Exercise source behavior against a configured project by keeping `--repo`

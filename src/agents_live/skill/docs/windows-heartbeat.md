@@ -1,159 +1,48 @@
 ---
-title: Agents Live Windows Heartbeat
-description: Keep WSL available for scheduled Agents Live agents with Windows Task Scheduler
-ms.date: 2026-07-25
-ms.topic: how-to
+title: WSL liveness
+description: How Agents Live keeps scheduled work available in WSL
+ms.date: 2026-08-08
+ms.topic: concept-article
 ---
 
-## Windows heartbeat
+# WSL liveness
 
-WSL2 auto-terminates its VM after a short idle period (~8 seconds with no
-active connections). When the machine enters Modern Standby, the VM is killed
-immediately. The Windows heartbeat prevents idle termination by poking WSL
-every 5 minutes from Windows Task Scheduler.
+WSL can stop when no Windows-side process keeps the distribution available.
+Agents Live therefore treats liveness as runtime-owned durable state, not as a
+user lifecycle command.
 
-## How it works
+On the first real convergence, the WSL host adapter:
 
-One task per WSL distro runs this action every five minutes:
+1. registers a Task Scheduler entry under a distinct staged name;
+2. starts it immediately;
+3. waits for a fresh, atomically written liveness beacon;
+4. registers and starts the stable distro-scoped task;
+5. removes the staged task; and
+6. removes a legacy task only after the verified replacement exists.
+
+If staging or verification fails, the working task is left unchanged and
+convergence reports unhealthy. Run `agents-live doctor --repair` after fixing
+the reported Task Scheduler, interop, launcher, or stable-shim problem.
+
+The action invokes the stable uv tool shim as:
 
 ```text
-"C:\Program Files\WSL\wslg.exe"
-    -d <distro> -- /home/<user>/.local/bin/agents-live heartbeat
+agents-live internal liveness
 ```
 
-`wslg.exe` is the windowless build of `wsl.exe` that ships with WSL, the
-one it uses to start Linux GUI programs. Windows gives it no console, so
-the five-minute cadence has no window to hide and nothing a terminal
-application can reopen somewhere visible. The distro argument selects
-the host runtime; everything after `--` is handed to the distro's shell
-as written. The uv-managed shim selects the currently installed
-agents-live version without pinning a checkout or a
-Python-minor-version directory. There is deliberately no project
-binding: one host heartbeat serves every Agents Live project in that
-distro.
+The internal command refreshes the machine-local beacon. It is not a public
+lifecycle verb. `agents-live uninstall` removes the distro task and, unless
+state retention was requested, its local beacon and log.
 
-Nothing in the action is a Windows path except the launcher, and nothing
-in it points back into the distro's filesystem, so upgrading agents-live
-does not invalidate the registration.
-
-The command writes `heartbeat.ok` and `heartbeat.log` under
-`${XDG_STATE_HOME:-~/.local/state}/agents-live/`. Repository discovery is never
-used. Missing state directories are created; an unknown distro or missing
-stable CLI shim makes installation fail clearly.
-
-## Health check
-
-`agents-live doctor` verifies the shared beacon is less than 10 minutes old.
-
-It also verifies the current distro's task is enabled, repeats every five
-minutes, and invokes the stable shim through `wslg.exe`. Superseded
-launchers are named for what they were: a direct `wsl.exe` action showed
-a console every run, and the VBScript wrapper that replaced it hid that
-console on a scripting host Windows is retiring. Those, along with
-checkout, Python-versioned, project-pinned, and legacy `WSL Heartbeat`
-actions, produce a re-registration or migration recommendation. A host
-where `wslg.exe` cannot be found is reported with the repair: run
-`wsl.exe --update` on the Windows side.
-
-## Diagnosing
-
-```powershell
-# 1. Is the task registered?
-$distro = "Ubuntu"
-$task = "Agents Live Heartbeat ($distro)"
-Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-
-# 2. Is it enabled?
-Get-ScheduledTask -TaskName $task | Select-Object State
-
-# 3. When did it last run?
-Get-ScheduledTaskInfo -TaskName $task | Select-Object LastRunTime, LastTaskResult
-
-# 4. Check from WSL side
-cat "${XDG_STATE_HOME:-$HOME/.local/state}/agents-live/heartbeat.ok"
-tail "${XDG_STATE_HOME:-$HOME/.local/state}/agents-live/heartbeat.log"
-```
-
-## Installing the scheduled task
-
-Install agents-live as a uv tool, then initialize host support:
+## Diagnostics
 
 ```bash
-uv tool install agents-live
-agents-live init
+agents-live doctor
+agents-live doctor --repair
 ```
 
-On WSL, `init` registers the current distro's task itself. Register a
-specific distro, or repair a task after a failed registration, with:
-
-```bash
-agents-live heartbeat install --distro "$WSL_DISTRO_NAME"
-```
-
-Registration is idempotent. It replaces a stale canonical action, starts the
-new task, and waits for a fresh global beacon. Only after that verification
-succeeds does it remove the legacy `WSL Heartbeat` task. If verification fails,
-the legacy task remains. If a checkout, environment, or Python path was
-already removed, `doctor` identifies the stale action and the same install
-command repairs it.
-
-Editable development may exercise
-`uv run --with-editable . agents-live heartbeat`, but an editable checkout must
-not be persisted in Task Scheduler. Production registration requires the
-executable `~/.local/bin/agents-live` uv shim. Package and Python upgrades can
-therefore replace the shim's target without changing the task.
-
-## Upgrading from a release before 4.0
-
-Releases before 4.0 launched the heartbeat through a packaged VBScript
-file that no longer ships. Because that path pointed inside the tool
-environment, upgrading the package in place leaves the task pointing at a
-file that is gone: it fails every five minutes and WSL is no longer held
-open. Python packaging runs no code on install or uninstall, so neither
-the outgoing nor the incoming version can correct this on its own.
-
-Remove the old task with the version that registered it, then reinstall:
-
-```bash
-agents-live uninstall --retain-state
-uv tool install agents-live
-agents-live init
-```
-
-`--retain-state` keeps the beacon, log, and existing configuration.
-Agent triggers are left in place throughout, so scheduled agents keep
-their registrations; only the brief window between the first two commands
-has no CLI to run. If the package was already upgraded in place,
-`agents-live init` alone re-registers the task, and `doctor` names the
-stale action until it does.
-
-A bare `uv tool install` does not carry project-declared plugin wheels;
-if any project declares them, follow with `agents-live upgrade` (hourly
-automatic maintenance also converges them).
-
-## Removing the scheduled task
-
-```bash
-agents-live heartbeat uninstall --distro "$WSL_DISTRO_NAME"
-```
-
-This removes only the selected distro's task and the generated beacon/log.
-Pass `--retain-state` to keep those files; unrelated files in the state
-directory are always preserved.
-
-To remove both host integration and the uv tool, use `agents-live uninstall
-[--retain-state]`. The package is removed only after Windows cleanup succeeds.
-If `uv tool uninstall agents-live` was run first and left an orphaned task:
-
-```bash
-uvx agents-live heartbeat uninstall --distro <name>
-```
-
-Tasks never self-delete merely because the Linux shim is temporarily missing.
-This supports normal upgrades and repairs; `doctor` reports the orphan.
-
-## Limitations
-
-- Does **not** prevent Modern Standby shutdown. When Windows sleeps, Task
-  Scheduler stops and WSL is terminated. On wake, WSL restarts on first
-  access and the heartbeat resumes.
+Healthy means the POSIX trigger store is readable, the distro-scoped Windows
+task has the expected windowless action and five-minute interval, and its
+beacon is no more than ten minutes old. A cron or systemd session may not carry
+`WSL_DISTRO_NAME`; a fresh beacon remains the read-side liveness fact in that
+case.

@@ -12,10 +12,10 @@ fi
 # Always perform the actual heartbeat first: it has zero Windows-side
 # dependencies, so a failed or impossible migration below can never cost
 # the keep-alive (systemd poke + beacon write) this task exists for.
-"$CLI" heartbeat
+"$CLI" internal liveness
 heartbeat_status=$?
 if [[ -z "${WSL_DISTRO_NAME:-}" ]]; then
-    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; to migrate this legacy task, run agents-live heartbeat install --distro <name> (replace <name> with a distro from wsl.exe -l -q)" >&2
+    echo "windows-heartbeat.sh: WSL_DISTRO_NAME is not set; to migrate this legacy task, run agents-live doctor --repair inside the target distro" >&2
     exit $heartbeat_status
 fi
 # A legacy task reaches this wrapper after an upgrade. Installing the
@@ -23,7 +23,7 @@ fi
 # running this wrapper, so migration needs no manual task deletion.
 # Migration failure (PowerShell interop off, registration policy) is
 # only a warning: the heartbeat above already did the real work.
-if ! "$CLI" heartbeat install --distro "$WSL_DISTRO_NAME"; then
+if ! "$CLI" internal install-liveness --distro "$WSL_DISTRO_NAME"; then
     echo "windows-heartbeat.sh: legacy-task migration failed; heartbeat still recorded" >&2
 fi
 exit $heartbeat_status

@@ -51,9 +51,10 @@ git-synced shared ownership registry ``Agents/data/agent-owners.json``.
 plan; state moved out of the tree 2026-07-19 - clean break, no legacy
 locations read.)
 
-stdlib-only on purpose, apart from the host-runtime seam beside it:
-every sibling script (headless, ownership, qlog, timeline, doctor)
-imports this module flat from the same directory.
+stdlib-only on purpose, apart from the host-runtime seam beside it. Scripts
+dispatched with ``uv run --script`` (qlog, timeline, dashboard) put the
+package root on ``sys.path`` and import this module as
+``agents_live.paths``; nothing imports it flat.
 """
 from __future__ import annotations
 
@@ -64,10 +65,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-try:
-    from . import hostruntime
-except ImportError:  # flat execution: qlog and timeline run as scripts
-    import hostruntime  # type: ignore[no-redef]
+from .runtime.hosts import system as hostruntime
 
 ENV_VAR = "AGENTS_LIVE_REPO"
 CONFIG_DOTFILE = ".agents-live.toml"
@@ -84,15 +82,9 @@ _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _repos_module():
-    """The repos module under either layout. qlog/timeline are dispatched
-    via ``uv run --script`` (decision 6.4) and import this module flat, so
-    a bare ``from . import repos`` here crashes with "no known parent
-    package" the moment resolution reaches the registry (issue #48)."""
-    try:
-        from . import repos
-    except ImportError:
-        import repos
-    return repos
+    """Imported lazily: the registry reads config, which reads this module."""
+    from .state import registry
+    return registry
 
 
 def _no_root_error(allow_sole_registered: bool) -> ValueError:

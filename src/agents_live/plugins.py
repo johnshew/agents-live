@@ -12,11 +12,23 @@ from dataclasses import dataclass, replace
 from email.parser import BytesParser
 from pathlib import Path
 
-from . import __version__, adminlog, hostruntime, paths
-from .spawn import find_uv
+from . import __version__, paths
+from .agent import providers as provider_plugins
+from .obs import admin as adminlog
+from .runtime.hosts import system as hostruntime
+from .runtime.spawn import find_uv
+from .state import ownership
 
-# Kernel extension points a declared distribution must provide.
-ENTRY_POINT_GROUPS = frozenset({"agents_live.agents", "agents_live.ownership"})
+# Kernel extension points a declared distribution must provide. Each seam
+# owns its own group name, so validating one group while another is read
+# cannot happen (a provider plugin was silently never discovered).
+ENTRY_POINT_GROUPS = frozenset({
+    provider_plugins.ENTRY_POINT_GROUP,
+    ownership.ENTRY_POINT_GROUP,
+})
+# 5.x adapter plugins named this group. Recognised only to say so; the
+# diagnostic expires with the rest of the 5.x support in 7.0.
+RETIRED_ENTRY_POINT_GROUPS = frozenset({"agents_live.agents"})
 
 
 class PluginError(RuntimeError):
@@ -191,6 +203,17 @@ def _installed_state(plugin: Plugin) -> tuple[bool, str]:
         return False, (
             f"installed version {distribution.version}, declared wheel "
             f"version {plugin.version}")
+    # Checked before the recognised groups: a distribution declaring both a
+    # retired and a current group would otherwise validate on the current one
+    # while the retired half is silently never loaded.
+    retired = sorted({
+        ep.group for ep in distribution.entry_points
+        if ep.group in RETIRED_ENTRY_POINT_GROUPS})
+    if retired:
+        return False, (
+            f"declares retired entry-point group {', '.join(retired)}; "
+            f"port it to {provider_plugins.ENTRY_POINT_GROUP} and "
+            "the 6.0 provider protocol")
     entry_points = [
         ep for ep in distribution.entry_points if ep.group in ENTRY_POINT_GROUPS
     ]

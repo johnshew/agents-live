@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-07-30
+ms.date: 2026-08-09
 ms.topic: concept
 ---
 
@@ -48,41 +48,68 @@ Whether an upgrade should go further and restart the watchers it makes
 stale is a separate policy question, still open
 ([#204](https://github.com/johnshew/agents-live/issues/204)).
 
+## Observability a processor can contribute to
+
+A processor has three channels and all three are lossy: an exit code, stderr
+that surfaces only on failure, and stdout that 6.0 now records but bounds. 5.x
+let a handler write structured entries directly into the log; 6.0 withdrew that
+without replacing it, so the capability regressed.
+
+The replacement should not be a Python API. Processors are `.py`, `.js`, `.ts`,
+`.ps1`, or `.sh`, so a Python surface serves one of five and couples user code
+to module paths, which is exactly what broke when 6.0 moved them. The
+contract should be an environment handle naming an append-only JSONL file,
+with correlation context passed in.
+
+GitHub Actions is the closest precedent and already made this migration, from
+stdout workflow commands to environment-file handles. Its `stop-commands`
+escape hatch remains as evidence of why: content flowing through stdout can
+impersonate control syntax. That risk is sharper here, because a
+post-processor's input is model output.
+
+For correlation, W3C Trace Context is the standard and OpenTelemetry defines
+the carrier as string key-value pairs, so `traceparent` in the environment is a
+conforming adaptation. Adopting it verbatim makes a future exporter a
+translation rather than a remapping.
+
+[#105](https://github.com/johnshew/agents-live/issues/105) carries this,
+together with span identity, per-step isolation and size caps, and the
+sensitivity metadata that a redaction rule needs.
+
 ## Confidence in the test suite
 
 Every defect found in the week of 2026-07-27 shipped through a green
-suite. That is a measured fact, and it points at structure rather than
-at missing coverage: the mock-driven population of the suite cannot
-execute the paths that keep breaking
-([#184](https://github.com/johnshew/agents-live/issues/184)), and the
-policy never required that anything assert the user-visible claim
-([#180](https://github.com/johnshew/agents-live/issues/180)).
-
-These are complements, not duplicates: one rebalances what the suite
-executes, the other changes what counts as coverage before a fix is
-called done.
+suite, and so did the three found in the 6.0 release review against a
+completely different suite. That is a measured fact, and it points at
+structure rather than at missing coverage: nothing required that the
+user-visible claim be asserted anywhere
+([#184](https://github.com/johnshew/agents-live/issues/184), which now
+absorbs the policy question first raised as #180).
 
 The slices done so far point at one shape worth repeating. An invariant
 that states a rule about the whole package - no subprocess capture may
 rely on the platform locale - costs less than the mock tests it replaces,
 cannot drift as the package grows, and runs on hosts where the defect it
-guards cannot be reproduced. That last property matters most on Windows,
-where the platform receiving the most change is the one CI sees least.
-An assertion about a literal in one file is the anti-pattern: it breaks
-on unrelated edits and proves nothing. A test is not finished until the
-fix has been removed and the test watched to fail.
+guards cannot be reproduced. An assertion about a literal in one file is
+the anti-pattern: it breaks on unrelated edits and proves nothing. A test
+is not finished until the fix has been removed and the test watched to
+fail.
 
 The corollary, learned the hard way: a Windows-only test that flakes is
-worse than no test, because on that platform it is the only signal and
-an untrustworthy signal invites ignoring the suite.
+worse than no test, because an untrustworthy signal invites ignoring the
+suite.
 
-What these slices have not done is change the balance #184 was filed
-about. The suite has grown from 45 classes and 420 tests to 58 and 527
-at a constant ~1.45 patch calls per test, so the mock-driven population
-is keeping pace rather than shrinking. The decision #184 poses - convert
-those classes, or state plainly that their job is import and signature
-breakage rather than behaviour - is still open, and incremental slices
-will not make it for us.
+The 6.0 architecture work retired the 527-test mock-heavy suite and
+replaced it with a small portable one over memory hosts and fake
+providers. That resolved the ratio #184 was filed about, but not the
+question behind it. The first release review found three defects the new
+suite could not see, because it verified structure where behaviour was
+what mattered: convergence removing artifacts it could not account for, a
+diagnostic command that failed at import, and a migrator that refused most
+real 5.x definitions. Structural invariants are necessary and cheap; they
+are not sufficient. What #184 still has to settle is which behaviours are
+owed an executing test, now that there is no large mock population to
+argue about.
 
 ## Safer execution modes in practice
 
@@ -99,13 +126,12 @@ Linux is the primary platform, with Ubuntu on WSL as the reference setup.
 macOS is untested; broadening it is direction rather than committed work,
 so file an issue before starting.
 
-A native Windows runtime, replacing cron and inotifywait with Task
-Scheduler and Windows change notification behind a small host-runtime
-seam, is implemented and covered by CI on `windows-latest`.
-[windows-support.md](windows-support.md) is the architecture guide: what
-the seam is, why it is functions rather than a protocol object, and what
-the spikes contradicted. Whether the Windows half earns its keep in the
-long run stays an open product question; the seam itself is settled.
+A native Windows runtime, replacing cron and POSIX file notification with Task
+Scheduler and `ReadDirectoryChangesW` behind the host protocols, is implemented
+and covered by CI on `windows-latest`. [windows-support.md](windows-support.md)
+records the current native architecture. [wsl-support.md](wsl-support.md)
+records the separate WSL composition and Windows-side liveness responsibility.
+The seams are settled; installation readiness remains tracked work.
 
 The direction for keeping it settled is that a Windows defect is fixed at
 the seam, not at the call site. Three rounds of that have now landed:

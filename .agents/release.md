@@ -32,7 +32,7 @@ Semantic versioning; the version lives in `pyproject.toml`.
 
 ```bash
 uv run --script tools/pre-release-audit.py
-uv run --with-editable . --script tests/test_smoke.py
+uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
 uv build
 ```
@@ -45,6 +45,17 @@ the unit suite cannot. It uses whichever agent CLI this host can launch,
 preferring `copilot`, so the gate does not require a particular vendor's
 CLI to be installed. `tools/release.py` runs all of these gates
 itself during `--prepare` and `--publish`.
+
+`uv build` resolves its build backend from PyPI, so on a network that
+intercepts TLS it fails with `HandshakeFailure` while every other gate
+passes. That is a local condition, not a release defect: the published
+artifacts are built by `.github/workflows/publish.yml` on a GitHub
+runner, which reaches PyPI normally. `uv build --offline` succeeds from
+the local cache and is enough to confirm the package still builds, but
+`release.py` deliberately offers no offline mode, because a release
+cannot be cut from a host that cannot reach the index it publishes to.
+Either run the release from a host with direct access, or dispatch the
+publish workflow against the tag.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`
@@ -92,12 +103,14 @@ the release tag, followed by GitHub's generated notes (merged pull requests and
 the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
-which rebuilds, attaches the wheel and sdist to the GitHub release, and
-publishes the same artifacts to PyPI through trusted publishing. Wait for that
-workflow to succeed, verify both artifacts are attached, then follow the
-two-stage PyPI and installed-tool checks in [testing.md](testing.md). In an
-interactive terminal, `gh run watch <run-id> --exit-status` can wait for the
-workflow. Automation should use noninteractive run-status APIs or
+which resolves the release tag to one commit, runs the Test workflow against
+that exact commit on Ubuntu and Windows, then rebuilds, attaches the wheel and
+sdist to the GitHub release, and publishes the same artifacts to PyPI through
+trusted publishing. Publication cannot start unless both test jobs pass. Wait
+for the workflow to succeed, verify both artifacts are attached, then follow
+the two-stage PyPI and installed-tool checks in [testing.md](testing.md). In
+an interactive terminal, `gh run watch <run-id> --exit-status` can wait for
+the workflow. Automation should use noninteractive run-status APIs or
 `GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
 over the terminal's alternate screen.
 

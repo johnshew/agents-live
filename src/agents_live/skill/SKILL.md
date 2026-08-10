@@ -13,24 +13,20 @@ description: >-
 
 # Agents Live
 
-Agents Live adds safe, local automation to the Claude Code and GitHub Copilot
-agents you already use. It does not replace or invent those agents, their
-prompts, their tools, their authentication, or their reasoning.
+Agents Live adds safe, local automation to portable Agent Skill definitions.
+It uses installed provider CLIs and does not replace their tools,
+authentication, or reasoning.
 
-- Each live agent remains one standard agent file under `.claude/agents/` or
-  `.github/agents/`, with Agents Live frontmatter defining when and how it
-  runs.
+- Each definition is a standard `<name>/SKILL.md` bundle or an Agents Live
+  flat `<name>.md` extension in a configured discovery root.
 - Deterministic pre- and post-processing scripts can prepare input and apply
   output without granting the agent direct write access.
-- Agents Live uses the installed agent CLIs, Python/uv, cron, and inotifywait.
-  It adds lifecycle management, debounce, locking, logs, recovery, and cost
-  tracking around them.
-- Agent state is computed from crontab and process lists. Runtime is the
-  source of truth. A watcher's durable "should be running" intent is its
-  `@reboot` respawn line in the crontab (it survives reboot and is removed by
-  a deliberate stop). Ownership is local by default (every agent belongs
-  to this host). With a plugin-provided registry backend, the shared state
-  file `Agents/data/agent-owners.json` records which host owns each agent.
+- Agents Live uses the host's native trigger store and filesystem change
+  source. It adds lifecycle management, debounce, locking, logs, recovery,
+  and output policy around provider execution.
+- Started intent is machine-local state. Native trigger and watcher artifacts
+  are converged from that intent and the current definitions. Ownership is
+  local by default; a plugin-provided backend may assign work across hosts.
 
 ## Load before acting
 
@@ -53,29 +49,18 @@ commit. Stale docs are worse than missing ones.
 
 ## Agent directories
 
-Canonical agent files live in the native agent directories:
-`.claude/agents/<name>.md` (the default - Claude Code, Copilot
-CLI, and VS Code all discover it) or `.github/agents/<name>.agent.md`
-(adds github.com cloud-agent exposure; pin `target: vscode` on
-write/pipeline agents there). A native-directory file WITHOUT
-`schedule`/`watchPath` is a plain interactive agent: discovery, `status`,
-`start --all`, and orphan pruning skip it. Additional agent directories
-(`Agents/`, plus `agent_directories` from the project config - root
-`.agents-live.toml` or `[tool.agents-live]` in `pyproject.toml`) still
-work; ephemeral `_` fixtures MUST stay in `Agents/` (interactive
-surfaces would list them from native dirs). Names must be unique across
-all locations.
+`Agents/` is always searched. Project configuration may add repository-relative
+discovery roots with `agent_directories = ["foo"]` in `.agents-live.toml` or
+the `[tool.agents-live]` table in `pyproject.toml`. Each root is searched one
+level deep for `<name>.md` flat definitions and `<name>/SKILL.md` Agent Skill
+bundles. Flat definitions use the Agent Skills content schema but are an
+Agents Live extension; only the bundle layout conforms to Agent Skills.
 
-Native agent directories hold no executables: agents there reference
-pre/post-processors by repo-relative path (e.g.
-`Agents/handlers/x.py`); bare names are rejected. In additional agent
-directories, bare names still resolve relative to the agent's own
-directory. Logs are centralized per repo in the user-level state home
-(`~/.local/state/agents-live/repos/<key>/logs/`), never in the project
-tree. Agents in
-`.claude/agents/` are visible to Claude Code as subagents - give each a
-description ending "Never delegate to this agent." plus
-`disable-model-invocation: true` (the doctor lints this).
+Every definition has a canonical `<name>-<path-hash>` identifier derived from
+its repository-relative prompt path. A plain name remains valid when unique.
+When names repeat, use the canonical identifier shown by `status`. Relative
+processor paths resolve from the bundle directory or, for a flat definition,
+from the containing discovery root.
 
 ## Lifecycle
 
@@ -85,10 +70,8 @@ create -> run (test) -> start (activate) -> stop
 
 ## Commands
 
-All user-invoked lifecycle commands go through `agents-live`. Persisted
-cron/watcher entries and internal spawns still invoke the underlying scripts
-until the package migration completes; those paths are implementation details,
-not the user-facing contract.
+All user-invoked lifecycle commands go through `agents-live`. Persisted host
+artifacts use hidden internal commands and are not a user-facing contract.
 
 | Pattern | Command |
 |---------|---------|
@@ -109,35 +92,20 @@ not the user-facing contract.
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `repair` | `agents-live doctor --repair [--dry-run]` |
-| `heartbeat` | `agents-live heartbeat install --distro <name>` (WSL host keep-alive; `init` registers it already) |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
 | `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
 
-**Smoketest and commands that touch cron/inotifywait require `requestUnsandboxedExecution: true`.**
+**Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
 **Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
 
-## Prompt Frontmatter
+## Definition metadata
 
-Each agent file's YAML frontmatter is the source of truth for Agents Live
-configuration.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `runtime` | *(required)* | `claude`, `copilot`, `none`, or an adapter registered by an installed plugin (e.g. `agency claude`, `agency copilot`) |
-| `mode` | `plan` | `plan` (read-only), `pipeline` (mediated `put`/`get`), or `write` (explicit direct authority) |
-| `model` | *(agent default)* | Optional model override |
-| `pre-processor` | *(none)* | Deterministic script that runs before the agent |
-| `post-processor` | *(log-only)* | Deterministic script that runs after the agent |
-| `env` | *(none)* | Map of env vars passed to the agent process |
-| `mcps` | *(none)* | List of MCP server specs |
-| `owner` | *(registry)* | Machine ownership; used only in registry mode, which requires a plugin-provided ownership backend. `"*"` (any host) or a `hostname/runtime/uuid` identity, where the runtime is `windows` or the WSL distro name; matching reads only the uuid, so anything else is another runtime's. Seeds `Agents/data/agent-owners.json` on first activation; if unset, only a targeted `start <name>` claims (never `start --all`) |
-| `schedule` | -- | Cron expression (at least one of schedule/watchPath required) |
-| `watchPath` | -- | Repo-relative directory or list of directories |
-
-Both `schedule` and `watchPath` can be set (type `multi`). Each trigger
-fires independently. On `start`/`stop`, both are activated/deactivated.
+Standard Agent Skills properties remain top-level. Agents Live execution
+policy is stored as quoted string values under `metadata` with the
+`agents-live.` prefix. Read [docs/definition-format.md](docs/definition-format.md)
+for the complete schema.
 
 ## Pre-processor pipeline
 
@@ -147,7 +115,7 @@ pre-processor -> agent -> post-processor
 
 - Pre-processor stdout is appended to the agent prompt as `pre-processor="<output>"`.
 - Output `{"skip": true}` to skip the agent call (status `skipped`).
-- With `runtime: none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
+- With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
   outside the project tree, so log writes cannot re-trigger watchers.
 - In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below).

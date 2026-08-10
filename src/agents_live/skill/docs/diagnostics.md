@@ -1,277 +1,73 @@
 ---
-title: Agents Live Log Diagnostics
-description: Log inventory and correlated diagnostic procedures for Agents Live agents
-ms.date: 2026-07-20
+title: Diagnostics
+description: Diagnose definitions, convergence, dispatch, and WSL liveness
+ms.date: 2026-08-08
 ms.topic: troubleshooting
 ---
 
-## Log diagnostics
+# Diagnostics
 
-Diagnose issues in the agents-live pipeline (watchers -> pre-processor
--> agent -> post-processor) by correlating events across log files. Most
-issues are races between a long-running agent and a fast watcher/sync
-agent writing the same files.
-
-## Log inventory
-
-All logs are **UTC JSONL**. Canonical writers use RFC 3339 timestamps with a
-`Z` suffix. `agents-live logs` normalizes equivalent aware ISO 8601 forms and
-offset-free legacy UTC timestamps before filtering and display. Logs live in
-the user-level XDG state home
-(`$XDG_STATE_HOME/agents-live/`, default `~/.local/state/agents-live/`),
-never in the project tree. Each repository gets its own state directory
-`repos/<basename>-<hash>/`; the paths below are relative to that
-directory unless marked host-level. There is one per-agent log for each
-discovered agent definition. Agents Live discovers standard definitions
-in `.claude/agents/` and `.github/agents/`; logs remain centralized at
-`logs/<name>.log` in the repo's state directory. `agents-live logs`
-resolves these locations for you; `--all` unions this repo's logs with
-the host-level logs.
-
-### Infrastructure logs
-
-| Log | Type | What it tells you |
-|-----|------|-------------------|
-| `logs/agents-live.log` | runtime | **Every** agent's lifecycle: `watcher` debounce batches, `activate`, `start`, `done` with `status`, `duration_s`, `trigger`, `changed_files`. The join point for all diagnostics. |
-| `~/.local/state/agents-live/logs/health-check.log` | host-level | The built-in check-and-repair loop: per-repo sweep results, smoketest gating, beacon writes. |
-| `~/.local/state/agents-live/logs/admin.log` | host-level | Administrative operations: what changed this host and when. See "Administrative events" below. |
-
-### Administrative events
-
-The logs above record what agents *do*. `admin.log` records how the system
-was *changed*: plugin convergence, tool upgrade, repository registration and
-removal, ownership claims and transfers, schedule and watcher registration
-and teardown, `init`, trigger migration, and `uninstall`. These are the
-changes that later explain surprising behavior, so start here when an agent
-stopped firing, started firing twice, or the tool is not the version you
-expected.
-
-Administrative events are not agents. Each one carries `scope: "host"`, the
-pseudo-agent name `admin`, the phase `admin`, an `operation` naming the verb,
-the invoking `command`, and `interactive` (whether a terminal was attached).
-Read them with `--all`, which unions the host log directory:
+Start with read-only commands:
 
 ```bash
-# Everything that changed this host in the last day
-agents-live logs --all --since 1d \
-  --sql "select ts, operation, status, command from logs \
-         where scope = 'host' order by ts"
-
-# Who moved an agent between hosts, and from where
-agents-live logs --all \
-  --sql "select ts, agent, owner_from, owner_to, runtime from logs \
-         where operation = 'ownership-set' order by ts"
-
-# Version changes, including any convergence that caused one
-agents-live logs --all \
-  --sql "select ts, operation, trigger, version_before, version_after \
-         from logs where version_after is not null order by ts"
+agents-live status --all-repos
+agents-live doctor --all-repos
+agents-live logs timeline --all
 ```
 
-### Per-agent logs (domain work)
+Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
+and `agents-live doctor --repair` to apply it.
 
-Each of your agents writes `logs/<name>.log`. Keep a short
-catalog of what each one means in your own repo -- during an incident,
-"which log is which" should not require reading agent definitions.
+## Definition failures
 
+The loader reports the exact `SKILL.md` and rejected property. Common causes
+are an unquoted metadata value, an unknown `agents-live.*` key, a directory and
+`name` mismatch, invalid selector or trigger syntax, a path that escapes the
+skill, or a 5.x flat definition. Use `agents-live migrate --dry-run` before the
+one-shot conversion.
 
-### Ancillary sources (not JSONL)
+## Collection failures
 
-| Source | Use |
-|--------|-----|
-| `logs/runs/<agent>-<ts>.stdout.txt` | Full raw stdout from every agent run. |
-| `logs/runs/<agent>-<ts>.stderr.txt` | Full raw stderr from every agent run. |
-| `logs/runs/<agent>-<ts>.transcript.md` | Archived session transcript (copilot-family runtimes). |
-| `logs/<agent>-transcript.md` | Live session transcript (overwritten each run). |
-| Agent CLI session logs | Full raw transcript kept by the agent CLI itself; location depends on the CLI. |
-| `git log --pretty='%h %ai %s' -- <file>` | Committed state history. |
-| `crontab -l` | Active cron registrations (ground truth). |
-| `ps aux \| grep inotifywait` | Active watcher processes. |
+An unreadable registry, ownership source, or started-state record causes
+convergence to abstain. Repair that input rather than deleting runtime
+artifacts manually. A registered repository that cannot be read, and a started
+definition that no longer parses, are narrower: convergence cannot compute
+what they should own, so it holds their existing artifacts and reports them.
+`status` lists a definition it cannot read as `unloadable`, and `doctor` names
+the file and the reason. Fix the file, or run `stop` to withdraw it.
 
-### Agent transcript deep dive
+## Trigger and watcher drift
 
-When a pipeline log shows an unexpected agent result, the session
-transcript is the definitive source.
+`doctor --repair --dry-run` shows install, remove, start, and stop operations.
+A changed canonical watch expression changes its fingerprint and restarts only
+that watcher. All watchers restart once when moving from the 5.x fingerprint
+form to 6.0.
 
-**Quick check -- run output files:**
+Never inspect runtime log files by hand. Use `agents-live logs` and
+`agents-live logs timeline`; they correlate versioned event records and
+provider transcripts.
+
+## Dispatch skips
+
+Automatic firings can be skipped because the definition is stopped, a clock
+fire is not due, another run of the same agent holds the lock, or the durable
+dispatch budget is exhausted. These are successful skip outcomes, not child
+failures.
+
+Failure categories include `state_unavailable`, `agent_invalid`, `timeout`,
+`cli_crash`, `pre_processor_crash`, `post_processor_crash`,
+`empty_output`, `output_parse_error`, and `agent_output_invalid`.
+
+## WSL liveness
+
+There is no public heartbeat command.
 
 ```bash
-# Recent runs for a specific agent (in this repo's state directory)
-runs_dir=~/.local/state/agents-live/repos/<repo-key>/logs/runs
-ls -lt "$runs_dir"/my-agent-* | head -10
-
-# View the stdout of the most recent run
-cat "$(ls -t "$runs_dir"/my-agent-*.stdout.txt | head -1)"
+agents-live doctor
+agents-live doctor --repair
 ```
 
-**Correlating with pipeline logs:**
-
-The `phase: agent` log entry includes `transcript_path` and the agent
-CLI's session directory in its `message` field. To go from a log entry
-to the full transcript:
-1. Find the `phase: agent` entry for your agent and time
-2. Extract the session directory from the `message` field
-3. Read the CLI's transcript file in that directory
-
-## Diagnostic procedure
-
-1. **Identify the symptom and approximate time.** Convert to UTC.
-
-2. **Get a narrow window from `agents-live.log`:**
-   ```bash
-  agents-live logs --agent <name> --since <time> --until <time>
-   ```
-   Look for: `start (trigger=...) -> done (status=ok|error|skipped, duration_s)`.
-
-3. **Find the long-running agent.** `duration_s > 30` is the usual suspect.
-
-4. **Pull the per-agent log** for that window.
-
-5. **Correlate with domain logs.** A pre-processor's own log (e.g. a
-   parser log) shows what the pipeline saw at run time.
-
-6. **Cross-check with git.** `git log --pretty='%h %ai %s' -- <file>`.
-
-### Recent error review
-
-For a retrospective review, capture one UTC end time and derive the start time
-from it so the result does not move while you investigate. Use both bounds when
-you need that fixed window:
-
-```bash
-agents-live logs --errors --all --since <start> --until <end>
-```
-
-The flags remain independent. `--since` alone means events at or after its
-value, and `--until` alone means events before its value. Relative values such
-as `8h` are supported; the literal `now` is not. Prefer explicit aware ISO 8601
-values when recording incident evidence.
-
-Count unique `event_id` values for physical events and `run_id` values for
-agent executions. The same operational condition can appear in the central
-runtime log and a per-agent log, so raw row counts can overstate impact. After
-reviewing historical errors, run `agents-live doctor` to distinguish a current
-outage from a recovered condition.
-
-## Common patterns
-
-- **Stale-read race.** Long agent reads input at t=0, writes output at
-  t=200s. User edits during that window. Signature: `duration_s > 60`
-  + multiple debounce batches on the same input file.
-
-- **Self-write cascade.** Agent writes back to a watched input file.
-  Signature: a second `start` within 1-2s of `done`, often with
-  `status: skipped` (pre-processor catches the self-write).
-
-- **Sync loop.** A post-processor propagates state between two watched
-  files (e.g. checkbox state between a recommendations file and a
-  tracking file). When the agent also writes one of those files, you
-  get oscillation.
-
-## Smoketests (what's what)
-
-The word "smoketest" refers to **several distinct things**. Don't
-confuse them when debugging (and if your deployment adds its own
-smoketest agents, catalog them in your per-agent log inventory).
-
-| Name | What it is | Trigger | Where to look |
-|------|------------|---------|---------------|
-| `agents-live smoketest` | End-to-end system test. Creates the `_smoketest-*` agents below, exercises cron + watcher + debounce + spawn paths, then tears them down. Manual / CI only. | `agents-live smoketest --runtime <runtime>` | `logs/smoketest-framework-result.json` (verdict), stdout |
-| `_smoketest-cron` | Synthetic scheduled agent created by the smoketest. | created + run by the smoketest | `logs/_smoketest-cron.log` |
-| `_smoketest-watcher` | Synthetic watcher agent created by the smoketest. **Refuses to run inside the VS Code chat sandbox** (cgroup kills the daemon mid-Claude-call). | created + run by the smoketest | `logs/_smoketest-watcher.log` |
-| `_smoketest-spawn-child` / `_smoketest-debounce` / `_smoketest-preprocessor` / `_smoketest-pipeline` | Synthetic agents exercising spawn, debounce dispatch, pre/post processors, and pipeline mode. | created + run by the smoketest | `logs/_smoketest-*.log` |
-
-If the system smoketest fails, check `smoketest-framework-result.json`
-first -- it carries `verdict`, `failed_step`, and `reason`.
-
-`BUSY` (exit 75) is not a test failure. It means another system smoketest
-owns `smoketest-framework.lock` in the repo's state directory; the lock
-file contains its PID,
-host, agent, model, and start time. Do not delete the lock file: kernel `flock`
-ownership, not file presence, determines whether it is held. After an
-uncatchable exit, the lock releases automatically and the next run removes
-stale `_smoketest-*` resources before setup.
-
-## Traps to avoid
-
-- `tail -N` / `cat` on 200k-line logs overflows context. Always filter
-  first with `agents-live logs` / `agents-live logs timeline`.
-- **Table display caps columns at 80 chars.** Use `--format jsonl` for
-  full values. The table is drawn for a terminal and printed as plain
-  ASCII when the output is captured, so a pipe stays readable; parse
-  `--format csv` or `--format jsonl`, not the table.
-- File-change events don't mean content changed -- mtime can bump on an
-  identical atomic-write.
-- **An upgrade does not restart watchers.** A watcher running when the
-  runtime was replaced keeps the previous version until it is stopped
-  and started again, so an agent can behave like an older release with
-  nothing on the surface to say why. The upgrade names them, and its
-  `upgrade-runtime` admin event carries `stale_watchers` and
-  `stale_watcher_agents` for looking it up afterwards.
-- `agents-live.log` has **multiple agents interleaved**. Filter by
-  `--agent` or `"agent_name":"<name>"`.
-- **Every log entry has an `agent_name` field.** Administrative events use
-  the pseudo-agent `admin` and carry `scope: "host"`; filter on `scope` to
-  separate host administration from agent activity.
-- **Schema version.** Entries carry `log_schema: <int>` (current: 5).
-  If a query reports a type mismatch across log generations, fix the data
-  rather than weakening the query. See [commands.md](commands.md) "Schema
-  evolution".
-- **`--sql` ignores other filter flags.** Include conditions in your SQL
-  `WHERE` clause.
-- **Warnings are deterministic telemetry.** 85 warnings in 12h = 6 runs
-  x ~14 repeated warnings. Group by `COUNT(DISTINCT line)`.
-- **Level vs status.** Some handlers report errors as `level: error`,
-  others as `status: error`. The `--errors` filter ORs both.
-- **`--errors` auto-enriches output** with `error_category` column and
-  a Tracebacks section.
-
-## Query recipes
-
-### logs (qlog)
-
-```bash
-# Events for one agent in a window
-agents-live logs --agent my-agent \
-  --since 2026-04-22T13:00 --until 2026-04-22T13:30
-
-# Correlated view across ALL logs
-agents-live logs --all --since 2026-04-22T13:02:41 --until 2026-04-22T13:06:10 \
-  --columns ts,_src,agent_name,phase,status,duration_s
-
-# Slow runs (agent duration > 30s)
-agents-live logs --slow 30 --since 2026-04-22
-
-# All errors across all logs
-agents-live logs --errors --all
-
-# Validate live-plus-archive normalized column types
-agents-live logs --all --check-schema
-
-# Custom SQL
-agents-live logs --all --sql "SELECT agent_name, COUNT(*) FROM log GROUP BY 1 ORDER BY 2 DESC"
-```
-
-Filters: `--agent`, `--since`, `--until`, `--phase`, `--status`, `--trigger`,
-`--slow SEC`, `--errors`. Output: `--format table|jsonl|csv`.
-
-### logs timeline
-
-```bash
-# Last 50 events across all agents
-agents-live logs timeline
-
-# Timeline for a specific agent
-agents-live logs timeline my-agent --since 2026-05-01T12:00
-
-# Content substring filter
-agents-live logs timeline "invoice" --last 30
-
-# All agents in a window
-agents-live logs timeline --all --since 2026-05-01T16:00
-```
-
-## Key files for reference
-
-Deployment-specific pipeline entry points (pre-processors, parsers,
-post-processors) belong in your per-agent log inventory.
+A repair stages a distinct Windows task and requires a fresh beacon before
+swapping. If it fails, verify PowerShell interop, the stable uv tool shim,
+`wslg.exe`, Task Scheduler policy, and `WSL_DISTRO_NAME` in the interactive
+session. The previous working task remains registered after a failed stage.

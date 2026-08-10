@@ -530,6 +530,8 @@ def _gate_commands() -> list[list[str]]:
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_smoke.py"],
+        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+         "tests/test_seams.py"],
         _smoketest_command(),
         ["uv", "build"],
     ]
@@ -593,6 +595,9 @@ def prepare(bump: str) -> None:
         _check_release_diff()
         for command in _gate_commands():
             _run(command)
+        # The gates are long and the checkout is shared, so what was
+        # validated above is not necessarily what is about to be staged.
+        _check_release_diff()
         _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
         message = f"chore(build): bump version to v{target}"
         _run(["git", "commit", "-m", message])

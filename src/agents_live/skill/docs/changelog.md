@@ -6,6 +6,113 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat!: definitions are conforming Agent Skills with namespaced execution metadata. (#255)
+  This release is a major refactoring of the package and an alignment of the
+  definition format with Agent Skills. A definition is
+  `Agents/<name>/SKILL.md`, or `<name>.md` in a configured discovery root, and
+  it is a valid Agent Skill that other tools can read. Execution policy is
+  quoted `agents-live.*` metadata under schema version 1, so what Agents Live
+  adds sits in its own namespace rather than in fields of its own invention.
+  Every definition gets a path-derived canonical identifier, so two roots may
+  hold the same name.
+
+  BREAKING CHANGE: the runtime contains no old-format loader. Run
+  `agents-live migrate` once per repository to convert 5.x definitions;
+  `handler` is retired in favour of `agents-live.post-processor`, whose
+  failures report `post_processor_crash`. The public `heartbeat` command is
+  removed and WSL liveness is converged automatically. The canonical watch
+  expression changes every watcher fingerprint, so each started watcher
+  restarts once after the upgrade.
+- refactor: the package is organised around a runtime port and an agent port.
+  Immutable primitive records cross each seam, one convergence path owns host
+  state, and `dispatch.py` is the single handoff. Command handlers live under
+  `cli/`, host implementations under `runtime/hosts/`, durable intent under
+  `state/`, observability under `obs/`, and one-major-cycle 5.x migration
+  code under `legacy/`.
+- fix: adoption survives an upgrade that happens before the migration.
+  A 5.x host has no started state, so 6.0 adopts one: it maps each installed
+  legacy trigger to the canonical identifier of the definition it names. That
+  happens once, and only definitions that parse can be mapped. Upgrading the
+  tool before converting the definitions meant the first convergence saw a
+  repository where nothing parsed, initialised started state to the empty set,
+  and spent the adoption on nothing; every agent then had to be started again
+  by hand after migrating. Started state is no longer initialised from a
+  repository whose definitions did not all load, unless the caller asked for a
+  specific change. (#261)
+- fix: migration reaches definitions in configured agent_directories roots. (#257)
+  6.0 ships no old-format loader, so `agents-live migrate` is the only way to
+  convert a repository. It scanned `Agents/` alone, leaving definitions in
+  configured roots unrunnable after an upgrade that reported success. A scan
+  now covers every discovery root and skips files that already carry
+  `agents-live.` metadata, so it reports what is left rather than re-reporting
+  what is done. The migration documentation also states the required upgrade
+  order: upgrade the tool before converting the definitions, because a 5.x
+  runtime holding converted definitions can withdraw their triggers. (#261)
+- feat: a definition written for a later release asks for an upgrade instead of failing as invalid.
+  A repository is often synced to a host before the tool on it is upgraded. A
+  definition declaring a schema version above the one the running release
+  implements is now refused with `runtime_outdated`, naming the installed
+  version and the upgrade command, and its trigger is preserved so the agent
+  resumes once the tool is upgraded. An unrecognised `agents-live.` key is no
+  longer fatal: keys are only added for additive capabilities, so an older
+  runtime honours the rest of the definition and runs it. `status --json` gains
+  the definition path and its execution policy, so a caller no longer has to
+  parse frontmatter to learn how an agent runs.
+- fix: one unreadable definition no longer removes a repository's automation.
+  Discovery stopped at the first failure, so collection reported the whole
+  repository as empty and convergence withdrew every trigger and watcher it
+  owned, on the five-minute maintenance schedule and without being asked. A
+  parse failure is now isolated and reported by `status` and `doctor`. A
+  repository that will not resolve, and a started definition that will not
+  parse, keep the artifacts they already own until they resolve again or are
+  stopped.
+- fix: `agents-live logs timeline` starts again.
+  It failed on an import before reading a single argument, which took away one
+  of the two commands the diagnostics guidance tells you to use.
+- fix: `agents-live migrate` converts the definitions it was refusing.
+  `allow-tools` was rejected as an unknown field although the converter
+  already handled it, every error now names the file it came from, and the
+  refusals for `owner` and for a runtime carrying arguments explain what to
+  do instead.
+- fix: `agents-live run --json` reports the run outcome.
+  Machine consumers received the agent's text with no status or failure
+  category, so a skip and a crash looked alike.
+- fix: `agents-live stop` works once a definition file has been deleted.
+  That is when withdrawing its automation matters most.
+- fix: `agents-live start` reports what it could not start.
+  A definition that declares no schedule or watch is called out instead of
+  reported as started, and `--all` exits nonzero when it skipped anything.
+- fix: a run lock that cannot be read is abandoned after a day.
+  An unreadable lock named no owner to wait for and blocked that agent
+  permanently.
+- fix: a scheduled run records what its processors produced.
+  A scheduled invocation is quiet and its streams are redirected away, so a
+  pre- or post-processor's output and warnings went nowhere at all: the run
+  event carried only success or failure. The durable record now carries the
+  output and any diagnostics, bounded, so `agents-live logs` shows what
+  happened. Structured emission from a processor remains unavailable and is
+  tracked by issue #105.
+- fix: migration rewrites a definition in place instead of relocating its processors.
+  `agents-live migrate` converted every definition into a `<name>/SKILL.md`
+  bundle and copied its processors into it. That silently broke any 5.x
+  processor deriving the repository root from its own location, left the
+  originals behind to drift from the copies, and split helpers that several
+  definitions deliberately shared. The default is now a frontmatter-only
+  rewrite: the definition and its processors stay where they are, and only
+  the reference spelling changes. `--bundle` performs the old conversion for
+  a definition that should become a self-contained skill.
+- fix: provider plugins are discovered again, and a 5.x plugin says so.
+  Plugin validation accepted the retired `agents_live.agents` group while
+  provider discovery read `agents_live.providers`, so a plugin declaring
+  either one was rejected outright or accepted and then never loaded, which
+  surfaced much later as an unknown provider at dispatch. Each seam now owns
+  its group name and validation reads those, and a distribution still
+  declaring the retired group is refused with the group to port it to.
+- docs: state what the 5.x migrator cannot convert, and what to do instead.
+  `owner`, `env`, and a `runtime` carrying arguments stop a conversion rather
+  than being guessed at, and `migrate` reads `Agents/<name>.md` only, so
+  definitions in configured `agent_directories` roots are converted by hand.
+  Until now the refusal messages were the only place any of that was said.
 - fix: native Windows upgrades preserve co-installed plugins across the external handoff. (#251)
   The continuation reads the upgraded tool's receipt instead of its temporary
   environment, so declared plugins and their ownership backends are restored.
