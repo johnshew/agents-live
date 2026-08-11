@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.5 - 2026-08-10
+
 - fix: make native Windows self-upgrades observable and single-flight.
   One correlated helper now owns each installed environment, records a bounded
   transcript and terminal outcome, recovers after parent exit, and refuses a
