@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.1.1 - 2026-08-12
+
 - fix: hand a post-processor the extracted value, not the text around it.
   A provider wraps its answer in prose and a session footer, and the processor
   is the reason the value was extracted at all; it was being given all 24,637
