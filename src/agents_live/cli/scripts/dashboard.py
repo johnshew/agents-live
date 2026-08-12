@@ -142,30 +142,7 @@ def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
     of history that is a gigabyte of parsing per refresh, which blocks
     the event loop long enough for the browser to lose the websocket.
     """
-    newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
-    for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
-        if entry.get("phase") != "done":
-            continue
-        identifier = entry.get("agent_name")
-        if not isinstance(identifier, str):
-            continue
-        moment = _moment(entry.get("ts"))
-        if moment is None:
-            continue
-        status = str(entry.get("status", "")).lower()
-        slots = newest.setdefault(identifier, {})
-        for slot in ("any", status):
-            current = slots.get(slot)
-            if current is None or moment > current[0]:
-                slots[slot] = (moment, entry.get("ts"), status)
-    return {
-        identifier: (
-            slots["ok"][1] if "ok" in slots else None,
-            slots["error"][1] if "error" in slots else None,
-            slots["any"][2],
-        )
-        for identifier, slots in newest.items()
-    }
+    return _scan()[0]
 
 
 def _moment(value: object) -> datetime | None:
@@ -203,51 +180,75 @@ def last_runs(identifier: str,
 _CREDIT_TO_USD = 0.01
 
 
-def agent_cost(name: str) -> tuple[str, str]:
-    """(cost_24h, cost_7d) in dollars from the agent log.
+def agent_cost(identifier: str,
+               index: dict[str, tuple[float, float]] | None = None
+               ) -> tuple[str, str]:
+    """(cost_24h, cost_7d) in dollars for one identifier.
 
-    Sums each run's cost over the trailing 24 hours and the trailing 7
-    days. Returns ("-", "-") when the log has no cost-bearing runs in the
-    7-day window (e.g. handler-only agents or agents that have not run
-    recently); an agent that ran in the last week but not the last day
-    shows "$0.00" for the 24h figure.
+    Returns ("-", "-") when no run in the 7-day window carried a cost;
+    an agent that ran in the last week but not the last day shows
+    "$0.00" for the 24h figure.
     """
-    log_file = _require_repo_path(LOGS_DIR) / f"{name}.log"
-    if not log_file.is_file():
+    if index is None:
+        index = cost_index()
+    totals = index.get(identifier)
+    if totals is None:
         return ("-", "-")
+    day_total, week_total = totals
+    return (f"${day_total:.2f}", f"${week_total:.2f}")
+
+
+def cost_index() -> dict[str, tuple[float, float]]:
+    """(24h, 7d) dollars per identifier, from one pass over the logs.
+
+    Keyed on the identifier and read through the shared decoder, like
+    every other column. Reading ``<display name>.log`` looked in a file
+    the current runtime does not write, so the answer was "-" no matter
+    what a run had cost.
+    """
+    return _scan()[1]
+
+
+def _scan() -> tuple[dict[str, tuple[str | None, str | None, str]],
+                     dict[str, tuple[float, float]]]:
+    """(runs, costs) for every identifier, reading the directory once."""
     now = datetime.now(timezone.utc)
     day_cutoff = now - timedelta(days=1)
     week_cutoff = now - timedelta(days=7)
-    day_total = 0.0
-    week_total = 0.0
-    found = False
-    for line in log_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or '"cost_usd"' not in line and '"credits"' not in line:
+    newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
+    totals: dict[str, list[float]] = {}
+    for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
+        identifier = entry.get("agent_name")
+        if not isinstance(identifier, str):
             continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        ts = entry.get("ts")
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if dt < week_cutoff:
+        moment = _moment(entry.get("ts"))
+        if moment is None:
             continue
         usd = _entry_cost_usd(entry)
-        if usd is None:
+        if usd is not None and moment >= week_cutoff:
+            running = totals.setdefault(identifier, [0.0, 0.0])
+            running[1] += usd
+            if moment >= day_cutoff:
+                running[0] += usd
+        if entry.get("phase") != "done":
             continue
-        week_total += usd
-        if dt >= day_cutoff:
-            day_total += usd
-        found = True
-    if not found:
-        return ("-", "-")
-    return (f"${day_total:.2f}", f"${week_total:.2f}")
+        status = str(entry.get("status", "")).lower()
+        slots = newest.setdefault(identifier, {})
+        for slot in ("any", status):
+            current = slots.get(slot)
+            if current is None or moment > current[0]:
+                slots[slot] = (moment, entry.get("ts"), status)
+    runs = {
+        identifier: (
+            slots["ok"][1] if "ok" in slots else None,
+            slots["error"][1] if "error" in slots else None,
+            slots["any"][2],
+        )
+        for identifier, slots in newest.items()
+    }
+    costs = {
+        identifier: (day, week) for identifier, (day, week) in totals.items()}
+    return runs, costs
 
 
 def _running_version() -> str:
@@ -667,7 +668,7 @@ def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
     rows: list[dict] = []
     host = ownership.current_label()
-    runs = last_run_index()
+    runs, costs = _scan()
     for agent in collect_agents():
         name = agent["name"]
         identifier = agent["identifier"]
@@ -689,7 +690,9 @@ def agent_rows() -> list[dict]:
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
-        cost_day, cost_week = (agent_cost(name) if runtime != "none" else ("-", "-"))
+        cost_day, cost_week = (
+            agent_cost(identifier, costs) if runtime != "none"
+            else ("-", "-"))
         model = _agent_model(agent, STATE["models"])
         can_pause = local and state == "started"
         can_activate = local and state == "stopped"

@@ -219,6 +219,33 @@ def _extract_json(text: str):
             return json.loads(candidate.strip())
         except json.JSONDecodeError:
             continue
+    return _last_balanced_value(text)
+
+
+def _last_balanced_value(text: str):
+    """The last complete JSON object or array embedded in *text*.
+
+    Provider CLIs append session footers, and stripping them by prefix
+    means chasing every release: a copilot footer carrying credits and a
+    resume hint began failing agents that had already produced their
+    output. Finding the value is version-independent.
+    """
+    for opening, closing in (("{", "}"), ("[", "]")):
+        end = text.rfind(closing)
+        while end != -1:
+            depth = 0
+            for index in range(end, -1, -1):
+                character = text[index]
+                if character == closing:
+                    depth += 1
+                elif character == opening:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[index:end + 1])
+                        except json.JSONDecodeError:
+                            break
+            end = text.rfind(closing, 0, end)
     return None
 
 

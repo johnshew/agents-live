@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from agents_live import agent, obs, paths, plugins, runtime, state
-from agents_live.agent import providers
+from agents_live.agent import port, providers
 from agents_live.cli import lifecycle
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
@@ -784,6 +784,45 @@ class TestFailuresAreVisible(TempRepository):
         self.assertEqual("ok", status)
         self.assertEqual("2026-08-12T04:08:19.249904+00:00", last_ok)
         self.assertEqual("2026-08-11T16:06:30.128Z", last_err)
+
+
+class TestProviderOutputSurvivesItsFooter(unittest.TestCase):
+    """A provider CLI's own chatter must not fail a run that produced output.
+
+    A copilot release began printing a session footer after the answer.
+    The extractor parsed the whole text, so an agent that had done its
+    work, emitted valid JSON, and exited zero was recorded as
+    `output_parse_error`. Stripping footers by prefix means chasing every
+    release; finding the value does not.
+    """
+
+    FOOTER = (
+        "\n\nChanges    +0 -0\n"
+        "AI Credits 22.7 (1m 5s)\n"
+        "Tokens     \u2191 85.0k (40.4k cached) \u2022 \u2193 7.0k (1.2k reasoning)\n"
+        "Resume     copilot --resume=785fa91c-24b3-4ae5-a200-8124fd6a6c9c\n"
+    )
+
+    def test_a_session_footer_does_not_hide_the_answer(self) -> None:
+        payload = {"diagnosisDate": "2026-08-12", "groups": [{"severity": "noise"}]}
+        text = json.dumps(payload) + self.FOOTER
+        self.assertEqual(payload, port._extract_json(text))
+
+    def test_a_fenced_block_still_wins_over_surrounding_prose(self) -> None:
+        text = (
+            "Here is the result:\n\n```json\n{\"chosen\": true}\n```\n"
+            + self.FOOTER)
+        self.assertEqual({"chosen": True}, port._extract_json(text))
+
+    def test_the_last_complete_value_is_the_answer(self) -> None:
+        """Preamble can contain braces of its own; the answer is last."""
+        text = ('note: {"draft": 1} was superseded\n'
+                '{"final": 2}' + self.FOOTER)
+        self.assertEqual({"final": 2}, port._extract_json(text))
+
+    def test_output_with_no_json_at_all_still_reports_none(self) -> None:
+        self.assertIsNone(port._extract_json("no value here" + self.FOOTER))
+        self.assertIsNone(port._extract_json("{unbalanced" + self.FOOTER))
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
