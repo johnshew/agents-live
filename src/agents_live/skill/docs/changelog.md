@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.1.0 - 2026-08-12
+
 - feat: move an agent between runtimes from the CLI again. (#289)
   `start --transfer-here` claims an agent and starts it here;
   `start --transfer-to` assigns it to another runtime and withdraws its
