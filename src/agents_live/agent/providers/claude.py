@@ -39,7 +39,10 @@ class ClaudeProvider:
         if spec.effort:
             argv.extend(("--effort", spec.effort))
         for mcp in spec.mcps:
-            argv.extend(("--mcp", mcp))
+            argv.extend(("--mcp", mcp.name))
+        project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
+        if project_config:
+            argv.extend(("--mcp-config", project_config))
         pipeline_config = environment.get("PIPELINE_MCP_CLAUDE_CONFIG")
         if pipeline_config:
             argv.extend(("--mcp-config", pipeline_config))

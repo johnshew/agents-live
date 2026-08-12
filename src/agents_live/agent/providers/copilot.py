@@ -24,7 +24,10 @@ class CopilotProvider:
         if spec.model:
             argv.extend(("--model", spec.model))
         for mcp in spec.mcps:
-            argv.extend(("--mcp", mcp))
+            argv.extend(("--mcp", mcp.name))
+        project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
+        if project_config:
+            argv.extend(("--additional-mcp-config", f"@{project_config}"))
         pipeline_config = environment.get("PIPELINE_MCP_COPILOT_CONFIG")
         if pipeline_config:
             argv.extend(("--additional-mcp-config", f"@{pipeline_config}"))

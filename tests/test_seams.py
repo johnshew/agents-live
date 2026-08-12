@@ -1324,11 +1324,22 @@ class RecordingRunner:
         self.argv: list[tuple[str, ...]] = []
         self.inputs: list[str | None] = []
         self.environments: list[dict[str, str]] = []
+        self.mcp_configs: list[tuple[Path, dict[str, object]]] = []
 
     def run_child(self, argv, **kwargs):
         self.argv.append(tuple(argv))
         self.inputs.append(kwargs.get("input_text"))
         self.environments.append(dict(kwargs.get("env", {})))
+        arguments = tuple(argv)
+        for flag in ("--mcp-config", "--additional-mcp-config"):
+            if flag in arguments:
+                value = arguments[arguments.index(flag) + 1].removeprefix("@")
+                path = Path(value)
+                if path.name.startswith("agents-live-mcp-"):
+                    self.mcp_configs.append((
+                        path,
+                        json.loads(path.read_text(encoding="utf-8")),
+                    ))
         return self.outputs.pop(0)
 
 
@@ -1602,6 +1613,129 @@ class TestAgentPipeline(TempRepository):
         )
         self.assertFalse(result.ok)
         self.assertEqual("agent_invalid", result.category)
+
+    def test_plan_agent_receives_project_mcp_definition(self) -> None:
+        (self.root / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "repo-tool": {
+                    "type": "stdio",
+                    "command": "uv",
+                    "args": ["run", "server.py"],
+                    "env": {"SAFE_VALUE": "portable"},
+                }
+            }
+        }), encoding="utf-8")
+        self.skill("uses-project-mcp", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mcps: "[\\"repo-tool\\"]"',
+        ])
+        runner = RecordingRunner([ChildResult(("copilot",), 0, "done", "")])
+
+        result = dispatch(
+            Firing("uses-project-mcp", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        argv = runner.argv[-1]
+        self.assertIn("--mcp", argv)
+        self.assertEqual("repo-tool", argv[argv.index("--mcp") + 1])
+        config_path, payload = runner.mcp_configs[-1]
+        self.assertEqual(
+            "uv",
+            payload["mcpServers"]["repo-tool"]["command"],
+        )
+        self.assertFalse(config_path.exists())
+
+    def test_project_mcp_config_is_removed_after_cli_failure(self) -> None:
+        (self.root / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "repo-tool": {"type": "stdio", "command": "uv"},
+            }
+        }), encoding="utf-8")
+        self.skill("failing-project-mcp", [
+            'agents-live.selector: "claude"',
+            'agents-live.mcps: "[\\"repo-tool\\"]"',
+        ])
+        runner = RecordingRunner([
+            ChildResult(("claude",), 1, "", "provider failed"),
+        ])
+
+        result = dispatch(
+            Firing("failing-project-mcp", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(1, len(runner.mcp_configs))
+        self.assertFalse(runner.mcp_configs[0][0].exists())
+
+    def test_pipeline_rejects_project_mcp_before_provider_start(self) -> None:
+        (self.root / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "repo-tool": {"type": "stdio", "command": "uv"},
+            }
+        }), encoding="utf-8")
+        self.skill("isolated-pipeline", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mode: "pipeline"',
+            'agents-live.mcps: "[\\"repo-tool\\"]"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("isolated-pipeline", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("pipeline mode", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_declared_mcp_without_project_definition_fails_before_cli(self) -> None:
+        self.skill("missing-mcp", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mcps: "[\\"missing\\"]"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("missing-mcp", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("missing", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_cli_argument_rejection_has_its_own_category(self) -> None:
+        for returncode, message in (
+            (1, "error: unknown option '--mcp'"),
+            (2, "error: unexpected value for --mcp: repo-tool"),
+        ):
+            with self.subTest(returncode=returncode):
+                self.skill(
+                    f"bad-cli-flag-{returncode}",
+                    ['agents-live.selector: "copilot"'],
+                )
+                runner = RecordingRunner([ChildResult(
+                    ("copilot",), returncode, "", message,
+                )])
+
+                result = dispatch(
+                    Firing(
+                        f"bad-cli-flag-{returncode}",
+                        str(self.root),
+                        "manual",
+                    ),
+                    runner=runner,
+                )
+
+                self.assertFalse(result.ok)
+                self.assertEqual("cli_argument_rejected", result.category)
+                self.assertIn(message, result.message)
 
     def test_run_json_reports_the_outcome_not_only_the_text(self) -> None:
         self.skill("reported", ['agents-live.selector: "copilot:max"'])
