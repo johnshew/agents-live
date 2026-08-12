@@ -95,23 +95,17 @@ onto stdout is not available.
 
 5.x handlers wrote structured entries with `headless.EventLog`. In 6.x the
 replacement is the log file contract, not an import. A handler may append
-newline-delimited schema-5 JSON objects to a `*.jsonl` file in the selected
-repository's Agents Live log directory. That directory is the `logs`
-subdirectory of the repository state directory under the Agents Live state
-home, for example:
-
-```text
-$XDG_STATE_HOME/agents-live/repos/<repo-name>-<hash8>/logs/<agent>.jsonl
-```
-
-When `XDG_STATE_HOME` is unset, the state home is the host's normal per-user
-state directory. Runtime state never lives inside the project tree.
+newline-delimited schema-5 JSON objects to the path in
+`AGENTS_LIVE_LOG_FILE`. Dispatch resolves that file inside the selected
+repository's machine-local state directory. Handlers do not need to derive the
+state home or repository path hash, and runtime state never lives inside the
+project tree.
 
 The minimal record contract is:
 
 - `log_schema`: integer `5`.
 - `ts`: ISO-8601 timestamp string with a UTC offset. Prefer `Z` or `+00:00`.
-- `agent_name`: stable agent identifier. Use `AGENTS_LIVE_AGENT_NAME` when the
+- `agent_name`: stable agent identifier. Use `AGENTS_LIVE_AGENT_ID` when the
   handler is running under dispatch.
 
 `phase`, `status`, `trigger`, `message`, `duration_s`, `run_id`, `event_id`,
@@ -141,9 +135,8 @@ a tiny writer around the JSONL contract above. #105 can still add a first-class
 append handle with correlation context, per-step isolation, size bounds, and
 redaction rules without blessing module imports.
 
-`Event.attributes` is the tempting field and the wrong one: `obs/query.normalize`
-drops it on schema-1 records, so anything written there is stored and
-invisible. That warning does not apply to top-level fields on schema-5 records.
+Schema-1 `Event.attributes` are promoted when they do not conflict with
+normalized fields. New handlers should use top-level schema-5 fields instead.
 
 ## What to use instead
 
@@ -178,9 +171,11 @@ Notes on the two that are not mechanical substitutions:
 
 ### The contract a processor can rely on
 
-- **Environment in:** `AGENTS_LIVE_AGENT_NAME`; `AGENTS_LIVE_CHANGED_FILES`
-  as a JSON array when the firing carried changed files; plus any `env`
-  declared in the definition and any MCP resource values.
+- **Environment in:** `AGENTS_LIVE_AGENT_NAME` (display name),
+  `AGENTS_LIVE_AGENT_ID` (canonical identifier), `AGENTS_LIVE_LOG_FILE`
+  (append destination), `AGENTS_LIVE_CHANGED_FILES` as a JSON array when the
+  firing carried changed files, plus any `env` declared in the definition and
+  any MCP resource values.
 - **Working directory:** the repository root.
 - **Stdin:** the upstream step's text for a post-processor in non-pipeline
   mode.

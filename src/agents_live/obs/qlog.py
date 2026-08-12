@@ -124,7 +124,6 @@ NORMALIZED_COLUMN_TYPES = {
     "exit_code": "INTEGER",
 }
 REQUIRED_SCHEMA_FIELDS = ("ts", "agent_name", "log_schema")
-VALID_LOG_SCHEMAS = {1, 5}
 MAX_SCHEMA_SAMPLES = 5
 
 def _resolve_ts(value: str | None) -> str | None:
@@ -148,6 +147,8 @@ def _is_jsonl(path: str) -> bool:
     itself to JSONL sources while plaintext stays queryable for
     diagnostics.
     """
+    if Path(path).suffix.casefold() == ".jsonl":
+        return True
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -300,28 +301,8 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
     con.sql(f"CREATE VIEW log AS SELECT {', '.join(projections)} FROM _log_raw")
 
 
-def _record_schema_issues(record: object) -> str | None:
-    if not isinstance(record, dict):
-        return "row is not a JSON object"
-    missing = [
-        field for field in REQUIRED_SCHEMA_FIELDS
-        if record.get(field) in (None, "")
-    ]
-    invalid = []
-    schema = record.get("log_schema")
-    if schema not in VALID_LOG_SCHEMAS and "log_schema" not in missing:
-        invalid.append("log_schema")
-    if missing or invalid:
-        parts = []
-        if missing:
-            parts.append(f"missing field(s): {', '.join(missing)}")
-        if invalid:
-            parts.append(f"invalid field(s): {', '.join(invalid)}")
-        return ", ".join(parts)
-    return None
-
-
-def _schema_violation_samples(patterns: list[str]) -> list[str]:
+def _schema_violations(patterns: list[str]) -> tuple[int, list[str]]:
+    count = 0
     samples: list[str] = []
     for filename in _expand(patterns):
         if not _is_jsonl(filename):
@@ -336,15 +317,18 @@ def _schema_violation_samples(patterns: list[str]) -> list[str]:
                     try:
                         record = json.loads(stripped)
                     except ValueError:
-                        continue
-                    issue = _record_schema_issues(record)
+                        issue = "invalid JSON"
+                    else:
+                        issue = query.normalization_issue(record)
                     if issue:
-                        samples.append(f"{path}: line {line_number}: {issue}")
-                        if len(samples) >= MAX_SCHEMA_SAMPLES:
-                            return samples
+                        count += 1
+                        if len(samples) < MAX_SCHEMA_SAMPLES:
+                            samples.append(
+                                f"{path}: line {line_number}: {issue}"
+                            )
         except OSError:
             continue
-    return samples
+    return count, samples
 
 
 def check_schema(con: duckdb.DuckDBPyConnection,
@@ -368,16 +352,13 @@ def check_schema(con: duckdb.DuckDBPyConnection,
         # Row-level contract applies to JSONL sources only; plaintext
         # logs (heartbeat, spawn stderr, transcripts) load as all-NULL
         # rows by design and are exempt.
-        invalid_count = con.sql(
-            "SELECT count(*) FROM log "
-            "WHERE _jsonl AND (ts IS NULL OR agent_name IS NULL "
-            "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
-        ).fetchone()[0]
+        invalid_count, samples = (
+            _schema_violations(patterns) if patterns else (0, [])
+        )
         if invalid_count:
             detail = (
-                f"{invalid_count} JSONL row(s) violate required schema v5 fields"
+                f"{invalid_count} JSONL row(s) violate the supported log schema"
             )
-            samples = _schema_violation_samples(patterns) if patterns else []
             if samples:
                 detail += "; samples: " + "; ".join(samples)
             violations.append(detail)

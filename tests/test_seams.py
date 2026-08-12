@@ -1323,10 +1323,12 @@ class RecordingRunner:
         self.outputs = outputs
         self.argv: list[tuple[str, ...]] = []
         self.inputs: list[str | None] = []
+        self.environments: list[dict[str, str]] = []
 
     def run_child(self, argv, **kwargs):
         self.argv.append(tuple(argv))
         self.inputs.append(kwargs.get("input_text"))
+        self.environments.append(dict(kwargs.get("env", {})))
         return self.outputs.pop(0)
 
 
@@ -1355,6 +1357,38 @@ class TestObservability(unittest.TestCase):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_processors_receive_stable_identity_and_log_destination(self) -> None:
+        directory = self.skill("handler-contract", [
+            'agents-live.selector: "none"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "print('done')\n", encoding="utf-8"
+        )
+        spec = agent.load("handler-contract", root=self.root)
+        runner = RecordingRunner([
+            ChildResult(("post",), 0, "done", ""),
+        ])
+
+        result = dispatch(
+            Firing("handler-contract", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        environment = runner.environments[0]
+        self.assertEqual(spec.name, environment["AGENTS_LIVE_AGENT_NAME"])
+        self.assertEqual(spec.identifier, environment["AGENTS_LIVE_AGENT_ID"])
+        self.assertEqual(
+            str(
+                paths.repo_state_dir(self.root)
+                / "logs"
+                / f"{spec.identifier}.jsonl"
+            ),
+            environment["AGENTS_LIVE_LOG_FILE"],
+        )
+
     @unittest.skipIf(os.name == "nt", "POSIX shebang execution")
     def test_shell_processors_honor_shebang_and_require_execute_permission(self) -> None:
         directory = self.skill("shell-pipeline", [
