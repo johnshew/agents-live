@@ -33,7 +33,8 @@ from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
 from agents_live.agent.values import RawOutput
-from agents_live.runtime import Subscription
+from agents_live.dispatch import Firing, dispatch
+from agents_live.runtime import ChildResult, Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
 from agents_live.runtime.hosts import system as hostruntime
@@ -1132,6 +1133,87 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         code, _, err = self._run(["--all", "--transfer-here"])
         self.assertEqual(2, code)
         self.assertIn("--name", err)
+
+
+class TestRunsAreRecordedUnderOneName(TempRepository):
+    """However an agent is named on the command line, it has one history.
+
+    `run --name <display name>` recorded under that name while the
+    scheduled form recorded under the identifier, so an agent accumulated
+    two log files. Identifier-keyed readers saw only one of them, which
+    hid manual runs from the dashboard's history, cost, and health
+    columns, and made the older file decide a row's colour.
+    """
+
+    def _spec(self):
+        self.skill("named", [
+            'agents-live.selector: "fake/echo"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        return agent.load("named", root=self.root)
+
+    def _dispatch(self, requested: str):
+        runner = mock.Mock()
+        runner.run_child.return_value = ChildResult(
+            ("fake",), 0, '{"text":"done"}', "")
+        return dispatch(
+            Firing(requested, str(self.root), "manual"), runner=runner)
+
+    def test_a_run_named_by_display_name_lands_in_the_identifier_log(self) -> None:
+        spec = self._spec()
+        outcome = self._dispatch("named")
+        self.assertTrue(outcome.ok, outcome)
+        logs = paths.repo_state_dir(self.root) / "logs"
+        self.assertEqual(
+            [f"{spec.identifier}.jsonl"],
+            sorted(path.name for path in logs.glob("named*.jsonl")))
+        records = obs.load(obs.files(logs))
+        self.assertEqual(
+            {spec.identifier},
+            {r["agent_name"] for r in records if r.get("phase") == "done"})
+
+    def test_both_invocation_forms_share_one_history(self) -> None:
+        spec = self._spec()
+        self._dispatch("named")
+        self._dispatch(spec.identifier)
+        logs = paths.repo_state_dir(self.root) / "logs"
+        self.assertEqual(
+            [f"{spec.identifier}.jsonl"],
+            sorted(path.name for path in logs.glob("named*.jsonl")))
+        done = [r for r in obs.load(obs.files(logs))
+                if r.get("phase") == "done"]
+        self.assertEqual(2, len(done))
+
+
+    def test_the_post_processor_is_handed_the_value_not_the_prose(self) -> None:
+        """A provider wraps its answer in prose and a session footer, and
+        the processor is the reason the value was extracted at all.
+        Handing it the surrounding text made it fail on 24,715 bytes that
+        do not begin with JSON."""
+        self.skill("contracted", [
+            'agents-live.selector: "fake/echo"',
+            'agents-live.schedule: "0 8 * * *"',
+            'agents-live.post-processor: "record.sh"',
+        ])
+        directory = self.root / "Agents" / "contracted"
+        script = directory / "record.sh"
+        script.write_text("#!/bin/sh\ncat >/dev/null\n", encoding="utf-8")
+        script.chmod(0o755)
+
+        answer = {"files": [{"path": "out.md", "content": "line one\nline two"}]}
+        wrapped = (
+            "Here is the result:\n\n" + json.dumps(answer)
+            + "\n\nAI Credits 1.2 (3s)\nResume copilot --resume=abc\n")
+        runner = mock.Mock()
+        runner.run_child.side_effect = [
+            ChildResult(("fake",), 0, json.dumps({"text": wrapped}), ""),
+            ChildResult(("sh",), 0, "", ""),
+        ]
+        outcome = dispatch(
+            Firing("contracted", str(self.root), "manual"), runner=runner)
+        self.assertTrue(outcome.ok, outcome)
+        handed = runner.run_child.call_args_list[-1].kwargs["input_text"]
+        self.assertEqual(answer, json.loads(handed))
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
