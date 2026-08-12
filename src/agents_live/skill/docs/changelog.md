@@ -6,6 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: honor shell processor shebangs on POSIX hosts. (#283)
+  Executable `.sh` processors now run through their declared interpreter, and
+  non-executable processors fail with a clear validation error.
+- fix: skip malformed timeline records without timestamps. (#284)
+  Valid neighboring events remain queryable when a schema-5 log contains a
+  damaged record.
+- fix: accept dashboard project arguments and bind refresh timers safely. (#285)
+  `agents-live dashboard PROJECT` reuses repository selection, and disconnected
+  clients can no longer crash a delayed refresh.
+
 ## 6.0.5 - 2026-08-10
 
 - fix: make native Windows self-upgrades observable and single-flight.
