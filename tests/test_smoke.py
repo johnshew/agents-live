@@ -172,6 +172,17 @@ class TestSixRuntimeSmoke(SmokeRepository):
         installed = self.root / ".claude" / "skills" / "agents-live"
         for relative in ("SKILL.md", "VERSION", "docs", "templates"):
             self.assertTrue((installed / relative).exists(), relative)
+        guide = installed / "docs" / "model-selection.md"
+        self.assertTrue(guide.is_file())
+        self.assertIn(
+            "docs/model-selection.md",
+            (installed / "SKILL.md").read_text(encoding="utf-8"),
+        )
+
+        guide.write_text("stale\n", encoding="utf-8")
+        (installed / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+        self.assertEqual("refreshed", init.install_skill(self.root))
+        self.assertNotEqual("stale\n", guide.read_text(encoding="utf-8"))
 
     def test_administrative_events_use_the_observability_schema(self) -> None:
         obs.admin.record(

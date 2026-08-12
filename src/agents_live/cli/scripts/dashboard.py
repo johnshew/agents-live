@@ -188,7 +188,7 @@ def agent_cost(identifier: str,
     if totals is None:
         return ("-", "-")
     day_total, week_total = totals
-    return (f"{day_total:.1f}", f"{week_total:.1f}")
+    return (f"{day_total:.2f}", f"{week_total:.2f}")
 
 
 def cost_index() -> dict[str, tuple[float, float]]:
@@ -686,6 +686,7 @@ def agent_rows() -> list[dict]:
         cost_day, cost_week = (
             agent_cost(identifier, costs) if runtime != "none"
             else ("-", "-"))
+        cost_values = costs.get(identifier)
         model = _agent_model(agent, STATE["models"])
         can_pause = local and state == "started"
         can_activate = local and state == "stopped"
@@ -703,6 +704,8 @@ def agent_rows() -> list[dict]:
             "last_err": err_ago,
             "cost_day": cost_day,
             "cost_week": cost_week,
+            "cost_day_value": cost_values[0] if cost_values else None,
+            "cost_week_value": cost_values[1] if cost_values else None,
             "unhealthy": unhealthy,
             "local": local,
             "can_pause": can_pause,
@@ -762,11 +765,11 @@ def _filtered_agent_rows(rows: list[dict], filters: dict) -> list[dict]:
 def _cost_totals(rows: list[dict]) -> tuple[str, str]:
     def total(field: str) -> str:
         values = [
-            float(row[field])
+            float(row[f"{field}_value"])
             for row in rows
-            if row[field] != "-"
+            if row.get(f"{field}_value") is not None
         ]
-        return f"{sum(values):.1f}"
+        return f"{sum(values):.2f}"
 
     return total("cost_day"), total("cost_week")
 

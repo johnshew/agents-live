@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 
 from ..values import Completion, Launch, RawOutput, Request, ResolvedSpec
 
@@ -70,7 +71,10 @@ def _usage(stdout: str) -> tuple[tuple[str, str | None], ...]:
     if credits:
         credit_value = credits.group(1)
         values.append(("ai_credits", credit_value))
-        values.append(("list_cost_usd", str(float(credit_value) * 0.01)))
+        values.append((
+            "list_cost_usd",
+            str(Decimal(credit_value) * Decimal("0.01")),
+        ))
     tokens = _TOKENS.search(text)
     if tokens:
         values.append(("input_tokens", tokens.group(1)))

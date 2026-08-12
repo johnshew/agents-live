@@ -1072,6 +1072,12 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         self.assertEqual("40.4k", usage["cached_tokens"])
         self.assertEqual("7.0k", usage["output_tokens"])
 
+    def test_copilot_list_cost_uses_exact_decimal_arithmetic(self) -> None:
+        completion = providers.get("copilot").parse(RawOutput(
+            0, "AI Credits 57.7\n", "",
+        ))
+        self.assertEqual("0.577", dict(completion.usage)["list_cost_usd"])
+
     def test_output_without_a_footer_reports_no_usage(self) -> None:
         completion = providers.get("copilot").parse(
             RawOutput(0, '{"done": true}\n', ""))
@@ -1112,8 +1118,21 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             costs = dashboard.cost_index()
         self.assertEqual((0.227, 0.227), costs["spender-1234567890"])
         self.assertEqual(
-            ("0.2", "0.2"),
+            ("0.23", "0.23"),
             dashboard.agent_cost("spender-1234567890", costs))
+
+    def test_dashboard_totals_unrounded_list_cost(self) -> None:
+        dashboard = self._dashboard()
+        rows = [
+            {
+                "cost_day": "0.04",
+                "cost_week": "0.04",
+                "cost_day_value": 0.04,
+                "cost_week_value": 0.04,
+            }
+            for _ in range(10)
+        ]
+        self.assertEqual(("0.40", "0.40"), dashboard._cost_totals(rows))
 
     def _dashboard(self):
         nicegui = mock.MagicMock()
