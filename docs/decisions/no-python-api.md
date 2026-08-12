@@ -1,7 +1,7 @@
 ---
 title: No Python API for Processors Decision
 description: Why agents-live exposes a CLI and environment contract instead of an importable Python surface, and what handlers should use instead
-ms.date: 2026-08-11
+ms.date: 2026-08-12
 ms.topic: concept
 ---
 
@@ -9,7 +9,9 @@ ms.topic: concept
 
 ## Status
 
-Accepted for 6.0. Emission side deferred to
+Accepted for 6.0. Handler-authored schema-5 JSONL records in the repository
+log directory are supported. A richer environment-provided append-only handle
+with correlation context is still deferred to
 [#105](https://github.com/johnshew/agents-live/issues/105).
 
 ## Context
@@ -89,23 +91,59 @@ true}` object, and POST stdout becomes the run's outcome text. A diagnostic
 line written there corrupts a control channel, so multiplexing observability
 onto stdout is not available.
 
-### The emission gap this leaves
+### Handler-authored log records
 
-5.x handlers wrote structured entries with `headless.EventLog`. 6.0 gave
-nothing back, so processors can record only through exit code, stderr, and
-stdout. `c8968ba` narrowed that by recording each step's diagnostics and the
-run's output text on the run event, bounded by `_RECORDED_MAX_CHARS`, so a
-scheduled run's output no longer vanishes into `--quiet`.
+5.x handlers wrote structured entries with `headless.EventLog`. In 6.x the
+replacement is the log file contract, not an import. A handler may append
+newline-delimited schema-5 JSON objects to a `*.jsonl` file in the selected
+repository's Agents Live log directory. That directory is the `logs`
+subdirectory of the repository state directory under the Agents Live state
+home, for example:
 
-A structured channel is deliberately **not** in 6.0, because it would commit
-to a record schema before #105 settles field names. Shipping a schema in a
-major release and changing it afterwards is worse than shipping none. The
-intended shape is an environment-provided append-only JSONL handle with
-correlation context, per-step isolation, size bounds, and redaction rules,
-designed once under #105.
+```text
+$XDG_STATE_HOME/agents-live/repos/<repo-name>-<hash8>/logs/<agent>.jsonl
+```
+
+When `XDG_STATE_HOME` is unset, the state home is the host's normal per-user
+state directory. Runtime state never lives inside the project tree.
+
+The minimal record contract is:
+
+- `log_schema`: integer `5`.
+- `ts`: ISO-8601 timestamp string with a UTC offset. Prefer `Z` or `+00:00`.
+- `agent_name`: stable agent identifier. Use `AGENTS_LIVE_AGENT_NAME` when the
+  handler is running under dispatch.
+
+`phase`, `status`, `trigger`, `message`, `duration_s`, `run_id`, `event_id`,
+and `level` are conventional fields used by default views and filters, but
+they are not required for a row to load.
+
+The reserved names are the normalized columns shown by `agents-live logs`:
+`ts`, `_src`, `_jsonl`, `run_id`, `event_id`, `agent_name`, `phase`, `status`,
+`trigger`, `duration_s`, `cost_usd`, `credits`, `premium_requests`,
+`log_schema`, `level`, `message`, `error_category`, `traceback`, and `_files`.
+Use those names only with their documented meaning and type. Names beginning
+with `_` are for reader-owned metadata.
+
+Any other top-level JSON field survives to the query layer. Because the log
+query unions records by name, custom handler fields become addressable columns
+in `--columns` and `--sql`:
+
+```bash
+agents-live logs --all \
+  --columns ts,agent_name,phase,message,fetched,written,cleared
+```
+
+This is intentionally a file contract rather than a shipped Python helper.
+Handlers run in several languages, and a package helper would become another
+public import path to preserve. A consumer that wants convenience should vendor
+a tiny writer around the JSONL contract above. #105 can still add a first-class
+append handle with correlation context, per-step isolation, size bounds, and
+redaction rules without blessing module imports.
 
 `Event.attributes` is the tempting field and the wrong one: `obs/query.normalize`
-drops it, so anything written there is stored and invisible.
+drops it on schema-1 records, so anything written there is stored and
+invisible. That warning does not apply to top-level fields on schema-5 records.
 
 ## What to use instead
 
@@ -121,8 +159,9 @@ If a handler imports `agents_live`, replace the import with a CLI call.
 | `headless.list_active_agent_names()` | `agents-live status --json`, `state` field (`started`, `stopped`, `unloadable`) |
 | `headless.list_spawned_definitions()` | `agents-live status --json`, derived from `execution.schedules` and `execution.watch` |
 | `headless.load_agent_config(name)` | `agents-live status --json`, `execution` object: `selector`, `provider`, `model`, `mode`, `schedules`, `watch`, `mcps`, `pre_processor`, `post_processor` |
+| `legacy.mcp_config_loader` | no CLI replacement in 6.x. Vendor the loader logic into the consumer if it must survive 7.0, or read the consumer's own MCP configuration directly. `legacy/` is removed in 7.0 |
 | `headless.EventLog` (reading) | `agents-live logs --json` - `ts`, `agent_name`, `phase`, `status`, `message`, `trigger`, `duration_s` |
-| `headless.EventLog` (writing) | no replacement in 6.0; write to stdout or stderr and let dispatch record it. Structured emission is #105 |
+| `headless.EventLog` (writing) | append schema-5 JSONL to the repository log directory when you need structured, queryable handler events. For ordinary diagnostics, write stderr and let dispatch attach it to the run event. A richer append handle remains #105 |
 | `headless.AgentsLiveError` | `agents-live status --json`, `loadable` plus `error` per row; or a non-zero CLI exit status |
 | hand-rolled spawn | `agents-live run --name <identifier> --json` - it both spawns and records |
 | health beacon inspection | `agents-live doctor --json` |
@@ -163,18 +202,18 @@ Notes on the two that are not mechanical substitutions:
 - **Stdout control commands for observability.** Disqualified by the
   injection risk from model-authored text and by stdout already carrying
   control meaning.
-- **A structured emission channel in 6.0.** Rejected on timing: it would
-  freeze a schema that #105 has not settled.
+- **An importable EventLog replacement in 6.0.** Rejected because the supported
+  surface is the schema-5 JSONL file contract. A package helper would freeze a
+  module path before #105 settles the richer append handle.
 
 ## Consequences
 
 - Consumer code is decoupled from package layout, so internal moves stop
   breaking handlers.
-- 6.0 ships with less emission capability for handlers than 5.x offered. This
-  is a stated regression, not an oversight, and the changelog and migration
-  guidance say so.
+- 6.x supports structured handler emission through schema-5 JSONL files, but
+  does not provide an importable writer helper.
 - Introspection features must be added to the JSON CLI rather than to a
   library, which keeps one tested surface.
-- A future helper library remains possible, but only as emission-only
-  convenience over a schema that stays independently usable, so a processor
-  writing raw JSONL never depends on it.
+- A future helper remains possible, but only as emission-only convenience over
+  a schema that stays independently usable, so a processor writing raw JSONL
+  never depends on it.

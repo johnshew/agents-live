@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import glob as _glob
+import json
 import sys
 from pathlib import Path
 
@@ -122,6 +123,9 @@ NORMALIZED_COLUMN_TYPES = {
     "log_schema": "INTEGER",
     "exit_code": "INTEGER",
 }
+REQUIRED_SCHEMA_FIELDS = ("ts", "agent_name", "log_schema")
+VALID_LOG_SCHEMAS = {1, 5}
+MAX_SCHEMA_SAMPLES = 5
 
 def _resolve_ts(value: str | None) -> str | None:
     """Normalize a bound through the decoder every reader shares."""
@@ -296,14 +300,62 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
     con.sql(f"CREATE VIEW log AS SELECT {', '.join(projections)} FROM _log_raw")
 
 
-def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
+def _record_schema_issues(record: object) -> str | None:
+    if not isinstance(record, dict):
+        return "row is not a JSON object"
+    missing = [
+        field for field in REQUIRED_SCHEMA_FIELDS
+        if record.get(field) in (None, "")
+    ]
+    invalid = []
+    schema = record.get("log_schema")
+    if schema not in VALID_LOG_SCHEMAS and "log_schema" not in missing:
+        invalid.append("log_schema")
+    if missing or invalid:
+        parts = []
+        if missing:
+            parts.append(f"missing field(s): {', '.join(missing)}")
+        if invalid:
+            parts.append(f"invalid field(s): {', '.join(invalid)}")
+        return ", ".join(parts)
+    return None
+
+
+def _schema_violation_samples(patterns: list[str]) -> list[str]:
+    samples: list[str] = []
+    for filename in _expand(patterns):
+        if not _is_jsonl(filename):
+            continue
+        path = Path(filename)
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except ValueError:
+                        continue
+                    issue = _record_schema_issues(record)
+                    if issue:
+                        samples.append(f"{path}: line {line_number}: {issue}")
+                        if len(samples) >= MAX_SCHEMA_SAMPLES:
+                            return samples
+        except OSError:
+            continue
+    return samples
+
+
+def check_schema(con: duckdb.DuckDBPyConnection,
+                 patterns: list[str] | None = None) -> list[str]:
     """Return contract violations for normalized columns in the log view."""
     actual = {
         name: dtype
         for name, dtype, *_ in con.sql("DESCRIBE log").fetchall()
     }
     violations = []
-    for required in ("ts", "agent_name", "log_schema"):
+    for required in REQUIRED_SCHEMA_FIELDS:
         if required not in actual:
             violations.append(f"missing required column: {required}")
     for name, expected_type in NORMALIZED_COLUMN_TYPES.items():
@@ -322,9 +374,13 @@ def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
             "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
         ).fetchone()[0]
         if invalid_count:
-            violations.append(
+            detail = (
                 f"{invalid_count} JSONL row(s) violate required schema v5 fields"
             )
+            samples = _schema_violation_samples(patterns) if patterns else []
+            if samples:
+                detail += "; samples: " + "; ".join(samples)
+            violations.append(detail)
     return violations
 
 
@@ -411,7 +467,7 @@ def main() -> int:
                     help="table (default; ASCII rules when not a terminal), "
                          "or csv/jsonl, which are the forms to parse")
     ap.add_argument("--check-schema", action="store_true",
-                    help="validate normalized live-plus-archive column types")
+                    help="validate normalized columns and sample row errors")
     args = ap.parse_args()
 
     try:
@@ -460,7 +516,7 @@ def main() -> int:
     build_view(con, patterns, archives=archives)
 
     if args.check_schema:
-        violations = check_schema(con)
+        violations = check_schema(con, patterns)
         if violations:
             preflight.emit_failure(
                 "logs", "; ".join(violations), code="schema_error")
