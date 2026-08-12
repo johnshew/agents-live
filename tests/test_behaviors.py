@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -708,6 +708,46 @@ class TestFailuresAreVisible(TempRepository):
         self.assertIn("span_everything", source)
         self.assertIn("args.errors and args.name is None",
                       Path(qlog.__file__).read_text(encoding="utf-8"))
+
+
+    def test_a_relative_window_narrows_monotonically(self) -> None:
+        """The bound is compared as a string, so an unresolved one does
+        not fail. `"2026-..." < "30m"` is true and discards everything;
+        `< "1h"` is false and discards nothing. The same timeline
+        answered "no events found" or "here is everything" depending on
+        which word was typed."""
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        (directory / "windowed.jsonl").write_text("\n".join(
+            json.dumps({
+                "log_schema": 5,
+                "ts": (now - timedelta(minutes=minutes)).isoformat(),
+                "agent_name": "windowed", "phase": "done", "status": "ok",
+            })
+            for minutes in (5, 45, 90, 400)
+        ) + "\n", encoding="utf-8")
+        counts = [
+            len(obs.load(obs.files(directory), since=window))
+            for window in ("30m", "1h", "2h", "1d")
+        ]
+        self.assertEqual([1, 2, 3, 4], counts)
+        self.assertEqual(counts, sorted(counts))
+
+    def test_an_unreadable_window_is_refused_rather_than_applied(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            obs.query.resolve_since("not-a-time")
+        self.assertIn("30m", str(caught.exception))
+
+    def test_every_reader_resolves_the_window_the_same_way(self) -> None:
+        """Two readers with two parsers is how one accepted `30m` and the
+        other compared against the literal string."""
+        self.assertIs(qlog._resolve_ts("30m") is None, False)
+        for value in ("30m", "2 hours ago", "1d"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    obs.query.resolve_since(value)[:16],
+                    qlog._resolve_ts(value)[:16])
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

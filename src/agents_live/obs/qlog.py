@@ -73,14 +73,13 @@ PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 from agents_live import preflight  # noqa: E402
+from agents_live.obs import query  # noqa: E402
 from agents_live.paths import (  # noqa: E402
     host_logs_dir,
     repo_state_dir,
     resolve_root,
 )
 
-import re
-from datetime import datetime, timedelta, timezone
 
 def logs_dir() -> Path:
     """This repo's log directory, resolved when it is asked for.
@@ -124,45 +123,9 @@ NORMALIZED_COLUMN_TYPES = {
     "exit_code": "INTEGER",
 }
 
-_RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
-_RELATIVE_WORDS = re.compile(
-    r"^(\d+)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
-    r"(?:\s+ago)?$",
-    re.IGNORECASE,
-)
-_UNIT_TO_DELTA = {
-    "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
-    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
-    "d": "d", "day": "d", "days": "d",
-}
-
-
 def _resolve_ts(value: str | None) -> str | None:
-    """Normalize a relative or ISO-8601 bound to an aware UTC timestamp."""
-    if value is None:
-        return None
-    text = value.strip()
-    match = _RELATIVE_COMPACT.match(text) or _RELATIVE_WORDS.match(text)
-    if match:
-        count = int(match.group(1))
-        unit = _UNIT_TO_DELTA[match.group(2).lower()]
-        delta = {
-            "m": timedelta(minutes=count),
-            "h": timedelta(hours=count),
-            "d": timedelta(days=count),
-        }[unit]
-        parsed = datetime.now(timezone.utc) - delta
-    else:
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(
-                f"invalid timestamp {value!r}; expected ISO-8601 or a relative "
-                "duration such as 30m, 2h, or '1 day ago'"
-            ) from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Normalize a bound through the decoder every reader shares."""
+    return query.resolve_since(value)
 
 
 def _expand(patterns: list[str]) -> list[str]:

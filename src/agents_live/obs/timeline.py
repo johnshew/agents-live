@@ -73,7 +73,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("filter", nargs="?", help="Agent name or content substring (case-insensitive)")
     p.add_argument("--all", action="store_true", help="Show all agents (no filter)")
-    p.add_argument("--since", help="Start time (ISO-8601 UTC)")
+    p.add_argument("--since", help="Start time: ISO-8601 UTC or a relative "
+                   "duration such as 30m, 2h, or '1 day ago'")
     p.add_argument("--last", type=int, default=50, help="Last N events (default 50)")
     p.add_argument("--logs", nargs="*", help="Specific log files to read "
                    "(default: all of this repo's logs plus host-level logs)")
@@ -237,6 +238,11 @@ def main() -> int:
     # positional filter (#89).
     text_filter = args.filter
     try:
+        since = query.resolve_since(args.since)
+    except ValueError as exc:
+        preflight.emit_failure("logs timeline", str(exc), code="usage_error")
+        return 2
+    try:
         log_files = find_log_files(args.logs)
     except ValueError as exc:
         preflight.emit_failure(
@@ -246,7 +252,7 @@ def main() -> int:
     # Load all matching entries from all log files
     all_entries: list[dict] = []
     for log_file in log_files:
-        all_entries.extend(load_jsonl(log_file, text_filter, args.since))
+        all_entries.extend(load_jsonl(log_file, text_filter, since))
 
     # Sort by timestamp
     all_entries.sort(key=lambda e: e.get("ts", ""))
