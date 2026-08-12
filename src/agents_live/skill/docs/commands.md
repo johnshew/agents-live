@@ -45,10 +45,19 @@ the one convergence operation.
 agents-live start link-check
 agents-live start --all
 agents-live start link-check --dry-run
+agents-live start link-check --transfer-here
+agents-live start link-check --transfer-to hostname/runtime/uuid
 ```
 
 Dry-run previews the same diff without writing started state, triggers, or
 processes.
+
+`--transfer-here` claims an agent for this runtime and starts it here.
+`--transfer-to` assigns it to another runtime, named by the full identity
+`status --json` reports, and withdraws its triggers from this host. Both
+need an ownership registry backend, and the first transfer in a project
+declares registry ownership. Use `--transfer-here` to recover an agent
+whose owner value cannot be matched to any runtime.
 
 ### `stop`
 
@@ -106,6 +115,7 @@ post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--scheduled" ] [ "--boot" ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ]
+                 [ "--transfer-here" | "--transfer-to" IDENTITY ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
 logs         ::= "logs" ( logs_query | "timeline" timeline_args )
@@ -129,7 +139,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, --scheduled, --boot, --quiet | Execute an agent once. |
-| start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n | Start automatic runs for an agent. |
+| start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --transfer-here, --transfer-to | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
 | status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |

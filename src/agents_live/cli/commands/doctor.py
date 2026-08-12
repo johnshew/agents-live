@@ -51,6 +51,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 checks.append({
                     "check": f"started state {name}", "ok": True, "detail": "readable"})
+                torn = _damaged_records(root)
+                if torn:
+                    # Reported, not failed: the loss is in history a
+                    # healthy host can no longer change, and a permanent
+                    # nonzero exit would gate every check that reads it.
+                    checks.append({
+                        "check": f"event log {name}", "ok": True,
+                        "detail": (
+                            f"{torn} unreadable record(s) from before "
+                            "record-atomic appends; that history will not "
+                            "appear in logs, timeline, or the dashboard"),
+                    })
         try:
             collected = lifecycle.collect(persist=False)
         except lifecycle.CollectionUnavailable as exc:
@@ -100,6 +112,19 @@ def main(argv: list[str] | None = None) -> int:
         if update_check.interactive():
             print(f"\n{update_check.status_text()}")
     return 0 if ok else 1
+
+
+def _damaged_records(root) -> int:
+    """Undecodable lines in this repository's event logs.
+
+    A dropped line looks exactly like one that was never written, so the
+    loss has to be counted somewhere an operator reads (#290).
+    """
+    from ... import obs, paths  # noqa: PLC0415 - keeps import cost off --help
+    try:
+        return obs.query.damaged(obs.files(paths.repo_state_dir(root) / "logs"))
+    except (OSError, ValueError):
+        return 0
 
 
 def _host_check(health: runtime.Health) -> dict[str, object]:

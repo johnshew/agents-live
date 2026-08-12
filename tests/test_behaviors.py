@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import importlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -25,9 +28,11 @@ from unittest import mock
 
 from agents_live import agent, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
-from agents_live.cli import lifecycle
+from agents_live.cli import lifecycle, upgrade_handoff
+from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
+from agents_live.agent.values import RawOutput
 from agents_live.runtime import Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
@@ -823,6 +828,310 @@ class TestProviderOutputSurvivesItsFooter(unittest.TestCase):
     def test_output_with_no_json_at_all_still_reports_none(self) -> None:
         self.assertIsNone(port._extract_json("no value here" + self.FOOTER))
         self.assertIsNone(port._extract_json("{unbalanced" + self.FOOTER))
+
+
+class TestPendingUpgradeIdentity(TempRepository):
+    """A durable record outlives the process it names.
+
+    The handoff is single-flight, so a pid that reads as alive when it is
+    really a different process refuses every later upgrade instead of
+    merely reporting stale information.
+    """
+
+    def _pending(self, **overrides) -> dict:
+        pending = {
+            "operation_id": "operation-1",
+            "helper_pid": 4321,
+            "helper_started_at": 1000.0,
+            "created_at": 900.0,
+        }
+        pending.update(overrides)
+        return pending
+
+    def test_a_reused_pid_is_not_the_helper_that_was_started(self) -> None:
+        with (
+            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                              return_value=True),
+            mock.patch.object(upgrade_handoff.hostruntime,
+                              "process_start_time", return_value=5000.0),
+        ):
+            self.assertFalse(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+
+    def test_the_same_process_still_counts_as_running(self) -> None:
+        with (
+            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                              return_value=True),
+            mock.patch.object(upgrade_handoff.hostruntime,
+                              "process_start_time", return_value=1000.4),
+        ):
+            self.assertTrue(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+
+    def test_an_unknown_start_time_is_not_treated_as_a_mismatch(self) -> None:
+        """Unavailable is not evidence. Refusing on it would abandon a
+        live upgrade and let a second one race the same environment."""
+        for recorded, current in ((None, 5000.0), (1000.0, None)):
+            with self.subTest(recorded=recorded, current=current):
+                pending = self._pending()
+                if recorded is None:
+                    pending.pop("helper_started_at")
+                with (
+                    mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                                      return_value=True),
+                    mock.patch.object(upgrade_handoff.hostruntime,
+                                      "process_start_time",
+                                      return_value=current),
+                ):
+                    self.assertTrue(upgrade_handoff._helper_is_running(
+                        pending, 4321))
+
+    def test_a_dead_pid_is_never_running(self) -> None:
+        with mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                               return_value=False):
+            self.assertFalse(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+        self.assertFalse(
+            upgrade_handoff._helper_is_running(self._pending(), None))
+
+    def test_the_start_time_probe_answers_for_this_process(self) -> None:
+        """The guard is only as good as the primitive under it."""
+        started = hostruntime.process_start_time(os.getpid())
+        self.assertIsNotNone(started)
+        self.assertLess(abs(time.time() - started), 3600)
+        self.assertIsNone(hostruntime.process_start_time(999_999_999))
+
+
+class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
+    """Several processes append to one log, and a split record is lost.
+
+    Watchers, scheduled runs, and the maintenance loop share these files.
+    A live deployment accumulated 11,577 records spliced into each other,
+    and because every reader skips what it cannot decode, the history
+    simply went missing.
+
+    The race itself is not reliably reproducible - four writers against a
+    text-mode stream pass most of the time - so what is asserted is the
+    mechanism that makes it impossible: one record leaves in one write,
+    at a position the kernel chooses.
+    """
+
+    def _event(self, size: int = 40000):
+        return obs.create(
+            "done", "ok", repository="/repo", agent="writer",
+            run_id="run-1", origin="test", message="x" * size)
+
+    def test_one_record_leaves_in_one_write(self) -> None:
+        log = paths.repo_state_dir(self.root) / "logs" / "shared.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        sizes: list[int] = []
+        flags: list[int] = []
+        real_write, real_open = os.write, os.open
+
+        def counting_write(descriptor, data):
+            sizes.append(len(data))
+            return real_write(descriptor, data)
+
+        def recording_open(path, opened_flags, *rest):
+            flags.append(opened_flags)
+            return real_open(path, opened_flags, *rest)
+
+        for size in (10, 40000):
+            with self.subTest(size=size):
+                sizes.clear()
+                flags.clear()
+                with (
+                    mock.patch.object(obs.events.os, "write", counting_write),
+                    mock.patch.object(obs.events.os, "open", recording_open),
+                ):
+                    obs.record(log, self._event(size))
+                self.assertEqual(
+                    1, len(sizes),
+                    f"record left in {len(sizes)} writes: {sizes}")
+                self.assertTrue(flags and flags[0] & os.O_APPEND)
+
+    def test_the_records_written_are_the_records_read_back(self) -> None:
+        log = paths.repo_state_dir(self.root) / "logs" / "shared.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(20):
+            obs.record(log, self._event(4000))
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(20, len(lines))
+        self.assertEqual(20, len([json.loads(line) for line in lines]))
+
+    def test_lost_history_is_counted_rather_than_skipped_in_silence(self) -> None:
+        """A dropped line looks exactly like one that was never written."""
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "torn.jsonl").write_text("\n".join([
+            '{"log_schema":5,"ts":"2026-08-01T00:00:00Z","agent_name":"a",'
+            '"phase":"done","status":"ok"}',
+            '{"ts":"2026-08-01T00:01:00Z",{"ts":"2026-08-01T00:02:00Z"}',
+            "",
+            "not-json",
+        ]) + "\n", encoding="utf-8")
+        self.assertEqual(2, obs.query.damaged(obs.files(directory)))
+        self.assertEqual(1, len(obs.load(obs.files(directory))))
+
+
+class TestRunsRecordWhatTheySpent(TempRepository):
+    """The provider meters the work; nothing else can.
+
+    Across 47,810 records on a live host, none carried usage, so both
+    cost columns and the totals line had never shown a number. The figure
+    was being printed on stdout and discarded.
+    """
+
+    FOOTER = (
+        "\x1b[32mChanges\x1b[0m    +0 -0\n"
+        "AI Credits 22.7 (1m 5s)\n"
+        "Tokens     \u2191 85.0k (40.4k cached) \u2022 \u2193 7.0k (1.2k reasoning)\n"
+        "Resume     copilot --resume=785fa91c\n"
+    )
+
+    def test_the_copilot_footer_is_recorded_as_usage(self) -> None:
+        completion = providers.get("copilot").parse(
+            RawOutput(0, '{"done": true}\n' + self.FOOTER, ""))
+        usage = dict(completion.usage)
+        self.assertEqual("22.7", usage["ai_credits"])
+        self.assertEqual("85.0k", usage["input_tokens"])
+        self.assertEqual("40.4k", usage["cached_tokens"])
+        self.assertEqual("7.0k", usage["output_tokens"])
+
+    def test_output_without_a_footer_reports_no_usage(self) -> None:
+        completion = providers.get("copilot").parse(
+            RawOutput(0, '{"done": true}\n', ""))
+        self.assertEqual((), completion.usage)
+
+    def test_the_dashboard_reads_credits_and_never_invents_currency(self) -> None:
+        """What a credit costs belongs to the account plan. Converting
+        here produced a figure that looked authoritative and was made up."""
+        dashboard = self._dashboard()
+        self.assertEqual(22.7, dashboard._entry_cost_usd(
+            {"usage": [["ai_credits", "22.7"]]}))
+        self.assertIsNone(dashboard._entry_cost_usd({"usage": []}))
+        source = Path(dashboard.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("_CREDIT_TO_USD", source)
+
+    def test_a_recorded_run_reaches_the_column(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "spender-1234567890.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="spender-1234567890", run_id="run-1", origin="manual",
+            usage=(("ai_credits", "22.7"),)))
+        dashboard = self._dashboard()
+        with mock.patch.object(dashboard, "LOGS_DIR", directory):
+            costs = dashboard.cost_index()
+        self.assertEqual((22.7, 22.7), costs["spender-1234567890"])
+        self.assertEqual(
+            ("22.7", "22.7"),
+            dashboard.agent_cost("spender-1234567890", costs))
+
+    def _dashboard(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        return dashboard
+
+
+class TestOwnershipMovesInBothDirections(TempRepository):
+    """An agent has to be assignable, not only claimable.
+
+    `set_owner` had one caller: the dashboard Claim button, which always
+    writes this runtime's identity. So ownership could only be pulled
+    toward the host you were looking at, while the docs and the guidance
+    inside `owns()` still named flags that had been removed (#289).
+    """
+
+    def _spec(self):
+        self.skill("movable", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        return agent.load("movable", root=self.root)
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with (
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+                mock.patch.object(start.repos, "ensure_registered"),
+                mock.patch.object(lifecycle.repos, "load", return_value={
+                    "repos": {"here": str(self.root)}, "default_repo": "here"}),
+            ):
+                code = start.main(argv)
+        finally:
+            runtime.configure(previous)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_missing_backend_refuses_instead_of_pretending(self) -> None:
+        self._spec()
+        with mock.patch.object(
+                start.ownership, "registry_available", return_value=False):
+            code, _, err = self._run(["--name", "movable", "--transfer-here"])
+        self.assertEqual(1, code)
+        self.assertIn(ownership.ENTRY_POINT_GROUP, err)
+
+    def test_an_identity_that_is_not_one_is_refused(self) -> None:
+        self._spec()
+        with mock.patch.object(
+                start.ownership, "registry_available", return_value=True):
+            code, _, err = self._run(
+                ["--name", "movable", "--transfer-to", "just-a-hostname"])
+        self.assertEqual(2, code)
+        self.assertIn("hostname/runtime/uuid", err)
+
+    def test_claiming_assigns_this_runtime_and_starts_it_here(self) -> None:
+        spec = self._spec()
+        assigned: list[tuple[str, str]] = []
+        with (
+            mock.patch.object(start.ownership, "registry_available",
+                              return_value=True),
+            mock.patch.object(start.ownership, "local_only",
+                              return_value=False),
+            mock.patch.object(start.ownership, "set_owner",
+                              side_effect=lambda n, o: assigned.append((n, o))),
+            mock.patch.object(ownership, "load_owners", return_value={}),
+        ):
+            code, out, _ = self._run(["--name", "movable", "--transfer-here"])
+        self.assertEqual(0, code)
+        self.assertEqual([("movable", ownership.current_owner_id())], assigned)
+        self.assertIn("Assigned 'movable'", out)
+        self.assertIn(spec.identifier, state.load(self.root).agents)
+
+    def test_assigning_elsewhere_withdraws_it_from_this_host(self) -> None:
+        """The point of the verb: an agent that now belongs to another
+        runtime must stop being automated here."""
+        spec = self._spec()
+        state.replace(self.root, {spec.identifier})
+        other = f"otherhost/wsl/{'b' * 32}"
+        with (
+            mock.patch.object(start.ownership, "registry_available",
+                              return_value=True),
+            mock.patch.object(start.ownership, "local_only",
+                              return_value=False),
+            mock.patch.object(start.ownership, "set_owner"),
+            mock.patch.object(ownership, "load_owners", return_value={}),
+        ):
+            code, out, err = self._run(
+                ["--name", "movable", "--transfer-to", other])
+        self.assertEqual(0, code)
+        self.assertIn("otherhost/wsl", out)
+        self.assertIn("withdrawn here", err)
+        self.assertNotIn(spec.identifier, state.load(self.root).agents)
+
+    def test_transfer_names_one_agent(self) -> None:
+        self._spec()
+        code, _, err = self._run(["--all", "--transfer-here"])
+        self.assertEqual(2, code)
+        self.assertIn("--name", err)
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

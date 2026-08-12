@@ -95,9 +95,10 @@ def _reconcile_locked() -> None:
                 and isinstance(result.get("helper_pid"), int)):
             helper_pid = result["helper_pid"]
             pending["helper_pid"] = helper_pid
+            _remember_identity(pending, helper_pid)
             _write(pending_path, pending)
         created_at = float(pending.get("created_at", 0.0))
-        alive = isinstance(helper_pid, int) and hostruntime.is_alive(helper_pid)
+        alive = _helper_is_running(pending, helper_pid)
         if alive or (helper_pid is None and now - created_at < _STALE_AFTER_S):
             continue
         _record_terminal(pending, result, stale=True)
@@ -151,7 +152,33 @@ def spawned(claim: Claim, helper_pid: int) -> None:
         if pending is None or pending.get("operation_id") != claim.operation_id:
             return
         pending["helper_pid"] = helper_pid
+        _remember_identity(pending, helper_pid)
         _write(claim.pending_path, pending)
+
+
+def _remember_identity(pending: dict, helper_pid: int) -> None:
+    """Pin the pid to the process that holds it right now.
+
+    A pid outlives the process it named, and this record outlives both.
+    Without the start time a reused pid reads as the upgrade still
+    running, which refuses every later upgrade rather than reporting
+    stale information.
+    """
+    started_at = hostruntime.process_start_time(helper_pid)
+    if started_at is not None:
+        pending["helper_started_at"] = started_at
+
+
+def _helper_is_running(pending: dict, helper_pid: object) -> bool:
+    if not isinstance(helper_pid, int) or not hostruntime.is_alive(helper_pid):
+        return False
+    recorded = pending.get("helper_started_at")
+    if not isinstance(recorded, (int, float)):
+        return True
+    current = hostruntime.process_start_time(helper_pid)
+    if current is None:
+        return True
+    return abs(current - float(recorded)) < 2.0
 
 
 def abandon(claim: Claim) -> None:
