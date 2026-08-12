@@ -1043,6 +1043,8 @@ class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
             "",
             "not-json",
         ]) + "\n", encoding="utf-8")
+        (directory / "dashboard-transcript.log").write_text(
+            "Run completed\nhandler output\n", encoding="utf-8")
         self.assertEqual(2, obs.query.damaged(obs.files(directory)))
         self.assertEqual(1, len(obs.load(obs.files(directory))))
 
