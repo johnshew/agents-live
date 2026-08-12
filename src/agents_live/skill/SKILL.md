@@ -43,6 +43,7 @@ authentication, or reasoning.
 | Debugging log issues | [docs/diagnostics.md](docs/diagnostics.md) (log inventory, procedures, patterns, query recipes) |
 | Debugging cron/watcher lifecycle | [docs/key-learnings.md](docs/key-learnings.md) |
 | Debugging WSL/9P issues | [docs/reference/wsl-runbook.md](docs/reference/wsl-runbook.md) |
+| Choosing or changing an agent selector/model | [docs/model-selection.md](docs/model-selection.md) |
 | Reviewing implementation history | [docs/changelog.md](docs/changelog.md) |
 
 If you change behavior that contradicts approach.md, update it in the same

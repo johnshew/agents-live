@@ -1067,24 +1067,41 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             RawOutput(0, '{"done": true}\n' + self.FOOTER, ""))
         usage = dict(completion.usage)
         self.assertEqual("22.7", usage["ai_credits"])
+        self.assertEqual("0.227", usage["list_cost_usd"])
         self.assertEqual("85.0k", usage["input_tokens"])
         self.assertEqual("40.4k", usage["cached_tokens"])
         self.assertEqual("7.0k", usage["output_tokens"])
+
+    def test_copilot_list_cost_uses_exact_decimal_arithmetic(self) -> None:
+        completion = providers.get("copilot").parse(RawOutput(
+            0, "AI Credits 57.7\n", "",
+        ))
+        self.assertEqual("0.577", dict(completion.usage)["list_cost_usd"])
 
     def test_output_without_a_footer_reports_no_usage(self) -> None:
         completion = providers.get("copilot").parse(
             RawOutput(0, '{"done": true}\n', ""))
         self.assertEqual((), completion.usage)
 
-    def test_the_dashboard_reads_credits_and_never_invents_currency(self) -> None:
-        """What a credit costs belongs to the account plan. Converting
-        here produced a figure that looked authoritative and was made up."""
+    def test_claude_preserves_provider_reported_list_cost(self) -> None:
+        completion = providers.get("claude").parse(RawOutput(
+            0,
+            json.dumps({
+                "result": "done",
+                "usage": {"input_tokens": 100},
+                "total_cost_usd": 0.42,
+            }),
+            "",
+        ))
+        self.assertEqual("0.42", dict(completion.usage)["list_cost_usd"])
+
+    def test_the_dashboard_reads_only_normalized_list_cost(self) -> None:
         dashboard = self._dashboard()
-        self.assertEqual(22.7, dashboard._entry_cost_usd(
+        self.assertEqual(0.227, dashboard._entry_cost_usd(
+            {"usage": [["ai_credits", "22.7"], ["list_cost_usd", "0.227"]]}))
+        self.assertIsNone(dashboard._entry_cost_usd(
             {"usage": [["ai_credits", "22.7"]]}))
         self.assertIsNone(dashboard._entry_cost_usd({"usage": []}))
-        source = Path(dashboard.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("_CREDIT_TO_USD", source)
 
     def test_a_recorded_run_reaches_the_column(self) -> None:
         directory = paths.repo_state_dir(self.root) / "logs"
@@ -1092,14 +1109,30 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         obs.record(directory / "spender-1234567890.jsonl", obs.create(
             "done", "ok", repository=str(self.root),
             agent="spender-1234567890", run_id="run-1", origin="manual",
-            usage=(("ai_credits", "22.7"),)))
+            usage=(
+                ("ai_credits", "22.7"),
+                ("list_cost_usd", "0.227"),
+            )))
         dashboard = self._dashboard()
         with mock.patch.object(dashboard, "LOGS_DIR", directory):
             costs = dashboard.cost_index()
-        self.assertEqual((22.7, 22.7), costs["spender-1234567890"])
+        self.assertEqual((0.227, 0.227), costs["spender-1234567890"])
         self.assertEqual(
-            ("22.7", "22.7"),
+            ("0.23", "0.23"),
             dashboard.agent_cost("spender-1234567890", costs))
+
+    def test_dashboard_totals_unrounded_list_cost(self) -> None:
+        dashboard = self._dashboard()
+        rows = [
+            {
+                "cost_day": "0.04",
+                "cost_week": "0.04",
+                "cost_day_value": 0.04,
+                "cost_week_value": 0.04,
+            }
+            for _ in range(10)
+        ]
+        self.assertEqual(("0.40", "0.40"), dashboard._cost_totals(rows))
 
     def _dashboard(self):
         nicegui = mock.MagicMock()
