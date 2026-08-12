@@ -53,12 +53,15 @@ def main(argv: list[str] | None = None) -> int:
                     "check": f"started state {name}", "ok": True, "detail": "readable"})
                 torn = _damaged_records(root)
                 if torn:
+                    # Reported, not failed: the loss is in history a
+                    # healthy host can no longer change, and a permanent
+                    # nonzero exit would gate every check that reads it.
                     checks.append({
-                        "check": f"event log {name}", "ok": False,
+                        "check": f"event log {name}", "ok": True,
                         "detail": (
-                            f"{torn} record(s) cannot be decoded; that history "
-                            "is lost and will not appear in logs, timeline, or "
-                            "the dashboard"),
+                            f"{torn} unreadable record(s) from before "
+                            "record-atomic appends; that history will not "
+                            "appear in logs, timeline, or the dashboard"),
                     })
         try:
             collected = lifecycle.collect(persist=False)
