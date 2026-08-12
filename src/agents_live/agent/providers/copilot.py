@@ -59,16 +59,18 @@ _TOKENS = re.compile(
 def _usage(stdout: str) -> tuple[tuple[str, str | None], ...]:
     """What the CLI reported it spent, from its own session footer.
 
-    The quantities are recorded as the CLI meters them - AI credits and
-    tokens. It never reports currency, and the value of a credit belongs
-    to the account plan rather than to this tool, so nothing here
-    converts (#294).
+    AI credits are retained as the native quantity. GitHub defines one credit
+    as a $0.01 list-price equivalent, so the adapter also emits normalized
+    ``list_cost_usd``. That is not an invoice charge: allowances, promotions,
+    and negotiated discounts remain outside provider run telemetry.
     """
     text = _ANSI.sub("", stdout)
     values: list[tuple[str, str | None]] = []
     credits = _CREDITS.search(text)
     if credits:
-        values.append(("ai_credits", credits.group(1)))
+        credit_value = credits.group(1)
+        values.append(("ai_credits", credit_value))
+        values.append(("list_cost_usd", str(float(credit_value) * 0.01)))
     tokens = _TOKENS.search(text)
     if tokens:
         values.append(("input_tokens", tokens.group(1)))

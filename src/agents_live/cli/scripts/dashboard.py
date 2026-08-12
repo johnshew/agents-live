@@ -176,7 +176,7 @@ def last_runs(identifier: str,
 def agent_cost(identifier: str,
                index: dict[str, tuple[float, float]] | None = None
                ) -> tuple[str, str]:
-    """(cost_24h, cost_7d) in dollars for one identifier.
+    """(cost_24h, cost_7d) list-price equivalents for one identifier.
 
     Returns ("-", "-") when no run in the 7-day window carried a cost;
     an agent that ran in the last week but not the last day shows
@@ -192,7 +192,7 @@ def agent_cost(identifier: str,
 
 
 def cost_index() -> dict[str, tuple[float, float]]:
-    """(24h, 7d) dollars per identifier, from one pass over the logs.
+    """(24h, 7d) list cost per identifier, from one pass over the logs.
 
     Keyed on the identifier and read through the shared decoder, like
     every other column. Reading ``<display name>.log`` looked in a file
@@ -344,13 +344,7 @@ def _refresh_summary() -> str:
 
 
 def _entry_cost_usd(entry: dict) -> float | None:
-    """AI credits a run reported, or None when it reported none.
-
-    Credits, not dollars: the provider CLIs meter credits and never
-    report currency, and what a credit costs belongs to the account plan
-    rather than to this tool. Converting here produced a figure that
-    looked authoritative and was invented (#294).
-    """
+    """Provider-normalized list cost, or None when none was reported."""
     usage = entry.get("usage")
     pairs = (
         dict(usage) if isinstance(usage, dict) else
@@ -359,14 +353,11 @@ def _entry_cost_usd(entry: dict) -> float | None:
             isinstance(item, (list, tuple)) and len(item) == 2 for item in usage)
         else {}
     )
-    for key in ("ai_credits", "credits"):
-        value = pairs.get(key, entry.get(key))
-        if value is not None:
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                return None
-    return None
+    value = pairs.get("list_cost_usd", entry.get("list_cost_usd"))
+    try:
+        return float(value) if value is not None else None
+    except (ValueError, TypeError):
+        return None
 
 
 def _ago(ts: str | None, now: datetime) -> str:
@@ -879,9 +870,9 @@ _AGENT_COLUMNS = [
      "style": "width: 64px", "headerStyle": "width: 64px"},
     {"name": "last_err", "label": "Last Err", "field": "last_err", "align": "right",
      "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_day", "label": "AI/24h", "field": "cost_day", "align": "right",
+    {"name": "cost_day", "label": "List cost/24h", "field": "cost_day", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_week", "label": "AI/1w", "field": "cost_week", "align": "right",
+    {"name": "cost_week", "label": "List cost/1w", "field": "cost_week", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
 ]
 
@@ -897,7 +888,7 @@ def agent_grid() -> None:
         table.rows = _filtered_agent_rows(rows, filters)
         table.update()
         day, week = _cost_totals(table.rows)
-        totals.text = f"AI credits: {day} / 24h   {week} / 1w"
+        totals.text = f"List cost: ${day} / 24h   ${week} / 1w"
 
     def set_filter(key: str, value) -> None:
         filters[key] = value
@@ -999,7 +990,7 @@ def agent_grid() -> None:
     table.on("claim", _claim_row)
     day_total, week_total = _cost_totals(filtered_rows)
     totals = ui.label(
-        f"AI credits: {day_total} / 24h   {week_total} / 1w"
+        f"List cost: ${day_total} / 24h   ${week_total} / 1w"
     ).classes("w-full text-right text-xs text-gray-500 pr-4")
 
 

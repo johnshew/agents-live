@@ -66,6 +66,9 @@ class ClaudeProvider:
             tuple(sorted((str(key), str(value)) for key, value in usage.items()))
             if isinstance(usage, dict) else ()
         )
+        total_cost = payload.get("total_cost_usd")
+        if isinstance(total_cost, (int, float)):
+            usage_values += (("list_cost_usd", str(total_cost)),)
         return Completion(
             text if isinstance(text, str) else raw.stdout.strip(),
             usage=usage_values,
