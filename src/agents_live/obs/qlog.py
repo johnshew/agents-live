@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import glob as _glob
+import json
 import sys
 from pathlib import Path
 
@@ -122,6 +123,8 @@ NORMALIZED_COLUMN_TYPES = {
     "log_schema": "INTEGER",
     "exit_code": "INTEGER",
 }
+REQUIRED_SCHEMA_FIELDS = ("ts", "agent_name", "log_schema")
+MAX_SCHEMA_SAMPLES = 5
 
 def _resolve_ts(value: str | None) -> str | None:
     """Normalize a bound through the decoder every reader shares."""
@@ -144,6 +147,8 @@ def _is_jsonl(path: str) -> bool:
     itself to JSONL sources while plaintext stays queryable for
     diagnostics.
     """
+    if Path(path).suffix.casefold() == ".jsonl":
+        return True
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -198,7 +203,7 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
         jsonl_sql = "TRUE" if _is_jsonl(f) else "FALSE"
         selects.append(
             f"SELECT {cols_sql}, '{Path(f).name}' AS _src, "
-            f"{jsonl_sql} AS _jsonl FROM {read_expr}"
+            f"{jsonl_sql} AS _jsonl, FALSE AS _archive FROM {read_expr}"
         )
     # Include current unified monthly Parquet archives if any exist.
     # Archives are produced from JSONL sources only, so they are always
@@ -208,7 +213,7 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
         if unified_files:
             paths_csv = ", ".join(f"'{p}'" for p in unified_files)
             selects.append(
-                f"SELECT *, TRUE AS _jsonl "
+                f"SELECT *, TRUE AS _jsonl, TRUE AS _archive "
                 f"FROM read_parquet([{paths_csv}], union_by_name=true)"
             )
     union = " UNION ALL BY NAME ".join(selects)
@@ -296,14 +301,45 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
     con.sql(f"CREATE VIEW log AS SELECT {', '.join(projections)} FROM _log_raw")
 
 
-def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
+def _schema_violations(patterns: list[str]) -> tuple[int, list[str]]:
+    count = 0
+    samples: list[str] = []
+    for filename in _expand(patterns):
+        if not _is_jsonl(filename):
+            continue
+        path = Path(filename)
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except ValueError:
+                        issue = "invalid JSON"
+                    else:
+                        issue = query.normalization_issue(record)
+                    if issue:
+                        count += 1
+                        if len(samples) < MAX_SCHEMA_SAMPLES:
+                            samples.append(
+                                f"{path}: line {line_number}: {issue}"
+                            )
+        except OSError:
+            continue
+    return count, samples
+
+
+def check_schema(con: duckdb.DuckDBPyConnection,
+                 patterns: list[str] | None = None) -> list[str]:
     """Return contract violations for normalized columns in the log view."""
     actual = {
         name: dtype
         for name, dtype, *_ in con.sql("DESCRIBE log").fetchall()
     }
     violations = []
-    for required in ("ts", "agent_name", "log_schema"):
+    for required in REQUIRED_SCHEMA_FIELDS:
         if required not in actual:
             violations.append(f"missing required column: {required}")
     for name, expected_type in NORMALIZED_COLUMN_TYPES.items():
@@ -316,15 +352,22 @@ def check_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
         # Row-level contract applies to JSONL sources only; plaintext
         # logs (heartbeat, spawn stderr, transcripts) load as all-NULL
         # rows by design and are exempt.
-        invalid_count = con.sql(
+        live_invalid_count, samples = (
+            _schema_violations(patterns) if patterns else (0, [])
+        )
+        archive_invalid_count = con.sql(
             "SELECT count(*) FROM log "
-            "WHERE _jsonl AND (ts IS NULL OR agent_name IS NULL "
+            "WHERE _archive AND (ts IS NULL OR agent_name IS NULL "
             "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
         ).fetchone()[0]
+        invalid_count = live_invalid_count + archive_invalid_count
         if invalid_count:
-            violations.append(
-                f"{invalid_count} JSONL row(s) violate required schema v5 fields"
+            detail = (
+                f"{invalid_count} JSONL row(s) violate the supported log schema"
             )
+            if samples:
+                detail += "; samples: " + "; ".join(samples)
+            violations.append(detail)
     return violations
 
 
@@ -411,7 +454,7 @@ def main() -> int:
                     help="table (default; ASCII rules when not a terminal), "
                          "or csv/jsonl, which are the forms to parse")
     ap.add_argument("--check-schema", action="store_true",
-                    help="validate normalized live-plus-archive column types")
+                    help="validate normalized columns and sample row errors")
     args = ap.parse_args()
 
     try:
@@ -460,7 +503,7 @@ def main() -> int:
     build_view(con, patterns, archives=archives)
 
     if args.check_schema:
-        violations = check_schema(con)
+        violations = check_schema(con, patterns)
         if violations:
             preflight.emit_failure(
                 "logs", "; ".join(violations), code="schema_error")

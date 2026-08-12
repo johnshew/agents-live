@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Mapping
 
+from ..paths import repo_state_dir
 from .definition import DefinitionError, discover_definitions, load_definition
 from .providers import get as get_provider
 from .values import (
@@ -51,6 +52,10 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     environment.update(ctx.request.env)
     environment.update(ctx.resource_env)
     environment["AGENTS_LIVE_AGENT_NAME"] = spec.name
+    environment["AGENTS_LIVE_AGENT_ID"] = spec.identifier
+    environment["AGENTS_LIVE_LOG_FILE"] = str(
+        repo_state_dir(spec.root) / "logs" / f"{spec.identifier}.jsonl"
+    )
     if ctx.request.changed_files:
         environment["AGENTS_LIVE_CHANGED_FILES"] = json.dumps(ctx.request.changed_files)
     if step in {Step.PRE, Step.POST}:

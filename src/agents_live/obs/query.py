@@ -142,6 +142,10 @@ def normalize(raw: object) -> dict[str, object] | None:
     required = ("timestamp", "event", "status", "agent", "run_id", "origin")
     if not all(isinstance(raw.get(field), str) for field in required):
         return None
+    try:
+        datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+    except ValueError:
+        return None
     event = str(raw["event"])
     status = str(raw["status"])
     record = {
@@ -171,3 +175,52 @@ def normalize(raw: object) -> dict[str, object] | None:
             ):
                 record[item[0]] = item[1]
     return record
+
+
+def normalization_issue(raw: object) -> str | None:
+    """Explain why a raw JSONL record is rejected by ``normalize``."""
+    if not isinstance(raw, dict):
+        return "row is not a JSON object"
+    if raw.get("log_schema") == 5:
+        missing = [
+            field for field in ("ts", "agent_name", "log_schema")
+            if raw.get(field) in (None, "")
+        ]
+        if missing:
+            return f"missing field(s): {', '.join(missing)}"
+        timestamp = raw.get("ts")
+        if not isinstance(timestamp, str):
+            return "invalid field(s): ts"
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return "invalid field(s): ts"
+        if parsed.tzinfo is None:
+            return "invalid field(s): ts (UTC offset required)"
+        if not isinstance(raw.get("agent_name"), str):
+            return "invalid field(s): agent_name"
+        return None
+    if raw.get("spec") == 1:
+        required = ("timestamp", "event", "status", "agent", "run_id", "origin")
+        missing = [
+            field for field in required
+            if raw.get(field) in (None, "")
+        ]
+        if missing:
+            return f"missing field(s): {', '.join(missing)}"
+        invalid = [
+            field for field in required
+            if not isinstance(raw.get(field), str)
+        ]
+        if invalid:
+            return f"invalid field(s): {', '.join(invalid)}"
+        try:
+            datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+        except ValueError:
+            return "invalid field(s): timestamp"
+        return None
+    if "log_schema" in raw:
+        return "invalid field(s): log_schema"
+    if "spec" in raw:
+        return "invalid field(s): spec"
+    return "missing field(s): log_schema"
