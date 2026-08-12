@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,7 @@ from unittest import mock
 
 from agents_live import agent, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
-from agents_live.cli import lifecycle
+from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
 from agents_live.runtime import Subscription
@@ -823,6 +824,78 @@ class TestProviderOutputSurvivesItsFooter(unittest.TestCase):
     def test_output_with_no_json_at_all_still_reports_none(self) -> None:
         self.assertIsNone(port._extract_json("no value here" + self.FOOTER))
         self.assertIsNone(port._extract_json("{unbalanced" + self.FOOTER))
+
+
+class TestPendingUpgradeIdentity(TempRepository):
+    """A durable record outlives the process it names.
+
+    The handoff is single-flight, so a pid that reads as alive when it is
+    really a different process refuses every later upgrade instead of
+    merely reporting stale information.
+    """
+
+    def _pending(self, **overrides) -> dict:
+        pending = {
+            "operation_id": "operation-1",
+            "helper_pid": 4321,
+            "helper_started_at": 1000.0,
+            "created_at": 900.0,
+        }
+        pending.update(overrides)
+        return pending
+
+    def test_a_reused_pid_is_not_the_helper_that_was_started(self) -> None:
+        with (
+            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                              return_value=True),
+            mock.patch.object(upgrade_handoff.hostruntime,
+                              "process_start_time", return_value=5000.0),
+        ):
+            self.assertFalse(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+
+    def test_the_same_process_still_counts_as_running(self) -> None:
+        with (
+            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                              return_value=True),
+            mock.patch.object(upgrade_handoff.hostruntime,
+                              "process_start_time", return_value=1000.4),
+        ):
+            self.assertTrue(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+
+    def test_an_unknown_start_time_is_not_treated_as_a_mismatch(self) -> None:
+        """Unavailable is not evidence. Refusing on it would abandon a
+        live upgrade and let a second one race the same environment."""
+        for recorded, current in ((None, 5000.0), (1000.0, None)):
+            with self.subTest(recorded=recorded, current=current):
+                pending = self._pending()
+                if recorded is None:
+                    pending.pop("helper_started_at")
+                with (
+                    mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                                      return_value=True),
+                    mock.patch.object(upgrade_handoff.hostruntime,
+                                      "process_start_time",
+                                      return_value=current),
+                ):
+                    self.assertTrue(upgrade_handoff._helper_is_running(
+                        pending, 4321))
+
+    def test_a_dead_pid_is_never_running(self) -> None:
+        with mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
+                               return_value=False):
+            self.assertFalse(
+                upgrade_handoff._helper_is_running(self._pending(), 4321))
+        self.assertFalse(
+            upgrade_handoff._helper_is_running(self._pending(), None))
+
+    def test_the_start_time_probe_answers_for_this_process(self) -> None:
+        """The guard is only as good as the primitive under it."""
+        started = hostruntime.process_start_time(os.getpid())
+        self.assertIsNotNone(started)
+        self.assertLess(abs(time.time() - started), 3600)
+        self.assertIsNone(hostruntime.process_start_time(999_999_999))
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from datetime import datetime
@@ -647,14 +648,37 @@ class TestRuntimeCore(unittest.TestCase):
                 transcript_path=transcript_path)
             self.assertIsNotNone(helper)
             assert helper is not None
-            self.assertEqual(7, helper.wait(timeout=15))
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(7, helper.wait(timeout=60))
+            # The helper is detached by design, so its exit does not order
+            # the write that follows it. Reading once raced the file and
+            # tore down the fixture underneath a live process, which then
+            # failed again on a directory that no longer existed.
+            result = self._await_terminal(result_path, transcript_path)
             self.assertEqual("operation-1", result["operation_id"])
             self.assertEqual("terminal", result["status"])
             self.assertEqual(7, result["exit_code"])
             self.assertIn(
                 "[value with spaces][apostrophe's value]",
                 transcript_path.read_text(encoding="utf-8"))
+
+    def _await_terminal(self, result_path: Path, transcript_path: Path,
+                        *, timeout: float = 30.0) -> dict:
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            try:
+                last = json.loads(result_path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                last = None
+            if isinstance(last, dict) and last.get("status") == "terminal":
+                return last
+            time.sleep(0.2)
+        transcript = ""
+        with contextlib.suppress(OSError):
+            transcript = transcript_path.read_text(encoding="utf-8")[-2000:]
+        self.fail(
+            f"no terminal result within {timeout:.0f}s; last={last!r}; "
+            f"transcript tail:\n{transcript}")
 
     def test_windows_deferred_process_without_powershell_returns_none(self) -> None:
         with (

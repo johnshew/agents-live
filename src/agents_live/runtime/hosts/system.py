@@ -621,6 +621,11 @@ if _IS_WINDOWS:
     _kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
                                              ctypes.POINTER(wintypes.DWORD)]
     _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    _kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME)]
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
     _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     _kernel32.TerminateProcess.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -677,6 +682,33 @@ if _IS_WINDOWS:
             if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
                 return False
             return code.value == STILL_ACTIVE
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    def process_start_time(pid: int) -> float | None:
+        """When *pid*'s process started, as a Unix timestamp.
+
+        The pid alone cannot say whether a process is the one we started:
+        the operating system reuses pids, and a durable record outlives
+        the process it names. None means the answer is unavailable, which
+        callers must treat as unknown rather than as a match.
+        """
+        handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                       False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not _kernel32.GetProcessTimes(
+                    handle, ctypes.byref(creation), ctypes.byref(exited),
+                    ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            # FILETIME counts 100ns intervals from 1601-01-01.
+            return ticks / 1e7 - 11644473600.0
         finally:
             _kernel32.CloseHandle(handle)
 
@@ -892,6 +924,28 @@ else:
         except PermissionError:
             return True
         return True
+
+    def process_start_time(pid: int) -> float | None:
+        """When *pid*'s process started, as a Unix timestamp.
+
+        The pid alone cannot say whether a process is the one we started:
+        the operating system reuses pids, and a durable record outlives
+        the process it names. None means the answer is unavailable, which
+        callers must treat as unknown rather than as a match.
+        """
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text(
+                encoding="utf-8").rsplit(")", 1)[-1].split()
+            ticks = float(fields[19])
+        except (OSError, IndexError, ValueError):
+            return None
+        try:
+            hertz = os.sysconf("SC_CLK_TCK") or 100
+            with open("/proc/uptime", encoding="utf-8") as handle:
+                uptime = float(handle.read().split()[0])
+        except (OSError, ValueError, AttributeError):
+            return None
+        return time.time() - uptime + ticks / hertz
 
     def terminate(pid: int, *, grace_s: float = TERMINATE_GRACE_S) -> None:
         """Signal *pid*'s process group to stop, then force it.
