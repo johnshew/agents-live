@@ -285,7 +285,7 @@ def _processor_argv(path: Path) -> tuple[str, ...]:
     if suffix == ".ps1":
         return ("pwsh", "-NoProfile", "-File", str(path))
     if suffix == ".sh":
-        return ("sh", str(path))
+        return (str(path),)
     return (str(path),)
 
 

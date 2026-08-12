@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -48,6 +49,15 @@ def normalize(raw: object) -> dict[str, object] | None:
     if not isinstance(raw, dict):
         return None
     if raw.get("log_schema") == 5:
+        timestamp = raw.get("ts")
+        if not isinstance(timestamp, str) or not timestamp:
+            return None
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
         return dict(raw)
     if raw.get("spec") != 1:
         return None

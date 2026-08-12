@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, status, and backlog
-ms.date: 2026-08-09
+ms.date: 2026-08-11
 ms.topic: overview
 ---
 
@@ -34,6 +34,9 @@ this directory is installed by `agents-live init` or `upgrade`.
   host automation and agent execution are separate ports.
 - [decisions/definition-format.md](decisions/definition-format.md) - why
   definitions use Agent Skills and namespaced execution metadata.
+- [decisions/no-python-api.md](decisions/no-python-api.md) - why processors
+  use the JSON CLI and child process contract instead of importing the
+  package, and what handlers should call instead.
 - [backlog.md](backlog.md) - high-level themes linked to GitHub issues.
 
 Design documents are added here as they are written, one file per topic,

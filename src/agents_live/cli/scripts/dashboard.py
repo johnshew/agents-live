@@ -976,6 +976,20 @@ def _refresh_views() -> None:
     _safe_ui(output_log.push, summary)
 
 
+def _timer_after_first_interval(interval: float, callback) -> None:
+    """Register a client timer now without invoking its callback yet."""
+    first_tick = True
+
+    def invoke() -> None:
+        nonlocal first_tick
+        if first_tick:
+            first_tick = False
+            return
+        callback()
+
+    ui.timer(interval, invoke)
+
+
 def build_page() -> None:
     with hostruntime.enumeration_pass():
         _build_page()
@@ -1032,7 +1046,7 @@ def _build_page() -> None:
         )
         output_log.push(startup_summary)
 
-    ui.timer(600.0, _refresh_views, immediate=False)
+    _timer_after_first_interval(600.0, _refresh_views)
 
 
 def _build_no_project_page() -> None:
