@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import importlib
 import json
 import os
@@ -28,6 +29,7 @@ from unittest import mock
 from agents_live import agent, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, upgrade_handoff
+from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
 from agents_live.agent.values import RawOutput
@@ -1033,6 +1035,103 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
         return dashboard
+
+
+class TestOwnershipMovesInBothDirections(TempRepository):
+    """An agent has to be assignable, not only claimable.
+
+    `set_owner` had one caller: the dashboard Claim button, which always
+    writes this runtime's identity. So ownership could only be pulled
+    toward the host you were looking at, while the docs and the guidance
+    inside `owns()` still named flags that had been removed (#289).
+    """
+
+    def _spec(self):
+        self.skill("movable", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        return agent.load("movable", root=self.root)
+
+    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with (
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+                mock.patch.object(start.repos, "ensure_registered"),
+                mock.patch.object(lifecycle.repos, "load", return_value={
+                    "repos": {"here": str(self.root)}, "default_repo": "here"}),
+            ):
+                code = start.main(argv)
+        finally:
+            runtime.configure(previous)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_missing_backend_refuses_instead_of_pretending(self) -> None:
+        self._spec()
+        with mock.patch.object(
+                start.ownership, "registry_available", return_value=False):
+            code, _, err = self._run(["--name", "movable", "--transfer-here"])
+        self.assertEqual(1, code)
+        self.assertIn(ownership.ENTRY_POINT_GROUP, err)
+
+    def test_an_identity_that_is_not_one_is_refused(self) -> None:
+        self._spec()
+        with mock.patch.object(
+                start.ownership, "registry_available", return_value=True):
+            code, _, err = self._run(
+                ["--name", "movable", "--transfer-to", "just-a-hostname"])
+        self.assertEqual(2, code)
+        self.assertIn("hostname/runtime/uuid", err)
+
+    def test_claiming_assigns_this_runtime_and_starts_it_here(self) -> None:
+        spec = self._spec()
+        assigned: list[tuple[str, str]] = []
+        with (
+            mock.patch.object(start.ownership, "registry_available",
+                              return_value=True),
+            mock.patch.object(start.ownership, "local_only",
+                              return_value=False),
+            mock.patch.object(start.ownership, "set_owner",
+                              side_effect=lambda n, o: assigned.append((n, o))),
+            mock.patch.object(ownership, "load_owners", return_value={}),
+        ):
+            code, out, _ = self._run(["--name", "movable", "--transfer-here"])
+        self.assertEqual(0, code)
+        self.assertEqual([("movable", ownership.current_owner_id())], assigned)
+        self.assertIn("Assigned 'movable'", out)
+        self.assertIn(spec.identifier, state.load(self.root).agents)
+
+    def test_assigning_elsewhere_withdraws_it_from_this_host(self) -> None:
+        """The point of the verb: an agent that now belongs to another
+        runtime must stop being automated here."""
+        spec = self._spec()
+        state.replace(self.root, {spec.identifier})
+        other = f"otherhost/wsl/{'b' * 32}"
+        with (
+            mock.patch.object(start.ownership, "registry_available",
+                              return_value=True),
+            mock.patch.object(start.ownership, "local_only",
+                              return_value=False),
+            mock.patch.object(start.ownership, "set_owner"),
+            mock.patch.object(ownership, "load_owners", return_value={}),
+        ):
+            code, out, err = self._run(
+                ["--name", "movable", "--transfer-to", other])
+        self.assertEqual(0, code)
+        self.assertIn("otherhost/wsl", out)
+        self.assertIn("withdrawn here", err)
+        self.assertNotIn(spec.identifier, state.load(self.root).agents)
+
+    def test_transfer_names_one_agent(self) -> None:
+        self._spec()
+        code, _, err = self._run(["--all", "--transfer-here"])
+        self.assertEqual(2, code)
+        self.assertIn("--name", err)
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

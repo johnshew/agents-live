@@ -88,6 +88,11 @@ COMMANDS = (
             Arg(("--name",), "Agent name.", kind="value"),
             Arg(("--all",), "Start all configured agents."),
             Arg(("--dry-run", "-n"), "Preview without mutating."),
+            Arg(("--transfer-here",),
+                "Claim this agent for this runtime, then start it."),
+            Arg(("--transfer-to",),
+                "Assign this agent to another runtime identity.",
+                kind="value"),
         ),
     ),
     Cmd(
