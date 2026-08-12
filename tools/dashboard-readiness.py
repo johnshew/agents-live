@@ -88,18 +88,34 @@ def _wheel() -> Path:
     return wheel
 
 
-def _launcher(editable: bool) -> tuple[list[str], list[str]]:
+def _launcher(directory: Path, editable: bool) -> tuple[list[str], list[str]]:
     """(CLI prefix, python prefix) for the artifact under test.
 
-    Both come from the same build, so the gate cannot check one thing and
-    launch another.
+    The wheel goes into a real environment rather than an ephemeral
+    ``uv run --with``. The CLI delegates the dashboard through ``uv run
+    --script`` against its own installed path, and uv refuses to treat a
+    directory inside its cache as a project - which is exactly where an
+    ephemeral install lands when the cache sits in the workspace, as it
+    does on CI. An environment also matches how a consumer runs the tool.
     """
     if editable:
         base = ["uv", "run", "--with-editable", str(ROOT)]
-    else:
-        base = ["uv", "run", "--isolated", "--no-project",
-                "--with", str(_wheel())]
-    return ([*base, "agents-live"], [*base, "python"])
+        return ([*base, "agents-live"], [*base, "python"])
+    environment = directory / "runtime"
+    for command in (
+        ["uv", "venv", str(environment)],
+        ["uv", "pip", "install", "--python", str(environment), str(_wheel())],
+    ):
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            raise ReadinessError(
+                f"could not build the candidate environment: "
+                f"{' '.join(command)}\n{completed.stdout}{completed.stderr}")
+    windows = os.name == "nt"
+    binaries = environment / ("Scripts" if windows else "bin")
+    suffix = ".exe" if windows else ""
+    return ([str(binaries / f"agents-live{suffix}")],
+            [str(binaries / f"python{suffix}")])
 
 
 def _fixture(directory: Path) -> None:
@@ -273,11 +289,11 @@ def main() -> int:
         help="skip the reload-worker mode (for a slow CI host)")
     args = parser.parse_args()
 
-    launcher, python = _launcher(args.editable)
     with tempfile.TemporaryDirectory(prefix="agents-live-readiness-") as temp:
         directory = Path(temp).resolve()
         _fixture(directory)
         environment = _environment(directory)
+        launcher, python = _launcher(directory, args.editable)
         _seed_started_state(python, directory, environment)
         _check(launcher, directory, environment, dev=False)
         if not args.skip_dev:

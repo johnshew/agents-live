@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +27,7 @@ from agents_live import agent, obs, paths, plugins, runtime, state
 from agents_live.agent import providers
 from agents_live.cli import lifecycle
 from agents_live.legacy import health_check
+from agents_live.obs import qlog
 from agents_live.runtime import Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
@@ -621,6 +623,91 @@ class TestDamagedLogsStayReadable(TempRepository):
         self.assertEqual(
             ("2026-08-01T00:02:00Z", "2026-08-01T00:03:00Z", "error"),
             index["healthy-agent"])
+
+
+class TestFailuresAreVisible(TempRepository):
+    """A failed run has to reach the surfaces an operator watches.
+
+    Two runs failed on screen while the dashboard header read "errors in
+    last hour: none" and `logs --errors` returned nothing. Neither
+    surface was broken in a way any run could show: one globbed the wrong
+    suffix, the other read one file, and both answered "none", which is
+    the one wrong answer these queries must never give.
+    """
+
+    IDENTIFIER = "failing-agent-1234567890"
+
+    def _logs(self) -> Path:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        moment = datetime.now(timezone.utc).isoformat()
+        (directory / f"{self.IDENTIFIER}.jsonl").write_text(json.dumps({
+            "log_schema": 5, "ts": moment, "agent_name": self.IDENTIFIER,
+            "phase": "done", "status": "error", "trigger": "manual",
+            "model": "test-model-1", "message": "child exited with status 2",
+        }) + "\n", encoding="utf-8")
+        (directory / "agents-live.log").write_text(json.dumps({
+            "log_schema": 5, "ts": moment, "agent_name": "framework",
+            "phase": "done", "status": "ok", "message": "unrelated",
+        }) + "\n", encoding="utf-8")
+        return directory
+
+    def _dashboard(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        return dashboard
+
+    def test_the_header_counts_a_failure_written_under_an_identifier(self) -> None:
+        """Records key on the identifier and the row shows the display
+        name. Matching only display names filed every failed run under
+        "framework", where no agent's row could show it."""
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            self.skipTest("duckdb is not installed")
+        logs = self._logs()
+        dashboard = self._dashboard()
+        with mock.patch.object(dashboard, "LOGS_DIR", logs):
+            errors, models = dashboard._structured_log_snapshot(
+                {self.IDENTIFIER: "failing-agent"})
+        self.assertEqual({"failing-agent": 1}, errors)
+        self.assertEqual({"failing-agent": "test-model-1"}, models)
+
+    def test_the_header_reads_both_log_suffixes(self) -> None:
+        """A run's outcome is written to <identifier>.jsonl. A *.log glob
+        counted zero with failed runs on the screen."""
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            self.skipTest("duckdb is not installed")
+        logs = self._logs()
+        (logs / f"{self.IDENTIFIER}.jsonl").rename(
+            logs / f"{self.IDENTIFIER}.jsonl.kept")
+        dashboard = self._dashboard()
+        with mock.patch.object(dashboard, "LOGS_DIR", logs):
+            self.assertEqual(
+                ({}, {}),
+                dashboard._structured_log_snapshot(
+                    {self.IDENTIFIER: "failing-agent"}))
+        (logs / f"{self.IDENTIFIER}.jsonl.kept").rename(
+            logs / f"{self.IDENTIFIER}.jsonl")
+        with mock.patch.object(dashboard, "LOGS_DIR", logs):
+            errors, _ = dashboard._structured_log_snapshot(
+                {self.IDENTIFIER: "failing-agent"})
+        self.assertEqual({"failing-agent": 1}, errors)
+
+    def test_asking_for_errors_spans_the_repository_not_one_file(self) -> None:
+        """`--errors` with no name is a question about the repository.
+        Scoping it to agents-live.log answered "none" while failed runs
+        sat in per-agent logs."""
+        source = (Path(qlog.__file__).read_text(encoding="utf-8")
+                  .split("patterns = ", 1)[1].split("\n", 1)[0])
+        self.assertIn("span_everything", source)
+        self.assertIn("args.errors and args.name is None",
+                      Path(qlog.__file__).read_text(encoding="utf-8"))
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

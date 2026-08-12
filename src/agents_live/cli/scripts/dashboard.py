@@ -229,8 +229,17 @@ def _running_version() -> str:
     return AGENTS_LIVE_VERSION
 
 
-def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dict[str, str]]:
-    """Return trailing-hour errors and latest reported models via qlog."""
+def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
+                             ) -> tuple[dict[str, int], dict[str, str]]:
+    """Return trailing-hour errors and latest reported models via qlog.
+
+    Accepts a mapping of identifier to display name. Records key on the
+    identifier, so matching display names alone bucketed every failed run
+    under "framework" and left the model column on its default.
+    """
+    display_by_key: dict[str, str] = (
+        dict(agent_names) if isinstance(agent_names, dict)
+        else {name: name for name in agent_names})
     if (SCRIPTS_DIR / "__init__.py").is_file():
         if str(SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(SCRIPTS_DIR))
@@ -239,11 +248,14 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
         import qlog as structured_qlog
 
     logs_dir = _require_repo_path(LOGS_DIR)
-    if not any(logs_dir.glob("*.log")):
+    # Both suffixes: a run's outcome is written to <identifier>.jsonl, so
+    # a *.log glob counted zero errors with failed runs on the screen.
+    patterns = [str(logs_dir / "*.jsonl"), str(logs_dir / "*.log")]
+    if not any(logs_dir.glob("*.jsonl")) and not any(logs_dir.glob("*.log")):
         return {}, {}
     connection = structured_qlog.duckdb.connect(":memory:")
     try:
-        structured_qlog.build_view(connection, [str(logs_dir / "*.log")],
+        structured_qlog.build_view(connection, patterns,
                                    archives=logs_dir / "archive")
         columns = {
             row[0] for row in connection.sql("DESCRIBE log").fetchall()
@@ -281,15 +293,15 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
     errors: dict[str, int] = {}
     framework_errors = 0
     for raw_name, count in error_rows:
-        name = str(raw_name or "")
-        if name in agent_names:
-            errors[name] = int(count)
+        display = display_by_key.get(str(raw_name or ""))
+        if display is not None:
+            errors[display] = errors.get(display, 0) + int(count)
         else:
             framework_errors += int(count)
     if framework_errors:
         errors["framework"] = framework_errors
     models = {
-        str(name): str(model)
+        display_by_key.get(str(name), str(name)): str(model)
         for name, model in model_rows
         if name and model
     }
@@ -297,7 +309,9 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
 
 
 def _refresh_summary() -> str:
-    names = {agent["name"] for agent in collect_agents()}
+    agents = collect_agents()
+    names = {agent["identifier"]: agent["name"] for agent in agents}
+    names.update({agent["name"]: agent["name"] for agent in agents})
     errors, models = _structured_log_snapshot(names)
     STATE["models"] = models
     error_text = ", ".join(

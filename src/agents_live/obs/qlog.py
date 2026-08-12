@@ -462,6 +462,7 @@ def main() -> int:
     # directory, point --log at it; otherwise fall through to an --agent
     # substring filter. With --all there is no single file to prefer, so
     # the name always narrows the union as an agent filter (#89).
+    _explicit_log = args.log
     try:
         if args.name and args.log is None:
             if args.all:
@@ -480,7 +481,13 @@ def main() -> int:
                     args.agent = args.name
         if args.log is None:
             args.log = str(default_log())
-        patterns = all_log_globs() if args.all else [args.log]
+        # "Are there errors?" is a question about the repository, not
+        # about one file. Defaulting it to agents-live.log answered
+        # "none" while four failed runs sat in per-agent logs, which is
+        # the one wrong answer this query must never give.
+        span_everything = args.all or (
+            args.errors and args.name is None and _explicit_log is None)
+        patterns = all_log_globs() if span_everything else [args.log]
         archives = archive_dir()
     except ValueError as exc:
         preflight.emit_failure("logs", str(exc), code="no_project_root")
