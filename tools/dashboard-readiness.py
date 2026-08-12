@@ -236,26 +236,32 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
 def _terminate(process: subprocess.Popen) -> None:
     """Stop the dashboard and every descendant it spawned.
 
-    ``--dev`` runs a reload worker in a second process; signalling only
-    the parent leaves it holding the port for the next mode.
+    The CLI delegates to a script that starts the server, and ``--dev``
+    adds a reload worker, so the process to signal is never the one that
+    holds the port. POSIX has the process group; Windows needs the tree
+    named explicitly, and a survivor there keeps a file handle open,
+    which fails the temporary directory rather than the check.
     """
     if process.poll() is not None:
         return
-    try:
-        if hasattr(os, "killpg"):
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True, check=False)
+    else:
+        try:
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        else:
+        except (ProcessLookupError, PermissionError, OSError):
             process.terminate()
-    except (ProcessLookupError, PermissionError, OSError):
-        process.terminate()
     try:
         process.wait(timeout=SHUTDOWN_GRACE_S)
     except subprocess.TimeoutExpired:
-        if hasattr(os, "killpg"):
+        if os.name != "nt":
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         process.kill()
-        process.wait(timeout=SHUTDOWN_GRACE_S)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=SHUTDOWN_GRACE_S)
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
@@ -270,7 +276,7 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
     process = subprocess.Popen(
         argv, cwd=directory, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        start_new_session=True)
+        **({} if os.name == "nt" else {"start_new_session": True}))
     try:
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
@@ -289,7 +295,11 @@ def main() -> int:
         help="skip the reload-worker mode (for a slow CI host)")
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory(prefix="agents-live-readiness-") as temp:
+    # A Windows handle can outlive the tree kill by a moment; a lingering
+    # file must not fail a check that already passed.
+    with tempfile.TemporaryDirectory(
+            prefix="agents-live-readiness-",
+            ignore_cleanup_errors=True) as temp:
         directory = Path(temp).resolve()
         _fixture(directory)
         environment = _environment(directory)
