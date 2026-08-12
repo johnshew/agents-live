@@ -73,14 +73,13 @@ PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 from agents_live import preflight  # noqa: E402
+from agents_live.obs import query  # noqa: E402
 from agents_live.paths import (  # noqa: E402
     host_logs_dir,
     repo_state_dir,
     resolve_root,
 )
 
-import re
-from datetime import datetime, timedelta, timezone
 
 def logs_dir() -> Path:
     """This repo's log directory, resolved when it is asked for.
@@ -124,45 +123,9 @@ NORMALIZED_COLUMN_TYPES = {
     "exit_code": "INTEGER",
 }
 
-_RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
-_RELATIVE_WORDS = re.compile(
-    r"^(\d+)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
-    r"(?:\s+ago)?$",
-    re.IGNORECASE,
-)
-_UNIT_TO_DELTA = {
-    "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
-    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
-    "d": "d", "day": "d", "days": "d",
-}
-
-
 def _resolve_ts(value: str | None) -> str | None:
-    """Normalize a relative or ISO-8601 bound to an aware UTC timestamp."""
-    if value is None:
-        return None
-    text = value.strip()
-    match = _RELATIVE_COMPACT.match(text) or _RELATIVE_WORDS.match(text)
-    if match:
-        count = int(match.group(1))
-        unit = _UNIT_TO_DELTA[match.group(2).lower()]
-        delta = {
-            "m": timedelta(minutes=count),
-            "h": timedelta(hours=count),
-            "d": timedelta(days=count),
-        }[unit]
-        parsed = datetime.now(timezone.utc) - delta
-    else:
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(
-                f"invalid timestamp {value!r}; expected ISO-8601 or a relative "
-                "duration such as 30m, 2h, or '1 day ago'"
-            ) from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    """Normalize a bound through the decoder every reader shares."""
+    return query.resolve_since(value)
 
 
 def _expand(patterns: list[str]) -> list[str]:
@@ -462,6 +425,7 @@ def main() -> int:
     # directory, point --log at it; otherwise fall through to an --agent
     # substring filter. With --all there is no single file to prefer, so
     # the name always narrows the union as an agent filter (#89).
+    _explicit_log = args.log
     try:
         if args.name and args.log is None:
             if args.all:
@@ -480,7 +444,13 @@ def main() -> int:
                     args.agent = args.name
         if args.log is None:
             args.log = str(default_log())
-        patterns = all_log_globs() if args.all else [args.log]
+        # "Are there errors?" is a question about the repository, not
+        # about one file. Defaulting it to agents-live.log answered
+        # "none" while four failed runs sat in per-agent logs, which is
+        # the one wrong answer this query must never give.
+        span_everything = args.all or (
+            args.errors and args.name is None and _explicit_log is None)
+        patterns = all_log_globs() if span_everything else [args.log]
         archives = archive_dir()
     except ValueError as exc:
         preflight.emit_failure("logs", str(exc), code="no_project_root")

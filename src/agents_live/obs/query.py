@@ -2,9 +2,57 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+
+_RELATIVE_COMPACT = re.compile(r"^(\d+)\s*([mhd])$")
+_RELATIVE_WORDS = re.compile(
+    r"^(\d+)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)"
+    r"(?:\s+ago)?$",
+    re.IGNORECASE,
+)
+_UNIT_TO_DELTA = {
+    "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
+    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    "d": "d", "day": "d", "days": "d",
+}
+
+
+def resolve_since(value: str | None) -> str | None:
+    """Normalize a relative or ISO-8601 bound to an aware UTC timestamp.
+
+    Every reader shares this because the bound is compared as a string.
+    An unresolved one does not fail: ``"2026-..." < "30m"`` is true and
+    discards every record, while ``< "1h"`` is false and discards none,
+    so the same window silently answered "nothing happened" or "here is
+    everything" depending on which word the operator typed.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    match = _RELATIVE_COMPACT.match(text) or _RELATIVE_WORDS.match(text)
+    if match:
+        unit = _UNIT_TO_DELTA[match.group(2).lower()]
+        count = int(match.group(1))
+        delta = {
+            "m": timedelta(minutes=count),
+            "h": timedelta(hours=count),
+            "d": timedelta(days=count),
+        }[unit]
+        parsed = datetime.now(timezone.utc) - delta
+    else:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid timestamp {value!r}; expected ISO-8601 or a relative "
+                "duration such as 30m, 2h, or '1 day ago'"
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def files(directory: Path) -> tuple[Path, ...]:
@@ -22,6 +70,7 @@ def load(
     text_filter: str | None = None,
     since: str | None = None,
 ) -> tuple[dict[str, object], ...]:
+    since = resolve_since(since)
     records: list[dict[str, object]] = []
     for path in paths:
         try:
@@ -31,7 +80,12 @@ def load(
         for line in lines:
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
+                # ValueError, not json.JSONDecodeError: the flat script
+                # dispatches put this module on sys.path twice, so the
+                # attribute the handler resolves is not always the class
+                # the raising copy of json produced. A record torn by two
+                # appenders must never end a reader (#284).
                 continue
             record = normalize(raw)
             if record is None:

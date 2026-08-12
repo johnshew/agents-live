@@ -25,6 +25,8 @@ this directory is installed by `agents-live init` or `upgrade`.
 
 - [architecture.md](architecture.md) - normative current package ownership,
   runtime flow, state, compatibility boundary, and invariants.
+- [testing-methodology.md](testing-methodology.md) - what earns a test, which
+  layer proves what, and why each release gate exists.
 - [project-status.md](project-status.md) - implementation state, platform
   maturity, validation baseline, and linked remaining work.
 - [windows-support.md](windows-support.md) - native Windows host architecture.

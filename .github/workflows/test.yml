@@ -52,3 +52,9 @@ jobs:
       # duckdb is the query tool's own PEP 723 dependency; supplying it here
       # lets the suite actually start `agents-live logs` instead of skipping it.
       - run: uv run --with-editable . --with duckdb --script tests/test_seams.py
+      - run: uv run --with-editable . --with duckdb --script tests/test_behaviors.py
+      # The artifact, not the source: a packaged dashboard that cannot start
+      # and rows whose actions are reversed both pass every import-level
+      # check, and both shipped (#279).
+      - run: uv build
+      - run: uv run --script tools/dashboard-readiness.py

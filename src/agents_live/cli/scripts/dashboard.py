@@ -128,7 +128,37 @@ def collect_agents() -> list[dict]:
     } for row in agent_view.repository_agents(REPO_ROOT)]
 
 
-def last_runs(identifier: str) -> tuple[str, str, str]:
+def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
+    """(last_ok, last_error, last_status) for every identifier, in one pass.
+
+    Ordered by timestamp, not by the order records are read. An agent
+    whose history spans a rename has two files, and the older one sorts
+    last, so reading order made a stale failure the current health: three
+    successful runs and a green one 33 minutes ago still showed red.
+
+    The log directory is read once. Asking per agent instead reads every
+    agent's log to answer a question about one of them, and the table
+    then does that once per row: on a repository with 21 agents and 50 MB
+    of history that is a gigabyte of parsing per refresh, which blocks
+    the event loop long enough for the browser to lose the websocket.
+    """
+    return _scan()[0]
+
+
+def _moment(value: object) -> datetime | None:
+    """A record's timestamp as an aware instant, or None when unusable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def last_runs(identifier: str,
+              index: dict[str, tuple[str | None, str | None, str]] | None = None
+              ) -> tuple[str, str, str]:
     """(last_ok, last_error, last_status) from the agent log.
 
     last_status is the status of the most recent `done` entry ("ok",
@@ -136,21 +166,9 @@ def last_runs(identifier: str) -> tuple[str, str, str]:
     drives the health colour the same way the DASHBOARD.md "OK" column
     does: an agent whose last run errored is unhealthy.
     """
-    last_ok: str | None = None
-    last_err: str | None = None
-    last_status = ""
-    records = obs.load(obs.files(_require_repo_path(LOGS_DIR)))
-    for entry in records:
-        if entry.get("agent_name") != identifier:
-            continue
-        if entry.get("phase") != "done":
-            continue
-        status = str(entry.get("status", "")).lower()
-        last_status = status
-        if status == "ok":
-            last_ok = entry.get("ts")
-        elif status == "error":
-            last_err = entry.get("ts")
+    if index is None:
+        index = last_run_index()
+    last_ok, last_err, last_status = index.get(identifier, (None, None, ""))
     now = datetime.now(timezone.utc)
     return (_ago(last_ok, now), _ago(last_err, now), last_status)
 
@@ -162,59 +180,92 @@ def last_runs(identifier: str) -> tuple[str, str, str]:
 _CREDIT_TO_USD = 0.01
 
 
-def agent_cost(name: str) -> tuple[str, str]:
-    """(cost_24h, cost_7d) in dollars from the agent log.
+def agent_cost(identifier: str,
+               index: dict[str, tuple[float, float]] | None = None
+               ) -> tuple[str, str]:
+    """(cost_24h, cost_7d) in dollars for one identifier.
 
-    Sums each run's cost over the trailing 24 hours and the trailing 7
-    days. Returns ("-", "-") when the log has no cost-bearing runs in the
-    7-day window (e.g. handler-only agents or agents that have not run
-    recently); an agent that ran in the last week but not the last day
-    shows "$0.00" for the 24h figure.
+    Returns ("-", "-") when no run in the 7-day window carried a cost;
+    an agent that ran in the last week but not the last day shows
+    "$0.00" for the 24h figure.
     """
-    log_file = _require_repo_path(LOGS_DIR) / f"{name}.log"
-    if not log_file.is_file():
+    if index is None:
+        index = cost_index()
+    totals = index.get(identifier)
+    if totals is None:
         return ("-", "-")
+    day_total, week_total = totals
+    return (f"${day_total:.2f}", f"${week_total:.2f}")
+
+
+def cost_index() -> dict[str, tuple[float, float]]:
+    """(24h, 7d) dollars per identifier, from one pass over the logs.
+
+    Keyed on the identifier and read through the shared decoder, like
+    every other column. Reading ``<display name>.log`` looked in a file
+    the current runtime does not write, so the answer was "-" no matter
+    what a run had cost.
+    """
+    return _scan()[1]
+
+
+def _scan() -> tuple[dict[str, tuple[str | None, str | None, str]],
+                     dict[str, tuple[float, float]]]:
+    """(runs, costs) for every identifier, reading the directory once."""
     now = datetime.now(timezone.utc)
     day_cutoff = now - timedelta(days=1)
     week_cutoff = now - timedelta(days=7)
-    day_total = 0.0
-    week_total = 0.0
-    found = False
-    for line in log_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or '"cost_usd"' not in line and '"credits"' not in line:
+    newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
+    totals: dict[str, list[float]] = {}
+    for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
+        identifier = entry.get("agent_name")
+        if not isinstance(identifier, str):
             continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ts = entry.get("ts")
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if dt < week_cutoff:
+        moment = _moment(entry.get("ts"))
+        if moment is None:
             continue
         usd = _entry_cost_usd(entry)
-        if usd is None:
+        if usd is not None and moment >= week_cutoff:
+            running = totals.setdefault(identifier, [0.0, 0.0])
+            running[1] += usd
+            if moment >= day_cutoff:
+                running[0] += usd
+        if entry.get("phase") != "done":
             continue
-        week_total += usd
-        if dt >= day_cutoff:
-            day_total += usd
-        found = True
-    if not found:
-        return ("-", "-")
-    return (f"${day_total:.2f}", f"${week_total:.2f}")
+        status = str(entry.get("status", "")).lower()
+        slots = newest.setdefault(identifier, {})
+        for slot in ("any", status):
+            current = slots.get(slot)
+            if current is None or moment > current[0]:
+                slots[slot] = (moment, entry.get("ts"), status)
+    runs = {
+        identifier: (
+            slots["ok"][1] if "ok" in slots else None,
+            slots["error"][1] if "error" in slots else None,
+            slots["any"][2],
+        )
+        for identifier, slots in newest.items()
+    }
+    costs = {
+        identifier: (day, week) for identifier, (day, week) in totals.items()}
+    return runs, costs
 
 
 def _running_version() -> str:
     return AGENTS_LIVE_VERSION
 
 
-def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dict[str, str]]:
-    """Return trailing-hour errors and latest reported models via qlog."""
+def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
+                             ) -> tuple[dict[str, int], dict[str, str]]:
+    """Return trailing-hour errors and latest reported models via qlog.
+
+    Accepts a mapping of identifier to display name. Records key on the
+    identifier, so matching display names alone bucketed every failed run
+    under "framework" and left the model column on its default.
+    """
+    display_by_key: dict[str, str] = (
+        dict(agent_names) if isinstance(agent_names, dict)
+        else {name: name for name in agent_names})
     if (SCRIPTS_DIR / "__init__.py").is_file():
         if str(SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(SCRIPTS_DIR))
@@ -223,11 +274,14 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
         import qlog as structured_qlog
 
     logs_dir = _require_repo_path(LOGS_DIR)
-    if not any(logs_dir.glob("*.log")):
+    # Both suffixes: a run's outcome is written to <identifier>.jsonl, so
+    # a *.log glob counted zero errors with failed runs on the screen.
+    patterns = [str(logs_dir / "*.jsonl"), str(logs_dir / "*.log")]
+    if not any(logs_dir.glob("*.jsonl")) and not any(logs_dir.glob("*.log")):
         return {}, {}
     connection = structured_qlog.duckdb.connect(":memory:")
     try:
-        structured_qlog.build_view(connection, [str(logs_dir / "*.log")],
+        structured_qlog.build_view(connection, patterns,
                                    archives=logs_dir / "archive")
         columns = {
             row[0] for row in connection.sql("DESCRIBE log").fetchall()
@@ -265,15 +319,15 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
     errors: dict[str, int] = {}
     framework_errors = 0
     for raw_name, count in error_rows:
-        name = str(raw_name or "")
-        if name in agent_names:
-            errors[name] = int(count)
+        display = display_by_key.get(str(raw_name or ""))
+        if display is not None:
+            errors[display] = errors.get(display, 0) + int(count)
         else:
             framework_errors += int(count)
     if framework_errors:
         errors["framework"] = framework_errors
     models = {
-        str(name): str(model)
+        display_by_key.get(str(name), str(name)): str(model)
         for name, model in model_rows
         if name and model
     }
@@ -281,7 +335,9 @@ def _structured_log_snapshot(agent_names: set[str]) -> tuple[dict[str, int], dic
 
 
 def _refresh_summary() -> str:
-    names = {agent["name"] for agent in collect_agents()}
+    agents = collect_agents()
+    names = {agent["identifier"]: agent["name"] for agent in agents}
+    names.update({agent["name"]: agent["name"] for agent in agents})
     errors, models = _structured_log_snapshot(names)
     STATE["models"] = models
     error_text = ", ".join(
@@ -361,8 +417,12 @@ DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log" if LOGS_DIR else No
 
 
 def _command_argv(command: str, args: list[str]) -> list[str]:
-    """Invoke the public CLI from the dashboard's installed environment."""
-    return [sys.executable, "-m", "agents_live.cli", command, *args]
+    """Invoke the public CLI from the environment that provides the package.
+
+    Not ``sys.executable``: this script runs under ``uv run --script``,
+    whose environment holds NiceGUI and no agents-live (#288).
+    """
+    return [*repos.cli_base(), command, *args]
 
 
 def _run_script(command: str, args: list[str],
@@ -608,6 +668,7 @@ def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
     rows: list[dict] = []
     host = ownership.current_label()
+    runs, costs = _scan()
     for agent in collect_agents():
         name = agent["name"]
         identifier = agent["identifier"]
@@ -618,7 +679,7 @@ def agent_rows() -> list[dict]:
             ownership.display_owner(owner_value) if owner_value else
             "-" if ownership_available else "Unavailable"
         )
-        ok_ago, err_ago, last_status = last_runs(identifier)
+        ok_ago, err_ago, last_status = last_runs(identifier, runs)
         # A failed last run only makes this host's view unhealthy while
         # the agent is still registered here. "stopped" means no trigger
         # is registered on this host - commonly an agent owned by
@@ -629,7 +690,9 @@ def agent_rows() -> list[dict]:
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
-        cost_day, cost_week = (agent_cost(name) if runtime != "none" else ("-", "-"))
+        cost_day, cost_week = (
+            agent_cost(identifier, costs) if runtime != "none"
+            else ("-", "-"))
         model = _agent_model(agent, STATE["models"])
         can_pause = local and state == "started"
         can_activate = local and state == "stopped"
