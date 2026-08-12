@@ -1,6 +1,8 @@
 """GitHub Copilot CLI provider plugin."""
 from __future__ import annotations
 
+import re
+
 from ..values import Completion, Launch, RawOutput, Request, ResolvedSpec
 
 
@@ -40,7 +42,37 @@ class CopilotProvider:
             line for line in raw.stdout.splitlines()
             if not line.startswith(("GitHub Copilot", "Usage:", "Tip:"))
         ]
-        return Completion("\n".join(lines).strip())
+        return Completion("\n".join(lines).strip(), usage=_usage(raw.stdout))
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_CREDITS = re.compile(r"^\s*AI Credits\s+([0-9]+(?:\.[0-9]+)?)", re.MULTILINE)
+_TOKENS = re.compile(
+    r"^\s*Tokens\s+\S\s*([0-9.]+[kKmM]?)"
+    r"(?:\s*\(([0-9.]+[kKmM]?) cached\))?"
+    r".*?\S\s*([0-9.]+[kKmM]?)", re.MULTILINE)
+
+
+def _usage(stdout: str) -> tuple[tuple[str, str | None], ...]:
+    """What the CLI reported it spent, from its own session footer.
+
+    The quantities are recorded as the CLI meters them - AI credits and
+    tokens. It never reports currency, and the value of a credit belongs
+    to the account plan rather than to this tool, so nothing here
+    converts (#294).
+    """
+    text = _ANSI.sub("", stdout)
+    values: list[tuple[str, str | None]] = []
+    credits = _CREDITS.search(text)
+    if credits:
+        values.append(("ai_credits", credits.group(1)))
+    tokens = _TOKENS.search(text)
+    if tokens:
+        values.append(("input_tokens", tokens.group(1)))
+        if tokens.group(2):
+            values.append(("cached_tokens", tokens.group(2)))
+        values.append(("output_tokens", tokens.group(3)))
+    return tuple(values)
 
 
 COPILOT = CopilotProvider()

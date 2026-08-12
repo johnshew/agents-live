@@ -30,6 +30,7 @@ from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
+from agents_live.agent.values import RawOutput
 from agents_live.runtime import Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
@@ -969,6 +970,69 @@ class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
         ]) + "\n", encoding="utf-8")
         self.assertEqual(2, obs.query.damaged(obs.files(directory)))
         self.assertEqual(1, len(obs.load(obs.files(directory))))
+
+
+class TestRunsRecordWhatTheySpent(TempRepository):
+    """The provider meters the work; nothing else can.
+
+    Across 47,810 records on a live host, none carried usage, so both
+    cost columns and the totals line had never shown a number. The figure
+    was being printed on stdout and discarded.
+    """
+
+    FOOTER = (
+        "\x1b[32mChanges\x1b[0m    +0 -0\n"
+        "AI Credits 22.7 (1m 5s)\n"
+        "Tokens     \u2191 85.0k (40.4k cached) \u2022 \u2193 7.0k (1.2k reasoning)\n"
+        "Resume     copilot --resume=785fa91c\n"
+    )
+
+    def test_the_copilot_footer_is_recorded_as_usage(self) -> None:
+        completion = providers.get("copilot").parse(
+            RawOutput(0, '{"done": true}\n' + self.FOOTER, ""))
+        usage = dict(completion.usage)
+        self.assertEqual("22.7", usage["ai_credits"])
+        self.assertEqual("85.0k", usage["input_tokens"])
+        self.assertEqual("40.4k", usage["cached_tokens"])
+        self.assertEqual("7.0k", usage["output_tokens"])
+
+    def test_output_without_a_footer_reports_no_usage(self) -> None:
+        completion = providers.get("copilot").parse(
+            RawOutput(0, '{"done": true}\n', ""))
+        self.assertEqual((), completion.usage)
+
+    def test_the_dashboard_reads_credits_and_never_invents_currency(self) -> None:
+        """What a credit costs belongs to the account plan. Converting
+        here produced a figure that looked authoritative and was made up."""
+        dashboard = self._dashboard()
+        self.assertEqual(22.7, dashboard._entry_cost_usd(
+            {"usage": [["ai_credits", "22.7"]]}))
+        self.assertIsNone(dashboard._entry_cost_usd({"usage": []}))
+        source = Path(dashboard.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("_CREDIT_TO_USD", source)
+
+    def test_a_recorded_run_reaches_the_column(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "spender-1234567890.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="spender-1234567890", run_id="run-1", origin="manual",
+            usage=(("ai_credits", "22.7"),)))
+        dashboard = self._dashboard()
+        with mock.patch.object(dashboard, "LOGS_DIR", directory):
+            costs = dashboard.cost_index()
+        self.assertEqual((22.7, 22.7), costs["spender-1234567890"])
+        self.assertEqual(
+            ("22.7", "22.7"),
+            dashboard.agent_cost("spender-1234567890", costs))
+
+    def _dashboard(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        return dashboard
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

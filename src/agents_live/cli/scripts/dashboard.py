@@ -173,13 +173,6 @@ def last_runs(identifier: str,
     return (_ago(last_ok, now), _ago(last_err, now), last_status)
 
 
-# Agency/Copilot runs report "AI Credits"; Claude runs report dollars
-# directly. The repo's billing note fixes the conversion at 1 credit = $0.01
-# (see .agents/agents-live.md), so both can be summed into one dollar
-# figure.
-_CREDIT_TO_USD = 0.01
-
-
 def agent_cost(identifier: str,
                index: dict[str, tuple[float, float]] | None = None
                ) -> tuple[str, str]:
@@ -195,7 +188,7 @@ def agent_cost(identifier: str,
     if totals is None:
         return ("-", "-")
     day_total, week_total = totals
-    return (f"${day_total:.2f}", f"${week_total:.2f}")
+    return (f"{day_total:.1f}", f"{week_total:.1f}")
 
 
 def cost_index() -> dict[str, tuple[float, float]]:
@@ -351,19 +344,28 @@ def _refresh_summary() -> str:
 
 
 def _entry_cost_usd(entry: dict) -> float | None:
-    """Dollar cost of a single run entry, or None when it carries no cost."""
-    cost = entry.get("cost_usd")
-    if cost is not None:
-        try:
-            return float(cost)
-        except (ValueError, TypeError):
-            return None
-    credits = entry.get("credits")
-    if credits is not None:
-        try:
-            return float(credits) * _CREDIT_TO_USD
-        except (ValueError, TypeError):
-            return None
+    """AI credits a run reported, or None when it reported none.
+
+    Credits, not dollars: the provider CLIs meter credits and never
+    report currency, and what a credit costs belongs to the account plan
+    rather than to this tool. Converting here produced a figure that
+    looked authoritative and was invented (#294).
+    """
+    usage = entry.get("usage")
+    pairs = (
+        dict(usage) if isinstance(usage, dict) else
+        {str(key): value for key, value in usage}
+        if isinstance(usage, (list, tuple)) and all(
+            isinstance(item, (list, tuple)) and len(item) == 2 for item in usage)
+        else {}
+    )
+    for key in ("ai_credits", "credits"):
+        value = pairs.get(key, entry.get(key))
+        if value is not None:
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return None
     return None
 
 
@@ -769,11 +771,11 @@ def _filtered_agent_rows(rows: list[dict], filters: dict) -> list[dict]:
 def _cost_totals(rows: list[dict]) -> tuple[str, str]:
     def total(field: str) -> str:
         values = [
-            float(row[field].removeprefix("$"))
+            float(row[field])
             for row in rows
             if row[field] != "-"
         ]
-        return f"${sum(values):.2f}"
+        return f"{sum(values):.1f}"
 
     return total("cost_day"), total("cost_week")
 
@@ -877,9 +879,9 @@ _AGENT_COLUMNS = [
      "style": "width: 64px", "headerStyle": "width: 64px"},
     {"name": "last_err", "label": "Last Err", "field": "last_err", "align": "right",
      "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_day", "label": "$/24h", "field": "cost_day", "align": "right",
+    {"name": "cost_day", "label": "AI/24h", "field": "cost_day", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
-    {"name": "cost_week", "label": "$/1w", "field": "cost_week", "align": "right",
+    {"name": "cost_week", "label": "AI/1w", "field": "cost_week", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
 ]
 
@@ -895,7 +897,7 @@ def agent_grid() -> None:
         table.rows = _filtered_agent_rows(rows, filters)
         table.update()
         day, week = _cost_totals(table.rows)
-        totals.text = f"Totals: {day} / 24h   {week} / 1w"
+        totals.text = f"AI credits: {day} / 24h   {week} / 1w"
 
     def set_filter(key: str, value) -> None:
         filters[key] = value
@@ -997,7 +999,7 @@ def agent_grid() -> None:
     table.on("claim", _claim_row)
     day_total, week_total = _cost_totals(filtered_rows)
     totals = ui.label(
-        f"Totals: {day_total} / 24h   {week_total} / 1w"
+        f"AI credits: {day_total} / 24h   {week_total} / 1w"
     ).classes("w-full text-right text-xs text-gray-500 pr-4")
 
 
