@@ -106,5 +106,12 @@ Python 3.12 or newer is required. POSIX schedules use the user crontab and
 watchers use `inotifywait`. Native Windows schedules use Task Scheduler and
 watchers use directory change notifications.
 
+The installed `.claude/skills/agents-live/` payload is tool-managed and carries
+a directory-local `.gitignore`; project-authored sibling skills are unaffected.
+For an existing repository that already tracks the payload, run
+`git rm -r --cached .claude/skills/agents-live`, then
+`git add -f .claude/skills/agents-live/.gitignore`. Agents Live never changes the
+Git index itself.
+
 For details, see the [command reference](commands.md), [diagnostics
 guide](diagnostics.md), and [release process](release-process.md).

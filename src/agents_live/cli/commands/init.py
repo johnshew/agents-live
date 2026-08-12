@@ -52,7 +52,8 @@ _DOTFILE_HEADER = (
 # The skill payload init installs into a target repo (§3.4 step 2):
 # docs and templates only - NO scripts/; the CLI is the executable
 # surface, the skill is the thin layer that drives it.
-_SKILL_PAYLOAD = ("SKILL.md", "VERSION", "docs", "templates")
+_SKILL_PAYLOAD = (".gitignore", "SKILL.md", "VERSION", "docs", "templates")
+_SKILL_IGNORE = "*\n!.gitignore\n"
 
 
 def initialize(root: Path) -> bool:
@@ -99,6 +100,9 @@ def _payload_version(payload_dir: Path) -> str | None:
 
 def _copy_payload(source: Path, dest: Path) -> None:
     for item in _SKILL_PAYLOAD:
+        if item == ".gitignore":
+            (dest / item).write_text(_SKILL_IGNORE, encoding="utf-8")
+            continue
         payload = source / item
         if payload.is_dir():
             shutil.copytree(payload, dest / item)
@@ -137,8 +141,9 @@ def _install_payload(source: Path, dest: Path) -> None:
 
 def install_skill(root: Path) -> str | None:
     """Install or refresh the vendored skill payload (§3.4 step 2) in the
-    target repo's ``.claude/skills/agents-live/``: SKILL.md, docs, and
-    starter templates - no ``scripts/``. Returns ``"installed"`` on first
+    target repo's ``.claude/skills/agents-live/``: its local ignore rule,
+    SKILL.md, docs, and starter templates - no ``scripts/``. Returns
+    ``"installed"`` on first
     install, ``"refreshed"`` when an existing install's VERSION differed
     from the vendored payload's, and None when already current. A refresh
     replaces only the payload items; anything else in the directory (a

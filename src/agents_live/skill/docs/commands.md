@@ -91,6 +91,16 @@ agents-live stop link-check --dry-run
 - `completions bash|zsh|powershell|--update` emits shell completions.
 - `dashboard` opens the local operational UI.
 
+`init` and skill upgrades install a directory-local `.gitignore` under
+`.claude/skills/agents-live/`. The managed payload stays out of repository
+status while sibling skills remain visible. The tool never changes the Git
+index. If an existing repository already tracks the payload, untrack it once:
+
+```bash
+git rm -r --cached .claude/skills/agents-live
+git add -f .claude/skills/agents-live/.gitignore
+```
+
 The former public `heartbeat` command is not part of 6.0. On WSL, liveness is
 runtime-owned: convergence registers a staged task under a distinct name,
 waits for a fresh beacon, swaps it into place, then removes the prior task.

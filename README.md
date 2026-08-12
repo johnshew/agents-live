@@ -121,6 +121,13 @@ agents-live init
 Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
 install.
 
+The installed `.claude/skills/agents-live/` payload is tool-managed and carries
+a directory-local `.gitignore`; project-authored sibling skills are unaffected.
+For an existing repository that already tracks the payload, run
+`git rm -r --cached .claude/skills/agents-live`, then
+`git add -f .claude/skills/agents-live/.gitignore`. Agents Live never changes the
+Git index itself.
+
 Note that macOS is untested.
 
 Run `agents-live doctor` to diagnose missing requirements and inspect

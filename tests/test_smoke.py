@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -170,7 +171,7 @@ class TestSixRuntimeSmoke(SmokeRepository):
     def test_init_installs_the_vendored_skill_payload(self) -> None:
         self.assertEqual("installed", init.install_skill(self.root))
         installed = self.root / ".claude" / "skills" / "agents-live"
-        for relative in ("SKILL.md", "VERSION", "docs", "templates"):
+        for relative in (".gitignore", "SKILL.md", "VERSION", "docs", "templates"):
             self.assertTrue((installed / relative).exists(), relative)
         guide = installed / "docs" / "model-selection.md"
         self.assertTrue(guide.is_file())
@@ -183,6 +184,72 @@ class TestSixRuntimeSmoke(SmokeRepository):
         (installed / "VERSION").write_text("0.0.0\n", encoding="utf-8")
         self.assertEqual("refreshed", init.install_skill(self.root))
         self.assertNotEqual("stale\n", guide.read_text(encoding="utf-8"))
+        self.assertEqual(
+            "*\n!.gitignore\n",
+            (installed / ".gitignore").read_text(encoding="utf-8"),
+        )
+
+    def test_managed_skill_ignore_is_local_and_index_safe(self) -> None:
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=self.root,
+            check=True,
+        )
+        (self.root / ".gitignore").write_text(
+            "*.temporary\n", encoding="utf-8"
+        )
+        sibling = self.root / ".claude" / "skills" / "project-skill"
+        sibling.mkdir(parents=True)
+        (sibling / "SKILL.md").write_text("project authored\n", encoding="utf-8")
+
+        self.assertEqual("installed", init.install_skill(self.root))
+        output = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.replace("\\", "/")
+
+        self.assertIn(
+            "?? .claude/skills/agents-live/.gitignore",
+            output,
+        )
+        self.assertIn(
+            "?? .claude/skills/project-skill/SKILL.md",
+            output,
+        )
+        self.assertNotIn(
+            ".claude/skills/agents-live/SKILL.md",
+            output,
+        )
+
+    def test_migration_can_track_ignore_below_ignored_ancestor(self) -> None:
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=self.root,
+            check=True,
+        )
+        (self.root / ".gitignore").write_text(
+            ".claude/\n", encoding="utf-8"
+        )
+        self.assertEqual("installed", init.install_skill(self.root))
+        relative = ".claude/skills/agents-live/.gitignore"
+
+        subprocess.run(
+            ["git", "add", "-f", relative],
+            cwd=self.root,
+            check=True,
+        )
+        tracked = subprocess.run(
+            ["git", "ls-files", "--stage", relative],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        self.assertIn(relative, tracked.replace("\\", "/"))
 
     def test_administrative_events_use_the_observability_schema(self) -> None:
         obs.admin.record(
