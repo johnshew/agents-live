@@ -128,7 +128,35 @@ def collect_agents() -> list[dict]:
     } for row in agent_view.repository_agents(REPO_ROOT)]
 
 
-def last_runs(identifier: str) -> tuple[str, str, str]:
+def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
+    """(last_ok, last_error, last_status) for every identifier, in one pass.
+
+    The log directory is read once. Asking per agent instead reads every
+    agent's log to answer a question about one of them, and the table
+    then does that once per row: on a repository with 21 agents and 50 MB
+    of history that is a gigabyte of parsing per refresh, which blocks
+    the event loop long enough for the browser to lose the websocket.
+    """
+    index: dict[str, tuple[str | None, str | None, str]] = {}
+    for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
+        if entry.get("phase") != "done":
+            continue
+        identifier = entry.get("agent_name")
+        if not isinstance(identifier, str):
+            continue
+        last_ok, last_err, _ = index.get(identifier, (None, None, ""))
+        status = str(entry.get("status", "")).lower()
+        if status == "ok":
+            last_ok = entry.get("ts")
+        elif status == "error":
+            last_err = entry.get("ts")
+        index[identifier] = (last_ok, last_err, status)
+    return index
+
+
+def last_runs(identifier: str,
+              index: dict[str, tuple[str | None, str | None, str]] | None = None
+              ) -> tuple[str, str, str]:
     """(last_ok, last_error, last_status) from the agent log.
 
     last_status is the status of the most recent `done` entry ("ok",
@@ -136,21 +164,9 @@ def last_runs(identifier: str) -> tuple[str, str, str]:
     drives the health colour the same way the DASHBOARD.md "OK" column
     does: an agent whose last run errored is unhealthy.
     """
-    last_ok: str | None = None
-    last_err: str | None = None
-    last_status = ""
-    records = obs.load(obs.files(_require_repo_path(LOGS_DIR)))
-    for entry in records:
-        if entry.get("agent_name") != identifier:
-            continue
-        if entry.get("phase") != "done":
-            continue
-        status = str(entry.get("status", "")).lower()
-        last_status = status
-        if status == "ok":
-            last_ok = entry.get("ts")
-        elif status == "error":
-            last_err = entry.get("ts")
+    if index is None:
+        index = last_run_index()
+    last_ok, last_err, last_status = index.get(identifier, (None, None, ""))
     now = datetime.now(timezone.utc)
     return (_ago(last_ok, now), _ago(last_err, now), last_status)
 
@@ -186,7 +202,7 @@ def agent_cost(name: str) -> tuple[str, str]:
             continue
         try:
             entry = json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:
             continue
         ts = entry.get("ts")
         try:
@@ -361,8 +377,12 @@ DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log" if LOGS_DIR else No
 
 
 def _command_argv(command: str, args: list[str]) -> list[str]:
-    """Invoke the public CLI from the dashboard's installed environment."""
-    return [sys.executable, "-m", "agents_live.cli", command, *args]
+    """Invoke the public CLI from the environment that provides the package.
+
+    Not ``sys.executable``: this script runs under ``uv run --script``,
+    whose environment holds NiceGUI and no agents-live (#288).
+    """
+    return [*repos.cli_base(), command, *args]
 
 
 def _run_script(command: str, args: list[str],
@@ -608,6 +628,7 @@ def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
     rows: list[dict] = []
     host = ownership.current_label()
+    runs = last_run_index()
     for agent in collect_agents():
         name = agent["name"]
         identifier = agent["identifier"]
@@ -618,7 +639,7 @@ def agent_rows() -> list[dict]:
             ownership.display_owner(owner_value) if owner_value else
             "-" if ownership_available else "Unavailable"
         )
-        ok_ago, err_ago, last_status = last_runs(identifier)
+        ok_ago, err_ago, last_status = last_runs(identifier, runs)
         # A failed last run only makes this host's view unhealthy while
         # the agent is still registered here. "stopped" means no trigger
         # is registered on this host - commonly an agent owned by

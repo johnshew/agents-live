@@ -408,10 +408,16 @@ def main(argv: list[str] | None = None) -> int:
                     json_mode=json_mode)
                 return 2
         uv = shutil.which("uv") or "uv"
+        # A delegated script runs in its own uv environment and cannot
+        # rediscover the CLI that launched it, so hand it down (#288).
+        # This is what keeps an editable source run acting on the source.
+        child_env = os.environ.copy()
+        child_env[state.CLI_ENV_VAR] = json.dumps(state.cli_base())
         try:
             completed = subprocess.run(
                 [uv, "run", "--script", str(SCRIPT_DIR / script), *rest],
                 check=False,
+                env=child_env,
                 **({"capture_output": True, "text": True,
                     "encoding": "utf-8", "errors": "replace"}
                    if capture else {}),

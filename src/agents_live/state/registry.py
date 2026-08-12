@@ -1,7 +1,6 @@
 """User-level repository registry and read-only aggregate collectors."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
@@ -269,26 +268,60 @@ def _remove(ref: str) -> None:
     _adminlog().record("repo-remove", repo=name, root=root)
 
 
-def _cli_base() -> list[str]:
+CLI_ENV_VAR = "AGENTS_LIVE_CLI"
+
+
+def _environment_shim() -> Path | None:
+    """The ``agents-live`` entry point of the environment running this code.
+
+    Anchored on ``pyvenv.cfg`` so only a real environment root answers;
+    a bare ``~/bin`` on the way up is not one.
+    """
+    filename = hostruntime.executable_filename("agents-live")
+    beside = Path(sys.executable).with_name(filename)
+    if beside.is_file():
+        return beside.resolve()
+    package = Path(__file__).resolve().parents[1]
+    for parent in package.parents[:4]:
+        if not (parent / "pyvenv.cfg").is_file():
+            continue
+        for directory in ("bin", "Scripts"):
+            candidate = parent / directory / filename
+            if candidate.is_file():
+                return candidate.resolve()
+    return None
+
+
+def cli_base() -> list[str]:
     """argv prefix for spawning the CLI in a child process.
 
-    The module form matches the code currently running, but only works
-    where ``agents_live`` is importable; the dashboard runs from an
-    isolated ``uv run --script`` environment where it is not, so fall
-    back to the installed shim there.
+    ``find_spec`` cannot answer this. A ``uv run --script`` dispatch such
+    as the dashboard puts the package directory on its own ``sys.path``,
+    so the check succeeds in-process while a child interpreter in that
+    isolated environment has no ``agents_live`` to import (#288). What a
+    child can run is the entry point of the environment that provides
+    the package, or an explicit prefix handed down by the dispatching
+    CLI - which is the only form that stays on the source tree when the
+    caller was itself editable.
     """
-    if importlib.util.find_spec("agents_live") is not None:
-        return [sys.executable, "-m", "agents_live.cli"]
-    try:
-        from ..legacy import headless
-    except ImportError:
-        from legacy import headless
-    return [str(headless.cli_shim_path())]
+    declared = os.environ.get(CLI_ENV_VAR)
+    if declared:
+        try:
+            argv = json.loads(declared)
+        except json.JSONDecodeError:
+            argv = None
+        if isinstance(argv, list) and argv and all(
+                isinstance(item, str) for item in argv):
+            return list(argv)
+    shim = _environment_shim()
+    if shim is not None:
+        return [str(shim)]
+    return [sys.executable, "-m", "agents_live.cli"]
 
 
 def _child_json(alias: str, path: str, command: str) -> dict:
     completed = subprocess.run(
-        [*_cli_base(), "--repo", path, command, "--json"],
+        [*cli_base(), "--repo", path, command, "--json"],
         capture_output=True, check=False, **hostruntime.CHILD_TEXT,
     )
     try:
@@ -353,7 +386,7 @@ def collect_doctor() -> dict:
         env.pop("AGENTS_LIVE_REPO", None)
         env["XDG_CONFIG_HOME"] = empty
         host_run = subprocess.run(
-            [*_cli_base(), "--json", "doctor"],
+            [*cli_base(), "--json", "doctor"],
             cwd=empty, env=env, capture_output=True, check=False,
             **hostruntime.CHILD_TEXT,
         )

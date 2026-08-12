@@ -31,7 +31,12 @@ def load(
         for line in lines:
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
+                # ValueError, not json.JSONDecodeError: the flat script
+                # dispatches put this module on sys.path twice, so the
+                # attribute the handler resolves is not always the class
+                # the raising copy of json produced. A record torn by two
+                # appenders must never end a reader (#284).
                 continue
             record = normalize(raw)
             if record is None:

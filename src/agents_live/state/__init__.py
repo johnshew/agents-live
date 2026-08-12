@@ -13,6 +13,7 @@ from .started import (
     record,
     replace,
 )
+from .registry import CLI_ENV_VAR, cli_base
 from .. import paths as _paths
 
 ENV_VAR = _paths.ENV_VAR
@@ -28,9 +29,11 @@ def clear_root_cache() -> None:
 __all__ = [
     "StartedSnapshot",
     "StartedStateUnavailable",
+    "CLI_ENV_VAR",
     "ENV_VAR",
     "clear",
     "clear_root_cache",
+    "cli_base",
     "is_started",
     "load",
     "load_or_adopt",
