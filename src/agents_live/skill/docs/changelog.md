@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.0.6 - 2026-08-11
+
 - fix: honor shell processor shebangs on POSIX hosts. (#283)
   Executable `.sh` processors now run through their declared interpreter, and
   non-executable processors fail with a clear validation error.
