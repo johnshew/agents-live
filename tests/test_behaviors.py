@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -896,6 +897,78 @@ class TestPendingUpgradeIdentity(TempRepository):
         self.assertIsNotNone(started)
         self.assertLess(abs(time.time() - started), 3600)
         self.assertIsNone(hostruntime.process_start_time(999_999_999))
+
+
+class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
+    """Several processes append to one log, and a split record is lost.
+
+    Watchers, scheduled runs, and the maintenance loop share these files.
+    A live deployment accumulated 11,577 records spliced into each other,
+    and because every reader skips what it cannot decode, the history
+    simply went missing.
+
+    The race itself is not reliably reproducible - four writers against a
+    text-mode stream pass most of the time - so what is asserted is the
+    mechanism that makes it impossible: one record leaves in one write,
+    at a position the kernel chooses.
+    """
+
+    def _event(self, size: int = 40000):
+        return obs.create(
+            "done", "ok", repository="/repo", agent="writer",
+            run_id="run-1", origin="test", message="x" * size)
+
+    def test_one_record_leaves_in_one_write(self) -> None:
+        log = paths.repo_state_dir(self.root) / "logs" / "shared.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        sizes: list[int] = []
+        flags: list[int] = []
+        real_write, real_open = os.write, os.open
+
+        def counting_write(descriptor, data):
+            sizes.append(len(data))
+            return real_write(descriptor, data)
+
+        def recording_open(path, opened_flags, *rest):
+            flags.append(opened_flags)
+            return real_open(path, opened_flags, *rest)
+
+        for size in (10, 40000):
+            with self.subTest(size=size):
+                sizes.clear()
+                flags.clear()
+                with (
+                    mock.patch.object(obs.events.os, "write", counting_write),
+                    mock.patch.object(obs.events.os, "open", recording_open),
+                ):
+                    obs.record(log, self._event(size))
+                self.assertEqual(
+                    1, len(sizes),
+                    f"record left in {len(sizes)} writes: {sizes}")
+                self.assertTrue(flags and flags[0] & os.O_APPEND)
+
+    def test_the_records_written_are_the_records_read_back(self) -> None:
+        log = paths.repo_state_dir(self.root) / "logs" / "shared.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(20):
+            obs.record(log, self._event(4000))
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(20, len(lines))
+        self.assertEqual(20, len([json.loads(line) for line in lines]))
+
+    def test_lost_history_is_counted_rather_than_skipped_in_silence(self) -> None:
+        """A dropped line looks exactly like one that was never written."""
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "torn.jsonl").write_text("\n".join([
+            '{"log_schema":5,"ts":"2026-08-01T00:00:00Z","agent_name":"a",'
+            '"phase":"done","status":"ok"}',
+            '{"ts":"2026-08-01T00:01:00Z",{"ts":"2026-08-01T00:02:00Z"}',
+            "",
+            "not-json",
+        ]) + "\n", encoding="utf-8")
+        self.assertEqual(2, obs.query.damaged(obs.files(directory)))
+        self.assertEqual(1, len(obs.load(obs.files(directory))))
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

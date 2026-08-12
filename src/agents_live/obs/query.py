@@ -99,6 +99,30 @@ def load(
     return tuple(records)
 
 
+def damaged(paths: Iterable[Path]) -> int:
+    """How many lines no reader can decode.
+
+    Skipping them silently is what let 11,577 torn records accumulate
+    unnoticed: a dropped line looks exactly like one that was never
+    written, so the loss has to be counted somewhere an operator reads.
+    """
+    total = 0
+    for path in paths:
+        try:
+            lines = path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except ValueError:
+                total += 1
+    return total
+
+
 def normalize(raw: object) -> dict[str, object] | None:
     if not isinstance(raw, dict):
         return None
