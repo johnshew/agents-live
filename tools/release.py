@@ -526,6 +526,11 @@ def _gate_commands() -> list[list[str]]:
 
     One list, run by both ``prepare`` and ``publish`` and printed by the
     plan, so the three cannot describe different releases.
+
+    The build comes before the dashboard readiness check because that
+    check runs the artifact rather than the source: an editable import
+    and a ``--help`` exit are what let two packaged dashboard breaks
+    reach releases (#279).
     """
     return [
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
@@ -533,8 +538,11 @@ def _gate_commands() -> list[list[str]]:
          "tests/test_smoke.py"],
         ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
          "tests/test_seams.py"],
+        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+         "tests/test_behaviors.py"],
         _smoketest_command(),
         ["uv", "build"],
+        ["uv", "run", "--script", "tools/dashboard-readiness.py"],
     ]
 
 
