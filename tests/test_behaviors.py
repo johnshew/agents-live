@@ -779,6 +779,11 @@ class TestFailuresAreVisible(TempRepository):
                 "agent_name": "handler",
             }),
             "{not-json",
+            json.dumps({
+                "spec": 1, "timestamp": "not-a-time", "event": "run",
+                "status": "success", "agent": "handler", "run_id": "bad-ts",
+                "origin": "manual",
+            }),
         ]) + "\n", encoding="utf-8")
 
         con = qlog.duckdb.connect(":memory:")
@@ -786,7 +791,7 @@ class TestFailuresAreVisible(TempRepository):
         qlog.build_view(con, patterns)
         message = "; ".join(qlog.check_schema(con, patterns))
 
-        self.assertIn("5 JSONL row(s)", message)
+        self.assertIn("6 JSONL row(s)", message)
         self.assertIn(f"{log}: line 2: missing field(s): ts", message)
         self.assertIn(f"{log}: line 3: invalid field(s): log_schema", message)
         self.assertIn(f"{log}: line 4: invalid field(s): log_schema", message)
@@ -794,6 +799,33 @@ class TestFailuresAreVisible(TempRepository):
             f"{log}: line 5: invalid field(s): ts (UTC offset required)",
             message,
         )
+
+    def test_schema_check_includes_invalid_archive_rows(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        archive = directory / "archive"
+        archive.mkdir(parents=True)
+        live = directory / "live.jsonl"
+        live.write_text(json.dumps({
+            "log_schema": 5, "ts": "2026-08-01T00:00:00Z",
+            "agent_name": "handler",
+        }) + "\n", encoding="utf-8")
+        parquet = archive / "2026-08.parquet"
+        writer = qlog.duckdb.connect(":memory:")
+        writer.sql(
+            "CREATE TABLE archived AS SELECT "
+            "CAST(NULL AS VARCHAR) AS ts, "
+            "'handler'::VARCHAR AS agent_name, 5::INTEGER AS log_schema"
+        )
+        writer.sql(
+            f"COPY archived TO '{parquet}' (FORMAT PARQUET)"
+        )
+
+        con = qlog.duckdb.connect(":memory:")
+        patterns = [str(directory / "*.jsonl")]
+        qlog.build_view(con, patterns, archives=archive)
+        message = "; ".join(qlog.check_schema(con, patterns))
+
+        self.assertIn("1 JSONL row(s)", message)
 
 
     def test_health_follows_the_newest_run_not_the_last_one_read(self) -> None:

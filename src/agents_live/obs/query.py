@@ -142,6 +142,10 @@ def normalize(raw: object) -> dict[str, object] | None:
     required = ("timestamp", "event", "status", "agent", "run_id", "origin")
     if not all(isinstance(raw.get(field), str) for field in required):
         return None
+    try:
+        datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+    except ValueError:
+        return None
     event = str(raw["event"])
     status = str(raw["status"])
     record = {
@@ -210,6 +214,10 @@ def normalization_issue(raw: object) -> str | None:
         ]
         if invalid:
             return f"invalid field(s): {', '.join(invalid)}"
+        try:
+            datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
+        except ValueError:
+            return "invalid field(s): timestamp"
         return None
     if "log_schema" in raw:
         return "invalid field(s): log_schema"

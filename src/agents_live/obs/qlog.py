@@ -203,7 +203,7 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
         jsonl_sql = "TRUE" if _is_jsonl(f) else "FALSE"
         selects.append(
             f"SELECT {cols_sql}, '{Path(f).name}' AS _src, "
-            f"{jsonl_sql} AS _jsonl FROM {read_expr}"
+            f"{jsonl_sql} AS _jsonl, FALSE AS _archive FROM {read_expr}"
         )
     # Include current unified monthly Parquet archives if any exist.
     # Archives are produced from JSONL sources only, so they are always
@@ -213,7 +213,7 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
         if unified_files:
             paths_csv = ", ".join(f"'{p}'" for p in unified_files)
             selects.append(
-                f"SELECT *, TRUE AS _jsonl "
+                f"SELECT *, TRUE AS _jsonl, TRUE AS _archive "
                 f"FROM read_parquet([{paths_csv}], union_by_name=true)"
             )
     union = " UNION ALL BY NAME ".join(selects)
@@ -352,9 +352,15 @@ def check_schema(con: duckdb.DuckDBPyConnection,
         # Row-level contract applies to JSONL sources only; plaintext
         # logs (heartbeat, spawn stderr, transcripts) load as all-NULL
         # rows by design and are exempt.
-        invalid_count, samples = (
+        live_invalid_count, samples = (
             _schema_violations(patterns) if patterns else (0, [])
         )
+        archive_invalid_count = con.sql(
+            "SELECT count(*) FROM log "
+            "WHERE _archive AND (ts IS NULL OR agent_name IS NULL "
+            "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
+        ).fetchone()[0]
+        invalid_count = live_invalid_count + archive_invalid_count
         if invalid_count:
             detail = (
                 f"{invalid_count} JSONL row(s) violate the supported log schema"

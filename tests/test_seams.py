@@ -1357,6 +1357,44 @@ class TestObservability(unittest.TestCase):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_first_manual_run_can_append_to_handler_log(self) -> None:
+        directory = self.skill("handler-writer", [
+            'agents-live.selector: "none"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "import json, os\n"
+            "from datetime import datetime, timezone\n"
+            "record = {'log_schema': 5, "
+            "'ts': datetime.now(timezone.utc).isoformat(), "
+            "'agent_name': os.environ['AGENTS_LIVE_AGENT_ID'], "
+            "'phase': 'handler', 'status': 'ok'}\n"
+            "with open(os.environ['AGENTS_LIVE_LOG_FILE'], 'a', "
+            "encoding='utf-8') as stream:\n"
+            "    stream.write(json.dumps(record) + '\\n')\n"
+            "print('done')\n",
+            encoding="utf-8",
+        )
+        spec = agent.load("handler-writer", root=self.root)
+        log = (
+            paths.repo_state_dir(self.root)
+            / "logs"
+            / f"{spec.identifier}.jsonl"
+        )
+        self.assertFalse(log.parent.exists())
+
+        result = dispatch(
+            Firing("handler-writer", str(self.root), "manual"),
+        )
+
+        self.assertTrue(result.ok, result)
+        records = obs.load([log])
+        self.assertEqual(
+            ["handler", "done"],
+            [record["phase"] for record in records],
+        )
+
     def test_processors_receive_stable_identity_and_log_destination(self) -> None:
         directory = self.skill("handler-contract", [
             'agents-live.selector: "none"',

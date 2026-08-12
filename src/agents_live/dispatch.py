@@ -87,6 +87,7 @@ def dispatch(
             return _skip(events, firing, run_id, "dispatch-budget")
         selected_runner = runner or runtime.current().child_runner
         try:
+            events.parent.mkdir(parents=True, exist_ok=True)
             return _pipeline(spec, firing, selected_runner, run_id, events)
         except (agent.DefinitionError, ValueError) as exc:
             return _failure(
