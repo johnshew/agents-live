@@ -63,7 +63,14 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         input_text = None
         if step is Step.POST:
             source = None if config.mode == "pipeline" else (ctx.agent or ctx.pre)
-            input_text = source.text if source else None
+            if source is not None and source.structured is not None:
+                # The extracted value, not the text it came out of: a
+                # provider wraps its answer in prose and a session
+                # footer, and the processor is the reason the value was
+                # extracted at all.
+                input_text = json.dumps(source.structured)
+            elif source is not None:
+                input_text = source.text
         return Launch(
             _processor_argv(path),
             tuple(sorted(environment.items())),

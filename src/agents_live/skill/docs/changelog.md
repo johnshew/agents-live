@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: hand a post-processor the extracted value, not the text around it.
+  A provider wraps its answer in prose and a session footer, and the processor
+  is the reason the value was extracted at all; it was being given all 24,637
+  bytes and failing on the first one.
+- fix: record a run under its canonical identifier however it was invoked.
+  `run --name <display name>` wrote a second log file that identifier-keyed
+  readers never found, hiding manual runs from the dashboard's history, cost,
+  and health columns and letting the older file decide a row's colour.
+
 ## 6.1.0 - 2026-08-12
 
 - feat: move an agent between runtimes from the CLI again. (#289)

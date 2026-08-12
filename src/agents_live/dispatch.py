@@ -59,6 +59,14 @@ def dispatch(
     except agent.DefinitionError as exc:
         return _failure(events, firing, run_id, "agent_invalid", str(exc))
 
+    # However the agent was named, record it under its canonical
+    # identifier. `run --name <display name>` otherwise writes a second
+    # log file that identifier-keyed readers never find, which hid manual
+    # runs from the dashboard's history, cost, and health columns.
+    if spec.identifier != firing.agent_id:
+        firing = replace(firing, agent_id=spec.identifier)
+        events = _event_path(root, spec.identifier)
+
     config = spec.execution
     if config is None:
         return _failure(

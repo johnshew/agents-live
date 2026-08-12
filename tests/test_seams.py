@@ -1426,9 +1426,11 @@ class TestAgentPipeline(TempRepository):
             self.assertTrue(result.ok, result)
             self.assertEqual(sum(expected), len(runner.argv))
             records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+            identifier = agent.load(name, root=self.root).identifier
             completed = [
                 record for record in records
-                if record["agent_name"] == name and record["phase"] == "done"
+                if record["agent_name"] == identifier
+                and record["phase"] == "done"
             ]
             self.assertEqual("ok", completed[-1]["status"])
 
