@@ -1622,6 +1622,37 @@ class TestArchitectureFitness(unittest.TestCase):
         resolve_root.assert_not_called()
         run.assert_not_called()
 
+    def test_dashboard_port_conflict_guidance_is_neutral(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        conflict = "127.0.0.1:8231 is not available"
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(
+                dashboard, "port_conflict", return_value=conflict),
+            mock.patch.object(dashboard.preflight, "emit_failure") as emit,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "8231"]),
+            self.assertRaises(SystemExit),
+        ):
+            dashboard.main()
+
+        emit.assert_called_once_with(
+            "dashboard",
+            f"{conflict}; `agents-live dashboard list` shows dashboards "
+            "started by this host; if one is listed on this port, "
+            "`agents-live dashboard stop --port 8231` stops that recorded "
+            "dashboard, but another listener may still hold the port; "
+            "otherwise stop the holder with the owning system or retry with "
+            "--port <other>",
+            code="port_unavailable",
+        )
+
     def test_dashboard_delayed_refresh_registers_before_client_disconnect(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
