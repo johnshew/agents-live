@@ -131,27 +131,52 @@ def collect_agents() -> list[dict]:
 def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
     """(last_ok, last_error, last_status) for every identifier, in one pass.
 
+    Ordered by timestamp, not by the order records are read. An agent
+    whose history spans a rename has two files, and the older one sorts
+    last, so reading order made a stale failure the current health: three
+    successful runs and a green one 33 minutes ago still showed red.
+
     The log directory is read once. Asking per agent instead reads every
     agent's log to answer a question about one of them, and the table
     then does that once per row: on a repository with 21 agents and 50 MB
     of history that is a gigabyte of parsing per refresh, which blocks
     the event loop long enough for the browser to lose the websocket.
     """
-    index: dict[str, tuple[str | None, str | None, str]] = {}
+    newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
     for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
         if entry.get("phase") != "done":
             continue
         identifier = entry.get("agent_name")
         if not isinstance(identifier, str):
             continue
-        last_ok, last_err, _ = index.get(identifier, (None, None, ""))
+        moment = _moment(entry.get("ts"))
+        if moment is None:
+            continue
         status = str(entry.get("status", "")).lower()
-        if status == "ok":
-            last_ok = entry.get("ts")
-        elif status == "error":
-            last_err = entry.get("ts")
-        index[identifier] = (last_ok, last_err, status)
-    return index
+        slots = newest.setdefault(identifier, {})
+        for slot in ("any", status):
+            current = slots.get(slot)
+            if current is None or moment > current[0]:
+                slots[slot] = (moment, entry.get("ts"), status)
+    return {
+        identifier: (
+            slots["ok"][1] if "ok" in slots else None,
+            slots["error"][1] if "error" in slots else None,
+            slots["any"][2],
+        )
+        for identifier, slots in newest.items()
+    }
+
+
+def _moment(value: object) -> datetime | None:
+    """A record's timestamp as an aware instant, or None when unusable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def last_runs(identifier: str,

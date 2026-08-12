@@ -750,6 +750,42 @@ class TestFailuresAreVisible(TempRepository):
                     qlog._resolve_ts(value)[:16])
 
 
+    def test_health_follows_the_newest_run_not_the_last_one_read(self) -> None:
+        """An agent whose history spans a rename has two log files, and
+        the older sorts last (`-` before `.`), so reading order made a
+        stale failure the current health: three successful runs and a
+        green one 35 minutes ago still showed red."""
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        identifier = "renamed-agent-abcdef1234"
+
+        def record(moment: str, status: str) -> str:
+            return json.dumps({
+                "log_schema": 5, "ts": moment, "agent_name": identifier,
+                "phase": "done", "status": status,
+            })
+
+        # The newer file sorts first, so the stale failure is read last.
+        (directory / f"{identifier}.jsonl").write_text(
+            record("2026-08-12T04:08:19.249904+00:00", "ok") + "\n",
+            encoding="utf-8")
+        (directory / "renamed-agent.jsonl").write_text(
+            record("2026-08-11T16:06:30.128Z", "error") + "\n",
+            encoding="utf-8")
+        # The fixture only means something while the newer file is read
+        # first, which is what puts the stale failure last.
+        self.assertEqual(
+            [f"{identifier}.jsonl", "renamed-agent.jsonl"],
+            [path.name for path in obs.files(directory)])
+
+        dashboard = self._dashboard()
+        with mock.patch.object(dashboard, "LOGS_DIR", directory):
+            last_ok, last_err, status = dashboard.last_run_index()[identifier]
+        self.assertEqual("ok", status)
+        self.assertEqual("2026-08-12T04:08:19.249904+00:00", last_ok)
+        self.assertEqual("2026-08-11T16:06:30.128Z", last_err)
+
+
 class TestCrossModuleAgreements(unittest.TestCase):
     """Assertions that two parts of the tree still agree (#216).
 
