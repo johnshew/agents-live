@@ -101,6 +101,11 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     if selector.effort and selector.effort not in provider.efforts:
         raise DefinitionError(
             f"provider {provider.name} does not support effort {selector.effort}")
+    if config.mode == "pipeline" and config.mcps:
+        raise DefinitionError(
+            "pipeline mode cannot declare project MCP servers; "
+            "only the isolated pipeline MCP is available"
+        )
     resolved_mcps = resolve_mcp_servers(spec.root, config.mcps)
     resolved = ResolvedSpec(
         spec.name,
@@ -167,7 +172,7 @@ def interpret(
 
 
 def _agent_failure_category(raw: RawOutput) -> str:
-    if raw.returncode == 2:
+    if raw.returncode != 0:
         text = f"{raw.stderr}\n{raw.stdout}".casefold()
         if any(phrase in text for phrase in (
             "unexpected value",

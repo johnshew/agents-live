@@ -275,18 +275,28 @@ def _failure(
 
 @contextlib.contextmanager
 def _resource(spec, needed: bool, run_id: str):
-    if not needed:
-        yield ()
-        return
-    from .pipeline import pipeline_runtime
-    from .paths import repo_state_dir
-    log = (
-        repo_state_dir(spec.root)
-        / "runs"
-        / spec.name
-        / f"{run_id}-pipeline.jsonl"
-    )
-    with pipeline_runtime(log, run_id=run_id) as environment:
+    from .agent.mcp import mcp_config_runtime, resolve_mcp_servers
+
+    environment: dict[str, str] = {}
+    config = spec.execution
+    with contextlib.ExitStack() as stack:
+        if config is not None and config.mcps and config.mode != "pipeline":
+            resolved = resolve_mcp_servers(spec.root, config.mcps)
+            project_config = stack.enter_context(mcp_config_runtime(resolved))
+            if project_config:
+                environment["AGENTS_LIVE_PROJECT_MCP_CONFIG"] = project_config
+        if needed:
+            from .pipeline import pipeline_runtime
+            from .paths import repo_state_dir
+            log = (
+                repo_state_dir(spec.root)
+                / "runs"
+                / spec.name
+                / f"{run_id}-pipeline.jsonl"
+            )
+            environment.update(
+                stack.enter_context(pipeline_runtime(log, run_id=run_id))
+            )
         yield tuple(sorted(environment.items()))
 
 

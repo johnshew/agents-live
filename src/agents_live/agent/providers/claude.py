@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 
 from ..values import Completion, Launch, RawOutput, Request, ResolvedSpec
-from ..mcp import write_mcp_config
 
 
 class ClaudeProvider:
@@ -41,7 +40,7 @@ class ClaudeProvider:
             argv.extend(("--effort", spec.effort))
         for mcp in spec.mcps:
             argv.extend(("--mcp", mcp.name))
-        project_config = write_mcp_config(spec.mcps)
+        project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
         if project_config:
             argv.extend(("--mcp-config", project_config))
         pipeline_config = environment.get("PIPELINE_MCP_CLAUDE_CONFIG")
