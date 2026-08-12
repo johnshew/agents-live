@@ -1243,6 +1243,17 @@ def port_conflict(host: str, port: int) -> str | None:
     return None
 
 
+def _port_conflict_message(conflict: str, port: int) -> str:
+    """Add recovery guidance without assuming who owns the listener."""
+    return (
+        f"{conflict}; `agents-live dashboard list` shows dashboards started "
+        "by this host; if one is listed on this port, `agents-live dashboard "
+        f"stop --port {port}` stops that recorded dashboard, but another "
+        "listener may still hold the port; otherwise stop the holder with "
+        "the owning system or retry with --port <other>"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -1274,9 +1285,7 @@ def main() -> None:
         if conflict is not None:
             preflight.emit_failure(
                 "dashboard",
-                f"{conflict}; `agents-live dashboard list` shows what this "
-                f"host started, `agents-live dashboard stop --port "
-                f"{args.port}` stops it, or retry with --port <other>",
+                _port_conflict_message(conflict, args.port),
                 code="port_unavailable")
             raise SystemExit(1)
         # Recorded by the launching process, not the server: under --dev
