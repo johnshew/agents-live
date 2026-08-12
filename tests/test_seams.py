@@ -1603,6 +1603,74 @@ class TestAgentPipeline(TempRepository):
         self.assertFalse(result.ok)
         self.assertEqual("agent_invalid", result.category)
 
+    def test_plan_agent_receives_project_mcp_definition(self) -> None:
+        (self.root / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "repo-tool": {
+                    "type": "stdio",
+                    "command": "uv",
+                    "args": ["run", "server.py"],
+                    "env": {"SAFE_VALUE": "portable"},
+                }
+            }
+        }), encoding="utf-8")
+        self.skill("uses-project-mcp", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mcps: "[\\"repo-tool\\"]"',
+        ])
+        runner = RecordingRunner([ChildResult(("copilot",), 0, "done", "")])
+
+        result = dispatch(
+            Firing("uses-project-mcp", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        argv = runner.argv[-1]
+        self.assertIn("--mcp", argv)
+        self.assertEqual("repo-tool", argv[argv.index("--mcp") + 1])
+        config_arg = argv[argv.index("--additional-mcp-config") + 1]
+        payload = json.loads(Path(config_arg.removeprefix("@")).read_text(encoding="utf-8"))
+        self.assertEqual(
+            "uv",
+            payload["mcpServers"]["repo-tool"]["command"],
+        )
+
+    def test_declared_mcp_without_project_definition_fails_before_cli(self) -> None:
+        self.skill("missing-mcp", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mcps: "[\\"missing\\"]"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("missing-mcp", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("missing", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_cli_argument_rejection_has_its_own_category(self) -> None:
+        self.skill("bad-cli-flag", ['agents-live.selector: "copilot"'])
+        runner = RecordingRunner([ChildResult(
+            ("copilot",),
+            2,
+            "",
+            "error: unexpected value for --mcp: repo-tool\n",
+        )])
+
+        result = dispatch(
+            Firing("bad-cli-flag", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("cli_argument_rejected", result.category)
+        self.assertIn("unexpected value", result.message)
+
     def test_run_json_reports_the_outcome_not_only_the_text(self) -> None:
         self.skill("reported", ['agents-live.selector: "copilot:max"'])
         stdout = io.StringIO()

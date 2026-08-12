@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
+from typing import Mapping
 
 
 class Step(StrEnum):
@@ -130,12 +131,18 @@ class StepContext:
 
 
 @dataclass(frozen=True)
+class McpServer:
+    name: str
+    definition: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class ResolvedSpec:
     name: str
     prompt: str
     mode: str
     allow_tools: tuple[str, ...]
-    mcps: tuple[str, ...]
+    mcps: tuple[McpServer, ...]
     env: tuple[tuple[str, str], ...]
     provider: str
     model: str | None

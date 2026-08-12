@@ -8,6 +8,7 @@ from typing import Mapping
 
 from ..paths import repo_state_dir
 from .definition import DefinitionError, discover_definitions, load_definition
+from .mcp import resolve_mcp_servers
 from .providers import get as get_provider
 from .values import (
     AgentSpec,
@@ -100,12 +101,13 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     if selector.effort and selector.effort not in provider.efforts:
         raise DefinitionError(
             f"provider {provider.name} does not support effort {selector.effort}")
+    resolved_mcps = resolve_mcp_servers(spec.root, config.mcps)
     resolved = ResolvedSpec(
         spec.name,
         prompt,
         config.mode,
         config.allow_tools,
-        config.mcps,
+        resolved_mcps,
         tuple(sorted(environment.items())),
         provider.name,
         selector.model,
@@ -138,7 +140,7 @@ def interpret(
         category = {
             Step.PRE: "pre_processor_crash",
             Step.POST: "post_processor_crash",
-            Step.AGENT: "cli_crash",
+            Step.AGENT: _agent_failure_category(raw),
         }[step]
         return StepResult(
             step, False, category=category,
@@ -162,6 +164,25 @@ def interpret(
             step, False, retryable=True, category="empty_output",
             message="provider returned no output")
     return _validate_completion(spec, completion, raw.stdout)
+
+
+def _agent_failure_category(raw: RawOutput) -> str:
+    if raw.returncode == 2:
+        text = f"{raw.stderr}\n{raw.stdout}".casefold()
+        if any(phrase in text for phrase in (
+            "unexpected value",
+            "unexpected argument",
+            "unknown argument",
+            "unknown option",
+            "unrecognized argument",
+            "unrecognized option",
+            "unrecognized arguments",
+            "invalid argument",
+            "invalid option",
+            "invalid value",
+        )):
+            return "cli_argument_rejected"
+    return "cli_crash"
 
 
 def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
