@@ -168,13 +168,31 @@ def _await_rows(process: subprocess.Popen, port: int, mode: str) -> dict:
         if process.poll() is not None:
             raise ReadinessError(
                 f"{mode}: dashboard exited {process.returncode} before "
-                f"serving /api/agents")
+                f"serving /api/agents\n{_output(process)}")
         payload = _api_agents(port)
         if payload and payload.get("agents"):
             return payload
         time.sleep(POLL_INTERVAL_S)
     raise ReadinessError(
-        f"{mode}: /api/agents served no rows within {READY_TIMEOUT_S:.0f}s")
+        f"{mode}: /api/agents served no rows within {READY_TIMEOUT_S:.0f}s\n"
+        f"{_output(process)}")
+
+
+def _output(process: subprocess.Popen) -> str:
+    """What the dashboard said, bounded, so a failure is diagnosable.
+
+    A gate that reports only an exit status sends the reader back to
+    reproduce it by hand, which on a CI host is the one thing they
+    cannot do.
+    """
+    if process.stdout is None:
+        return "  (no output captured)"
+    try:
+        text = process.stdout.read() or ""
+    except (OSError, ValueError):
+        return "  (output unavailable)"
+    lines = text.splitlines()[-40:]
+    return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
 
 def _assert_row(payload: dict, mode: str, *, started: bool) -> None:

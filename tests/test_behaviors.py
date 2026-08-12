@@ -29,6 +29,7 @@ from agents_live.legacy import health_check
 from agents_live.runtime import Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
+from agents_live.runtime.hosts import system as hostruntime
 from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts.posix import PosixHost, PosixTriggerStore
 from agents_live.state import ownership
@@ -718,14 +719,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
         with mock.patch.dict(os.environ, {
                 state.CLI_ENV_VAR: json.dumps(["/declared/agents-live"])}):
             self.assertEqual(["/declared/agents-live"], repos.cli_base())
+        shim = Path("/env/agents-live")
         for broken in ("not json", "[]", '"string"', '[1, 2]'):
             with self.subTest(broken=broken):
                 with (
                     mock.patch.dict(os.environ, {state.CLI_ENV_VAR: broken}),
                     mock.patch.object(repos, "_environment_shim",
-                                      return_value=Path("/env/agents-live")),
+                                      return_value=shim),
                 ):
-                    self.assertEqual(["/env/agents-live"], repos.cli_base())
+                    self.assertEqual([str(shim)], repos.cli_base())
 
     def test_the_environment_shim_only_answers_for_a_real_environment(self) -> None:
         """Walking up from the package would otherwise accept a personal
@@ -734,19 +736,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
             home = Path(temporary).resolve()
             package = home / "src" / "agents_live" / "state"
             package.mkdir(parents=True)
-            stray = home / "bin"
+            filename = hostruntime.executable_filename("agents-live")
+            directory = "Scripts" if filename.endswith(".exe") else "bin"
+            stray = home / directory
             stray.mkdir()
-            (stray / "agents-live").write_text("#!/bin/sh\n", encoding="utf-8")
+            (stray / filename).write_text("#!/bin/sh\n", encoding="utf-8")
             with (
                 mock.patch.object(repos, "__file__",
                                   str(package / "registry.py")),
                 mock.patch.object(repos.sys, "executable",
                                   str(home / "python")),
             ):
-                self.assertIsNone(repos._environment_shim())
+                # Not asserting None: a temp directory can sit under an
+                # ancestor that is itself an environment. What must hold
+                # is that the stray bin only answers once its own root
+                # is marked as one.
+                self.assertNotEqual(stray / filename,
+                                    repos._environment_shim())
                 (home / "pyvenv.cfg").write_text("home = /usr\n",
                                                  encoding="utf-8")
-                self.assertEqual(stray / "agents-live",
+                self.assertEqual(stray / filename,
                                  repos._environment_shim())
 
     def test_the_dashboard_readiness_gate_asserts_actions_not_only_a_page(self) -> None:
