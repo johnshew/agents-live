@@ -64,6 +64,21 @@ def files(directory: Path) -> tuple[Path, ...]:
     }))
 
 
+def is_jsonl(path: Path) -> bool:
+    """Whether a log is expected to contain newline-delimited JSON."""
+    if path.suffix.casefold() == ".jsonl":
+        return True
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                stripped = line.strip()
+                if stripped:
+                    return stripped.startswith("{")
+    except OSError:
+        pass
+    return False
+
+
 def load(
     paths: Iterable[Path],
     *,
@@ -108,6 +123,8 @@ def damaged(paths: Iterable[Path]) -> int:
     """
     total = 0
     for path in paths:
+        if not is_jsonl(path):
+            continue
         try:
             lines = path.read_text(
                 encoding="utf-8", errors="replace").splitlines()

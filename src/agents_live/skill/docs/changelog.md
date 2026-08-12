@@ -6,6 +6,28 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: resolve project-defined MCP servers without weakening pipeline isolation. (#296)
+  Plan and write agents can use servers declared in `.vscode/mcp.json` or
+  `.mcp.json`; generated provider configuration is scoped to one dispatch and
+  removed afterward.
+- fix: give processors a stable identity, log destination, and strict diagnostics. (#287)
+  Handlers receive the canonical agent identifier and supported JSONL path,
+  while schema checks now report malformed live and archived records
+  consistently.
+- fix: exclude plaintext diagnostic logs from torn-event warnings.
+  `doctor` no longer counts valid dashboard transcripts or process stderr as
+  unreadable structured records.
+- fix: distinguish dashboard port conflicts from dashboards this host can stop.
+  Recovery guidance no longer implies that `dashboard stop` can release an
+  unrelated or unrecorded listener.
+- feat: normalize provider list-cost telemetry and document model selection. (#300)
+  Claude and Copilot runs retain comparable list-price equivalents without
+  presenting them as invoice charges, and the shipped skill includes current
+  model-selection guidance.
+- feat: keep the managed Agents Live skill payload out of target repository changes. (#301)
+  Install and refresh generate a payload-local ignore file without hiding
+  sibling skills or mutating the Git index.
+
 ## 6.1.1 - 2026-08-12
 
 - fix: hand a post-processor the extracted value, not the text around it.

@@ -147,17 +147,7 @@ def _is_jsonl(path: str) -> bool:
     itself to JSONL sources while plaintext stays queryable for
     diagnostics.
     """
-    if Path(path).suffix.casefold() == ".jsonl":
-        return True
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped:
-                    return stripped.startswith("{")
-    except OSError:
-        pass
-    return False
+    return query.is_jsonl(Path(path))
 
 
 def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
