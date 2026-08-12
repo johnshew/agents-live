@@ -95,6 +95,35 @@ def _apply_name_sugar(name_sugar: bool, rest: list[str]) -> list[str]:
     return rest
 
 
+def _consume_project_argument(command: Cmd, argv: list[str]) -> tuple[str | None, list[str]]:
+    project = next(
+        (argument for argument in command.args
+         if argument.kind == "positional" and "project" in argument.flags),
+        None,
+    )
+    if project is None or (
+        argv and any(child.name == argv[0] for child in command.subcommands)
+    ):
+        return None, argv
+    value_options = {
+        flag for argument in command.args if argument.kind == "value"
+        for flag in argument.flags if flag.startswith("-")
+    }
+    skip_value = False
+    for index, token in enumerate(argv):
+        if skip_value:
+            skip_value = False
+            continue
+        option = token.split("=", 1)[0]
+        if option in value_options and "=" not in token:
+            skip_value = True
+            continue
+        if token.startswith("-"):
+            continue
+        return token, [*argv[:index], *argv[index + 1:]]
+    return None, argv
+
+
 def _finish(code: int, command: Cmd | None, rest: list[str],
             *, json_mode: bool) -> int:
     if (
@@ -272,14 +301,25 @@ def main(argv: list[str] | None = None) -> int:
         json_mode = True
         os.environ[JSON_ENV_VAR] = "1"
         rest = [argument for argument in rest if argument != "--json"]
-    # Commands without envelope support (command.json False) still accept
-    # --json: the env var carries envelope mode to any typed errors, and
-    # the command's own output passes through uncaptured.
-    capture = json_mode and command.json
     if any(arg in ("-h", "--help", "help") for arg in rest):
         target, invoked_as = _help_target(command, cmd, rest)
         print(command_help(target, invoked_as), end="")
         return _finish(0, target, rest, json_mode=json_mode)
+    project, rest = _consume_project_argument(command, rest)
+    if project is not None:
+        try:
+            root = state.resolve_root(project)
+        except ValueError as exc:
+            _emit_failure(
+                "no_project_root", cmd, str(exc), json_mode=json_mode)
+            return 2
+        os.environ[state.ENV_VAR] = str(root)
+        selected_repo = root
+        state.clear_root_cache()
+    # Commands without envelope support (command.json False) still accept
+    # --json: the env var carries envelope mode to any typed errors, and
+    # the command's own output passes through uncaptured.
+    capture = json_mode and command.json
     unknown = unknown_flag(command, rest)
     if unknown is not None:
         _emit_failure(

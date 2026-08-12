@@ -117,6 +117,7 @@ class LocalChildRunner:
         timeout: float | None = None,
         use_pty: bool = False,
     ) -> ChildResult:
+        argv = _shell_processor_argv(argv)
         if use_pty and os.name != "nt":
             return self._run_pty(
                 argv, cwd=cwd, env=env, input_text=input_text, timeout=timeout)
@@ -200,6 +201,17 @@ def _text(value: bytes | str | None) -> str:
     if value is None:
         return ""
     return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+
+def _shell_processor_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    invocation = tuple(argv)
+    if len(invocation) != 1 or Path(invocation[0]).suffix.lower() != ".sh":
+        return invocation
+    if os.name == "nt":
+        return ("sh", invocation[0])
+    if not os.access(invocation[0], os.X_OK):
+        raise ValueError(f"shell processor is not executable: {invocation[0]}")
+    return invocation
 
 
 def _markers(argv: Sequence[str]) -> dict[str, str] | None:

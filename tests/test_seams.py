@@ -1306,7 +1306,63 @@ class RecordingRunner:
         return self.outputs.pop(0)
 
 
+class TestObservability(unittest.TestCase):
+    def test_malformed_timestamp_does_not_hide_valid_timeline_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "mixed.log"
+            log.write_text(
+                '{"log_schema":5,"agent_name":"broken","phase":"done"}\n'
+                '{"log_schema":5,"ts":"","agent_name":"empty"}\n'
+                '{"log_schema":5,"ts":42,"agent_name":"number"}\n'
+                '{"log_schema":5,"ts":"not-a-time","agent_name":"invalid"}\n'
+                '{"log_schema":5,"ts":"2026-08-11T22:00:00","agent_name":"naive"}\n'
+                '{"log_schema":5,"ts":"2026-08-11T22:00:00Z",'
+                '"agent_name":"valid","phase":"done"}\n',
+                encoding="utf-8",
+            )
+
+            all_records = obs.load([log])
+            filtered_records = obs.load(
+                [log], since="2026-08-11T21:00:00Z")
+
+        for records in (all_records, filtered_records):
+            self.assertEqual(1, len(records))
+            self.assertEqual("valid", records[0]["agent_name"])
+
+
 class TestAgentPipeline(TempRepository):
+    @unittest.skipIf(os.name == "nt", "POSIX shebang execution")
+    def test_shell_processors_honor_shebang_and_require_execute_permission(self) -> None:
+        directory = self.skill("shell-pipeline", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.sh"',
+            'agents-live.post-processor: "scripts/process.sh"',
+        ])
+        scripts = directory / "scripts"
+        scripts.mkdir()
+        pre = scripts / "prepare.sh"
+        post = scripts / "process.sh"
+        pre.write_text(
+            "#!/usr/bin/env bash\nset -o pipefail\nprintf 'prepared'\n",
+            encoding="utf-8",
+        )
+        post.write_text(
+            "#!/usr/bin/env bash\nset -o pipefail\nprintf 'processed:%s' \"$(cat)\"\n",
+            encoding="utf-8",
+        )
+        pre.chmod(0o755)
+        post.chmod(0o755)
+
+        result = dispatch(Firing("shell-pipeline", str(self.root), "manual"))
+        self.assertTrue(result.ok, result)
+        self.assertEqual("processed:prepared", result.text)
+
+        post.chmod(0o644)
+        result = dispatch(Firing("shell-pipeline", str(self.root), "manual"))
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("not executable", result.message)
+
     def test_six_shapes_are_pure_and_dispatch_uses_the_fake_runner(self) -> None:
         shapes = (
             ("agent-only", "fake", None, None, (False, True, False)),
@@ -1492,6 +1548,71 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_dashboard_project_argument_uses_repo_selection(self) -> None:
+        cli_main = importlib.import_module("agents_live.cli.main")
+        root = Path(tempfile.gettempdir()).resolve()
+        completed = mock.Mock(returncode=0)
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(cli_main.state, "resolve_root", return_value=root),
+            mock.patch.object(cli_main.state, "clear_root_cache"),
+            mock.patch.object(cli_main.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(cli_main.update_check, "interactive", return_value=False),
+            mock.patch.object(upgrade_handoff, "reconcile"),
+        ):
+            code = cli_main.main(["dashboard", "--port", "9000", "."])
+            selected = os.environ[state.ENV_VAR]
+
+        self.assertEqual(0, code)
+        self.assertEqual(str(root), selected)
+        invocation = run.call_args.args[0]
+        self.assertEqual(["--port", "9000"], invocation[-2:])
+        self.assertNotIn(".", invocation)
+        self.assertEqual(
+            (None, ["list"]),
+            cli_main._consume_project_argument(
+                cli_main.COMMAND_BY_NAME["dashboard"], ["list"]),
+        )
+        self.assertEqual(
+            (".", ["--port=9000"]),
+            cli_main._consume_project_argument(
+                cli_main.COMMAND_BY_NAME["dashboard"], ["--port=9000", "."]),
+        )
+
+    def test_dashboard_help_is_not_treated_as_a_project(self) -> None:
+        cli_main = importlib.import_module("agents_live.cli.main")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(cli_main.state, "resolve_root") as resolve_root,
+            mock.patch.object(cli_main.subprocess, "run") as run,
+            mock.patch.object(cli_main.update_check, "interactive", return_value=False),
+            mock.patch.object(upgrade_handoff, "reconcile"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = cli_main.main(["dashboard", "help"])
+
+        self.assertEqual(0, code)
+        self.assertIn("agents-live dashboard", stdout.getvalue())
+        resolve_root.assert_not_called()
+        run.assert_not_called()
+
+    def test_dashboard_delayed_refresh_registers_before_client_disconnect(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+            callback = mock.Mock()
+            dashboard._timer_after_first_interval(600.0, callback)
+
+        timer_callback = nicegui.ui.timer.call_args.args[1]
+        self.assertNotIn("immediate", nicegui.ui.timer.call_args.kwargs)
+        timer_callback()
+        callback.assert_not_called()
+        timer_callback()
+        callback.assert_called_once_with()
+
     def test_compatibility_shim_and_lazy_host_imports_resolve(self) -> None:
         from agents_live import hidden as legacy_hidden
         from agents_live.runtime.hosts import crontab, hidden, wsl_liveness

@@ -345,6 +345,8 @@ boundary and never edits shell startup files.""",
             ),
         ),
         args=(
+            Arg(("project",), "Project path or registered alias.",
+                kind="positional"),
             Arg(("--native",), "Open a desktop window."),
             Arg(("--open",), "Open a browser."),
             Arg(("--dev",), "Enable development mode."),
