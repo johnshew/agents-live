@@ -6,6 +6,40 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: move an agent between runtimes from the CLI again. (#289)
+  `start --transfer-here` claims an agent and starts it here;
+  `start --transfer-to` assigns it to another runtime and withdraws its
+  triggers. Ownership could previously only be claimed toward the host running
+  the dashboard, while the documentation still named flags 6.0 had removed.
+- feat: record the AI credits and tokens a run reported. (#294)
+  The provider prints them in its session footer and they were discarded, so
+  both cost columns had never shown a number. The dashboard reports credits
+  rather than a currency nothing measures.
+- fix: write each log record in a single append. (#290)
+  Concurrent writers could previously interleave halves of a record. `doctor`
+  reports records already lost that way; every reader skips them, which is why
+  the loss went unnoticed.
+- fix: pin a pending Windows upgrade to the process holding its pid. (#292)
+  A reused pid read as an upgrade in flight and refused every later upgrade.
+  Adds `process_start_time` on both hosts.
+- fix: read agent output past a provider's session footer.
+  An agent that produced valid JSON and exited zero was recorded as a parse
+  error once the CLI began printing a footer after the answer.
+- fix: resolve the CLI a dashboard action launches. (#288)
+  Actions ran an interpreter that cannot import the package.
+- fix: read run history once per refresh instead of once per row.
+  A repository with 21 agents and 50 MB of history took 7.8s per refresh and
+  dropped the browser websocket. A row is also coloured by its newest run
+  rather than by the last record read.
+- fix: answer log queries from the repository, not one file.
+  `logs --errors` missed failures in per-agent logs, and every reader now
+  resolves a relative `--since` window the same way, so
+  `logs timeline --since 30m` no longer reports nothing.
+- test: restore behavioral coverage and gate the built dashboard. (#279)
+  Covers ownership, trigger stores, plugin declarations, provider selection,
+  and damaged logs, and a release gate now starts the built wheel's dashboard
+  and asserts its rows and action availability.
+
 ## 6.0.6 - 2026-08-11
 
 - fix: honor shell processor shebangs on POSIX hosts. (#283)
