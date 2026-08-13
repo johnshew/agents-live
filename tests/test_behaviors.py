@@ -10,6 +10,7 @@ calls, so a later refactor can move the code without deleting the check.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
@@ -1169,6 +1170,28 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
         return dashboard
+
+
+class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_during_action_does_not_unpack_a_missing_result(
+            self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        request = dashboard._ActionRequest(
+            "Run", "run", ["--name", "sample"], "sample", None,
+            asyncio.get_running_loop().create_future())
+        with (
+            mock.patch.object(
+                dashboard.ng_run, "io_bound",
+                new=mock.AsyncMock(return_value=None)),
+            mock.patch.object(
+                dashboard, "output_log", mock.Mock(), create=True),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await dashboard._execute_action(request)
 
 
 class TestOwnershipMovesInBothDirections(TempRepository):
