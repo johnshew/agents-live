@@ -1103,6 +1103,52 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             ("0.23", "0.23"),
             dashboard.agent_cost("spender-1234567890", costs))
 
+    def test_legacy_display_name_history_reaches_the_canonical_row(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "legacy-agent.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="legacy-agent", run_id="run-1", origin="manual",
+            usage=(("list_cost_usd", "0.25"),)))
+        dashboard = self._dashboard()
+        agents = [{
+            "name": "legacy-agent",
+            "identifier": "legacy-agent-1234567890",
+        }]
+        with mock.patch.object(dashboard, "LOGS_DIR", directory):
+            runs, costs = dashboard._scan(dashboard._history_aliases(agents))
+        self.assertEqual(
+            "ok", runs["legacy-agent-1234567890"][2])
+        self.assertEqual(
+            (0.25, 0.25), costs["legacy-agent-1234567890"])
+
+    def test_unchanged_dashboard_logs_are_not_reparsed(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "cached-agent.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="cached-agent-1234567890", run_id="run-1",
+            origin="manual"))
+        dashboard = self._dashboard()
+        with (
+            mock.patch.object(dashboard, "LOGS_DIR", directory),
+            mock.patch.object(
+                dashboard.obs, "load",
+                side_effect=dashboard.obs.load) as load,
+        ):
+            dashboard._scan()
+            dashboard._scan()
+        self.assertEqual(1, load.call_count)
+
+    def test_dashboard_agent_collection_never_pulls_ownership(self) -> None:
+        dashboard = self._dashboard()
+        with mock.patch.object(
+                dashboard.agent_view, "repository_agents",
+                return_value=()) as repository_agents:
+            self.assertEqual([], dashboard.collect_agents())
+        repository_agents.assert_called_once_with(
+            dashboard.REPO_ROOT, ownership_rate_limit_secs=10**9)
+
     def test_dashboard_totals_unrounded_list_cost(self) -> None:
         dashboard = self._dashboard()
         rows = [
