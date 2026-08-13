@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -531,9 +530,17 @@ def _check_release_index() -> None:
     _run(["git", "diff", "--cached", "--check"])
 
 
-def _blob_id(content: bytes) -> str:
-    header = f"blob {len(content)}\0".encode()
-    return hashlib.sha1(header + content).hexdigest()
+def _blob_id(path: Path, content: bytes) -> str:
+    """Hash content exactly as Git would store it after clean filters."""
+    relative = path.relative_to(ROOT).as_posix()
+    result = subprocess.run(
+        ["git", "hash-object", "--path", relative, "--stdin"],
+        cwd=ROOT,
+        input=content,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.decode("ascii").strip()
 
 
 def _check_release_commit(validated: dict[Path, bytes]) -> None:
@@ -548,7 +555,7 @@ def _check_release_commit(validated: dict[Path, bytes]) -> None:
     mismatched = []
     for path, content in validated.items():
         relative = path.relative_to(ROOT).as_posix()
-        if _git("rev-parse", f"HEAD:{relative}") != _blob_id(content):
+        if _git("rev-parse", f"HEAD:{relative}") != _blob_id(path, content):
             mismatched.append(relative)
     if mismatched:
         raise ReleaseError(
