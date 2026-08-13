@@ -24,7 +24,11 @@ class AgentView:
     watch: str | None
 
 
-def repository_agents(root: Path) -> tuple[AgentView, ...]:
+def repository_agents(
+    root: Path,
+    *,
+    ownership_rate_limit_secs: int = 60,
+) -> tuple[AgentView, ...]:
     """Return one fail-closed view of every loadable agent in *root*."""
     started = state.load(root)
     specs = agent.discover(root).specs
@@ -34,7 +38,8 @@ def repository_agents(root: Path) -> tuple[AgentView, ...]:
     }
     if not ownership.local_only(root):
         try:
-            owners = ownership.load_owners(root=root)
+            owners = ownership.load_owners(
+                root=root, rate_limit_secs=ownership_rate_limit_secs)
             owner_by_identifier.update(ownership.resolve_owners(
                 ((spec.identifier, spec.name) for spec in specs), owners))
         except ownership.OwnershipUnavailableError:

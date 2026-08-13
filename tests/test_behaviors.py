@@ -10,6 +10,7 @@ calls, so a later refactor can move the code without deleting the check.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
@@ -33,7 +34,7 @@ from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
-from agents_live.agent.values import RawOutput
+from agents_live.agent.values import RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
 from agents_live.runtime import artifacts
@@ -1065,6 +1066,64 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             RawOutput(0, '{"done": true}\n', ""))
         self.assertEqual((), completion.usage)
 
+    def test_copilot_json_stream_preserves_answer_and_exact_cost(self) -> None:
+        launch = providers.get("copilot").prepare(
+            ResolvedSpec(
+                "cost", "prompt", "write", (), (), (), "copilot", None, None),
+            Request(),
+        )
+        self.assertIn("--output-format", launch.argv)
+        # A terminal is what wraps a long event across lines, and every
+        # figure below arrives on one.
+        self.assertFalse(launch.use_pty)
+        stream = "\n".join([
+            "warning emitted before the JSON stream",
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "phase": "final_answer",
+                    "content": '{"done": true}',
+                },
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 15110175000},
+            }),
+            json.dumps({
+                "type": "result",
+                "exitCode": 0,
+                "usage": {"sessionDurationMs": 1234},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"done": true}', completion.text)
+        self.assertEqual({
+            "ai_credits": "15.110175",
+            "list_cost_usd": "0.15110175",
+        }, dict(completion.usage))
+
+    def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
+        self,
+    ) -> None:
+        stream = "\n".join([
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 1000000000},
+            }),
+            "{malformed final event",
+            json.dumps({
+                "type": "session.task_complete",
+                "data": {"summary": "Completed from task summary.", "success": True},
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 2500000000},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual("Completed from task summary.", completion.text)
+        self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
+
     def test_claude_preserves_provider_reported_list_cost(self) -> None:
         completion = providers.get("claude").parse(RawOutput(
             0,
@@ -1103,6 +1162,52 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             ("0.23", "0.23"),
             dashboard.agent_cost("spender-1234567890", costs))
 
+    def test_legacy_display_name_history_reaches_the_canonical_row(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "legacy-agent.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="legacy-agent", run_id="run-1", origin="manual",
+            usage=(("list_cost_usd", "0.25"),)))
+        dashboard = self._dashboard()
+        agents = [{
+            "name": "legacy-agent",
+            "identifier": "legacy-agent-1234567890",
+        }]
+        with mock.patch.object(dashboard, "LOGS_DIR", directory):
+            runs, costs = dashboard._scan(dashboard._history_aliases(agents))
+        self.assertEqual(
+            "ok", runs["legacy-agent-1234567890"][2])
+        self.assertEqual(
+            (0.25, 0.25), costs["legacy-agent-1234567890"])
+
+    def test_unchanged_dashboard_logs_are_not_reparsed(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        obs.record(directory / "cached-agent.jsonl", obs.create(
+            "done", "ok", repository=str(self.root),
+            agent="cached-agent-1234567890", run_id="run-1",
+            origin="manual"))
+        dashboard = self._dashboard()
+        with (
+            mock.patch.object(dashboard, "LOGS_DIR", directory),
+            mock.patch.object(
+                dashboard.obs, "load",
+                side_effect=dashboard.obs.load) as load,
+        ):
+            dashboard._scan()
+            dashboard._scan()
+        self.assertEqual(1, load.call_count)
+
+    def test_dashboard_agent_collection_never_pulls_ownership(self) -> None:
+        dashboard = self._dashboard()
+        with mock.patch.object(
+                dashboard.agent_view, "repository_agents",
+                return_value=()) as repository_agents:
+            self.assertEqual([], dashboard.collect_agents())
+        repository_agents.assert_called_once_with(
+            dashboard.REPO_ROOT, ownership_rate_limit_secs=10**9)
+
     def test_dashboard_totals_unrounded_list_cost(self) -> None:
         dashboard = self._dashboard()
         rows = [
@@ -1123,6 +1228,28 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
         return dashboard
+
+
+class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_during_action_does_not_unpack_a_missing_result(
+            self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        request = dashboard._ActionRequest(
+            "Run", "run", ["--name", "sample"], "sample", None,
+            asyncio.get_running_loop().create_future())
+        with (
+            mock.patch.object(
+                dashboard.ng_run, "io_bound",
+                new=mock.AsyncMock(return_value=None)),
+            mock.patch.object(
+                dashboard, "output_log", mock.Mock(), create=True),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await dashboard._execute_action(request)
 
 
 class TestOwnershipMovesInBothDirections(TempRepository):

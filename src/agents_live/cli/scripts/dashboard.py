@@ -87,6 +87,13 @@ STATE: dict = {
     "filters": {"name": "", "state": "All", "owner": "All",
                 "runtime": "All", "failing": False},
 }
+_SCAN_CACHE: tuple[
+    tuple[object, ...],
+    tuple[
+        dict[str, tuple[str | None, str | None, str]],
+        dict[str, tuple[float, float]],
+    ],
+] | None = None
 
 
 def _require_repo_path(path: Path | None) -> Path:
@@ -125,7 +132,8 @@ def collect_agents() -> list[dict]:
         "mode": row.mode,
         "schedule": list(row.schedules),
         "watch": row.watch,
-    } for row in agent_view.repository_agents(REPO_ROOT)]
+    } for row in agent_view.repository_agents(
+        REPO_ROOT, ownership_rate_limit_secs=10**9)]
 
 
 def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
@@ -202,18 +210,56 @@ def cost_index() -> dict[str, tuple[float, float]]:
     return _scan()[1]
 
 
-def _scan() -> tuple[dict[str, tuple[str | None, str | None, str]],
+def _history_aliases(agents: list[dict]) -> dict[str, str]:
+    """Map current IDs and unambiguous legacy display names to current IDs."""
+    counts: dict[str, int] = {}
+    for agent in agents:
+        name = str(agent["name"])
+        counts[name] = counts.get(name, 0) + 1
+    aliases = {
+        str(agent["identifier"]): str(agent["identifier"])
+        for agent in agents
+    }
+    aliases.update({
+        str(agent["name"]): str(agent["identifier"])
+        for agent in agents
+        if counts[str(agent["name"])] == 1
+    })
+    return aliases
+
+
+def _scan_signature(files: tuple[Path, ...],
+                    aliases: dict[str, str]) -> tuple[object, ...]:
+    signatures = []
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signatures.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return (tuple(signatures), tuple(sorted(aliases.items())))
+
+
+def _scan(aliases: dict[str, str] | None = None
+          ) -> tuple[dict[str, tuple[str | None, str | None, str]],
                      dict[str, tuple[float, float]]]:
-    """(runs, costs) for every identifier, reading the directory once."""
+    """Return run/cost indexes, reusing them while the log set is unchanged."""
+    global _SCAN_CACHE
+    aliases = aliases or {}
+    files = obs.files(_require_repo_path(LOGS_DIR))
+    signature = _scan_signature(files, aliases)
+    if _SCAN_CACHE is not None and _SCAN_CACHE[0] == signature:
+        return _SCAN_CACHE[1]
     now = datetime.now(timezone.utc)
     day_cutoff = now - timedelta(days=1)
     week_cutoff = now - timedelta(days=7)
     newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
     totals: dict[str, list[float]] = {}
-    for entry in obs.load(obs.files(_require_repo_path(LOGS_DIR))):
-        identifier = entry.get("agent_name")
-        if not isinstance(identifier, str):
+    for entry in obs.load(files):
+        raw_identifier = entry.get("agent_name")
+        if not isinstance(raw_identifier, str):
             continue
+        identifier = aliases.get(raw_identifier, raw_identifier)
         moment = _moment(entry.get("ts"))
         if moment is None:
             continue
@@ -241,7 +287,9 @@ def _scan() -> tuple[dict[str, tuple[str | None, str | None, str]],
     }
     costs = {
         identifier: (day, week) for identifier, (day, week) in totals.items()}
-    return runs, costs
+    result = runs, costs
+    _SCAN_CACHE = signature, result
+    return result
 
 
 def _running_version() -> str:
@@ -529,8 +577,11 @@ async def _execute_action(request: _ActionRequest) -> int:
     started = time.monotonic()
     _push_log(f"started: {request.description}")
     try:
-        code, out = await ng_run.io_bound(
+        result = await ng_run.io_bound(
             _run_script, request.script, request.args, timeout=request.timeout)
+        if result is None:
+            raise asyncio.CancelledError
+        code, out = result
     finally:
         if note is not None:
             _safe_ui(note.dismiss)
@@ -661,8 +712,9 @@ def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
     rows: list[dict] = []
     host = ownership.current_label()
-    runs, costs = _scan()
-    for agent in collect_agents():
+    agents = collect_agents()
+    runs, costs = _scan(_history_aliases(agents))
+    for agent in agents:
         name = agent["name"]
         identifier = agent["identifier"]
         state = re.sub(r"\s*\(pid \d+\)", "", agent.get("state", "?"))

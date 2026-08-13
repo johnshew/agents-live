@@ -6,6 +6,20 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: read Copilot run cost from its machine-readable stream.
+  The CLI prints its cost footer only to an interactive terminal, which Windows
+  cannot allocate, so runs there recorded no spend at all. Runs now request the
+  JSON stream, which reports the same figures on every host and needs no
+  pseudo-terminal to wrap them.
+- fix: keep dashboard history and refresh responsive.
+  A read-only refresh pulled the ownership registry over the network and
+  reparsed every log on each pass, and history recorded under an agent's former
+  display name never reached its row.
+- fix: bound the wait a deferred Windows upgrade helper spends on a busy
+  environment.
+  A live helper is what tells the handoff its slot is in use, so one process
+  that never exits refused every later upgrade as already queued.
+
 ## 6.2.0 - 2026-08-12
 
 - fix: reject concurrent worktree and index changes throughout release preparation. (#227)
