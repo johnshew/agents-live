@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.0 - 2026-08-13
+
 - fix: report an oversized prompt as an oversized prompt.
   POSIX allows a command line into the megabytes, so a definition that grew
   past 32767 characters ran there for months and failed on Windows as
