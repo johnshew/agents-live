@@ -276,6 +276,33 @@ def supports_pty() -> bool:
     return not _IS_WINDOWS
 
 
+_WINDOWS_COMMAND_LINE_LIMIT = 32767
+
+
+def command_line_overflow(command: Sequence[str]) -> int | None:
+    """How far *command* exceeds what this host can spawn, or ``None``.
+
+    POSIX allows a command line into the megabytes, so a large prompt
+    passed as an argument works there and is never questioned. Windows
+    caps the whole ``CreateProcess`` line at 32767 characters and
+    reports the overflow as ``WinError 206``, "the filename or
+    extension is too long" - which names the one thing that is not
+    wrong and sends the reader hunting for a path.
+
+    Returning the measurement rather than raising keeps the platform
+    fact here and the phrasing of the failure with the caller that
+    knows what the oversized argument is.
+    """
+    if not _IS_WINDOWS:
+        return None
+    # One separating space per argument, plus surrounding quotes for any
+    # argument that needs them. Counting quotes for every argument keeps
+    # the estimate on the safe side of the real limit.
+    length = sum(len(str(part)) + 3 for part in command)
+    overflow = length - _WINDOWS_COMMAND_LINE_LIMIT
+    return overflow if overflow > 0 else None
+
+
 def find_tool(name: str) -> str | None:
     """Locate *name* where this host installs tools a PATH may not reach.
 
