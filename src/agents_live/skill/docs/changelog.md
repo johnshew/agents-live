@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: stop a foreground dashboard quietly on Ctrl+C. (#249)
+  Ctrl+C is the documented way to stop it, so it is the ordinary exit path,
+  but an unguarded server call ended the run in a traceback that read like a
+  crash.
 - fix: keep log commands readable on a legacy Windows console.
   `logs` and `logs timeline` print agent output verbatim, so a single emoji in a
   transcript ended the command in a `UnicodeEncodeError` traceback. The

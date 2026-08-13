@@ -2025,6 +2025,30 @@ class TestArchitectureFitness(unittest.TestCase):
         resolve_root.assert_not_called()
         run.assert_not_called()
 
+    def test_dashboard_interrupt_exits_without_a_traceback(self) -> None:
+        # Ctrl+C is the documented way to stop a foreground dashboard, so
+        # it is the ordinary exit path and must not read like a crash. The
+        # delivery of a real interrupt is platform-specific; the handling
+        # under test is not (#249).
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(dashboard, "port_conflict", return_value=None),
+            mock.patch.object(dashboard.dashboards, "record"),
+            mock.patch.object(dashboard, "build_page"),
+            mock.patch.object(
+                dashboard.ui, "run", side_effect=KeyboardInterrupt),
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "8231"]),
+        ):
+            dashboard.main()  # must return rather than propagate
+
     def test_dashboard_port_conflict_guidance_is_neutral(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
