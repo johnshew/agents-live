@@ -43,8 +43,7 @@ history is retained in the source repository.
   A read-only refresh pulled the ownership registry over the network and
   reparsed every log on each pass, and history recorded under an agent's former
   display name never reached its row.
-- fix: bound the wait a deferred Windows upgrade helper spends on a busy
-  environment.
+- fix: bound a deferred Windows upgrade helper's wait on a busy environment.
   A live helper is what tells the handoff its slot is in use, so one process
   that never exits refused every later upgrade as already queued.
 
