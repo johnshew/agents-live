@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.2.0 - 2026-08-12
+
 - fix: reject concurrent worktree and index changes throughout release preparation. (#227)
   Release commits and tags are created only when the exact validated file bytes
   survive every gate, staging, and commit boundary.
