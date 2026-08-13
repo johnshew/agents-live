@@ -25,6 +25,7 @@ import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +54,14 @@ _ISOLATED_HOMES = {
     "XDG_DATA_HOME": "data",
     "XDG_CONFIG_HOME": "config",
 }
+
+PROVIDER_SPEND: dict[str, str | None] = {
+    "claude": '{"result": "done", "total_cost_usd": 0.42}',
+    "copilot": '{"type": "session.usage_checkpoint", '
+               '"data": {"totalNanoAiu": 42000000000}}',
+    "fake": None,
+}
+"""Vendor output that reports spend, or ``None`` for a provider with none."""
 
 
 class TempRepository(unittest.TestCase):
@@ -1468,6 +1477,107 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def _workflow_text(self, name: str) -> str:
         return (REPOSITORY / ".github" / "workflows" / name).read_text(
             encoding="utf-8")
+
+    def _launch(self, name: str):
+        return providers.get(name).prepare(
+            ResolvedSpec(
+                "invariant", "prompt", "write", (), (), (), name, None, None),
+            Request(),
+        )
+
+    def _dashboard(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        return dashboard
+
+    def _parse(self, name: str, stdout: str):
+        return providers.get(name).parse(RawOutput(0, stdout, ""))
+
+    def test_an_outer_timeout_outlives_the_work_it_bounds(self) -> None:
+        """A budget that expires first reports a healthy run as failed.
+
+        The dashboard's Smoketest button bounds a framework smoketest that
+        carries its own internal timeout, and the agent call underneath
+        retries. Each number lives in a different module, so raising the
+        inner one silently makes the outer one a false failure (#178).
+        """
+        from agents_live.legacy import headless, health_check
+
+        dashboard = self._dashboard()
+        self.assertGreater(
+            dashboard.WORKER_TIMEOUT, health_check.SMOKETEST_TIMEOUT_S,
+            "the dashboard would kill a smoketest that is still within "
+            "its own timeout and report the failure as the agent's")
+        self.assertGreaterEqual(
+            dashboard.WORKER_TIMEOUT,
+            headless.HEADLESS_TIMEOUT * (headless.HEADLESS_TIMEOUT_RETRIES + 1),
+            "the retry-inclusive worst case of one agent call already "
+            "exceeds the outer bound the dashboard allows for all of them")
+
+    def test_a_provider_that_reports_cost_reports_it_under_one_key(self) -> None:
+        """Zero spend and unreported spend look identical on screen.
+
+        The dashboard reads one key. Each provider derives it from a
+        different vendor field, so a provider that names its own key
+        still parses, still runs, and silently reports nothing. The
+        parsers run here against real vendor output rather than being
+        read, because a key named only in a docstring reports no spend.
+        """
+        readers = (REPOSITORY / "src" / "agents_live" / "cli" / "scripts"
+                   / "dashboard.py").read_text(encoding="utf-8")
+        self.assertIn("list_cost_usd", readers)
+        self.assertEqual(
+            set(providers.names()), set(PROVIDER_SPEND),
+            "a new provider must declare whether it reports spend, or it "
+            "joins the suite reporting none and nobody notices")
+        for name, stdout in PROVIDER_SPEND.items():
+            if stdout is None:
+                continue  # a provider that reports no spend owes no key
+            with self.subTest(provider=name):
+                usage = dict(self._parse(name, stdout).usage)
+                self.assertIn(
+                    "list_cost_usd", usage,
+                    f"{name} reports cost under a key the dashboard "
+                    "does not read, so its spend shows as nothing")
+                self.assertTrue(
+                    Decimal(usage["list_cost_usd"]) > 0,
+                    f"{name} parsed vendor output that reported spend and "
+                    "produced a figure the dashboard cannot distinguish "
+                    "from a free run")
+
+    def test_no_provider_captures_its_output_through_a_posix_only_terminal(
+            self) -> None:
+        """A PTY is `script -qec`, so Windows ignores the request.
+
+        Cost was captured from a footer the CLI printed only to a
+        terminal. Windows allocates none, ignores the flag without
+        error, and recorded no spend at all for months.
+        """
+        for name in providers.names():
+            with self.subTest(provider=name):
+                self.assertFalse(
+                    self._launch(name).use_pty,
+                    f"{name} depends on a terminal that exists on POSIX "
+                    "and is silently absent on Windows")
+
+    def test_a_provider_that_reports_cost_asks_for_machine_readable_output(
+            self) -> None:
+        """Scraping a human footer is what made cost platform-specific.
+
+        A structured stream carries the same figures on every host, so
+        the request for one is the property worth holding.
+        """
+        for name, stdout in PROVIDER_SPEND.items():
+            if stdout is None:
+                continue
+            with self.subTest(provider=name):
+                self.assertIn(
+                    "--output-format", self._launch(name).argv,
+                    f"{name} would parse a human-facing footer, which is "
+                    "printed on some hosts and not others")
 
     def test_every_test_file_is_run_by_the_gates_and_by_ci(self) -> None:
         """A suite the release does not run is not a gate.

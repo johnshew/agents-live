@@ -6,6 +6,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- test: hold cross-module invariants that a single suite cannot see. (#184)
+  Four agreements now execute rather than being restated in prose: an outer
+  timeout must outlive the work it bounds, every provider that reports spend
+  must produce it under the key the dashboard reads and must ask for a
+  machine-readable stream to derive it from, and none may capture output
+  through a pseudo-terminal that exists only on POSIX. Each was demonstrated
+  to fail when its guarded fact was broken.
 - feat: check repository dependency health through host runtime adapters. (#309)
   `doctor --dependencies --json` verifies the runtimes assigned to started
   automatic work, probes paired Windows and WSL environments without exposing
