@@ -92,7 +92,7 @@ artifacts use hidden internal commands and are not a user-facing contract.
 | `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
-| `doctor --dependencies` | `agents-live doctor --dependencies --json` *(repository readiness for agents)* |
+| `doctor --quick` | `agents-live doctor --quick` *(fast automatic-maintenance gate; always JSON)* |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `repair` | `agents-live doctor --repair [--dry-run]` |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
@@ -102,6 +102,20 @@ artifacts use hidden internal commands and are not a user-facing contract.
 **Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
 **Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
+
+## Automatic-maintenance health gate
+
+Before relying on scheduled or watched work, run:
+
+```bash
+agents-live doctor --quick
+```
+
+Continue only when the command exits zero and its JSON response has top-level
+`"ok": true`. The command reads this runtime's cached maintenance health and
+refreshes it once when it is missing or stale. Do not inspect runtime beacon
+files or call hidden `internal` commands; their paths, formats, and invocation
+details are not agent-facing contracts.
 
 ## Definition metadata
 

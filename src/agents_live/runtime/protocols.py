@@ -7,12 +7,10 @@ from typing import IO, Protocol
 
 from .values import (
     ChildResult,
-    DependencyHealth,
     Health,
     InstalledTrigger,
     ProcessRef,
     RenderedSubscription,
-    RuntimeTarget,
     Subscription,
 )
 
@@ -82,7 +80,4 @@ class HostAdapter(Protocol):
     def legacy_agents(self, root: str) -> set[str]: ...
     def remove_legacy(self, root: str, name: str) -> None: ...
     def health(self) -> Health: ...
-    def dependency_health(
-        self, targets: Sequence[RuntimeTarget],
-    ) -> tuple[DependencyHealth, ...]: ...
     def change_source(self, roots: Sequence[str]) -> ChangeSource | None: ...

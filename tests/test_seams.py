@@ -39,7 +39,6 @@ from agents_live.runtime import (
     Health,
     InstalledTrigger,
     ProcessRef,
-    RuntimeTarget,
     Subscription,
     WatchSyntaxError,
     converge,
@@ -51,8 +50,7 @@ from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
-from agents_live.runtime.hosts.windows import WindowsHost, WindowsProcesses
-from agents_live.runtime.hosts.wsl import WslHost
+from agents_live.runtime.hosts.windows import WindowsProcesses
 from agents_live.runtime.hosts import system as hostruntime, task_scheduler
 
 
@@ -390,7 +388,7 @@ class TestDoctor(unittest.TestCase):
              *, json_mode: bool = False) -> tuple[int, str]:
         collected = mock.Mock(
             unavailable_repositories=(), broken_definitions=(),
-            unknown_metadata=(), required_runtimes=())
+            unknown_metadata=())
         stdout = io.StringIO()
         with (
             mock.patch.dict(
@@ -411,81 +409,137 @@ class TestDoctor(unittest.TestCase):
             code = doctor.main(argv)
         return code, stdout.getvalue()
 
-    def test_dependencies_fail_closed_when_an_owning_runtime_is_unknown(self) -> None:
-        dependency = mock.Mock(
-            runtime="ubuntu", status="unknown",
-            detail="owning runtime is unreachable")
-        collected = mock.Mock(
-            unavailable_repositories=(), broken_definitions=(),
-            unknown_metadata=(), required_runtimes=((
-                Path("repository"), RuntimeTarget("ubuntu", False)),))
-        stdout = io.StringIO()
-        with (
-            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
-            mock.patch.object(
-                doctor.repos, "load", return_value={"repos": {}}),
-            mock.patch.object(
-                doctor.runtime, "health", return_value=Health(True, "fresh")),
-            mock.patch.object(
-                doctor.runtime, "dependency_health", return_value=(dependency,)),
-            mock.patch.object(
-                doctor.lifecycle, "collect", return_value=collected),
-            mock.patch.object(
-                doctor.state, "resolve_root", return_value=Path("repository")),
-            mock.patch.object(
-                doctor.update_check, "interactive", return_value=False),
-            contextlib.redirect_stdout(stdout),
-        ):
-            code = doctor.main(["--dependencies"])
+    def test_quick_uses_fresh_cached_health_and_always_returns_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text("cached\n", encoding="utf-8")
+            stdout = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": ""}),
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(doctor.internal, "main") as maintain,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(0, code)
+        maintain.assert_not_called()
+        self.assertEqual({
+            "ok": True,
+            "checks": [{
+                "check": "automatic maintenance",
+                "ok": True,
+                "detail": "fresh",
+                "source": "cached",
+            }],
+        }, json.loads(stdout.getvalue()))
+
+    def test_quick_refreshes_stale_health_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text("stale\n", encoding="utf-8")
+            stale = time.time() - doctor.HEALTH_STALE_SECONDS - 60
+            os.utime(beacon, (stale, stale))
+
+            def refresh(_argv):
+                beacon.write_text("fresh\n", encoding="utf-8")
+                return 0
+
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    doctor.internal, "main", side_effect=refresh) as maintain,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(0, code)
+        maintain.assert_called_once_with(["maintain", "--quiet"])
+        self.assertEqual("refreshed", json.loads(
+            stdout.getvalue())["checks"][0]["source"])
+
+    def test_quick_fails_when_maintenance_does_not_write_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    doctor.internal, "main", return_value=1) as maintain,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(1, code)
+        maintain.assert_called_once_with(["maintain", "--quiet"])
+        self.assertEqual({
+            "ok": False,
+            "checks": [{
+                "check": "automatic maintenance",
+                "ok": False,
+                "detail": "health record remained stale",
+                "source": "refresh-failed",
+            }],
+        }, json.loads(stdout.getvalue()))
+
+    def test_quick_reports_maintenance_errors_as_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    doctor.internal, "main",
+                    side_effect=RuntimeError("maintenance unavailable")),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
-        self.assertEqual({
-            "check": "runtime dependency",
-            "ok": False,
-            "runtime": "ubuntu",
-            "status": "unknown",
-            "detail": "owning runtime is unreachable",
-        }, payload["checks"][-1])
+        self.assertEqual(
+            "health refresh failed",
+            payload["checks"][0]["detail"],
+        )
 
-    def test_selected_repository_excludes_unrelated_registered_repositories(self) -> None:
+    def test_quick_cli_is_host_local_and_suppresses_maintenance_output(self) -> None:
+        cli_main = importlib.import_module("agents_live.cli.main")
+        stdout = io.StringIO()
+        stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary:
-            selected = Path(temporary, "selected")
-            unrelated = Path(temporary, "unrelated")
-            selected.mkdir()
-            unrelated.mkdir()
-            collected = mock.Mock(
-                unavailable_repositories=(), broken_definitions=(),
-                unknown_metadata=(), required_runtimes=())
-            stdout = io.StringIO()
+            beacon = Path(temporary) / "health.ok"
 
-            def resolve(value=None):
-                return selected if value is None else Path(value)
+            def noisy_failure(_argv):
+                print("private maintenance output")
+                print("private repository path", file=sys.stderr)
+                return 1
 
             with (
-                mock.patch.object(doctor.repos, "load", return_value={
-                    "repos": {
-                        "selected": str(selected),
-                        "unrelated": str(unrelated),
-                    },
-                }),
+                mock.patch.dict(
+                    os.environ,
+                    {"AGENTS_LIVE_REPO": "Z:/missing-private-repository"},
+                ),
+                mock.patch.object(upgrade_handoff, "reconcile"),
                 mock.patch.object(
-                    doctor.runtime, "health", return_value=Health(True)),
-                mock.patch.object(doctor.state, "resolve_root", side_effect=resolve),
-                mock.patch.object(doctor.state, "load"),
+                    doctor.paths, "health_beacon_path", return_value=beacon),
                 mock.patch.object(
-                    doctor.lifecycle, "collect", return_value=collected) as collect,
-                mock.patch.object(
-                    doctor.update_check, "interactive", return_value=False),
+                    doctor.internal, "main", side_effect=noisy_failure),
                 contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
             ):
-                code = doctor.main([])
+                code = cli_main.main(["doctor", "--quick"])
 
-        self.assertEqual(0, code)
-        self.assertIn("started state selected", stdout.getvalue())
-        self.assertNotIn("started state unrelated", stdout.getvalue())
-        collect.assert_called_once_with(persist=False, roots={selected})
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("", stderr.getvalue())
+        self.assertNotIn("private", stdout.getvalue())
 
     def test_unknown_metadata_reports_both_possible_remedies(self) -> None:
         collected = mock.Mock(
@@ -614,46 +668,6 @@ class TestReleaseTool(unittest.TestCase):
 
 
 class TestRuntimeCore(unittest.TestCase):
-    def test_windows_probes_a_paired_wsl_runtime_through_doctor(self) -> None:
-        host = WindowsHost()
-        host.child_runner = mock.Mock()
-        host.child_runner.run_child.return_value = ChildResult(
-            (), 0, json.dumps({
-                "ok": True,
-                "checks": [{
-                    "check": "host runtime", "ok": True,
-                    "detail": "fresh",
-                }],
-            }), "")
-
-        result = host.dependency_health((RuntimeTarget("ubuntu", True),))
-
-        self.assertEqual("healthy", result[0].status)
-        argv = host.child_runner.run_child.call_args.args[0]
-        self.assertEqual("wsl.exe", argv[0])
-        self.assertEqual("ubuntu", argv[2])
-
-    def test_wsl_probes_paired_windows_and_leaves_remote_owners_unknown(self) -> None:
-        host = WslHost()
-        host.child_runner = mock.Mock()
-        host.child_runner.run_child.return_value = ChildResult(
-            (), 1, json.dumps({
-                "ok": False,
-                "checks": [{
-                    "check": "host runtime", "ok": False,
-                    "detail": "task scheduler is unavailable",
-                }],
-            }), "")
-
-        result = host.dependency_health((
-            RuntimeTarget("windows", True),
-            RuntimeTarget("linux", False),
-        ))
-
-        self.assertEqual("unhealthy", result[0].status)
-        self.assertEqual("unknown", result[1].status)
-        self.assertEqual(1, host.child_runner.run_child.call_count)
-
     def test_framework_smoketest_has_no_external_provider_gate(self) -> None:
         self.assertEqual("fake", health_check._resolve_smoketest_runtime())
 
