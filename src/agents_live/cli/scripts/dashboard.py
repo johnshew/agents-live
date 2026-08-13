@@ -1346,16 +1346,23 @@ def main() -> None:
     else:
         build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
-    ui.run(
-        host=DASHBOARD_HOST,
-        port=args.port,
-        title="Agents Live",
-        native=args.native,
-        show=args.open_browser,
-        reload=args.dev,
-        uvicorn_reload_dirs=str(SCRIPTS_DIR),
-        uvicorn_reload_includes="dashboard.py",
-    )
+    try:
+        ui.run(
+            host=DASHBOARD_HOST,
+            port=args.port,
+            title="Agents Live",
+            native=args.native,
+            show=args.open_browser,
+            reload=args.dev,
+            uvicorn_reload_dirs=str(SCRIPTS_DIR),
+            uvicorn_reload_includes="dashboard.py",
+        )
+    except KeyboardInterrupt:
+        # Ctrl+C is the documented way to stop a foreground dashboard, so it
+        # is the ordinary exit path. The CLI parent already reports the
+        # conventional interrupt status; this child owns its own shutdown
+        # and must not dump a traceback on the way out (#249).
+        pass
 
 
 if __name__ in {"__main__", "__mp_main__"}:
