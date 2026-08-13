@@ -1439,6 +1439,53 @@ class TestRunsAreRecordedUnderOneName(TempRepository):
         self.assertEqual(answer, json.loads(handed))
 
 
+class TestPromptFitsTheHostCommandLine(unittest.TestCase):
+    """A prompt that outgrows the command line must say so plainly.
+
+    POSIX allows a command line into the megabytes, so a definition
+    that grew past 32767 characters ran there for months and failed on
+    Windows as `WinError 206`, "the filename or extension is too long"
+    - naming the one thing that was not wrong.
+    """
+
+    def test_a_posix_host_imposes_no_limit(self) -> None:
+        with mock.patch.object(hostruntime, "_IS_WINDOWS", False):
+            self.assertIsNone(
+                hostruntime.command_line_overflow(["copilot", "-p", "x" * 90000]))
+
+    def test_a_windows_host_reports_how_far_over_the_prompt_is(self) -> None:
+        with mock.patch.object(hostruntime, "_IS_WINDOWS", True):
+            self.assertIsNone(
+                hostruntime.command_line_overflow(["copilot", "-p", "hello"]))
+            overflow = hostruntime.command_line_overflow(
+                ["copilot", "-p", "x" * 40000])
+            self.assertIsNotNone(overflow)
+            self.assertGreater(overflow, 0)
+
+    def test_the_failure_names_the_prompt_rather_than_a_filename(self) -> None:
+        """The remedy is the definition's, so the message must point there.
+
+        This drives the real spawn seam every provider uses, including
+        plugin providers, because the legacy agent path is not the one
+        that reported the original failure.
+        """
+        from agents_live.runtime.hosts.processes import LocalChildRunner
+
+        with mock.patch.object(hostruntime, "_IS_WINDOWS", True):
+            result = LocalChildRunner().run_child(["copilot", "-p", "x" * 70000])
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("prompt too large", result.stderr)
+        self.assertIn("70000", result.stderr)
+
+    def test_a_prompt_that_fits_still_reaches_the_child(self) -> None:
+        """The guard must not stand between ordinary runs and their work."""
+        from agents_live.runtime.hosts.processes import LocalChildRunner
+
+        result = LocalChildRunner().run_child([sys.executable, "-c", "print(42)"])
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("42", result.stdout.strip())
+
+
 class TestCrossModuleAgreements(unittest.TestCase):
     """Assertions that two parts of the tree still agree (#216).
 

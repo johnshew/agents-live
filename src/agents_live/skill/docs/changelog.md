@@ -6,6 +6,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: report an oversized prompt as an oversized prompt.
+  POSIX allows a command line into the megabytes, so a definition that grew
+  past 32767 characters ran there for months and failed on Windows as
+  `WinError 206`, "the filename or extension is too long" - naming the one
+  thing that was not wrong. The shared spawn seam now measures the command
+  line first and reports how far over the limit it is, so the guard covers
+  plugin providers too.
 - test: hold cross-module invariants that a single suite cannot see. (#184)
   Four agreements now execute rather than being restated in prose: an outer
   timeout must outlive the work it bounds, every provider that reports spend

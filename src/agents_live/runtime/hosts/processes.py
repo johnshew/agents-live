@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO
 
 from ..values import ChildResult, ProcessRef
+from . import system
 
 
 def pid_exists(pid: int) -> bool:
@@ -127,6 +128,24 @@ class LocalChildRunner:
         use_pty: bool = False,
     ) -> ChildResult:
         argv = _shell_processor_argv(argv)
+        overflow = system.command_line_overflow(argv)
+        if overflow is not None:
+            # Reported as a failed child rather than raised, so it travels
+            # the path every other launch failure takes. The prompt is the
+            # only argument that grows without bound, so it is named.
+            prompt = max((str(part) for part in argv), key=len, default="")
+            return ChildResult(
+                tuple(argv),
+                -1,
+                "",
+                f"prompt too large: the longest argument is {len(prompt)} "
+                f"characters, putting this host's command line {overflow} "
+                "characters over its limit. Windows caps a command line at "
+                "32767 characters and reports the overflow as 'the filename "
+                "or extension is too long'. Shorten the definition, or have "
+                "the pre-processor pass less of its material through the "
+                "prompt.",
+            )
         if use_pty and os.name != "nt":
             return self._run_pty(
                 argv, cwd=cwd, env=env, input_text=input_text, timeout=timeout)
