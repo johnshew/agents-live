@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: reject concurrent worktree and index changes throughout release preparation. (#227)
+  Release commits and tags are created only when the exact validated file bytes
+  survive every gate, staging, and commit boundary.
+- fix: report unresolved Git index entries before automated agents run. (#253)
+  `doctor` fails health checks when a registered repository has unmerged paths
+  without exposing their names in diagnostics.
+- fix: manage deferred Windows upgrade and uninstall helpers through the runtime supervisor. (#293)
+  Durable handoffs persist full process references, reject recycled process IDs,
+  and share the supported host process contract.
 - fix: resolve project-defined MCP servers without weakening pipeline isolation. (#296)
   Plan and write agents can use servers declared in `.vscode/mcp.json` or
   `.mcp.json`; generated provider configuration is scoped to one dispatch and
