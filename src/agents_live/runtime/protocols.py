@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import IO, Protocol
 
 from .values import (
@@ -33,6 +34,17 @@ class Supervisor(Protocol):
         stdout: IO[bytes] | int | None = None,
         stderr: IO[bytes] | int | None = None,
     ) -> ProcessRef: ...
+    def adopt(
+        self, pid: int, *, role: str, key: str = "",
+        fingerprint: str = "", image: str = "",
+    ) -> ProcessRef: ...
+    def defer_until_environment_exits(
+        self, argv: Sequence[str], environment: Path | str, *,
+        operation_id: str | None = None,
+        result_path: Path | str | None = None,
+        transcript_path: Path | str | None = None,
+        transcript_limit: int = 65536,
+    ) -> ProcessRef | None: ...
     def alive(self, ref: ProcessRef) -> bool: ...
     def terminate(self, ref: ProcessRef) -> None: ...
     def owned(self, role: str | None = None) -> list[ProcessRef]: ...

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import __version__, agent, paths, plugins, preflight
+from ... import __version__, agent, paths, plugins, preflight, runtime
 from ...obs import admin as adminlog
 from ...legacy import triggers
 from ...runtime.hosts import system as hostruntime
@@ -236,7 +236,7 @@ def _handoff_windows_upgrade(
         if _refuse_while_held(end):
             upgrade_handoff.abandon(claim)
             return 1
-        helper = hostruntime.defer_until_environment_exits(
+        helper = runtime.current().supervisor.defer_until_environment_exits(
             command, environment, operation_id=claim.operation_id,
             result_path=claim.result_path,
             transcript_path=claim.transcript_path)
@@ -250,7 +250,7 @@ def _handoff_windows_upgrade(
                 "helper could not start; run `uv tool run --from agents-live "
                 "agents-live upgrade` after this command exits")
             return 1
-        upgrade_handoff.spawned(claim, helper.pid)
+        upgrade_handoff.spawned(claim, helper)
         end["status"] = "deferred"
         end["transcript"] = str(claim.transcript_path)
         end["message"] = "upgrade queued until this process exits"

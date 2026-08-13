@@ -73,6 +73,15 @@ class LocalProcesses:
             return False
         return True
 
+    def adopt(
+        self, pid: int, *, role: str, key: str = "",
+        fingerprint: str = "", image: str = "",
+    ) -> ProcessRef:
+        return ProcessRef(pid, time.time(), image, role, key, fingerprint)
+
+    def defer_until_environment_exits(self, *_args, **_kwargs) -> None:
+        return None
+
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
             return

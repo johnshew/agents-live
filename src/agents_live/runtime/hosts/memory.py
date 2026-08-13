@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -50,6 +51,18 @@ class MemorySupervisor:
             role, key, fingerprint)
         self.processes[key] = process
         return process
+
+    def adopt(
+        self, pid: int, *, role: str, key: str = "",
+        fingerprint: str = "", image: str = "",
+    ) -> ProcessRef:
+        process = ProcessRef(
+            pid, time.time(), image, role, key, fingerprint)
+        self.processes[key] = process
+        return process
+
+    def defer_until_environment_exits(self, *_args, **_kwargs) -> None:
+        return None
 
     def alive(self, ref: ProcessRef) -> bool:
         return self.processes.get(ref.key) == ref

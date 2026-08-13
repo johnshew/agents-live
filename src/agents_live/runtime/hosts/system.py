@@ -32,12 +32,16 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TypeVar
+
+from ..protocols import Supervisor
+from ..values import ProcessRef
 
 LINUX = "linux"
 WSL = "wsl"
@@ -1027,10 +1031,12 @@ def spawn_detached(
 
 def defer_until_environment_exits(
     argv: Sequence[str], environment: Path | str, *,
+    supervisor: Supervisor | None = None,
     operation_id: str | None = None,
     result_path: Path | str | None = None,
     transcript_path: Path | str | None = None,
-    transcript_limit: int = 65536) -> subprocess.Popen | None:
+    transcript_limit: int = 65536,
+) -> ProcessRef | None:
     """Start *argv* after no process executes from *environment*.
 
     Windows will not remove an executable while it is running. The helper
@@ -1060,8 +1066,11 @@ def defer_until_environment_exits(
             f"$result = '{result}'; $transcript = '{transcript}'; "
             "$temporary = $result + '.' + $PID + '.tmp'; "
             f"$operation = '{operation}'; "
+            "$helperStartedAt = ((Get-Process -Id $PID).StartTime."
+            "ToFileTimeUtc() / 10000000.0) - 11644473600.0; "
             "$started = @{schema=1; operation_id=$operation; status='started'; "
-            "helper_pid=$PID} | ConvertTo-Json -Compress; "
+            "helper_pid=$PID; helper_started_at=$helperStartedAt} | "
+            "ConvertTo-Json -Compress; "
             "[IO.File]::WriteAllText($temporary, $started, "
             "[Text.UTF8Encoding]::new($false)); "
             "Move-Item -LiteralPath $temporary -Destination $result -Force; "
@@ -1110,8 +1119,19 @@ def defer_until_environment_exits(
         f"exit {'$code' if durable else '$LASTEXITCODE'}"
     )
     try:
-        return spawn_detached(
+        process = spawn_detached(
             powershell_argv(powershell, script),
             stdin=subprocess.DEVNULL, stdout=None, stderr=None)
+        threading.Thread(
+            target=process.wait,
+            name=f"agents-live-upgrade-{process.pid}",
+            daemon=True,
+        ).start()
+        if supervisor is None:
+            from ..convergence import current
+            supervisor = current().supervisor
+        return supervisor.adopt(
+            process.pid, role="upgrade", key=operation_id or "",
+            image=Path(powershell).name)
     except OSError:
         return None

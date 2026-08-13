@@ -50,6 +50,7 @@ from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
+from agents_live.runtime.hosts.windows import WindowsProcesses
 from agents_live.runtime.hosts import system as hostruntime, task_scheduler
 
 
@@ -431,6 +432,47 @@ class TestDoctor(unittest.TestCase):
         self.assertIn("typo", stdout.getvalue())
         self.assertIn("newer agents-live runtime", stdout.getvalue())
 
+    def test_unmerged_git_index_fails_health_without_listing_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ["git", *args], cwd=root, check=check,
+                    capture_output=True, text=True)
+
+            git("init", "--quiet")
+            git("config", "user.email", "tests@example.invalid")
+            git("config", "user.name", "Agents Live Tests")
+            conflicted = root / "private-name.txt"
+            conflicted.write_text("base\n", encoding="utf-8")
+            git("add", conflicted.name)
+            git("commit", "--quiet", "-m", "base")
+            primary = git("branch", "--show-current").stdout.strip()
+            git("switch", "--quiet", "-c", "other")
+            conflicted.write_text("ours\n", encoding="utf-8")
+            git("commit", "--quiet", "-am", "other")
+            git("switch", "--quiet", primary)
+            conflicted.write_text("theirs\n", encoding="utf-8")
+            git("commit", "--quiet", "-am", "primary")
+            self.assertNotEqual(0, git("merge", "other", check=False).returncode)
+
+            check = doctor._git_index_check(root, "sample")
+
+        self.assertEqual({
+            "check": "git index sample",
+            "ok": False,
+            "detail": (
+                "1 unmerged path(s); resolve the Git index before running "
+                "automated agents"
+            ),
+        }, check)
+        self.assertNotIn("private-name", str(check))
+
+    def test_non_git_repository_has_no_git_index_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertIsNone(
+                doctor._git_index_check(Path(temporary), "sample"))
+
     def test_repair_reports_post_convergence_health_in_text_and_json(self) -> None:
         stale = Health(False, "stale", detail=("liveness beacon is stale",))
         fresh = Health(True, "fresh")
@@ -565,10 +607,16 @@ class TestRuntimeCore(unittest.TestCase):
                 claim, _ = upgrade_handoff.claim(
                     environment, source="agents-live", runtime_only=False)
                 assert claim is not None
-                upgrade_handoff.spawned(claim, 321)
+                helper = ProcessRef(
+                    321, 1000.0, "powershell.exe", "upgrade",
+                    claim.operation_id)
+                upgrade_handoff.spawned(claim, helper)
+                supervisor = mock.Mock()
+                supervisor.alive.return_value = False
                 with (
                     mock.patch.object(
-                        upgrade_handoff.hostruntime, "is_alive", return_value=False),
+                        upgrade_handoff.runtime, "current",
+                        return_value=mock.Mock(supervisor=supervisor)),
                     mock.patch.object(upgrade_handoff.adminlog, "record") as record,
                 ):
                     upgrade_handoff.reconcile()
@@ -588,27 +636,75 @@ class TestRuntimeCore(unittest.TestCase):
                     "operation_id": claim.operation_id,
                     "status": "started",
                     "helper_pid": 321,
+                    "helper_started_at": 1000.0,
                 }), encoding="utf-8")
+                helper = ProcessRef(
+                    321, 1000.0, "powershell.exe", "upgrade",
+                    claim.operation_id)
+                supervisor = mock.Mock()
+                supervisor.alive.return_value = True
                 with (
                     mock.patch.object(
                         upgrade_handoff.time, "time", return_value=10_000),
                     mock.patch.object(
-                        upgrade_handoff.hostruntime, "is_alive", return_value=True),
+                        upgrade_handoff.runtime, "current",
+                        return_value=mock.Mock(supervisor=supervisor)),
                     mock.patch.object(upgrade_handoff.adminlog, "record") as record,
                 ):
                     upgrade_handoff.reconcile()
                     self.assertTrue(claim.pending_path.exists())
                     pending = json.loads(
                         claim.pending_path.read_text(encoding="utf-8"))
-                    self.assertEqual(321, pending["helper_pid"])
+                    self.assertEqual({
+                        "pid": 321,
+                        "created_at": 1000.0,
+                        "image": "powershell.exe",
+                        "role": "upgrade",
+                        "key": claim.operation_id,
+                        "fingerprint": "",
+                    }, pending["helper"])
+                    supervisor.alive.assert_called_once_with(helper)
                     record.assert_not_called()
                     duplicate, existing = upgrade_handoff.claim(
                         environment, source="agents-live", runtime_only=False)
                 self.assertIsNone(duplicate)
                 self.assertEqual(claim.operation_id, existing)
 
+    def test_deferred_upgrade_recovery_rejects_a_reused_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                claim, _ = upgrade_handoff.claim(
+                    environment, source="agents-live", runtime_only=False)
+                assert claim is not None
+                claim.result_path.write_text(json.dumps({
+                    "schema": 1,
+                    "operation_id": claim.operation_id,
+                    "status": "started",
+                    "helper_pid": 321,
+                    "helper_started_at": 1000.0,
+                }), encoding="utf-8")
+                with (
+                    mock.patch.object(
+                        upgrade_handoff.runtime, "current",
+                        return_value=mock.Mock(supervisor=WindowsProcesses())),
+                    mock.patch.object(
+                        hostruntime, "is_alive", return_value=True),
+                    mock.patch.object(
+                        hostruntime, "process_start_time", return_value=5000.0),
+                    mock.patch.object(upgrade_handoff.adminlog, "record") as record,
+                ):
+                    upgrade_handoff.reconcile()
+                self.assertFalse(claim.pending_path.exists())
+                self.assertEqual("error", record.call_args.kwargs["status"])
+
     def test_windows_deferred_process_writes_a_bounded_result(self) -> None:
         process = mock.Mock(pid=42)
+        reference = ProcessRef(
+            42, 1000.0, "powershell.exe", "upgrade", "operation-1")
+        supervisor = mock.Mock()
+        supervisor.adopt.return_value = reference
         with tempfile.TemporaryDirectory() as temporary:
             result_path = Path(temporary) / "result.json"
             transcript_path = Path(temporary) / "transcript.log"
@@ -621,11 +717,15 @@ class TestRuntimeCore(unittest.TestCase):
             ):
                 result = hostruntime.defer_until_environment_exits(
                     ["uv", "tool", "upgrade", "agents-live"], Path("C:/tool"),
+                    supervisor=supervisor,
                     operation_id="operation-1", result_path=result_path,
                     transcript_path=transcript_path, transcript_limit=4096)
-        self.assertIs(process, result)
+        self.assertIs(reference, result)
+        supervisor.adopt.assert_called_once_with(
+            42, role="upgrade", key="operation-1", image="powershell.exe")
         command = " ".join(spawn.call_args.args[0])
         self.assertIn("status='started'", command)
+        self.assertIn("helper_started_at=$helperStartedAt", command)
         self.assertIn("status='terminal'", command)
         self.assertIn("4096", command)
         self.assertIn("exit $code", command)
@@ -641,14 +741,12 @@ class TestRuntimeCore(unittest.TestCase):
                 "echo [%~1][%~2]\n"
                 "exit /b 7\n",
                 encoding="utf-8")
-            helper = hostruntime.defer_until_environment_exits(
+            helper = WindowsProcesses().defer_until_environment_exits(
                 [str(command_path), "value with spaces", "apostrophe's value"],
                 Path(temporary) / "unused-environment",
                 operation_id="operation-1", result_path=result_path,
                 transcript_path=transcript_path)
             self.assertIsNotNone(helper)
-            assert helper is not None
-            self.assertEqual(7, helper.wait(timeout=60))
             # The helper is detached by design, so its exit does not order
             # the write that follows it. Reading once raced the file and
             # tore down the fixture underneath a live process, which then
@@ -693,7 +791,10 @@ class TestRuntimeCore(unittest.TestCase):
             state_home = Path(temporary) / "state"
             environment = Path(temporary) / "tools" / "agents-live"
             environment.mkdir(parents=True)
-            helper = mock.Mock(pid=42)
+            helper = ProcessRef(
+                42, 1000.0, "powershell.exe", "upgrade", "operation-1")
+            supervisor = mock.Mock()
+            supervisor.defer_until_environment_exits.return_value = helper
             stdout = io.StringIO()
             with (
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}),
@@ -705,8 +806,8 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
                 mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
                 mock.patch.object(
-                    upgrade.hostruntime, "defer_until_environment_exits",
-                    return_value=helper) as defer,
+                    upgrade.runtime, "current",
+                    return_value=mock.Mock(supervisor=supervisor)),
                 mock.patch.object(
                     upgrade.adminlog, "operation",
                     return_value=contextlib.nullcontext({})) as operation,
@@ -714,6 +815,7 @@ class TestRuntimeCore(unittest.TestCase):
             ):
                 self.assertEqual(
                     0, upgrade._handoff_windows_upgrade(None, runtime_only=False))
+            defer = supervisor.defer_until_environment_exits
             command = defer.call_args.args[0]
             self.assertEqual(
                 ["uv.exe", "tool", "run", "--refresh", "--from",
@@ -732,7 +834,7 @@ class TestRuntimeCore(unittest.TestCase):
                     "*.pending.json"))
             self.assertEqual(1, len(pending))
             self.assertEqual(42, json.loads(
-                pending[0].read_text(encoding="utf-8"))["helper_pid"])
+                pending[0].read_text(encoding="utf-8"))["helper"]["pid"])
 
     def test_windows_upgrade_abandons_claim_when_helper_cannot_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -740,6 +842,8 @@ class TestRuntimeCore(unittest.TestCase):
             environment = Path(temporary) / "tools" / "agents-live"
             environment.mkdir(parents=True)
             stderr = io.StringIO()
+            supervisor = mock.Mock()
+            supervisor.defer_until_environment_exits.return_value = None
             with (
                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}),
                 mock.patch.object(
@@ -750,8 +854,8 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
                 mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
                 mock.patch.object(
-                    upgrade.hostruntime, "defer_until_environment_exits",
-                    return_value=None),
+                    upgrade.runtime, "current",
+                    return_value=mock.Mock(supervisor=supervisor)),
                 contextlib.redirect_stderr(stderr),
             ):
                 self.assertEqual(
@@ -761,6 +865,25 @@ class TestRuntimeCore(unittest.TestCase):
                     "*.pending.json"))
             self.assertEqual([], pending)
             self.assertIn("nothing was changed", stderr.getvalue())
+
+    def test_windows_uninstall_uses_the_supervisor_handoff(self) -> None:
+        helper = ProcessRef(
+            42, 1000.0, "powershell.exe", "upgrade", "operation-1")
+        supervisor = mock.Mock()
+        supervisor.defer_until_environment_exits.return_value = helper
+        stdout = io.StringIO()
+        environment = Path("C:/tools/agents-live")
+        with (
+            mock.patch.object(
+                uninstall.runtime, "current",
+                return_value=mock.Mock(supervisor=supervisor)),
+            contextlib.redirect_stdout(stdout),
+        ):
+            self.assertTrue(
+                uninstall._handoff_windows_uninstall("uv.exe", environment))
+        supervisor.defer_until_environment_exits.assert_called_once_with(
+            ["uv.exe", "tool", "uninstall", "agents-live"], environment)
+        self.assertIn("after this command exits", stdout.getvalue())
 
     def test_name_keyed_ownership_rejects_duplicate_identities(self) -> None:
         with self.assertRaisesRegex(
