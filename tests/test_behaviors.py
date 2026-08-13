@@ -1472,7 +1472,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
         expected = [
             path.relative_to(REPOSITORY).as_posix() for path in files]
         expected_blobs = {
-            path: release["_blob_id"](content)
+            path: release["_blob_id"](path, content)
             for path, content in validated.items()
         }
 
@@ -1503,6 +1503,25 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(release["ReleaseError"], message):
                     check_release_commit(validated)
+
+    def test_release_blob_validation_applies_git_clean_filters(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        blob_id = release["_blob_id"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "core.autocrlf", "true"],
+                cwd=root, check=True)
+            path = root / "version.txt"
+            blob_id.__globals__["ROOT"] = root
+            actual = blob_id(path, b"version\r\n")
+            expected = subprocess.run(
+                ["git", "hash-object", "--stdin"],
+                cwd=root, input=b"version\n", capture_output=True, check=True,
+            ).stdout.decode("ascii").strip()
+            self.assertEqual(expected, actual)
 
     def test_the_smoketest_waits_longer_than_an_agent_may_take(self) -> None:
         """A supervisor that gives up before its child can finish reports
