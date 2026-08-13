@@ -5,11 +5,12 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .. import paths
+from .. import paths, runtime
 from ..obs import admin as adminlog
+from ..runtime import ProcessRef
 from ..runtime.hosts import system as hostruntime
 
 _STALE_AFTER_S = 300
@@ -87,19 +88,28 @@ def _reconcile_locked() -> None:
             pending_path.unlink(missing_ok=True)
             result_path.unlink(missing_ok=True)
             continue
-        helper_pid = pending.get("helper_pid")
-        if (helper_pid is None
+        helper = _process_ref(pending.get("helper"))
+        if (helper is None
                 and result is not None
                 and result.get("operation_id") == pending.get("operation_id")
                 and result.get("status") == "started"
-                and isinstance(result.get("helper_pid"), int)):
-            helper_pid = result["helper_pid"]
-            pending["helper_pid"] = helper_pid
-            _remember_identity(pending, helper_pid)
+                and isinstance(result.get("helper_pid"), int)
+                and isinstance(result.get("helper_started_at"), (int, float))):
+            helper = ProcessRef(
+                result["helper_pid"],
+                float(result["helper_started_at"]),
+                "powershell.exe",
+                "upgrade",
+                str(pending.get("operation_id", "")),
+            )
+            pending["helper"] = asdict(helper)
             _write(pending_path, pending)
         created_at = float(pending.get("created_at", 0.0))
-        alive = _helper_is_running(pending, helper_pid)
-        if alive or (helper_pid is None and now - created_at < _STALE_AFTER_S):
+        alive = (
+            helper is not None
+            and runtime.current().supervisor.alive(helper)
+        )
+        if alive or (helper is None and now - created_at < _STALE_AFTER_S):
             continue
         _record_terminal(pending, result, stale=True)
         pending_path.unlink(missing_ok=True)
@@ -137,7 +147,7 @@ def claim(environment: Path, *, source: str, runtime_only: bool
             "operation_id": operation_id,
             "environment": str(claim.environment),
             "created_at": time.time(),
-            "helper_pid": None,
+            "helper": None,
             "result_path": str(result_path),
             "transcript_path": str(transcript_path),
             "source": source,
@@ -146,39 +156,22 @@ def claim(environment: Path, *, source: str, runtime_only: bool
         return claim, None
 
 
-def spawned(claim: Claim, helper_pid: int) -> None:
+def spawned(claim: Claim, helper: ProcessRef) -> None:
     with hostruntime.exclusive_lock(_lock_path(), blocking=True):
         pending = _read(claim.pending_path)
         if pending is None or pending.get("operation_id") != claim.operation_id:
             return
-        pending["helper_pid"] = helper_pid
-        _remember_identity(pending, helper_pid)
+        pending["helper"] = asdict(helper)
         _write(claim.pending_path, pending)
 
 
-def _remember_identity(pending: dict, helper_pid: int) -> None:
-    """Pin the pid to the process that holds it right now.
-
-    A pid outlives the process it named, and this record outlives both.
-    Without the start time a reused pid reads as the upgrade still
-    running, which refuses every later upgrade rather than reporting
-    stale information.
-    """
-    started_at = hostruntime.process_start_time(helper_pid)
-    if started_at is not None:
-        pending["helper_started_at"] = started_at
-
-
-def _helper_is_running(pending: dict, helper_pid: object) -> bool:
-    if not isinstance(helper_pid, int) or not hostruntime.is_alive(helper_pid):
-        return False
-    recorded = pending.get("helper_started_at")
-    if not isinstance(recorded, (int, float)):
-        return True
-    current = hostruntime.process_start_time(helper_pid)
-    if current is None:
-        return True
-    return abs(current - float(recorded)) < 2.0
+def _process_ref(value: object) -> ProcessRef | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return ProcessRef(**value)
+    except (TypeError, ValueError):
+        return None
 
 
 def abandon(claim: Claim) -> None:

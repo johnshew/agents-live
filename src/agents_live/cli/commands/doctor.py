@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 from ... import runtime, state
 from ...state import registry as repos
@@ -43,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
                     "detail": "registered but cannot be read; its triggers are preserved",
                 })
                 continue
+            git_index = _git_index_check(root, name)
+            if git_index is not None:
+                checks.append(git_index)
             try:
                 state.load(root)
             except state.StartedStateUnavailable as exc:
@@ -125,6 +130,53 @@ def _damaged_records(root) -> int:
         return obs.query.damaged(obs.files(paths.repo_state_dir(root) / "logs"))
     except (OSError, ValueError):
         return 0
+
+
+def _git_index_check(root: Path, name: str) -> dict[str, object] | None:
+    """Report unresolved index entries without exposing repository paths."""
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--unmerged", "-z"],
+            capture_output=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return {
+            "check": f"git index {name}", "ok": False,
+            "detail": f"could not inspect the Git index: {exc}",
+        }
+    if result.returncode != 0:
+        detail = (
+            result.stderr.decode(errors="replace").strip()
+            or f"git exited {result.returncode}"
+        )
+        return {
+            "check": f"git index {name}", "ok": False,
+            "detail": f"could not inspect the Git index: {detail}",
+        }
+    conflicted_paths = {
+        record.split(b"\t", 1)[1]
+        for record in result.stdout.split(b"\0")
+        if b"\t" in record
+    }
+    count = len(conflicted_paths)
+    return {
+        "check": f"git index {name}",
+        "ok": count == 0,
+        "detail": (
+            "clean" if count == 0 else
+            f"{count} unmerged path(s); resolve the Git index before "
+            "running automated agents"
+        ),
+    }
 
 
 def _host_check(health: runtime.Health) -> dict[str, object]:

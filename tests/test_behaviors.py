@@ -16,6 +16,7 @@ import io
 import importlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -34,12 +35,13 @@ from agents_live.legacy import health_check
 from agents_live.obs import qlog
 from agents_live.agent.values import RawOutput
 from agents_live.dispatch import Firing, dispatch
-from agents_live.runtime import ChildResult, Subscription
+from agents_live.runtime import ChildResult, ProcessRef, Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
 from agents_live.runtime.hosts import system as hostruntime
 from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts.posix import PosixHost, PosixTriggerStore
+from agents_live.runtime.hosts.windows import WindowsProcesses
 from agents_live.state import ownership
 from agents_live.state import registry as repos
 
@@ -911,61 +913,39 @@ class TestPendingUpgradeIdentity(TempRepository):
     merely reporting stale information.
     """
 
-    def _pending(self, **overrides) -> dict:
-        pending = {
-            "operation_id": "operation-1",
-            "helper_pid": 4321,
-            "helper_started_at": 1000.0,
-            "created_at": 900.0,
-        }
-        pending.update(overrides)
-        return pending
+    def _reference(self, *, created_at: float = 1000.0) -> ProcessRef:
+        return ProcessRef(
+            4321, created_at, "powershell.exe", "upgrade", "operation-1")
 
     def test_a_reused_pid_is_not_the_helper_that_was_started(self) -> None:
         with (
-            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
-                              return_value=True),
-            mock.patch.object(upgrade_handoff.hostruntime,
-                              "process_start_time", return_value=5000.0),
+            mock.patch.object(hostruntime, "is_alive", return_value=True),
+            mock.patch.object(
+                hostruntime, "process_start_time", return_value=5000.0),
         ):
-            self.assertFalse(
-                upgrade_handoff._helper_is_running(self._pending(), 4321))
+            self.assertFalse(WindowsProcesses().alive(self._reference()))
 
     def test_the_same_process_still_counts_as_running(self) -> None:
         with (
-            mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
-                              return_value=True),
-            mock.patch.object(upgrade_handoff.hostruntime,
-                              "process_start_time", return_value=1000.4),
+            mock.patch.object(hostruntime, "is_alive", return_value=True),
+            mock.patch.object(
+                hostruntime, "process_start_time", return_value=1000.4),
         ):
-            self.assertTrue(
-                upgrade_handoff._helper_is_running(self._pending(), 4321))
+            self.assertTrue(WindowsProcesses().alive(self._reference()))
 
     def test_an_unknown_start_time_is_not_treated_as_a_mismatch(self) -> None:
         """Unavailable is not evidence. Refusing on it would abandon a
         live upgrade and let a second one race the same environment."""
-        for recorded, current in ((None, 5000.0), (1000.0, None)):
-            with self.subTest(recorded=recorded, current=current):
-                pending = self._pending()
-                if recorded is None:
-                    pending.pop("helper_started_at")
-                with (
-                    mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
-                                      return_value=True),
-                    mock.patch.object(upgrade_handoff.hostruntime,
-                                      "process_start_time",
-                                      return_value=current),
-                ):
-                    self.assertTrue(upgrade_handoff._helper_is_running(
-                        pending, 4321))
+        with (
+            mock.patch.object(hostruntime, "is_alive", return_value=True),
+            mock.patch.object(
+                hostruntime, "process_start_time", return_value=None),
+        ):
+            self.assertTrue(WindowsProcesses().alive(self._reference()))
 
     def test_a_dead_pid_is_never_running(self) -> None:
-        with mock.patch.object(upgrade_handoff.hostruntime, "is_alive",
-                               return_value=False):
-            self.assertFalse(
-                upgrade_handoff._helper_is_running(self._pending(), 4321))
-        self.assertFalse(
-            upgrade_handoff._helper_is_running(self._pending(), None))
+        with mock.patch.object(hostruntime, "is_alive", return_value=False):
+            self.assertFalse(WindowsProcesses().alive(self._reference()))
 
     def test_the_start_time_probe_answers_for_this_process(self) -> None:
         """The guard is only as good as the primitive under it."""
@@ -1367,6 +1347,162 @@ class TestCrossModuleAgreements(unittest.TestCase):
         gates = self._gate_text()
         self.assertRegex(
             gates, r'"--repo",\s*str\(ROOT\),\s*"smoketest"')
+
+    def test_release_prepare_revalidates_files_after_gates(self) -> None:
+        """A gate-time editor save must not produce a partial release (#227)."""
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = release["prepare"]
+        scope = prepare.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=root, check=True,
+                capture_output=True, text=True)
+            files = tuple(root / name for name in (
+                "pyproject.toml", "__init__.py", "VERSION", "changelog.md"))
+            original = {}
+            for index, path in enumerate(files):
+                content = f"original {index}\n".encode()
+                path.write_bytes(content)
+                original[path] = content
+            commands: list[list[str]] = []
+
+            def update_versions(_current: str, _target: str) -> None:
+                for path in files:
+                    path.write_text("release\n", encoding="utf-8")
+
+            def git(*args: str) -> str:
+                if args == ("rev-parse", "HEAD"):
+                    return "original-head"
+                if args == ("diff", "--name-only"):
+                    return "\n".join(
+                        path.name for path in files
+                        if path.read_bytes() != original[path])
+                if args in (
+                    ("diff", "--cached", "--name-only"),
+                    ("ls-files", "--others", "--exclude-standard"),
+                ):
+                    return ""
+                raise AssertionError(args)
+
+            def run(command: list[str], *, capture: bool = False) -> str:
+                commands.append(command)
+                if command == ["gate"]:
+                    files[-1].write_bytes(original[files[-1]])
+                return ""
+
+            scope.update({
+                "ROOT": root,
+                "RELEASE_FILES": files,
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.0.0",
+                "_next_version": lambda _current, _bump: "1.1.0",
+                "_check_bump": lambda _bump: "minor",
+                "_print_plan": lambda *_args: None,
+                "_check_prepare_state": lambda *_args, **_kwargs: None,
+                "_update_versions": update_versions,
+                "_gate_commands": lambda: [["gate"]],
+                "_git": git,
+                "_run": run,
+            })
+
+            with self.assertRaisesRegex(
+                    release["ReleaseError"],
+                    "version bump changed an unexpected file set"):
+                prepare("minor")
+
+            self.assertEqual(original, {
+                path: path.read_bytes() for path in files})
+            self.assertNotIn(["git", "add"], [command[:2] for command in commands])
+            self.assertNotIn(
+                ["git", "commit"], [command[:2] for command in commands])
+
+    def test_release_diff_rejects_staged_and_untracked_files(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check_release_diff = release["_check_release_diff"]
+        scope = check_release_diff.__globals__
+        expected = "\n".join(
+            path.relative_to(REPOSITORY).as_posix()
+            for path in release["RELEASE_FILES"])
+
+        for staged, untracked in (
+            ("unexpected.txt", ""),
+            ("", "unexpected.txt"),
+        ):
+            with self.subTest(staged=bool(staged), untracked=bool(untracked)):
+                def git(*args: str) -> str:
+                    return {
+                        ("diff", "--name-only"): expected,
+                        ("diff", "--cached", "--name-only"): staged,
+                        ("ls-files", "--others", "--exclude-standard"): untracked,
+                    }[args]
+
+                scope["_git"] = git
+                with self.assertRaisesRegex(
+                        release["ReleaseError"],
+                        "version bump changed an unexpected file set"):
+                    check_release_diff()
+
+    def test_release_index_rejects_an_editor_save_after_git_add(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check_release_index = release["_check_release_index"]
+        scope = check_release_index.__globals__
+        expected = "\n".join(
+            path.relative_to(REPOSITORY).as_posix()
+            for path in release["RELEASE_FILES"])
+
+        def git(*args: str) -> str:
+            return {
+                ("diff", "--name-only"): "src/agents_live/__init__.py",
+                ("diff", "--cached", "--name-only"): expected,
+                ("ls-files", "--others", "--exclude-standard"): "",
+            }[args]
+
+        scope["_git"] = git
+        with self.assertRaisesRegex(
+                release["ReleaseError"], "staged release changed before commit"):
+            check_release_index()
+
+    def test_release_commit_rejects_post_validation_changes(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check_release_commit = release["_check_release_commit"]
+        scope = check_release_commit.__globals__
+        files = release["RELEASE_FILES"]
+        validated = {path: b"validated\n" for path in files}
+        expected = [
+            path.relative_to(REPOSITORY).as_posix() for path in files]
+        expected_blobs = {
+            path: release["_blob_id"](content)
+            for path, content in validated.items()
+        }
+
+        for extra, changed_file in (
+            ("unexpected.txt", None),
+            (None, files[0]),
+        ):
+            with self.subTest(extra=extra, changed_file=changed_file):
+                changed = [*expected, *([extra] if extra else [])]
+
+                def git(*args: str) -> str:
+                    if args == ("diff", "--name-only", "HEAD^..HEAD"):
+                        return "\n".join(changed)
+                    _, reference = args
+                    relative = reference.removeprefix("HEAD:")
+                    path = next(
+                        item for item in files
+                        if item.relative_to(REPOSITORY).as_posix() == relative)
+                    return (
+                        "different-blob"
+                        if path == changed_file else expected_blobs[path]
+                    )
+
+                scope["_git"] = git
+                message = (
+                    "unexpected file set" if extra else
+                    "changed after validation"
+                )
+                with self.assertRaisesRegex(release["ReleaseError"], message):
+                    check_release_commit(validated)
 
     def test_the_smoketest_waits_longer_than_an_agent_may_take(self) -> None:
         """A supervisor that gives up before its child can finish reports

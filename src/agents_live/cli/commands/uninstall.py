@@ -28,7 +28,7 @@ def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
     directory has to outlive both of them; waiting only for this PID races
     the shim's own exit.
     """
-    if not hostruntime.defer_until_environment_exits(
+    if not runtime.current().supervisor.defer_until_environment_exits(
             [uv, "tool", "uninstall", "agents-live"], environment):
         return False
     print("Uninstall will complete after this command exits")

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -499,13 +500,61 @@ def _check_publish_state(version: str) -> bool:
 
 def _check_release_diff() -> None:
     changed = set(_git("diff", "--name-only").splitlines())
+    staged = set(_git("diff", "--cached", "--name-only").splitlines())
+    untracked = set(
+        _git("ls-files", "--others", "--exclude-standard").splitlines())
     expected = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
-    if changed != expected:
+    if changed != expected or staged or untracked:
         raise ReleaseError(
             "version bump changed an unexpected file set: "
-            f"expected {sorted(expected)}, got {sorted(changed)}"
+            f"expected unstaged {sorted(expected)}, got unstaged "
+            f"{sorted(changed)}, staged {sorted(staged)}, and untracked "
+            f"{sorted(untracked)}"
         )
     _run(["git", "diff", "--check"])
+
+
+def _check_release_index() -> None:
+    """Require the validated release snapshot, with no later worktree edits."""
+    changed = set(_git("diff", "--name-only").splitlines())
+    staged = set(_git("diff", "--cached", "--name-only").splitlines())
+    untracked = set(
+        _git("ls-files", "--others", "--exclude-standard").splitlines())
+    expected = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
+    if changed or staged != expected or untracked:
+        raise ReleaseError(
+            "staged release changed before commit: "
+            f"expected staged {sorted(expected)}, got unstaged "
+            f"{sorted(changed)}, staged {sorted(staged)}, and untracked "
+            f"{sorted(untracked)}"
+        )
+    _run(["git", "diff", "--cached", "--check"])
+
+
+def _blob_id(content: bytes) -> str:
+    header = f"blob {len(content)}\0".encode()
+    return hashlib.sha1(header + content).hexdigest()
+
+
+def _check_release_commit(validated: dict[Path, bytes]) -> None:
+    """Verify the commit contains exactly the bytes that passed the gates."""
+    expected = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
+    changed = set(_git("diff", "--name-only", "HEAD^..HEAD").splitlines())
+    if changed != expected:
+        raise ReleaseError(
+            "release commit has an unexpected file set: "
+            f"expected {sorted(expected)}, got {sorted(changed)}"
+        )
+    mismatched = []
+    for path, content in validated.items():
+        relative = path.relative_to(ROOT).as_posix()
+        if _git("rev-parse", f"HEAD:{relative}") != _blob_id(content):
+            mismatched.append(relative)
+    if mismatched:
+        raise ReleaseError(
+            "release files changed after validation: "
+            f"{sorted(mismatched)}"
+        )
 
 
 def _smoketest_command() -> list[str]:
@@ -598,21 +647,39 @@ def prepare(bump: str) -> None:
     _check_prepare_state(target, fetch=True)
     original = {path: path.read_bytes() for path in RELEASE_FILES}
     original_head = _git("rev-parse", "HEAD")
+    release_head: str | None = None
     committed = False
     try:
         _update_versions(current, target)
         _check_release_diff()
+        validated = {path: path.read_bytes() for path in RELEASE_FILES}
         for command in _gate_commands():
             _run(command)
         # The gates are long and the checkout is shared, so what was
         # validated above is not necessarily what is about to be staged.
         _check_release_diff()
-        _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
+        release_paths = [str(path.relative_to(ROOT)) for path in RELEASE_FILES]
+        _run(["git", "add", *release_paths])
+        _check_release_index()
         message = f"chore(build): bump version to v{target}"
         _run(["git", "commit", "-m", message])
+        release_head = _git("rev-parse", "HEAD")
         committed = True
+        _check_release_commit(validated)
     except BaseException:
         committed = _git("rev-parse", "HEAD") != original_head
+        if (
+            committed
+            and release_head is not None
+            and _git("rev-parse", "HEAD") == release_head
+            and _git("rev-parse", "HEAD^") == original_head
+        ):
+            subprocess.run(
+                ["git", "reset", "--soft", original_head],
+                cwd=ROOT,
+                check=False,
+            )
+            committed = False
         if not committed:
             subprocess.run(
                 ["git", "reset", "--quiet", "HEAD", "--",

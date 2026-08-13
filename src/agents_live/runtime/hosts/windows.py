@@ -130,6 +130,12 @@ class WindowsProcesses:
             role, key, fingerprint)
 
     def alive(self, ref: ProcessRef) -> bool:
+        if ref.role == "upgrade":
+            from . import system as hostruntime
+            if not hostruntime.is_alive(ref.pid):
+                return False
+            started = hostruntime.process_start_time(ref.pid)
+            return started is None or abs(started - ref.created_at) < 2.0
         return any(
             item.pid == ref.pid
             and item.role == ref.role
@@ -137,6 +143,22 @@ class WindowsProcesses:
             and item.fingerprint == ref.fingerprint
             for item in self.owned(ref.role)
         )
+
+    def adopt(
+        self, pid: int, *, role: str, key: str = "",
+        fingerprint: str = "", image: str = "",
+    ) -> ProcessRef:
+        from . import system as hostruntime
+        created_at = hostruntime.process_start_time(pid) or time.time()
+        return ProcessRef(
+            pid, created_at, image, role, key, fingerprint)
+
+    def defer_until_environment_exits(
+        self, argv: Sequence[str], environment: Path | str, **kwargs,
+    ) -> ProcessRef | None:
+        from . import system as hostruntime
+        return hostruntime.defer_until_environment_exits(
+            argv, environment, supervisor=self, **kwargs)
 
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):

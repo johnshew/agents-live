@@ -61,7 +61,8 @@ class ProcessRef:
     def __post_init__(self) -> None:
         if self.pid <= 0:
             raise ValueError("process pid must be positive")
-        if self.role not in {"watcher", "provider-child", "maintenance"}:
+        if self.role not in {
+                "watcher", "provider-child", "maintenance", "upgrade"}:
             raise ValueError(f"unknown process role: {self.role}")
 
 
