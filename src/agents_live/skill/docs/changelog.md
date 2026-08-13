@@ -6,6 +6,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep log commands readable on a legacy Windows console.
+  `logs` and `logs timeline` print agent output verbatim, so a single emoji in a
+  transcript ended the command in a `UnicodeEncodeError` traceback. The
+  dispatcher reconfigured only its own streams, which never reached the
+  subcommands it runs as subprocesses; it now exports the UTF-8 setting they
+  inherit.
 - fix: read Copilot run cost from its machine-readable stream.
   The CLI prints its cost footer only to an interactive terminal, which Windows
   cannot allocate, so runs there recorded no spend at all. Runs now request the

@@ -48,6 +48,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from .. import state
+from ..runtime.hosts import system
 from . import update_check
 from .spec import (
     COMMAND_BY_NAME,
@@ -201,9 +202,11 @@ def _captured_result(code: int, cmd: str, stdout: str, stderr: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    # Reconfiguring only this process leaves the subprocess-dispatched
+    # subcommands (logs, timeline, dashboard) on the console code page,
+    # so a single emoji in a log line takes them down. `use_utf8_io`
+    # also exports PYTHONUTF8 and switches the console itself (#241).
+    system.use_utf8_io()
     from . import upgrade_handoff
     upgrade_handoff.reconcile()
     args = list(sys.argv[1:] if argv is None else argv)

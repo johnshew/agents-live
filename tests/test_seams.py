@@ -569,6 +569,25 @@ class TestRuntimeCore(unittest.TestCase):
         ):
             ownership.registry_available()
 
+    def test_cli_entry_exports_utf8_to_subprocess_subcommands(self) -> None:
+        # The subprocess-dispatched subcommands (logs, timeline, dashboard)
+        # print agent output verbatim, so a legacy console code page turns
+        # one emoji in a log line into UnicodeEncodeError. Reconfiguring
+        # only the dispatcher's own streams does not reach them; exporting
+        # PYTHONUTF8 does.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTHONUTF8", None)
+            with mock.patch.object(hostruntime, "_IS_WINDOWS", False):
+                hostruntime.use_utf8_io()
+            self.assertEqual("1", os.environ.get("PYTHONUTF8"))
+
+    def test_cli_entry_point_uses_the_utf8_helper(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        with mock.patch.object(hostruntime, "use_utf8_io") as helper:
+            with contextlib.suppress(SystemExit):
+                module.main(["--version"])
+        helper.assert_called_once_with()
+
     def test_deferred_upgrade_is_single_flight_and_records_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_home = Path(temporary) / "state"
