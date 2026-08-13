@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from ... import runtime, state
+from ... import paths, runtime, state
 from ...state import registry as repos
 from .. import lifecycle, update_check
+from . import internal
+
+
+HEALTH_STALE_SECONDS = 70 * 60
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,19 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all-repos", action="store_true")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--dependencies", action="store_true")
-    parser.add_argument("--host-only", action="store_true")
+    parser.add_argument("--quick", action="store_true")
     args = parser.parse_args(argv)
+    if args.quick:
+        return _quick()
     checks: list[dict[str, object]] = []
-    if args.host_only:
-        try:
-            health = runtime.health()
-        except (OSError, RuntimeError, ValueError) as exc:
-            checks.append({
-                "check": "host runtime", "ok": False, "detail": str(exc)})
-        else:
-            checks.append(_host_check(health))
-        return _finish(checks)
     try:
         registry = repos.load()
     except ValueError as exc:
@@ -39,11 +38,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         checks.append({"check": "repository registry", "ok": True,
                        "detail": f"{len(registry['repos'])} registered"})
-    selected_root = (
-        None
-        if args.all_repos or registry is None or not registry["repos"]
-        else state.resolve_root()
-    )
     host_check_index = len(checks)
     try:
         health = runtime.health()
@@ -55,8 +49,6 @@ def main(argv: list[str] | None = None) -> int:
     if registry is not None:
         for name, value in sorted(registry["repos"].items()):
             root = state.resolve_root(value) if os.path.isdir(value) else None
-            if selected_root is not None and root != selected_root:
-                continue
             if root is None:
                 checks.append({
                     "check": f"repository {name}", "ok": False,
@@ -87,10 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                             "appear in logs, timeline, or the dashboard"),
                     })
         try:
-            collected = lifecycle.collect(
-                persist=False,
-                roots=None if selected_root is None else {selected_root},
-            )
+            collected = lifecycle.collect(persist=False)
         except lifecycle.CollectionUnavailable as exc:
             checks.append({
                 "check": "definition collection", "ok": False,
@@ -116,27 +105,6 @@ def main(argv: list[str] | None = None) -> int:
                         "a newer agents-live runtime"
                     ),
                 })
-            if args.dependencies:
-                required_runtimes = tuple(
-                    target for root, target in collected.required_runtimes
-                    if selected_root is None or root == selected_root
-                )
-                try:
-                    dependencies = runtime.dependency_health(
-                        required_runtimes)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    checks.append({
-                        "check": "runtime dependencies", "ok": False,
-                        "status": "unknown", "detail": str(exc),
-                    })
-                else:
-                    checks.extend({
-                        "check": "runtime dependency",
-                        "ok": item.status == "healthy",
-                        "runtime": item.runtime,
-                        "status": item.status,
-                        "detail": item.detail,
-                    } for item in dependencies)
     if args.repair or args.dry_run:
         try:
             result = lifecycle.converge(dry_run=args.dry_run)
@@ -151,6 +119,43 @@ def main(argv: list[str] | None = None) -> int:
                 "detail": f"{len(result.done)} changes, {len(result.failed)} failures",
             })
     return _finish(checks)
+
+
+def _quick() -> int:
+    beacon = paths.health_beacon_path()
+    if _fresh(beacon):
+        return _quick_result(True, "fresh", "cached")
+    try:
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            internal.main(["maintain", "--quiet"])
+    except (OSError, RuntimeError, ValueError):
+        return _quick_result(False, "health refresh failed", "refresh-failed")
+    if _fresh(beacon):
+        return _quick_result(True, "fresh", "refreshed")
+    return _quick_result(False, "health record remained stale", "refresh-failed")
+
+
+def _fresh(beacon: Path) -> bool:
+    try:
+        return time.time() - beacon.stat().st_mtime <= HEALTH_STALE_SECONDS
+    except OSError:
+        return False
+
+
+def _quick_result(ok: bool, detail: str, source: str) -> int:
+    print(json.dumps({
+        "ok": ok,
+        "checks": [{
+            "check": "automatic maintenance",
+            "ok": ok,
+            "detail": detail,
+            "source": source,
+        }],
+    }))
+    return 0 if ok else 1
 
 
 def _finish(checks: list[dict[str, object]]) -> int:

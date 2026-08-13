@@ -13,10 +13,10 @@ history is retained in the source repository.
   machine-readable stream to derive it from, and none may capture output
   through a pseudo-terminal that exists only on POSIX. Each was demonstrated
   to fail when its guarded fact was broken.
-- feat: check repository dependency health through host runtime adapters. (#309)
-  `doctor --dependencies --json` verifies the runtimes assigned to started
-  automatic work, probes paired Windows and WSL environments without exposing
-  platform artifacts, and fails closed for unreachable owners.
+- feat: add a quick automatic-maintenance health check. (#309)
+  `doctor --quick` returns cached host health as JSON, refreshes stale or
+  missing health through the existing maintenance operation, and fails when no
+  current record is written.
 - fix: stop a foreground dashboard quietly on Ctrl+C. (#249)
   Ctrl+C is the documented way to stop it, so it is the ordinary exit path,
   but an unguarded server call ended the run in a traceback that read like a

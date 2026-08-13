@@ -118,12 +118,6 @@ class MemoryHost:
     def health(self) -> Health:
         return Health(True)
 
-    def dependency_health(self, targets):
-        from . import dependency_health as dependencies
-        return tuple(dependencies.unknown(
-            target, "owning runtime is not reachable from this host")
-            for target in targets)
-
     def legacy_agents(self, root: str) -> set[str]:
         return set(self.legacy.get(str(Path(root).resolve()), set()))
 

@@ -73,16 +73,13 @@ agents-live stop link-check --dry-run
 
 - `status [name] [--all-repos]` reports definitions and their started or
   stopped state.
-- `doctor [--all-repos] [--repair] [--dry-run]` reports local runtime health.
+- `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health.
   `--repair` invokes the same convergence path as lifecycle changes.
-- `doctor --dependencies --json` is the agent-facing repository readiness
-  check. It includes runtimes assigned to started automatic definitions,
-  returns `healthy`, `unhealthy`, or `unknown` for each dependency, and exits
-  nonzero unless every required runtime is healthy. Platform adapters own
-  paired-runtime probes; scheduler APIs, beacon files, and interop commands are
-  not part of the contract.
-- `doctor --host-only` reports only the current host adapter for local
-  diagnostics, without repository or definition checks.
+- `doctor --quick` is the fast agent-facing automatic-maintenance check. It
+  always emits JSON. A cached host health record younger than 70 minutes
+  returns immediately; a missing or stale record runs automatic maintenance
+  once and checks again. The command exits nonzero unless a current record
+  exists after that attempt. It checks only the runtime where it runs.
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
@@ -139,7 +136,7 @@ logs         ::= "logs" ( logs_query | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
-doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--dependencies" ] [ "--host-only" ]
+doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
 init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ] [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
@@ -162,7 +159,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
-| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --dependencies, --host-only | Check environment and installation readiness. |
+| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only, --from | Upgrade runtime and project skill payloads. |
 | migrate | in-process | required |  |  |  |  | --dry-run, --bundle | Convert 5.x flat definitions. |

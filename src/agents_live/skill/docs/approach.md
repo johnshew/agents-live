@@ -26,11 +26,13 @@ adapter with a staged, verified Windows-side liveness task.
 One `converge(desired)` operation renders the complete subscription set,
 compares it with structured owned artifacts and watcher process markers, and
 repairs drift. There is no held plan and no second mutation path. `health()` is
-the local read-side operation. Repository dependency health composes that read
-with the runtime identities assigned to started automatic definitions. Host
-adapters may probe paired runtimes, such as native Windows and WSL, without
-exposing scheduler APIs, beacon paths, or interop commands. Owners that the
-current host cannot probe remain `unknown`; they are never inferred healthy.
+the read-side operation.
+
+Automatic maintenance is the sole writer of the host-local health record.
+`doctor --quick` treats a record younger than 70 minutes as current. A missing
+or stale record triggers that same maintenance operation once, followed by one
+more freshness check. The command answers only for the runtime where it runs;
+it neither discovers nor probes another runtime.
 
 ## Agent port
 

@@ -1,7 +1,7 @@
 ---
 title: No Python API for Processors Decision
 description: Why agents-live exposes a CLI and environment contract instead of an importable Python surface, and what handlers should use instead
-ms.date: 2026-08-12
+ms.date: 2026-08-13
 ms.topic: concept
 ---
 
@@ -157,7 +157,7 @@ If a handler imports `agents_live`, replace the import with a CLI call.
 | `headless.EventLog` (writing) | append schema-5 JSONL to the repository log directory when you need structured, queryable handler events. For ordinary diagnostics, write stderr and let dispatch attach it to the run event. A richer append handle remains #105 |
 | `headless.AgentsLiveError` | `agents-live status --json`, `loadable` plus `error` per row; or a non-zero CLI exit status |
 | hand-rolled spawn | `agents-live run --name <identifier> --json` - it both spawns and records |
-| health beacon inspection | `agents-live doctor --json` |
+| health beacon inspection | `agents-live doctor --quick` |
 | `paths.repo_state_dir`, `paths.host_logs_dir`, `paths.health_beacon_path` | still present and unmoved, but not a promised surface. Prefer the CLI; log rotation, the main reason to want a log directory, becomes built-in under [#259](https://github.com/johnshew/agents-live/issues/259) |
 
 Notes on the two that are not mechanical substitutions:

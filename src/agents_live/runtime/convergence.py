@@ -6,14 +6,7 @@ from threading import RLock
 
 from .diff import diff
 from .protocols import HostAdapter
-from .values import (
-    Converged,
-    DependencyHealth,
-    Health,
-    Operation,
-    RuntimeTarget,
-    Subscription,
-)
+from .values import Converged, Health, Operation, Subscription
 
 _adapter: HostAdapter | None = None
 _lock = RLock()
@@ -36,12 +29,6 @@ def current() -> HostAdapter:
 
 def health() -> Health:
     return current().health()
-
-
-def dependency_health(
-    targets: Sequence[RuntimeTarget],
-) -> tuple[DependencyHealth, ...]:
-    return current().dependency_health(targets)
 
 
 def converge(

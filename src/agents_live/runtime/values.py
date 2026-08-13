@@ -93,23 +93,6 @@ class Health:
 
 
 @dataclass(frozen=True)
-class RuntimeTarget:
-    runtime: str
-    paired: bool
-
-
-@dataclass(frozen=True)
-class DependencyHealth:
-    runtime: str
-    status: str
-    detail: str
-
-    def __post_init__(self) -> None:
-        if self.status not in {"healthy", "unhealthy", "unknown"}:
-            raise ValueError(f"unknown dependency health status: {self.status}")
-
-
-@dataclass(frozen=True)
 class Converged:
     dry_run: bool
     done: tuple[Operation, ...]

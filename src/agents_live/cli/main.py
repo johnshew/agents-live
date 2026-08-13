@@ -304,6 +304,10 @@ def main(argv: list[str] | None = None) -> int:
         json_mode = True
         os.environ[JSON_ENV_VAR] = "1"
         rest = [argument for argument in rest if argument != "--json"]
+    quick_doctor = command.name == "doctor" and "--quick" in rest
+    if quick_doctor:
+        json_mode = True
+        os.environ[JSON_ENV_VAR] = "1"
     if any(arg in ("-h", "--help", "help") for arg in rest):
         target, invoked_as = _help_target(command, cmd, rest)
         print(command_help(target, invoked_as), end="")
@@ -349,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
     # the spec declares the same kind as its parent, so consulting the
     # child leaves them as they were.
     active_root = command.root
+    if quick_doctor:
+        active_root = "none"
     if command.subcommands and rest:
         child = next(
             (item for item in command.subcommands if item.name == rest[0]),
