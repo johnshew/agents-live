@@ -34,7 +34,7 @@ from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
-from agents_live.agent.values import RawOutput
+from agents_live.agent.values import RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
 from agents_live.runtime import artifacts
@@ -1065,6 +1065,64 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         completion = providers.get("copilot").parse(
             RawOutput(0, '{"done": true}\n', ""))
         self.assertEqual((), completion.usage)
+
+    def test_copilot_json_stream_preserves_answer_and_exact_cost(self) -> None:
+        launch = providers.get("copilot").prepare(
+            ResolvedSpec(
+                "cost", "prompt", "write", (), (), (), "copilot", None, None),
+            Request(),
+        )
+        self.assertIn("--output-format", launch.argv)
+        # A terminal is what wraps a long event across lines, and every
+        # figure below arrives on one.
+        self.assertFalse(launch.use_pty)
+        stream = "\n".join([
+            "warning emitted before the JSON stream",
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "phase": "final_answer",
+                    "content": '{"done": true}',
+                },
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 15110175000},
+            }),
+            json.dumps({
+                "type": "result",
+                "exitCode": 0,
+                "usage": {"sessionDurationMs": 1234},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"done": true}', completion.text)
+        self.assertEqual({
+            "ai_credits": "15.110175",
+            "list_cost_usd": "0.15110175",
+        }, dict(completion.usage))
+
+    def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
+        self,
+    ) -> None:
+        stream = "\n".join([
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 1000000000},
+            }),
+            "{malformed final event",
+            json.dumps({
+                "type": "session.task_complete",
+                "data": {"summary": "Completed from task summary.", "success": True},
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 2500000000},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual("Completed from task summary.", completion.text)
+        self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
 
     def test_claude_preserves_provider_reported_list_cost(self) -> None:
         completion = providers.get("claude").parse(RawOutput(
