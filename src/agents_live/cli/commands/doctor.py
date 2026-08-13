@@ -18,8 +18,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all-repos", action="store_true")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dependencies", action="store_true")
+    parser.add_argument("--host-only", action="store_true")
     args = parser.parse_args(argv)
     checks: list[dict[str, object]] = []
+    if args.host_only:
+        try:
+            health = runtime.health()
+        except (OSError, RuntimeError, ValueError) as exc:
+            checks.append({
+                "check": "host runtime", "ok": False, "detail": str(exc)})
+        else:
+            checks.append(_host_check(health))
+        return _finish(checks)
     try:
         registry = repos.load()
     except ValueError as exc:
@@ -28,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         checks.append({"check": "repository registry", "ok": True,
                        "detail": f"{len(registry['repos'])} registered"})
+    selected_root = (
+        None
+        if args.all_repos or registry is None or not registry["repos"]
+        else state.resolve_root()
+    )
     host_check_index = len(checks)
     try:
         health = runtime.health()
@@ -39,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     if registry is not None:
         for name, value in sorted(registry["repos"].items()):
             root = state.resolve_root(value) if os.path.isdir(value) else None
+            if selected_root is not None and root != selected_root:
+                continue
             if root is None:
                 checks.append({
                     "check": f"repository {name}", "ok": False,
@@ -69,7 +87,10 @@ def main(argv: list[str] | None = None) -> int:
                             "appear in logs, timeline, or the dashboard"),
                     })
         try:
-            collected = lifecycle.collect(persist=False)
+            collected = lifecycle.collect(
+                persist=False,
+                roots=None if selected_root is None else {selected_root},
+            )
         except lifecycle.CollectionUnavailable as exc:
             checks.append({
                 "check": "definition collection", "ok": False,
@@ -95,6 +116,27 @@ def main(argv: list[str] | None = None) -> int:
                         "a newer agents-live runtime"
                     ),
                 })
+            if args.dependencies:
+                required_runtimes = tuple(
+                    target for root, target in collected.required_runtimes
+                    if selected_root is None or root == selected_root
+                )
+                try:
+                    dependencies = runtime.dependency_health(
+                        required_runtimes)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    checks.append({
+                        "check": "runtime dependencies", "ok": False,
+                        "status": "unknown", "detail": str(exc),
+                    })
+                else:
+                    checks.extend({
+                        "check": "runtime dependency",
+                        "ok": item.status == "healthy",
+                        "runtime": item.runtime,
+                        "status": item.status,
+                        "detail": item.detail,
+                    } for item in dependencies)
     if args.repair or args.dry_run:
         try:
             result = lifecycle.converge(dry_run=args.dry_run)
@@ -108,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": not result.failed,
                 "detail": f"{len(result.done)} changes, {len(result.failed)} failures",
             })
+    return _finish(checks)
+
+
+def _finish(checks: list[dict[str, object]]) -> int:
     ok = all(bool(item["ok"]) for item in checks)
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         print(json.dumps({"ok": ok, "checks": checks}))

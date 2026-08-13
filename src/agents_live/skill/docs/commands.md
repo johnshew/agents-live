@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-10
+ms.date: 2026-08-13
 ms.topic: reference
 ---
 
@@ -73,8 +73,16 @@ agents-live stop link-check --dry-run
 
 - `status [name] [--all-repos]` reports definitions and their started or
   stopped state.
-- `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health.
+- `doctor [--all-repos] [--repair] [--dry-run]` reports local runtime health.
   `--repair` invokes the same convergence path as lifecycle changes.
+- `doctor --dependencies --json` is the agent-facing repository readiness
+  check. It includes runtimes assigned to started automatic definitions,
+  returns `healthy`, `unhealthy`, or `unknown` for each dependency, and exits
+  nonzero unless every required runtime is healthy. Platform adapters own
+  paired-runtime probes; scheduler APIs, beacon files, and interop commands are
+  not part of the contract.
+- `doctor --host-only` reports only the current host adapter for local
+  diagnostics, without repository or definition checks.
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
@@ -124,23 +132,22 @@ pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--scheduled" ] [ "--boot" ] [ "--quiet" ]
-start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ]
-                 [ "--transfer-here" | "--transfer-to" IDENTITY ]
+start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
 logs         ::= "logs" ( logs_query | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
-doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ]
+doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--dependencies" ] [ "--host-only" ]
 init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ] [ "--from" VALUE ]
-migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ]
+migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
 completions  ::= "completions" ( "bash" | "zsh" | "powershell" | "--update" )
 dashboard    ::= "dashboard" ( dashboard_query | "list" | "stop" stop_args )
-dashboard_query ::= [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
+dashboard_query ::= [ PROJECT ] [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
 stop_args ::= [ "--port" VALUE ] [ "--all" ]
 ```
 
@@ -155,10 +162,10 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
-| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run | Check environment and installation readiness. |
+| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --dependencies, --host-only | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only, --from | Upgrade runtime and project skill payloads. |
-| migrate | in-process | required |  |  |  |  | --dry-run | Convert 5.x flat definitions. |
+| migrate | in-process | required |  |  |  |  | --dry-run, --bundle | Convert 5.x flat definitions. |
 | uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |

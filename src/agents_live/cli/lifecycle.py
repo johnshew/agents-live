@@ -1,6 +1,7 @@
 """Lifecycle composition above the runtime and agent ports."""
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ class Collected:
     protected_scopes: tuple[str, ...] = ()
     protected_targets: tuple[str, ...] = ()
     unknown_metadata: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+    required_runtimes: tuple[tuple[Path, runtime.RuntimeTarget], ...] = ()
 
 
 def collect(
@@ -28,6 +30,7 @@ def collect(
     additions: dict[Path, set[str]] | None = None,
     removals: dict[Path, set[str]] | None = None,
     persist: bool = True,
+    roots: Collection[Path] | None = None,
 ) -> Collected:
     additions = {
         root.resolve(): names for root, names in (additions or {}).items()}
@@ -37,8 +40,13 @@ def collect(
         registry = repos.load()
     except ValueError as exc:
         raise CollectionUnavailable(str(exc)) from exc
-    roots = [(Path(value).resolve(), Path(value).is_dir())
-             for value in registry["repos"].values()]
+    selected_roots = (
+        {root.resolve() for root in roots} if roots is not None else None)
+    roots = [
+        (Path(value).resolve(), Path(value).is_dir())
+        for value in registry["repos"].values()
+        if selected_roots is None or Path(value).resolve() in selected_roots
+    ]
     host = runtime.current()
     try:
         installed = {item.key for item in host.trigger_store.list()}
@@ -157,6 +165,7 @@ def collect(
             state.replace(root, agents)
 
     desired: list[runtime.Subscription] = []
+    required_runtimes: set[tuple[Path, runtime.RuntimeTarget]] = set()
     for root, definitions in discovered.items():
         if root in blocked_ownership_roots:
             continue
@@ -164,6 +173,14 @@ def collect(
             if root in registry_roots:
                 owner = owner_by_identifier.get(identifier)
                 if owner is not None and not ownership.owns(owner):
+                    if definitions.get(identifier):
+                        owner_host, _, owner_runtime = ownership.display_owner(
+                            owner).partition(ownership.SEPARATOR)
+                        required_runtimes.add((root, runtime.RuntimeTarget(
+                            owner_runtime or "unknown",
+                            bool(owner_runtime) and (
+                                owner_host == ownership.current_host()),
+                        )))
                     continue
             desired.extend(definitions.get(identifier, ()))
     desired.append(_maintenance())
@@ -188,6 +205,8 @@ def collect(
             for spec in specs.values()
             if spec.unknown_metadata
         ),
+        tuple(sorted(required_runtimes, key=lambda item: (
+            str(item[0]), item[1].runtime, item[1].paired))),
     )
 
 

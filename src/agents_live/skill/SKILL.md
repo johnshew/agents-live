@@ -92,6 +92,7 @@ artifacts use hidden internal commands and are not a user-facing contract.
 | `logs timeline [name]` | `agents-live logs timeline [name] [--all] [--since T]` (bare defaults to all agents, last 50 events) |
 | `smoketest` | `agents-live smoketest` |
 | `doctor` | `agents-live doctor` (plus judgment checks per [docs/commands.md](docs/commands.md)) |
+| `doctor --dependencies` | `agents-live doctor --dependencies --json` *(repository readiness for agents)* |
 | `doctor --all-repos` | `agents-live doctor --all-repos` |
 | `repair` | `agents-live doctor --repair [--dry-run]` |
 | `uninstall` | `agents-live uninstall [--retain-state]` |

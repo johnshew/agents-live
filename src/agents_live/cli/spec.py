@@ -210,11 +210,19 @@ COMMANDS = (
         "doctor", "Check environment and installation readiness.", "cli.commands.doctor",
         "in-process", root="markerless", json=True,
         all_repos=True, update_notice=False,
-        mutually_exclusive=(("--all-repos", "--repair"),),
+        mutually_exclusive=(
+            ("--all-repos", "--repair"),
+            ("--host-only", "--all-repos"),
+            ("--host-only", "--repair"),
+            ("--host-only", "--dry-run"),
+            ("--host-only", "--dependencies"),
+        ),
         args=(
             Arg(("--all-repos",), "Check every registered repository."),
             Arg(("--repair",), "Run immediate repair before diagnosis."),
             Arg(("--dry-run",), "Preview repairs without mutating."),
+            Arg(("--dependencies",), "Check runtimes owning started automation."),
+            Arg(("--host-only",), "Check only this host runtime."),
         ),
     ),
     Cmd(

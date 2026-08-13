@@ -9,7 +9,15 @@ from pathlib import Path
 
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
-from ..values import Health, InstalledTrigger, RenderedSubscription, Subscription
+from ..values import (
+    DependencyHealth,
+    Health,
+    InstalledTrigger,
+    RenderedSubscription,
+    RuntimeTarget,
+    Subscription,
+)
+from . import dependency_health as dependencies
 from .processes import LocalChildRunner, LocalProcesses
 from . import crontab as crontasks
 from . import filesystem as watchsource
@@ -134,6 +142,13 @@ class PosixHost:
     def health(self) -> Health:
         readable = crontasks.lines() is not None
         return Health(readable, detail=() if readable else ("crontab is unreadable",))
+
+    def dependency_health(
+        self, targets: Sequence[RuntimeTarget],
+    ) -> tuple[DependencyHealth, ...]:
+        return tuple(dependencies.unknown(
+            target, "owning runtime is not reachable from this host")
+            for target in targets)
 
     def change_source(self, roots: Sequence[str]):
         return watchsource.PosixEventSource([Path(item) for item in roots], cwd=Path.cwd())
