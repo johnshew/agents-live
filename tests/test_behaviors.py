@@ -175,6 +175,31 @@ class TestOwnershipEnforcement(TempRepository):
             f"agent:{identifier}",
             {item.target for item in collected.subscriptions})
 
+    def test_dependency_health_requires_only_started_automatic_foreign_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _identifier = self._registry_project(temporary, "automatic")
+            self.skill("stopped", [
+                'agents-live.selector: "fake"',
+                'agents-live.schedule: "0 10 * * *"',
+            ], root=root)
+            self.skill("manual", [
+                'agents-live.selector: "fake"',
+            ], root=root)
+            manual = agent.load("manual", root=root)
+            state.record(root, manual.identifier)
+            host = ownership.current_host()
+
+            collected = self._collect(root, {
+                "automatic": f"{host}/ubuntu/{'a' * 32}",
+                "stopped": f"{host}/debian/{'b' * 32}",
+                "manual": f"{host}/windows/{'c' * 32}",
+            })
+
+        self.assertEqual(
+            ((root, runtime.RuntimeTarget("ubuntu", True)),),
+            collected.required_runtimes,
+        )
+
     def test_an_unmatchable_owner_value_is_treated_as_someone_elses(self) -> None:
         """No uuid means not ours, whatever produced the value.
 

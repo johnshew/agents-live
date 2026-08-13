@@ -17,12 +17,15 @@ from pathlib import Path
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import (
+    DependencyHealth,
     Health,
     InstalledTrigger,
     ProcessRef,
     RenderedSubscription,
+    RuntimeTarget,
     Subscription,
 )
+from . import dependency_health as dependencies
 from .posix import _address
 from .processes import LocalChildRunner
 from . import task_scheduler as wintasks
@@ -293,6 +296,28 @@ class WindowsHost:
         from . import task_scheduler as wintasks
         problem = wintasks.probe()
         return Health(problem is None, detail=() if problem is None else (problem,))
+
+    def dependency_health(
+        self, targets: Sequence[RuntimeTarget],
+    ) -> tuple[DependencyHealth, ...]:
+        found = []
+        for target in targets:
+            if not target.paired or target.runtime == "windows":
+                found.append(dependencies.unknown(
+                    target, "owning runtime is not reachable from this host"))
+                continue
+            try:
+                result = self.child_runner.run_child(
+                    ["wsl.exe", "-d", target.runtime, "--", "bash", "-ic",
+                     "agents-live doctor --json"],
+                    timeout=30,
+                )
+            except (OSError, RuntimeError, ValueError):
+                found.append(dependencies.unknown(
+                    target, "paired runtime health probe could not start"))
+            else:
+                found.append(dependencies.from_child(target, result))
+        return tuple(found)
 
 
 def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:

@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-08
+ms.date: 2026-08-13
 ms.topic: concept-article
 ---
 
@@ -26,7 +26,11 @@ adapter with a staged, verified Windows-side liveness task.
 One `converge(desired)` operation renders the complete subscription set,
 compares it with structured owned artifacts and watcher process markers, and
 repairs drift. There is no held plan and no second mutation path. `health()` is
-the read-side operation.
+the local read-side operation. Repository dependency health composes that read
+with the runtime identities assigned to started automatic definitions. Host
+adapters may probe paired runtimes, such as native Windows and WSL, without
+exposing scheduler APIs, beacon paths, or interop commands. Owners that the
+current host cannot probe remain `unknown`; they are never inferred healthy.
 
 ## Agent port
 

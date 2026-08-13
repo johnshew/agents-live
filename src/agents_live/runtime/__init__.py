@@ -1,10 +1,10 @@
 """Host automation port.
 
 The runtime owns durable triggers, detached processes, change sources, child
-execution, liveness, and convergence. It deliberately knows targets only as
-strings.
+execution, liveness, dependency probes, and convergence. It receives only
+immutable primitive records across the seam.
 """
-from .convergence import configure, converge, current, health
+from .convergence import configure, converge, current, dependency_health, health
 from .diff import diff
 from .grammars import (
     Schedule,
@@ -18,11 +18,13 @@ from .protocols import ChangeSource, ChildRunner, HostAdapter, Supervisor, Trigg
 from .values import (
     ChildResult,
     Converged,
+    DependencyHealth,
     Health,
     InstalledTrigger,
     Operation,
     ProcessRef,
     RenderedSubscription,
+    RuntimeTarget,
     Subscription,
 )
 
@@ -31,12 +33,14 @@ __all__ = [
     "ChildResult",
     "ChildRunner",
     "Converged",
+    "DependencyHealth",
     "Health",
     "HostAdapter",
     "InstalledTrigger",
     "Operation",
     "ProcessRef",
     "RenderedSubscription",
+    "RuntimeTarget",
     "Schedule",
     "ScheduleSyntaxError",
     "Subscription",
@@ -47,6 +51,7 @@ __all__ = [
     "configure",
     "converge",
     "current",
+    "dependency_health",
     "diff",
     "health",
     "parse_schedule",

@@ -6,6 +6,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: check repository dependency health through host runtime adapters. (#309)
+  `doctor --dependencies --json` verifies the runtimes assigned to started
+  automatic work, probes paired Windows and WSL environments without exposing
+  platform artifacts, and fails closed for unreachable owners.
 - fix: stop a foreground dashboard quietly on Ctrl+C. (#249)
   Ctrl+C is the documented way to stop it, so it is the ordinary exit path,
   but an unguarded server call ended the run in a traceback that read like a
