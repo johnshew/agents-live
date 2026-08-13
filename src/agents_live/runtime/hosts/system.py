@@ -997,6 +997,9 @@ else:
 # Spawning
 # ---------------------------------------------------------------------------
 
+WAIT_FOR_ENVIRONMENT_S = 900
+
+
 def spawn_detached(
     argv: Sequence[str],
     *,
@@ -1036,12 +1039,19 @@ def defer_until_environment_exits(
     result_path: Path | str | None = None,
     transcript_path: Path | str | None = None,
     transcript_limit: int = 65536,
+    wait_timeout_s: int = WAIT_FOR_ENVIRONMENT_S,
 ) -> ProcessRef | None:
     """Start *argv* after no process executes from *environment*.
 
     Windows will not remove an executable while it is running. The helper
     itself must therefore live outside the environment being removed. Other
     hosts do not need this handoff and return ``None``.
+
+    The wait is bounded. An unbounded one kept the helper alive against a
+    process that never exits, and a live helper is what tells the handoff
+    its slot is still in use, so every later upgrade refused as already
+    queued. On expiry the helper runs nothing and reports a failure, which
+    releases the slot and leaves the installation untouched.
     """
     if not _IS_WINDOWS:
         return None
@@ -1100,20 +1110,28 @@ def defer_until_environment_exits(
             "Move-Item -LiteralPath $temporary -Destination $result -Force; "
         )
         invocation = (
-            f"{command}& $program @arguments *> $transcript"
+            f"{command}if ($timedOut) {{ throw \"the tool environment was "
+            f"still in use after {wait_timeout_s} seconds\" }}; "
+            "& $program @arguments *> $transcript"
         )
     else:
         durable_prefix = durable_suffix = ""
-        invocation = f"{command}& $program @arguments"
+        invocation = (
+            f"{command}if ($timedOut) {{ exit 1 }}; & $program @arguments"
+        )
     script = (
         f"$root = '{escaped_environment}'; "
+        f"$deadline = (Get-Date).AddSeconds({wait_timeout_s}); "
+        "$timedOut = $false; "
         "do { "
         "$running = @(Get-Process -ErrorAction SilentlyContinue | "
         "Where-Object { try { $_.Path -and "
         "$_.Path.StartsWith($root, "
         "[System.StringComparison]::OrdinalIgnoreCase) } "
         "catch { $false } }); "
-        "if ($running.Count) { Start-Sleep -Milliseconds 100 } "
+        "if ($running.Count) { "
+        "if ((Get-Date) -gt $deadline) { $timedOut = $true; break }; "
+        "Start-Sleep -Milliseconds 100 } "
         "} while ($running.Count); "
         f"{durable_prefix}{invocation}{durable_suffix}"
         f"exit {'$code' if durable else '$LASTEXITCODE'}"

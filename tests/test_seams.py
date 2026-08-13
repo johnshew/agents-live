@@ -730,6 +730,57 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertIn("4096", command)
         self.assertIn("exit $code", command)
 
+    def test_windows_deferred_process_bounds_the_wait_for_the_environment(
+        self,
+    ) -> None:
+        """An unbounded wait is a permanent block, not a delay.
+
+        The helper staying alive is what tells the handoff its slot is
+        still in use, so one process that never exits refused every later
+        upgrade as already queued.
+        """
+        process = mock.Mock(pid=42)
+        supervisor = mock.Mock()
+        supervisor.adopt.return_value = ProcessRef(
+            42, 1000.0, "powershell.exe", "upgrade", "operation-1")
+        with (
+            mock.patch.object(hostruntime, "_IS_WINDOWS", True),
+            mock.patch.object(
+                hostruntime.shutil, "which", return_value="powershell.exe"),
+            mock.patch.object(
+                hostruntime, "spawn_detached", return_value=process) as spawn,
+        ):
+            hostruntime.defer_until_environment_exits(
+                ["uv", "tool", "upgrade", "agents-live"], Path("C:/tool"),
+                supervisor=supervisor, wait_timeout_s=7)
+        command = " ".join(spawn.call_args.args[0])
+        self.assertIn("AddSeconds(7)", command)
+        self.assertIn("$timedOut = $true", command)
+        # Expiring must not run the upgrade: the environment is still busy.
+        self.assertIn("if ($timedOut) { exit 1 }", command)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows only")
+    def test_windows_deferred_process_reports_a_busy_environment(self) -> None:
+        """A helper that gives up still reports, so the slot is released."""
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.json"
+            transcript_path = Path(temporary) / "transcript.log"
+            command_path = Path(temporary) / "never-runs.cmd"
+            command_path.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
+            # Every process runs from somewhere below the drive root, so
+            # the environment never frees and the bound is what ends it.
+            helper = WindowsProcesses().defer_until_environment_exits(
+                [str(command_path)], Path(sys.executable).anchor,
+                operation_id="operation-1", result_path=result_path,
+                transcript_path=transcript_path, wait_timeout_s=1)
+            self.assertIsNotNone(helper)
+            result = self._await_terminal(result_path, transcript_path)
+            self.assertEqual("terminal", result["status"])
+            self.assertEqual(1, result["exit_code"])
+            self.assertIn(
+                "still in use",
+                transcript_path.read_text(encoding="utf-8"))
+
     @unittest.skipUnless(os.name == "nt", "native Windows only")
     def test_windows_deferred_process_persists_terminal_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1761,6 +1812,10 @@ class TestAgentPipeline(TempRepository):
 
         self.assertTrue(result.ok, result)
         argv = runner.argv[-1]
+        self.assertEqual(
+            ("--output-format", "json"),
+            argv[argv.index("--output-format"):argv.index("--output-format") + 2],
+        )
         self.assertIn("--mcp", argv)
         self.assertEqual("repo-tool", argv[argv.index("--mcp") + 1])
         config_path, payload = runner.mcp_configs[-1]
