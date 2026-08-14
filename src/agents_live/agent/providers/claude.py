@@ -38,8 +38,6 @@ class ClaudeProvider:
             argv.extend(("--model", spec.model))
         if spec.effort:
             argv.extend(("--effort", spec.effort))
-        for mcp in spec.mcps:
-            argv.extend(("--mcp", mcp.name))
         project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
         if project_config:
             argv.extend(("--mcp-config", project_config))

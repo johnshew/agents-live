@@ -1967,8 +1967,7 @@ class TestAgentPipeline(TempRepository):
             ("--output-format", "json"),
             argv[argv.index("--output-format"):argv.index("--output-format") + 2],
         )
-        self.assertIn("--mcp", argv)
-        self.assertEqual("repo-tool", argv[argv.index("--mcp") + 1])
+        self.assertNotIn("--mcp", argv)
         config_path, payload = runner.mcp_configs[-1]
         self.assertEqual(
             "uv",
