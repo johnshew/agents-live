@@ -1842,6 +1842,66 @@ class TestAgentPipeline(TempRepository):
             ]
             self.assertEqual("ok", completed[-1]["status"])
 
+    def test_pipeline_stdio_bridge_completes_a_real_mcp_handshake(self) -> None:
+        """Exercise the real subprocess, not a mock of it.
+
+        Three separate bridge-crash bugs (agents-live#205, #240, #321) each
+        reached a live agent before being caught, and each was diagnosed only
+        by manually reconstructing the ``uv run --script`` invocation outside
+        the test suite - nothing here actually ran the bridge as a real
+        subprocess against a live server. This spawns it exactly as
+        ``pipeline/runtime.py`` configures copilot to, over real stdio, and
+        confirms a genuine MCP ``initialize`` round-trip succeeds.
+        """
+        from agents_live.runtime.spawn import find_uv
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        uv = find_uv()
+        if uv is None:
+            self.skipTest("uv not found on PATH")
+        with pipeline_runtime(None) as env:
+            config = json.loads(
+                Path(env["PIPELINE_MCP_COPILOT_CONFIG"]).read_text(
+                    encoding="utf-8"))
+            bridge = config["mcpServers"]["pipeline"]
+            child_env = {**os.environ, **bridge["env"]}
+            proc = subprocess.Popen(
+                [uv, *bridge["args"]],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=child_env, text=True,
+            )
+            try:
+                request = {
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"},
+                    },
+                }
+                proc.stdin.write(json.dumps(request) + "\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+                try:
+                    stdout, stderr = proc.communicate(timeout=60)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    self.fail(f"bridge did not respond in time: {stderr}")
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+        first_line = next(
+            (line for line in stdout.splitlines() if line.strip()), "")
+        self.assertTrue(first_line, f"no stdout from bridge; stderr: {stderr}")
+        response = json.loads(first_line)
+        self.assertEqual(1, response.get("id"))
+        self.assertIn("result", response, f"bridge error: {response}")
+        self.assertEqual(
+            "pipeline-stdio-bridge",
+            response["result"].get("serverInfo", {}).get("name"))
+
     def test_pipeline_post_processor_reads_the_resource_not_agent_stdout(self) -> None:
         directory = self.skill("pipeline", [
             'agents-live.selector: "fake"',
