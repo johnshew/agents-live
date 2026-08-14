@@ -1823,6 +1823,39 @@ class TestObservability(unittest.TestCase):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_processor_crash_gets_reactive_dependency_diagnosis(self) -> None:
+        directory = self.skill("diagnosed", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+        ])
+        scripts = directory / "scripts"
+        scripts.mkdir()
+        processor = scripts / "prepare.py"
+        processor.write_text(
+            "# /// script\n"
+            '# requires-python = ">=3.12"\n'
+            '# dependencies = ["example-package"]\n'
+            "# ///\n",
+            encoding="utf-8",
+        )
+        runner = RecordingRunner([
+            ChildResult(("uv", "run", str(processor)), 1, "", "ModuleNotFoundError: api"),
+        ])
+        with mock.patch.object(
+            processor_check,
+            "diagnose",
+            return_value=(
+                "fresh dependency resolution succeeded; the failed import "
+                "indicates an incompatible dependency API"
+            ),
+        ) as diagnose:
+            result = dispatch(
+                Firing("diagnosed", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        diagnose.assert_called_once()
+        self.assertIn("incompatible dependency API", result.message)
+
     def test_first_manual_run_can_append_to_handler_log(self) -> None:
         directory = self.skill("handler-writer", [
             'agents-live.selector: "none"',

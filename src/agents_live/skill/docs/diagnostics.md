@@ -28,6 +28,15 @@ script or writing a lockfile. Literal repository-local paths passed to
 runtime; those dynamic scripts must be checked separately or promoted to
 directly declared processors.
 
+The full processor check is intentionally explicit because fresh network
+resolution across a repository can take minutes. Users do not need to run it
+before ordinary work. When a PEP 723 pre-processor or post-processor crashes,
+dispatch automatically fresh-resolves only that processor and its literal
+script children, then appends one of two diagnoses to the recorded failure:
+resolution itself failed, or resolution succeeded and the processor failed
+afterward (including likely import/API incompatibility). The processor is
+never executed a second time.
+
 Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
 and `agents-live doctor --repair` to apply it.
 

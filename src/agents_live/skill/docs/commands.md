@@ -87,7 +87,8 @@ agents-live stop link-check --dry-run
   declared Python pre-processors and post-processors without executing them or
   writing lockfiles. It recursively follows literal repository-local paths
   passed to `uv run --script`; dynamically constructed paths are not
-  discoverable.
+  discoverable. This is an optional networked deep check for release or host
+  validation, not a prerequisite for ordinary `run` or `start` commands.
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.

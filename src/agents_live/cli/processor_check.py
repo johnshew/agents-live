@@ -1,4 +1,4 @@
-"""Fresh dependency resolution for directly declared Python processors."""
+"""Fresh processor dependency checks and reactive crash diagnosis."""
 from __future__ import annotations
 
 import ast
@@ -36,7 +36,6 @@ class ProcessorCheck:
 def processor_paths(root: Path) -> tuple[Path, ...]:
     """Declared processors and literal repository-local scripts they invoke."""
     root = root.resolve()
-    found: set[Path] = set()
     pending: list[Path] = []
     for spec in agent.discover(root).specs:
         config = spec.execution
@@ -49,6 +48,11 @@ def processor_paths(root: Path) -> tuple[Path, ...]:
             if path.suffix.lower() != ".py":
                 continue
             pending.append(path)
+    return _expanded_paths(root, pending)
+
+
+def _expanded_paths(root: Path, pending: list[Path]) -> tuple[Path, ...]:
+    found: set[Path] = set()
     visited: set[Path] = set()
     while pending:
         path = pending.pop()
@@ -105,8 +109,66 @@ def check(
         paths = processor_paths(root)
     except (OSError, UnicodeError, agent.DefinitionError) as exc:
         return ProcessorCheck(False, 0, (str(exc),))
+    return _check_paths(root, paths, prefix, timeout)
+
+
+def diagnose(
+    root: Path,
+    processor: Path,
+    failure: str,
+    *,
+    command: tuple[str, ...] | None = None,
+    timeout: float = 60,
+) -> str | None:
+    """Explain a processor crash without running the processor again."""
+    root = root.resolve()
+    processor = processor.resolve()
+    if processor.suffix.lower() != ".py" or not processor.is_relative_to(root):
+        return None
+    try:
+        paths = _expanded_paths(root, [processor])
+        if not paths:
+            return None
+        prefix = command or (find_uv(),)
+    except (OSError, UnicodeError, agent.DefinitionError):
+        return None
+    result = _check_paths(root, paths, prefix, timeout)
+    if not result.ok:
+        return f"dependency diagnosis: fresh resolution failed; {result.detail}"
+    lowered = failure.casefold()
+    if any(marker in lowered for marker in (
+        "modulenotfounderror",
+        "importerror",
+        "cannot import name",
+        "no module named",
+    )):
+        return (
+            "dependency diagnosis: fresh resolution succeeded, but the "
+            "processor failed while importing; a resolved dependency likely "
+            "removed or moved that API. Add a compatible version bound to "
+            "the script's PEP 723 dependencies"
+        )
+    return (
+        "dependency diagnosis: fresh resolution succeeded; the processor "
+        "failed after dependency setup"
+    )
+
+
+def _check_paths(
+    root: Path,
+    paths: tuple[Path, ...],
+    prefix: tuple[str, ...],
+    timeout: float,
+) -> ProcessorCheck:
     failures: list[str] = []
+    groups: dict[str, list[Path]] = {}
     for path in paths:
+        text = path.read_text(encoding="utf-8")
+        match = _PEP_723.search(text)
+        if match is not None:
+            groups.setdefault(match.group(0), []).append(path)
+    for grouped in groups.values():
+        path = grouped[0]
         relative = path.relative_to(root).as_posix()
         try:
             completed = subprocess.run(
@@ -133,8 +195,10 @@ def check(
         if completed.returncode:
             message = completed.stderr.strip().splitlines()
             detail = message[-1] if message else f"uv exited {completed.returncode}"
-            failures.append(f"{relative}: {detail}")
+            affected = ", ".join(
+                item.relative_to(root).as_posix() for item in grouped)
+            failures.append(f"{affected}: {detail}")
     return ProcessorCheck(not failures, len(paths), tuple(failures))
 
 
-__all__ = ["ProcessorCheck", "check", "processor_paths"]
+__all__ = ["ProcessorCheck", "check", "diagnose", "processor_paths"]

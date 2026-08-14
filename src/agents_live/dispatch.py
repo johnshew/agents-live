@@ -185,6 +185,25 @@ def _run(
         RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out),
     )
     if (
+        not interpreted.ok
+        and interpreted.category in {
+            "pre_processor_crash", "post_processor_crash"}
+    ):
+        try:
+            from .cli import processor_check
+            diagnosis = processor_check.diagnose(
+                Path(launch.cwd or spec.root),
+                Path(launch.argv[-1]),
+                f"{raw.stderr}\n{raw.stdout}",
+            )
+        except (OSError, RuntimeError, ValueError):
+            diagnosis = None
+        if diagnosis:
+            interpreted = replace(
+                interpreted,
+                message=f"{interpreted.message}\n{diagnosis}",
+            )
+    if (
         step is Step.AGENT
         and spec.execution is not None
         and spec.execution.transcript
