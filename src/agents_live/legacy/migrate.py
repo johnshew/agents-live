@@ -108,7 +108,13 @@ def _legacy_watchers(root: Path) -> list[tuple[int, str]]:
     return found
 
 
-def _result(result, *, dry_run: bool, rewrites: int | None = None) -> int:
+def _result(
+    result,
+    *,
+    dry_run: bool,
+    rewrites: int | None = None,
+    unmatched: list[str] | None = None,
+) -> int:
     failed = [
         {"operation": operation.kind, "key": operation.key, "detail": detail}
         for operation, detail in result.failed
@@ -122,6 +128,8 @@ def _result(result, *, dry_run: bool, rewrites: int | None = None) -> int:
         "changes": len(result.done),
         "failures": failed,
     }
+    if unmatched is not None:
+        payload["unmatched"] = unmatched
     if preflight.json_mode():
         print(json.dumps(payload))
     elif failed:
@@ -226,8 +234,9 @@ def _adopt(root: Path, old_root: Path, *, dry_run: bool) -> int:
         return 1
     identifiers, matched, unmatched = _adoption_candidates(
         lines, old_root, root)
-    for line in unmatched:
-        print(f"Unmatched old-root entry left unchanged:\n  {line}")
+    if not preflight.json_mode():
+        for line in unmatched:
+            print(f"Unmatched old-root entry left unchanged:\n  {line}")
     if not identifiers:
         if preflight.json_mode():
             print(json.dumps({
@@ -249,7 +258,12 @@ def _adopt(root: Path, old_root: Path, *, dry_run: bool) -> int:
     except lifecycle.CollectionUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    code = _result(result, dry_run=dry_run, rewrites=len(matched))
+    code = _result(
+        result,
+        dry_run=dry_run,
+        rewrites=len(matched),
+        unmatched=unmatched,
+    )
     if code != 0 or dry_run:
         return code
     with crontab.lock():

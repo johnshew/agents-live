@@ -1354,6 +1354,81 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertEqual([], host.trigger_store.list())
         self.assertEqual([], host.supervisor.owned())
 
+    def test_uninstall_refusal_preserves_structured_runtime(self) -> None:
+        host = MemoryHost()
+        subscription = Subscription.create(
+            scope="repo:/tmp/example", target="agent:sample",
+            kind="watch", trigger="src/** debounce 1s")
+        self.assertFalse(converge((subscription,), _host=host).failed)
+        with (
+            mock.patch.object(uninstall.runtime, "current", return_value=host),
+            mock.patch.object(
+                uninstall.plugins, "tool_environment",
+                return_value=Path("C:/tools/agents-live"),
+            ),
+            mock.patch.object(
+                uninstall, "_stop_own_watchers",
+                return_value=[(42, "sample", "/tmp/example")],
+            ),
+            mock.patch.object(uninstall.preflight, "emit_failure"),
+        ):
+            self.assertEqual(1, uninstall.main([]))
+        self.assertEqual(1, len(host.trigger_store.list()))
+        self.assertEqual(1, len(host.supervisor.owned("watcher")))
+
+    def test_uninstall_wsl_cleanup_failure_preserves_structured_runtime(
+            self) -> None:
+        host = MemoryHost()
+        subscription = Subscription.create(
+            scope="repo:/tmp/example", target="agent:sample",
+            kind="schedule", trigger="0 8 * * *")
+        self.assertFalse(converge((subscription,), _host=host).failed)
+        with (
+            mock.patch.object(uninstall.runtime, "current", return_value=host),
+            mock.patch.object(
+                uninstall.plugins, "tool_environment",
+                return_value=Path("/tools/agents-live"),
+            ),
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(
+                uninstall.hostruntime, "id", return_value=uninstall.hostruntime.WSL),
+            mock.patch.object(
+                uninstall.wsl_liveness, "uninstall",
+                side_effect=RuntimeError("blocked"),
+            ),
+            mock.patch.object(uninstall.preflight, "emit_failure"),
+        ):
+            self.assertEqual(1, uninstall.main([]))
+        self.assertEqual(1, len(host.trigger_store.list()))
+
+    def test_windows_uninstall_handoff_failure_preserves_structured_runtime(
+            self) -> None:
+        host = MemoryHost()
+        subscription = Subscription.create(
+            scope="repo:/tmp/example", target="agent:sample",
+            kind="schedule", trigger="0 8 * * *")
+        self.assertFalse(converge((subscription,), _host=host).failed)
+        with (
+            mock.patch.object(uninstall.runtime, "current", return_value=host),
+            mock.patch.object(
+                uninstall.plugins, "tool_environment",
+                return_value=Path("C:/tools/agents-live"),
+            ),
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(
+                uninstall.hostruntime, "id",
+                return_value=uninstall.hostruntime.WINDOWS,
+            ),
+            mock.patch.object(uninstall, "find_uv", return_value="uv.exe"),
+            mock.patch.object(
+                uninstall, "_handoff_windows_uninstall", return_value=False),
+            mock.patch.object(uninstall.preflight, "emit_failure"),
+            mock.patch.object(uninstall.completions, "remove", return_value=[]),
+            mock.patch.object(uninstall, "_sweep_triggers"),
+        ):
+            self.assertEqual(1, uninstall.main([]))
+        self.assertEqual(1, len(host.trigger_store.list()))
+
 
 def _rendered(kind: str, key: str, fingerprint: str):
     from agents_live.runtime import RenderedSubscription
@@ -1513,6 +1588,29 @@ class TestStartedState(TempRepository):
                 for item in host.trigger_store.list()
             ))
 
+    def test_internal_migrate_preserves_unmapped_other_repository_watcher(
+            self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        host = MemoryHost()
+        other = Subscription.create(
+            scope="repo:/other", target="agent:other",
+            kind="watch", trigger="docs/** debounce 1s")
+        rendered = host.render(other)
+        process = host.supervisor.spawn_detached(
+            rendered.watcher_argv,
+            role="watcher",
+            key=rendered.key,
+            fingerprint=rendered.fingerprint,
+        )
+        host.legacy[str(self.root)] = {"sample"}
+
+        self.assertEqual(0, self._migrate_with_legacy(host))
+
+        self.assertTrue(host.supervisor.alive(process))
+
     def test_internal_migrate_does_not_retire_unmatched_watcher(self) -> None:
         self.skill("sample", [
             'agents-live.selector: "fake"',
@@ -1616,6 +1714,52 @@ class TestStartedState(TempRepository):
             item.target == f"agent:{spec.identifier}"
             for item in host.trigger_store.list()
         ))
+
+    def test_internal_migrate_adoption_json_is_one_document(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        old_root = Path("Z:/agents-live-json-old-root").resolve()
+        old_token = old_root.as_posix()
+        matched = (
+            f"0 8 * * * cd {old_token} && agents-live --repo {old_token} "
+            "run --name sample"
+        )
+        unmatched = (
+            f"0 9 * * * cd {old_token} && agents-live --repo {old_token} "
+            "run --name missing"
+        )
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        stdout = io.StringIO()
+        try:
+            with (
+                mock.patch.dict(
+                    os.environ, {migrate.preflight.JSON_ENV_VAR: "1"}),
+                mock.patch.object(
+                    lifecycle.repos, "load",
+                    return_value={"repos": {}, "default_repo": None}),
+                mock.patch.object(
+                    migrate.hostruntime, "native_scheduler",
+                    return_value=migrate.hostruntime.CRONTAB,
+                ),
+                mock.patch.object(
+                    migrate.crontab, "lines", return_value=[matched, unmatched]),
+                mock.patch.object(
+                    migrate.crontab, "lock", return_value=contextlib.nullcontext()),
+                mock.patch.object(migrate.crontab, "write"),
+                mock.patch.object(migrate, "_legacy_watchers", return_value=[]),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(
+                    0, migrate.main(["--adopt", str(old_root)]))
+        finally:
+            runtime.configure(previous)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual([unmatched], payload["unmatched"])
 
     def test_lifecycle_adopts_then_replaces_legacy_trigger(self) -> None:
         self.skill("sample", [

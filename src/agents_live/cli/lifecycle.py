@@ -21,6 +21,7 @@ class Collected:
     broken_definitions: tuple[tuple[Path, str], ...] = ()
     protected_scopes: tuple[str, ...] = ()
     protected_targets: tuple[str, ...] = ()
+    protected_process_keys: tuple[str, ...] = ()
     unknown_metadata: tuple[tuple[Path, tuple[str, ...]], ...] = ()
 
 
@@ -52,6 +53,10 @@ def collect(
     try:
         installed_items = host.trigger_store.list()
         installed = {item.key for item in installed_items}
+        running_watchers = (
+            host.supervisor.owned(role="watcher")
+            if selected_roots is not None else []
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         raise CollectionUnavailable(
             f"trigger store is unreadable: {exc}") from exc
@@ -59,6 +64,8 @@ def collect(
     specs_by_root: dict[Path, dict[str, agent.AgentSpec]] = {}
     unavailable: list[str] = []
     selected_scopes = {f"repo:{root}" for root in roots_by_path}
+    selected_installed_keys = {
+        item.key for item in installed_items if item.scope in selected_scopes}
     protected: list[str] = (
         sorted({
             item.scope
@@ -201,6 +208,13 @@ def collect(
         tuple(broken),
         tuple(protected),
         tuple(protected_targets),
+        tuple(sorted({
+            process.key
+            for process in running_watchers
+            if selected_roots is not None
+            and process.key
+            and process.key not in selected_installed_keys
+        })),
         tuple(
             (spec.prompt_path, spec.unknown_metadata)
             for specs in specs_by_root.values()
@@ -228,6 +242,7 @@ def converge(
         dry_run=dry_run,
         protected_scopes=collected.protected_scopes,
         protected_targets=collected.protected_targets,
+        protected_process_keys=collected.protected_process_keys,
     )
     if dry_run or converged.failed:
         return converged
