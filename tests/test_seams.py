@@ -1870,24 +1870,24 @@ class TestAgentPipeline(TempRepository):
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=child_env, text=True,
             )
+            request = {
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"},
+                },
+            }
             try:
-                request = {
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "0"},
-                    },
-                }
-                proc.stdin.write(json.dumps(request) + "\n")
-                proc.stdin.flush()
-                proc.stdin.close()
-                try:
-                    stdout, stderr = proc.communicate(timeout=60)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    stdout, stderr = proc.communicate()
-                    self.fail(f"bridge did not respond in time: {stderr}")
+                # communicate() writes stdin, closes it, and reads both
+                # streams to EOF; the bridge's read loop exits on stdin
+                # EOF, so the process terminates once this returns.
+                stdout, stderr = proc.communicate(
+                    input=json.dumps(request) + "\n", timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                _, stderr = proc.communicate()
+                self.fail(f"bridge did not respond in time: {stderr}")
             finally:
                 if proc.poll() is None:
                     proc.kill()
