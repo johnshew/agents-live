@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from .mcp import PipelineMcp
+from .server import PipelineMcp
 
 
 def _bridge_path() -> Path:

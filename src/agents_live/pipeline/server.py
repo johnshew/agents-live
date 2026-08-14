@@ -1,5 +1,16 @@
 """Pipeline MCP - schema-validated side channel for agents-live pipelines.
 
+Named ``server.py``, not ``mcp.py``: this package's sibling
+``stdio_bridge.py`` runs standalone via ``uv run --script`` and depends
+on the third-party ``mcp`` SDK. ``uv run --script`` puts the script's
+own directory first on ``sys.path``, so a sibling module literally
+named ``mcp.py`` shadows that dependency - ``import mcp`` inside the
+bridge resolves to this plain module instead of the installed package,
+and fails with ``ModuleNotFoundError: No module named 'mcp.client'; 'mcp'
+is not a package``. Keep this module's filename distinct from the
+``mcp`` package name for as long as ``stdio_bridge.py`` lives in the
+same directory.
+
 In-process MCP server that exposes a tiny path-addressed surface:
 ``put(path, value)`` and ``get(path)``. All three pipeline
 phases (pre-processor, agent, post-processor) connect to the same server
@@ -36,7 +47,7 @@ See ``Agents/docs/proposal-pipeline-side-channel.md`` for full design.
 
 Usage (host side, e.g. ``run.py``)::
 
-    from .mcp import PipelineMcp
+    from .server import PipelineMcp
     mcp = PipelineMcp(agent_log=Path("Agents/logs/foo.log"))
     mcp.start()  # binds 127.0.0.1:<random port>, daemon thread
     os.environ["PIPELINE_MCP_URL"] = mcp.url
