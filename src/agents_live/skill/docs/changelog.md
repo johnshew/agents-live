@@ -6,6 +6,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: refresh dashboard health through modern automatic maintenance. (#325)
+  A successful rerun replaces a stale failing smoketest verdict, while a
+  current failure records a degraded beacon through the same canonical writer.
+- chore: retire the obsolete legacy execution cluster.
+  Upgrade, uninstall, watcher discovery, launcher resolution, and 5.x trigger
+  conversion now use current lifecycle and runtime ports. Explicit 5.x artifact
+  migration remains supported without retaining the old execution engine.
+
 ## 6.3.3 - 2026-08-14
 
 - fix: refuse package-index downgrades before upgrade mutation. (#320)
