@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.3 - 2026-08-14
+
 - fix: refuse package-index downgrades before upgrade mutation. (#320)
   An explicitly configured uv mirror must fresh-resolve at least the installed
   stable version, or the newer stable release already found by the update
