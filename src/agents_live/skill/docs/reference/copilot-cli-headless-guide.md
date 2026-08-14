@@ -1,4 +1,11 @@
-# Running GitHub Copilot CLI Headless: Practical Guide and Gotchas
+---
+title: Running GitHub Copilot CLI Headless
+description: Practical guidance for unattended GitHub Copilot CLI execution
+ms.date: 2026-08-14
+ms.topic: concept
+---
+
+## Running GitHub Copilot CLI headless
 
 > Status: **draft** - intended for public gist
 
@@ -126,7 +133,7 @@ for name in get_workspace_mcp_names(repo_root):
 `/run/user/*/vscode-ipc-*.sock`. Neither `CLAUDE_CODE_AUTO_CONNECT_IDE=false`
 nor clearing env vars prevents this.
 
-**Solution:** `env -i` with minimal PATH. Implemented in `headless.py`:
+**Solution:** `env -i` with a minimal PATH when embedding Claude directly:
 
 ```bash
 env -i HOME="$HOME" PATH="$CLEAN_PATH" claude -p "..." --permission-mode plan

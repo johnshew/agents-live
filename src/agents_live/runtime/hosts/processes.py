@@ -32,6 +32,48 @@ def pid_exists(pid: int) -> bool:
     return True
 
 
+def within(candidate: str, root: Path | str) -> bool:
+    """Whether a command-line argument names something inside *root*."""
+    return bool(candidate) and Path(root) in Path(candidate).parents
+
+
+def watchers_on_host(
+    *, under: Path | None = None,
+) -> list[tuple[int, str, str | None]]:
+    """Return running Agents Live watchers as ``(pid, agent, project)``."""
+    found: list[tuple[int, str, str | None]] = []
+    for pid, command in system.process_command_lines():
+        args = system.split_command_line(command)
+        if not any(
+            "activate.py" in argument or Path(argument).stem == "agents-live"
+            for argument in args
+        ):
+            continue
+        if under is not None and not any(
+            within(argument, under) for argument in args):
+            continue
+        name = next(
+            (
+                second
+                for first, second in zip(args, args[1:])
+                if first in ("watch-loop", "--watch-loop")
+            ),
+            None,
+        )
+        if not name:
+            continue
+        project = next(
+            (
+                second
+                for first, second in zip(args, args[1:])
+                if first == "--repo"
+            ),
+            None,
+        )
+        found.append((pid, name, project))
+    return found
+
+
 class LocalProcesses:
     def spawn_detached(
         self,

@@ -15,7 +15,7 @@ One dispatcher over the existing modules; the logic stays in them. Every
 lifecycle operation is a subcommand:
 
     cli.py run <name> [...]          execute an agent once (run.py)
-    cli.py start <name>|--all [...]  activate cron/watcher (activate.py)
+    cli.py start <name>|--all [...]  converge schedules and watchers
     cli.py stop <name>               deactivate, keep config
     cli.py status [...]              list agents and state (status.py)
     cli.py smoketest [...]           end-to-end validation (smoketest.py)

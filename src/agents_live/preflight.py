@@ -15,7 +15,7 @@ Symbolic codes carry the meaning; process exit status stays coarse
     host_permission_required, dependency_missing, agent_invalid,
   agent_failed, agent_output_invalid, ownership_unavailable, no_project_root
 
-stdlib-only; sibling scripts import it flat. Must not import headless.
+stdlib-only; sibling scripts import it flat.
 """
 from __future__ import annotations
 

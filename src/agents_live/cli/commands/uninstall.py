@@ -9,7 +9,8 @@ from pathlib import Path
 
 from ... import plugins, preflight, runtime
 from ...obs import admin as adminlog
-from ...legacy import health_check, schedules
+from ...legacy import migrate as legacy_migration
+from ...runtime.hosts.processes import watchers_on_host
 from ...runtime.hosts import wsl_liveness
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
@@ -46,8 +47,6 @@ def _stop_own_watchers(environment: Path | None
     they are exactly the ones that block it. A watcher started from a
     checkout is somebody's working tree and is left alone.
     """
-    from ...legacy.headless import watchers_on_host  # noqa: PLC0415
-
     if environment is None:
         return []
     try:
@@ -82,7 +81,7 @@ def _sweep_triggers(environment: Path | None) -> None:
               "stop --all` before uninstalling", file=sys.stderr)
         return
     try:
-        removed = schedules.remove_all_under(environment)
+        removed = legacy_migration.remove_under(environment)
     except Exception as exc:
         print(f"warning: could not withdraw scheduled triggers: {exc}",
               file=sys.stderr)
@@ -148,14 +147,6 @@ def main(argv: list[str] | None = None) -> int:
         # runs its own triggers, which the loop removal below withdraws.
         # A hard dependency here would make uninstall impossible off WSL.
         print("no cross-host integrations to remove; uninstalling the tool")
-    # After host cleanup succeeded (never before: a failed uninstall must
-    # not strand an installed tool without its check-and-repair loop).
-    try:
-        if health_check.remove_health_cron_lines():
-            print("Removed the check-and-repair loop from this host")
-    except Exception as exc:
-        print(f"warning: could not remove the check-and-repair loop: "
-              f"{exc}", file=sys.stderr)
     _sweep_triggers(environment)
     try:
         for path in completions.remove():

@@ -79,8 +79,11 @@ def _maintain(*, dry_run: bool) -> int:
         "repos": {root: {"status": "ok"} for root in sorted(repositories)},
     }
     previous = _health_beacon()
-    if isinstance(previous.get("smoketest"), dict):
-        payload["smoketest"] = previous["smoketest"]
+    smoketest = _smoketest_verdict(previous)
+    if smoketest:
+        payload["smoketest"] = smoketest
+        if smoketest.get("status") == "fail":
+            payload["status"] = "degraded"
     paths.atomic_write_text(
         paths.health_beacon_path(), json.dumps(payload, indent=2) + "\n")
     return 0
@@ -92,6 +95,29 @@ def _health_beacon() -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _smoketest_verdict(previous: dict) -> dict:
+    prior = previous.get("smoketest")
+    prior = prior if isinstance(prior, dict) else {}
+    try:
+        root = paths.resolve_root()
+    except ValueError:
+        return prior
+    result_path = paths.repo_state_dir(root) / "logs" / \
+        "smoketest-framework-result.json"
+    try:
+        if (
+            paths.health_beacon_path().is_file()
+            and result_path.stat().st_mtime < paths.health_beacon_path().stat().st_mtime
+        ):
+            return prior
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return prior
+    if not isinstance(result, dict) or result.get("status") not in {"pass", "fail"}:
+        return prior
+    return result
 
 
 def _watch(args) -> int:

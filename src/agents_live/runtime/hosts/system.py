@@ -176,10 +176,8 @@ def pass_cached(key: str, read: Callable[[], _T]) -> _T:
 # Scheduling
 # ---------------------------------------------------------------------------
 
-# Which of the host's own schedulers persists a trigger. Named for the
-# mechanism rather than the platform, because that is what the answer is
-# used for: `schedules` maps it to an implementation, and nothing else
-# asks the question at all.
+# Which host scheduler persists compatibility trigger artifacts. Named for
+# the mechanism rather than the platform.
 CRONTAB = "crontab"
 TASK_SCHEDULER = "task-scheduler"
 

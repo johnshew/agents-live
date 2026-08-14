@@ -92,10 +92,10 @@ In the assembled tree the audit additionally enforces two release gates
 
 ## Validate and build
 
-Run the focused engine suite from the source repository:
+Run the portable source suite from the source repository:
 
 ```bash
-uv run --script .claude/skills/agents-live/scripts/test_headless.py
+uv run --with-editable . python -m unittest discover -s tests -v
 ```
 
 Run the exported smoke suite from the assembled tree:

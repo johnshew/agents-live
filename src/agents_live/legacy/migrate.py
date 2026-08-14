@@ -1,32 +1,4 @@
-#!/usr/bin/env -S uv run --quiet --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["PyYAML"]
-# ///
-"""Internal convergence of persisted trigger entries to canonical form.
-
-Scope: this project's schedule entries (``--name <agent>``) and watcher
-respawn entries (``ensure-watcher <agent>`` or its legacy flag form).
-The store is host-global, so other projects' entries are never touched.
-Every entry is compared against the trigger spec activation would
-install today - ``headless.schedule_spec`` / ``headless.watcher_spec``
-- so migrate always converges entries to the running context's form:
-the script-path form in the flat checkout, the pinned-shim + ``--repo``
-form once installed as a package (§3.4.2). This is what retires stale
-``uv run .../scripts/*.py`` lines at the F7 flip.
-
-Which store holds the entries is :mod:`schedules`' question, not this
-one: on a crontab host the comparison is between lines, on a Task
-Scheduler host between registrations, and the plan, the printing, and
-the rewrite are the same either way.
-
-A running watcher whose respawn entry was rewritten is restarted so its
-in-memory dispatch matches the new entry. Entries for agents that no
-longer exist are reported and left alone - orphan pruning stays
-``start --prune-orphans`` / the health check's job.
-
-``--dry-run`` prints the plan without mutating anything.
-"""
+"""One-major-cycle conversion of pre-6.0 trigger artifacts."""
 from __future__ import annotations
 
 import argparse
@@ -35,24 +7,43 @@ import shlex
 import sys
 from pathlib import Path
 
-from .. import preflight
+from .. import agent, paths, preflight
+from ..cli import lifecycle
 from ..obs import admin as adminlog
-from ..runtime.hosts import crontab as crontasks
-from ..runtime.hosts import system as hostruntime
-from . import triggers
-from .headless import (
-    AgentsLiveError,
-    find_watcher_pid,
-    repo_root,
-    schedule_spec,
-    stop_watcher,
-    watcher_spec,
-    agent_file_exists,
-)
+from ..runtime.hosts import crontab, system as hostruntime, task_scheduler
+
+
+def _store():
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        return task_scheduler
+    return crontab
+
+
+def _store_call(action):
+    try:
+        return action()
+    except task_scheduler.TaskError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def persisted_roots() -> list[Path]:
+    """Existing roots named only by pre-6.0 trigger artifacts."""
+    return _store_call(lambda: _store().persisted_roots())
+
+
+def remove_under(environment: Path) -> int:
+    """Remove pre-6.0 triggers tied to an installation being removed."""
+    removed = _store_call(lambda: _store().remove_under(environment))
+    if removed:
+        adminlog.record(
+            "schedule-sweep",
+            count=removed,
+            scheduler=hostruntime.native_scheduler(),
+        )
+    return removed
 
 
 def _token_pair_value(line: str, flag: str) -> str | None:
-    """The value following *flag* in a crontab line, token-exact."""
     try:
         tokens = shlex.split(line)
     except ValueError:
@@ -63,301 +54,240 @@ def _token_pair_value(line: str, flag: str) -> str | None:
     return None
 
 
-def plan_migration(lines: list[str]) -> dict:
-    """Pure planning core: compare this project's entries against the
-    trigger specs activation would install. Returns ``{"schedule":
-    {name: (old, new)}, "watcher": {name: (old, new)}, "missing":
-    [name, ...]}`` where old/new are line lists (already-canonical
-    entries are omitted)."""
-    schedule_names: set[str] = set()
-    watcher_names: set[str] = set()
-    for line in lines:
-        if not crontasks.belongs_to_root(line, repo_root()):
-            continue
-        name = _token_pair_value(line, "--name")
-        if name:
-            schedule_names.add(name)
-        watcher = (
-            _token_pair_value(line, "ensure-watcher")
-            or _token_pair_value(line, "--ensure-watcher")
-        )
-        if watcher:
-            watcher_names.add(watcher)
-
-    plan: dict = {"schedule": {}, "watcher": {}, "missing": []}
-    for name in sorted(schedule_names):
-        if not agent_file_exists(name):
-            plan["missing"].append(name)
-            continue
-        old = [l for l in lines
-               if crontasks.matches(l, repo_root(), name)]
-        try:
-            spec = schedule_spec(name)
-        except AgentsLiveError:
-            # Defined but currently unloadable/scheduleless: leave alone,
-            # report as missing-from-migration rather than guessing.
-            plan["missing"].append(name)
-            continue
-        if not triggers.is_canonical(old, spec):
-            plan["schedule"][name] = (old, triggers.render(spec))
-    for name in sorted(watcher_names):
-        if not agent_file_exists(name):
-            if name not in plan["missing"]:
-                plan["missing"].append(name)
-            continue
-        old = [l for l in lines
-               if crontasks.agent_of_line(l, repo_root(),
-                                          kind=crontasks.WATCH) == name]
-        spec = watcher_spec(name)
-        if not triggers.is_canonical(old, spec):
-            plan["watcher"][name] = (old, triggers.render(spec))
-    return plan
-
-
-def plan_task_migration() -> dict:
-    """The same comparison against a task store instead of a crontab.
-
-    Same question, different reader: what is registered for each agent
-    this repository has on this host, against what activation would
-    register today. Answered through the dispatch point, so this module
-    still never names a store.
-    """
-    from . import schedules  # noqa: PLC0415
-
-    plan: dict = {"schedule": {}, "watcher": {}, "missing": []}
-    for key, names, spec_of in (
-            ("schedule", schedules.installed_names(), schedule_spec),
-            ("watcher", schedules.watcher_respawn_names(), watcher_spec)):
-        for name in sorted(names):
-            if not agent_file_exists(name):
-                if name not in plan["missing"]:
-                    plan["missing"].append(name)
-                continue
-            try:
-                spec = spec_of(name)
-            except AgentsLiveError:
-                # Defined but currently unloadable/scheduleless: leave
-                # alone, report rather than guess.
-                if name not in plan["missing"]:
-                    plan["missing"].append(name)
-                continue
-            old, new = schedules.current_form(spec)
-            if old != new:
-                plan[key][name] = (old, new)
-    return plan
-
-
 def _line_belongs_to_root(line: str, root: Path) -> bool:
-    """Whether *line* carries an exact ``cd`` or ``--repo`` root token."""
     try:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
-    value = str(root)
     roots = [
         second
         for first, second in zip(tokens, tokens[1:])
         if first in {"cd", "--repo"}
     ]
-    return bool(roots) and all(candidate == value for candidate in roots)
+    return bool(roots) and all(Path(candidate) == root for candidate in roots)
 
 
-def plan_adoption(lines: list[str], old_root: Path) -> dict:
-    """Plan canonical replacements for trigger entries from *old_root*."""
-    candidates = [line for line in lines if _line_belongs_to_root(line, old_root)]
-    schedule: dict[str, list[str]] = {}
-    watcher: dict[str, list[str]] = {}
+def _legacy_watchers(root: Path) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for pid, command in hostruntime.process_command_lines():
+        args = hostruntime.split_command_line(command)
+        if "--runtime-role" in args:
+            continue
+        if not any(
+            argument in {"watch-loop", "--watch-loop"}
+            for argument in args
+        ):
+            continue
+        explicit = next(
+            (
+                second
+                for first, second in zip(args, args[1:])
+                if first == "--repo"
+            ),
+            None,
+        )
+        name = next(
+            (
+                second
+                for first, second in zip(args, args[1:])
+                if first in {"watch-loop", "--watch-loop"}
+            ),
+            None,
+        )
+        if name is None:
+            continue
+        if explicit is not None:
+            belongs = Path(explicit) == root
+        else:
+            belongs = any(
+                bool(argument) and root in Path(argument).parents
+                for argument in args
+            )
+        if belongs:
+            found.append((pid, name))
+    return found
+
+
+def _result(result, *, dry_run: bool, rewrites: int | None = None) -> int:
+    failed = [
+        {"operation": operation.kind, "key": operation.key, "detail": detail}
+        for operation, detail in result.failed
+    ]
+    payload = {
+        "ok": not failed,
+        "dry_run": dry_run,
+        "rewrites": rewrites if rewrites is not None else sum(
+            operation.kind == "remove-legacy" for operation in result.done
+        ),
+        "changes": len(result.done),
+        "failures": failed,
+    }
+    if preflight.json_mode():
+        print(json.dumps(payload))
+    elif failed:
+        for item in failed:
+            print(
+                f"{item['operation']} {item['key']}: {item['detail']}",
+                file=sys.stderr,
+            )
+    else:
+        verb = "Would converge" if dry_run else "Converged"
+        print(f"{verb} {payload['changes']} trigger operation(s).")
+    return 1 if failed else 0
+
+
+def _migrate(root: Path, *, dry_run: bool) -> int:
+    old_watchers = [] if dry_run else _legacy_watchers(root)
+    try:
+        result = lifecycle.converge(
+            selected_roots=(root,),
+            dry_run=dry_run,
+        )
+    except lifecycle.CollectionUnavailable as exc:
+        if preflight.json_mode():
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
+    code = _result(result, dry_run=dry_run)
+    if code != 0 or dry_run:
+        return code
+    removed = {
+        operation.key.removeprefix(f"{root}:")
+        for operation in result.done
+        if operation.kind == "remove-legacy"
+        and operation.key.startswith(f"{root}:")
+    }
+    for pid, name in old_watchers:
+        if name in removed:
+            hostruntime.terminate(pid)
+    return 0
+
+
+def _adoption_candidates(
+    lines: list[str], old_root: Path, root: Path,
+) -> tuple[set[str], set[str], list[str]]:
+    discovery = agent.discover(root)
+    identities: dict[str, list[agent.AgentSpec]] = {}
+    for spec in discovery.specs:
+        identities.setdefault(spec.name, []).append(spec)
+        identities.setdefault(spec.identifier, []).append(spec)
+    identifiers: set[str] = set()
+    matched: set[str] = set()
     unmatched: list[str] = []
-    for line in candidates:
-        name = _token_pair_value(line, "--name")
+    for line in lines:
+        if not _line_belongs_to_root(line, old_root):
+            continue
+        schedule_name = _token_pair_value(line, "--name")
         watcher_name = (
             _token_pair_value(line, "ensure-watcher")
             or _token_pair_value(line, "--ensure-watcher")
         )
-        if name:
-            schedule.setdefault(name, []).append(line)
-        elif watcher_name:
-            watcher.setdefault(watcher_name, []).append(line)
-        else:
+        name = schedule_name or watcher_name
+        candidates = identities.get(name or "", [])
+        candidates = list({spec.identifier: spec for spec in candidates}.values())
+        if len(candidates) != 1:
             unmatched.append(line)
-
-    plan: dict = {"schedule": {}, "watcher": {}, "unmatched": unmatched}
-    for name, old in sorted(schedule.items()):
-        if not agent_file_exists(name):
-            plan["unmatched"].extend(old)
             continue
-        try:
-            new = triggers.render(schedule_spec(name))
-        except AgentsLiveError:
-            plan["unmatched"].extend(old)
+        spec = candidates[0]
+        config = spec.execution
+        has_trigger = bool(
+            config
+            and (
+                (schedule_name and config.schedules)
+                or (watcher_name and config.watch)
+            )
+        )
+        if not has_trigger:
+            unmatched.append(line)
             continue
-        plan["schedule"][name] = (old, new)
-    for name, old in sorted(watcher.items()):
-        if not agent_file_exists(name):
-            plan["unmatched"].extend(old)
-            continue
-        plan["watcher"][name] = (old, triggers.render(watcher_spec(name)))
-    return plan
+        identifiers.add(spec.identifier)
+        matched.add(line)
+    return identifiers, matched, unmatched
 
 
-def _apply_adoption(lines: list[str], plan: dict) -> list[str]:
-    replaced = {
-        line
-        for kind in ("schedule", "watcher")
-        for old, _new in plan[kind].values()
-        for line in old
-    }
-    canonical = [
-        line
-        for kind in ("schedule", "watcher")
-        for _old, new in plan[kind].values()
-        for line in new
-    ]
-    return [line for line in lines if line not in replaced] + canonical
-
-
-def _print_adoption(plan: dict, *, dry_run: bool, say=print) -> int:
-    verb = "Would adopt" if dry_run else "Adopting"
-    for line in plan["unmatched"]:
-        say(f"Unmatched old-root entry left unchanged:\n  {line}")
-    for kind, label in (("schedule", "schedule"), ("watcher", "@reboot watcher")):
-        for name, (old, new) in plan[kind].items():
-            say(f"{verb} {label} entries for '{name}':")
-            for line in old:
-                say(f"  - {line}")
-            for line in new:
-                say(f"  + {line}")
-    return len(plan["schedule"]) + len(plan["watcher"])
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Converge persisted cron/watcher entries to the "
-                    "canonical invocation form.")
-    parser.add_argument("--dry-run", "-n", action="store_true",
-                        help="Print the plan without mutating anything.")
-    parser.add_argument(
-        "--adopt", metavar="OLD_ROOT",
-        help="Adopt trigger entries from a moved, nonexistent project root.")
-    args = parser.parse_args()
-
-    # In JSON mode the whole of stdout is the document: a caller parses
-    # it, and a narration printed alongside it is a parse error rather
-    # than a message. The plan carries everything the narration says.
-    say = (lambda *_a, **_k: None) if preflight.json_mode() else print
-
-    tasks = hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER
-
-    if args.adopt and tasks:
-        # Adoption rewrites entries that name a root which no longer
-        # exists. A task is found by a name carrying a digest of its
-        # root, and a root nobody can name cannot be digested, so there
-        # is nothing here to look up. Re-running `start` from the new
-        # location registers the agents under their new names.
-        raise AgentsLiveError(
-            "--adopt is not available on this host: tasks are named after "
-            "the project they belong to, so entries from a moved project "
-            "cannot be found by name; run `agents-live start --all` from "
-            "the new location instead")
-
-    if args.adopt:
-        old_root = Path(args.adopt).expanduser().resolve()
-        if old_root.exists():
-            raise AgentsLiveError(
-                f"cannot adopt {old_root}: the old project root still exists; "
-                "move or remove it before adopting its triggers")
-        if args.dry_run:
-            lines = crontasks.lines()
-            if lines is None:
-                raise AgentsLiveError("crontab is not accessible")
-            plan = plan_adoption(lines, old_root)
-        else:
-            with crontasks.lock():
-                lines = crontasks.lines()
-                if lines is None:
-                    raise AgentsLiveError("crontab is not accessible")
-                plan = plan_adoption(lines, old_root)
-                rewritten = _apply_adoption(lines, plan)
-                if rewritten != lines:
-                    crontasks.write(rewritten)
-        rewrites = _print_adoption(plan, dry_run=args.dry_run, say=say)
-        if not args.dry_run and rewrites:
-            adminlog.record("trigger-adopt", old_root=str(old_root),
-                            rewrites=rewrites,
-                            agents=sorted(plan["schedule"]) + sorted(plan["watcher"]))
-        if rewrites == 0:
-            say("No matching old-root entries to adopt.")
-        else:
-            done = "planned" if args.dry_run else "adopted"
-            say(f"\n{rewrites} entr{'y' if rewrites == 1 else 'ies'} {done}.")
+def _adopt(root: Path, old_root: Path, *, dry_run: bool) -> int:
+    if hostruntime.native_scheduler() == hostruntime.TASK_SCHEDULER:
+        print(
+            "--adopt is unavailable for Task Scheduler artifacts; run "
+            "`agents-live start --all` from the new location",
+            file=sys.stderr,
+        )
+        return 1
+    if old_root.exists():
+        print(
+            f"cannot adopt {old_root}: the old project root still exists",
+            file=sys.stderr,
+        )
+        return 1
+    lines = crontab.lines()
+    if lines is None:
+        print("crontab is not accessible", file=sys.stderr)
+        return 1
+    identifiers, matched, unmatched = _adoption_candidates(
+        lines, old_root, root)
+    for line in unmatched:
+        print(f"Unmatched old-root entry left unchanged:\n  {line}")
+    if not identifiers:
         if preflight.json_mode():
             print(json.dumps({
-                "ok": True, "dry_run": args.dry_run,
-                "rewrites": rewrites, "plan": plan,
+                "ok": True,
+                "dry_run": dry_run,
+                "rewrites": 0,
+                "unmatched": unmatched,
             }))
+        elif not unmatched:
+            print("No matching old-root entries to adopt.")
         return 0
-
-    if tasks:
-        plan = plan_task_migration()
-    else:
-        lines = crontasks.lines()
-        if lines is None:
-            raise AgentsLiveError("crontab is not accessible")
-        plan = plan_migration(lines)
-    rewrites = len(plan["schedule"]) + len(plan["watcher"])
-
-    for name in plan["missing"]:
-        say(f"'{name}': entry references an agent with no definition file; "
-            f"left alone (prune via `start --prune-orphans`)")
-
-    if rewrites == 0:
-        say("All entries already canonical; nothing to migrate.")
-        if preflight.json_mode():
-            print(json.dumps({
-                "ok": True, "dry_run": args.dry_run,
-                "rewrites": 0, "plan": plan,
-            }))
-        return 0
-
-    from . import activate, schedules
-
-    verb = "Would rewrite" if args.dry_run else "Rewriting"
-    for name, (old, new) in plan["schedule"].items():
-        say(f"{verb} schedule entr{'y' if len(new) == 1 else 'ies'} "
-            f"for '{name}':")
-        for l in old:
-            say(f"  - {l}")
-        for l in new:
-            say(f"  + {l}")
-        if not args.dry_run:
-            activate.install_cron_agent(name)
-    for name, (old, new) in plan["watcher"].items():
-        say(f"{verb} respawn entry for '{name}':")
-        for l in old:
-            say(f"  - {l}")
-        for l in new:
-            say(f"  + {l}")
-        if not args.dry_run:
-            schedules.install_watcher_respawn(name)
-            # The running watcher (if any) still dispatches through the
-            # old invocation; cycle it onto the new one.
-            if find_watcher_pid(name):
-                stop_watcher(name)
-                pid = activate.activate_watcher(name)
-                say(f"  restarted watcher for '{name}' (pid {pid})")
-
-    done = "planned" if args.dry_run else "migrated"
-    say(f"\n{rewrites} entr{'y' if rewrites == 1 else 'ies'} {done}.")
-    if not args.dry_run:
-        adminlog.record("trigger-migrate", rewrites=rewrites,
-                        agents=sorted(plan["schedule"]) + sorted(plan["watcher"]))
-    if preflight.json_mode():
-        print(json.dumps({
-            "ok": True, "dry_run": args.dry_run,
-            "rewrites": rewrites, "plan": plan,
-        }))
+    old_watchers = [] if dry_run else _legacy_watchers(old_root)
+    try:
+        result = lifecycle.converge(
+            additions={root: identifiers},
+            selected_roots=(root,),
+            dry_run=dry_run,
+        )
+    except lifecycle.CollectionUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    code = _result(result, dry_run=dry_run, rewrites=len(matched))
+    if code != 0 or dry_run:
+        return code
+    with crontab.lock():
+        current = crontab.lines()
+        if current is None:
+            print("crontab became inaccessible during adoption", file=sys.stderr)
+            return 1
+        crontab.write([line for line in current if line not in matched])
+    for pid, name in old_watchers:
+        if name in identifiers or any(
+                spec.name == name and spec.identifier in identifiers
+                for spec in agent.discover(root).specs):
+            hostruntime.terminate(pid)
+    adminlog.record(
+        "trigger-adopt",
+        old_root=str(old_root),
+        rewrites=len(matched),
+        agents=sorted(identifiers),
+    )
     return 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Converge pre-6.0 triggers into current subscriptions.")
+    parser.add_argument("--dry-run", "-n", action="store_true")
+    parser.add_argument("--adopt", metavar="OLD_ROOT")
+    args = parser.parse_args(argv)
+    try:
+        root = paths.resolve_root()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.adopt:
+        old_root = Path(args.adopt).expanduser().resolve()
+        return _adopt(root, old_root, dry_run=args.dry_run)
+    return _migrate(root, dry_run=args.dry_run)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
