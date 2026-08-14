@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.1 - 2026-08-13
+
 - fix: stop sending provider CLIs an `--mcp` flag they never accepted. (#296)
   Neither `copilot` nor `claude` has ever had a bare `--mcp` option, so every
   agent declaring `agents-live.mcps` outside pipeline mode was rejected at
