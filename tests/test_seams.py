@@ -1860,6 +1860,27 @@ class TestAgentPipeline(TempRepository):
         self.assertTrue(result.ok, result)
         self.assertIsNone(runner.inputs[-1])
 
+    def test_transcript_records_the_argv_the_child_was_launched_with(self) -> None:
+        """The transcript is the only place the launched command survives.
+
+        A provider's constructed argv is otherwise visible only through
+        whatever the child chooses to print to its own stderr/stdout, if
+        anything. Persisting it lets a provider-boundary failure (e.g. a
+        wrapper CLI dropping or mishandling a flag) be diagnosed from the
+        run record, not re-derived from provider source and incidental logs.
+        """
+        self.skill("recorded", ['agents-live.selector: "fake"'])
+        argv = ("fake", "--additional-mcp-config", "@/tmp/pipeline-cfg.json")
+        runner = RecordingRunner([
+            ChildResult(argv, 0, json.dumps({"text": "ok"}), ""),
+        ])
+        result = dispatch(
+            Firing("recorded", str(self.root), "manual"), runner=runner)
+        self.assertTrue(result.ok, result)
+        self.assertIsNotNone(result.transcript)
+        transcript = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertEqual(list(argv), transcript["argv"])
+
     def test_a_quiet_run_records_what_the_processor_produced(self) -> None:
         """A scheduled run is quiet and its streams go nowhere.
 
@@ -2526,6 +2547,38 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertIn(
             ["--with", "candidate.whl", "--with", "example.whl"],
             [command[index:index + 4] for index in range(len(command) - 3)])
+
+    def test_pipeline_package_does_not_shadow_the_mcp_dependency(self) -> None:
+        """A same-named sibling module breaks a script run standalone.
+
+        ``stdio_bridge.py`` is executed via ``uv run --script``, which puts
+        the script's own directory first on ``sys.path``. A sibling module
+        in that directory sharing a name with a dependency the script
+        imports would shadow the real package there - this happened once
+        (agents-live#317) when the pipeline server module was named
+        ``mcp.py``, so ``import mcp`` inside the bridge resolved to that
+        plain module instead of the third-party SDK and failed with
+        ``ModuleNotFoundError: No module named 'mcp.client'; 'mcp' is not
+        a package``. Reproduce the exact shadowing mechanism rather than
+        asserting one filename, so a differently named future collision
+        is still caught.
+        """
+        pipeline_dir = (
+            Path(__file__).parents[1] / "src" / "agents_live" / "pipeline")
+        self.assertTrue(pipeline_dir.is_dir())
+        completed = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import mcp; import mcp.client.session",
+                str(pipeline_dir),
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(
+            0, completed.returncode,
+            f"a pipeline/ sibling module shadows the mcp dependency: "
+            f"{completed.stderr}")
 
     def test_cli_targets_resolve_from_owned_packages(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

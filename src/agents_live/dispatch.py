@@ -205,6 +205,7 @@ def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump({
+                "argv": list(raw.argv),
                 "provider_transcript": provider_ref,
                 "returncode": raw.returncode,
                 "stderr": raw.stderr,
