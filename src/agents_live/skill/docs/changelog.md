@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: restore isolated, schema-checked Copilot-family pipeline runs. (#317)
+  The standalone stdio bridge no longer shadows the MCP SDK, fenced `put`
+  blocks seed frozen run-scoped schemas again, and Copilot exposes only the
+  pipeline tools plus its inert completion control. Post-processed runs retain
+  provider usage and transcript metadata, and a real subprocess handshake now
+  guards the bridge on Windows and Ubuntu.
+- docs: add complete mediated Markdown-polisher examples and clarify local operational boundaries. (#116, #215, #234)
+  Runnable plan and pipeline variants enforce the changed-file set before
+  writing. The command and diagnostics guides describe uninstall refusal and
+  deferred Windows completion, while the dashboard endpoint records why its
+  unauthenticated inventory requires a loopback-only bind.
+
 ## 6.3.2 - 2026-08-13
 
 - fix: let a state write wait out a Windows hold on its destination.
