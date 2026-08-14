@@ -212,13 +212,15 @@ COMMANDS = (
         all_repos=True, update_notice=False,
         mutually_exclusive=(
             ("--all-repos", "--repair"),
-            ("--quick", "--all-repos", "--repair", "--dry-run"),
+            ("--quick", "--all-repos", "--repair", "--dry-run", "--check-processors", "--check-index"),
         ),
         args=(
             Arg(("--all-repos",), "Check every registered repository."),
             Arg(("--repair",), "Run immediate repair before diagnosis."),
             Arg(("--dry-run",), "Preview repairs without mutating."),
             Arg(("--quick",), "Read cached host health and refresh it when stale."),
+            Arg(("--check-processors",), "Fresh-resolve declared processor dependencies."),
+            Arg(("--check-index",), "Check the configured package index."),
         ),
     ),
     Cmd(

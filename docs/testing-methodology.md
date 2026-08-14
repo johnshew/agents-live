@@ -1,7 +1,7 @@
 ---
 title: Testing Methodology
 description: What this project tests, at which layer, and why each gate exists
-ms.date: 2026-08-11
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -83,6 +83,12 @@ what a trigger store does to a table it shares, which declared plugin is safe
 to install, and whether a reader steps over a damaged record are decisions.
 They survive a refactor because they are statements about behavior, not about
 call shapes.
+
+A behavior requires an executing test when it crosses a platform seam, is
+observable only through a side effect, or is a documented user-facing exit
+path. The test drives the real boundary and asserts the observable result. A
+regression test must also be demonstrated to fail without its fix; otherwise
+it has not shown that it guards the reported defect.
 
 ## Rules
 

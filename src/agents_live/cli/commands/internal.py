@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ... import agent, paths, runtime
+from ... import __version__, agent, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
@@ -116,11 +118,42 @@ def _watch(args) -> int:
                 args.subscription_key,
                 changed,
             )),
+            should_continue=_runtime_is_current,
+            on_retire=lambda: _restart_watcher(args, root, expression),
         )
     except (agent.DefinitionError, RuntimeError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return 0
+
+
+def _runtime_is_current() -> bool:
+    """Whether this process loaded the version installed on disk."""
+    try:
+        return importlib.metadata.version("agents-live") == __version__
+    except importlib.metadata.PackageNotFoundError:
+        return True
+
+
+def _restart_watcher(args, root: Path, expression: str) -> None:
+    """Start the replacement after the old change source has stopped."""
+    executable = shutil.which("agents-live") or sys.argv[0]
+    runtime.current().supervisor.spawn_detached(
+        [
+            executable,
+            "--repo",
+            str(root),
+            "internal",
+            "watch-loop",
+            args.name,
+            "--watch-expression",
+            expression,
+        ],
+        role="watcher",
+        key=args.subscription_key,
+        fingerprint=args.subscription_fingerprint,
+        cwd=str(root),
+    )
 
 
 def _roots(root: Path, includes: tuple[str, ...]) -> tuple[Path, ...]:

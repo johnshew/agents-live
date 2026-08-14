@@ -187,12 +187,13 @@ metadata:
   agents-live.post-processor: "scripts/apply.py"
 ---
 
-Call `get("/input/files")` to read the selected Markdown and
+Call `get("/input/files/manifest")`. For each file, call `get` on every path
+in its `chunks` array and concatenate the returned strings in order. Call
 `get("/output/files/$schema")` to read the required output schema. Correct
 spelling, grammar, punctuation, and Markdown formatting while preserving
 meaning, links, code, and frontmatter. Call `put("/output/files", value)` with
 the complete result. Fix every validation error returned by `put` before you
-finish. Do not publish any path that is absent from `/input/files`.
+finish. Do not publish any path that is absent from the manifest.
 ```
 
 Use this `scripts/prepare.py`:
@@ -210,6 +211,8 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
+
+CHUNK_SIZE = 4000
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -257,15 +260,15 @@ async def pipeline():
             yield session
 
 
-async def publish(files: list[dict[str, str]]) -> None:
+async def publish(manifest: list[dict[str, object]], values: dict[str, str]) -> None:
     async with pipeline() as session:
-        schema = await session.call_tool(
-            "put", {"path": "/output/files/$schema", "value": SCHEMA}
-        )
-        inputs = await session.call_tool(
-            "put", {"path": "/input/files", "value": files}
-        )
-        for result in (schema, inputs):
+        puts: list[tuple[str, object]] = [
+            ("/output/files/$schema", SCHEMA),
+            ("/input/files/manifest", manifest),
+            *values.items(),
+        ]
+        for path, value in puts:
+            result = await session.call_tool("put", {"path": path, "value": value})
             payload = result_json(result)
             if not payload.get("ok"):
                 raise RuntimeError(payload)
@@ -274,7 +277,8 @@ async def publish(files: list[dict[str, str]]) -> None:
 def main() -> int:
     root = Path.cwd().resolve()
     docs = (root / "docs").resolve()
-    files: list[dict[str, str]] = []
+    manifest: list[dict[str, object]] = []
+    values: dict[str, str] = {}
     changed = json.loads(os.environ.get("AGENTS_LIVE_CHANGED_FILES", "[]"))
     for item in changed:
         if not isinstance(item, str):
@@ -282,12 +286,20 @@ def main() -> int:
         relative = normalized(item)
         source = (root / relative).resolve()
         if source.is_relative_to(docs) and source.suffix.lower() == ".md" and source.is_file():
-            files.append({"path": relative, "content": source.read_text(encoding="utf-8")})
-    if not files:
+            content = source.read_text(encoding="utf-8")
+            index = len(manifest)
+            chunks = [
+                content[offset:offset + CHUNK_SIZE]
+                for offset in range(0, len(content), CHUNK_SIZE)
+            ]
+            paths = [f"/input/files/{index}/{part}" for part in range(len(chunks))]
+            manifest.append({"path": relative, "chunks": paths})
+            values.update(zip(paths, chunks, strict=True))
+    if not manifest:
         print('{"skip": true}')
         return 0
-    asyncio.run(publish(files))
-    print(json.dumps({"published": [item["path"] for item in files]}))
+    asyncio.run(publish(manifest, values))
+    print(json.dumps({"published": [item["path"] for item in manifest]}))
     return 0
 
 

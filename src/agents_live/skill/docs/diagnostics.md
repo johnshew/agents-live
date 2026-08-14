@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-10
+ms.date: 2026-08-14
 ms.topic: troubleshooting
 ---
 
@@ -12,6 +12,21 @@ agents-live status --all-repos
 agents-live doctor --all-repos
 agents-live logs timeline --all
 ```
+
+Use the networked checks only when you want fresh external resolution:
+
+```bash
+agents-live doctor --check-index
+agents-live doctor --check-processors
+```
+
+The index check asks the configured uv resolver for a non-downgrading Agents
+Live version. The processor check asks uv to resolve each directly declared
+PEP 723 Python processor from a fresh temporary cache without executing the
+script or writing a lockfile. Literal repository-local paths passed to
+`uv run --script` are followed recursively. A processor can construct paths at
+runtime; those dynamic scripts must be checked separately or promoted to
+directly declared processors.
 
 Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
 and `agents-live doctor --repair` to apply it.
@@ -279,6 +294,12 @@ the file and the reason. Fix the file, or run `stop` to withdraw it.
 A changed canonical watch expression changes its fingerprint and restarts only
 that watcher. All watchers restart once when moving from the 5.x fingerprint
 form to 6.0.
+
+After a runtime upgrade, a watcher finishes any dispatch already in progress,
+then notices the installed version at the top of its loop. It stops its old
+change source and starts the same marked subscription through the current
+launcher. An already idle watcher checks within 60 seconds; no manual
+stop/start cycle is required.
 
 Never inspect runtime log files by hand. Use `agents-live logs` and
 `agents-live logs timeline`; they correlate versioned event records and

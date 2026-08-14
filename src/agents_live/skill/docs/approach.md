@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-13
+ms.date: 2026-08-14
 ms.topic: concept-article
 ---
 
@@ -33,6 +33,11 @@ Automatic maintenance is the sole writer of the host-local health record.
 or stale record triggers that same maintenance operation once, followed by one
 more freshness check. The command answers only for the runtime where it runs;
 it neither discovers nor probes another runtime.
+
+Long-lived watchers compare their loaded package version with the installed
+distribution at a bounded idle check. A mismatch is handled only between
+dispatches: the old loop stops its change source, launches the same marked
+subscription through the current CLI, and exits.
 
 ## Agent port
 

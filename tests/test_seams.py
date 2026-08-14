@@ -24,7 +24,7 @@ from unittest import mock
 from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
-from agents_live.cli import lifecycle, upgrade_handoff
+from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
 from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
@@ -48,6 +48,7 @@ from agents_live.runtime import (
 )
 from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime.hosts.processes import LocalChildRunner
+from agents_live.runtime.watchloop import run as run_watchloop
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts.windows import WindowsProcesses
@@ -384,6 +385,93 @@ class TestDefinitionLoader(TempRepository):
 
 
 class TestDoctor(unittest.TestCase):
+    def test_package_index_rejects_a_resolved_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            resolver = root / "fake-uv.py"
+            resolver.write_text(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "output = Path(args[args.index('--output-file') + 1])\n"
+                "output.write_text('agents-live==5.5.2\\n')\n",
+                encoding="utf-8",
+            )
+            result = package_index.check(
+                "6.3.2", command=(sys.executable, str(resolver)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("5.5.2", result.resolved)
+        self.assertIn("agents-live>=6.3.2 is required", result.detail)
+
+    def test_processor_check_resolves_without_executing_the_processor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            skill = root / "Agents" / "processor-check"
+            scripts = skill / "scripts"
+            scripts.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                "---\nname: processor-check\n"
+                "description: Check processor dependencies.\nmetadata:\n"
+                '  agents-live.schema-version: "1"\n'
+                '  agents-live.selector: "none"\n'
+                '  agents-live.pre-processor: "scripts/prepare.py"\n'
+                "---\nCheck dependencies.\n",
+                encoding="utf-8",
+            )
+            executed = root / "processor-executed"
+            processor = scripts / "prepare.py"
+            task = scripts / "task.py"
+            task.write_text(
+                "# /// script\n"
+                '# requires-python = ">=3.12"\n'
+                '# dependencies = ["transitive-package"]\n'
+                "# ///\n"
+                f"from pathlib import Path\nPath({str(executed)!r}).touch()\n",
+                encoding="utf-8",
+            )
+            processor.write_text(
+                "# /// script\n"
+                '# requires-python = ">=3.12"\n'
+                '# dependencies = ["example-package"]\n'
+                "# ///\n"
+                "import subprocess\n"
+                "subprocess.run([\"uv\", \"run\", \"--script\", "
+                "\"Agents/processor-check/scripts/task.py\"])\n"
+                f"from pathlib import Path\nPath({str(executed)!r}).touch()\n",
+                encoding="utf-8",
+            )
+            calls = root / "resolver-calls.json"
+            resolver = root / "fake-uv.py"
+            resolver.write_text(
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "path = Path(os.environ['CALLS'])\n"
+                "with path.open('a', encoding='utf-8') as stream:\n"
+                "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"CALLS": str(calls)}):
+                result = processor_check.check(
+                    root, command=(sys.executable, str(resolver)))
+            call_args = [
+                json.loads(line)
+                for line in calls.read_text(encoding="utf-8").splitlines()
+            ]
+            processor_executed = executed.exists()
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual(2, result.checked)
+        self.assertFalse(processor_executed)
+        self.assertEqual({str(processor), str(task)}, {
+            args[2] for args in call_args
+        })
+        for args in call_args:
+            self.assertEqual("lock", args[0])
+            self.assertEqual("--script", args[1])
+            self.assertEqual(
+                ["--dry-run", "--refresh", "--no-cache"], args[3:])
+
     def _run(self, argv: list[str], initial: Health, result,
              *, json_mode: bool = False) -> tuple[int, str]:
         collected = mock.Mock(
@@ -1595,6 +1683,48 @@ class TestStartedState(TempRepository):
 
 
 class TestRuntimeProcessPolicy(unittest.TestCase):
+    def test_idle_watcher_retires_after_runtime_replacement(self) -> None:
+        class QuietSource:
+            def __init__(self) -> None:
+                self.started = False
+                self.stopped = False
+                self.timeouts: list[float | None] = []
+
+            def start(self) -> None:
+                self.started = True
+
+            def poll(self, timeout: float | None) -> list[str]:
+                self.timeouts.append(timeout)
+                return []
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        source = QuietSource()
+        handoffs: list[bool] = []
+        with (
+            mock.patch.object(internal, "__version__", "6.3.2"),
+            mock.patch.object(
+                internal.importlib.metadata,
+                "version",
+                side_effect=("6.3.2", "6.3.3"),
+            ),
+        ):
+            run_watchloop(
+                source,
+                parse_watch("docs/**"),
+                root=Path.cwd(),
+                fire=lambda _changed: self.fail("quiet watcher dispatched"),
+                should_continue=internal._runtime_is_current,
+                on_retire=lambda: handoffs.append(source.stopped),
+                idle_check_s=60,
+            )
+
+        self.assertTrue(source.started)
+        self.assertTrue(source.stopped)
+        self.assertEqual([60], source.timeouts)
+        self.assertEqual([True], handoffs)
+
     def test_dispatch_budget_counts_atomically_and_recovers_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "budget.json"
@@ -2585,13 +2715,37 @@ class TestArchitectureFitness(unittest.TestCase):
                 mock.patch.object(
                     upgrade, "_targets", return_value=([("legacy", root)], [])),
                 mock.patch.object(upgrade, "_handoff_windows_upgrade") as handoff,
-                mock.patch.dict(os.environ, {paths.ENV_VAR: ""}),
+                mock.patch.dict(os.environ, {
+                    paths.ENV_VAR: "",
+                    "UV_DEFAULT_INDEX": "https://pypi.org/simple",
+                }),
                 mock.patch.object(sys, "argv", ["agents-live upgrade"]),
                 contextlib.redirect_stderr(stderr),
             ):
                 self.assertEqual(1, upgrade.main())
         handoff.assert_not_called()
         self.assertIn("retired 5.x fields", stderr.getvalue())
+
+    def test_upgrade_refuses_a_stale_configured_index_before_mutation(self) -> None:
+        refused = package_index.IndexCheck(
+            False,
+            "6.3.2",
+            "5.5.2",
+            "configured index resolved 5.5.2; agents-live>=6.3.2 is required",
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(upgrade.package_index, "configured", return_value=True),
+            mock.patch.object(upgrade.package_index, "check", return_value=refused),
+            mock.patch.object(upgrade.update_check, "cached_result", return_value=None),
+            mock.patch.object(upgrade, "_targets") as targets,
+            mock.patch.object(sys, "argv", ["agents-live upgrade"]),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(1, upgrade.main())
+
+        targets.assert_not_called()
+        self.assertIn("agents-live>=6.3.2 is required", stderr.getvalue())
 
     def test_upgrade_preflight_refuses_a_retired_plugin_wheel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2614,7 +2768,10 @@ class TestArchitectureFitness(unittest.TestCase):
                 mock.patch.object(
                     upgrade, "_targets", return_value=([("plugin", root)], [])),
                 mock.patch.object(upgrade, "_handoff_windows_upgrade") as handoff,
-                mock.patch.dict(os.environ, {paths.ENV_VAR: ""}),
+                mock.patch.dict(os.environ, {
+                    paths.ENV_VAR: "",
+                    "UV_DEFAULT_INDEX": "https://pypi.org/simple",
+                }),
                 mock.patch.object(sys, "argv", ["agents-live upgrade"]),
                 contextlib.redirect_stderr(stderr),
             ):

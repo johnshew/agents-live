@@ -18,7 +18,7 @@ from ...legacy import triggers
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
 from ...state import registry as repos
-from .. import upgrade_handoff
+from .. import package_index, update_check, upgrade_handoff
 from ..scripts import dashboards
 from . import init
 
@@ -351,7 +351,7 @@ def _running_watchers() -> list[tuple[int, str, str | None]]:
 
 def _report_stale_watchers(
         before: list[tuple[int, str, str | None]], end: dict) -> None:
-    """Name the watchers still running the version just replaced.
+    """Name watchers waiting to hand off from the version just replaced.
 
     Replacing the runtime does not stop the processes already running
     it, on any host. A running process has its code loaded and keeps
@@ -363,9 +363,11 @@ def _report_stale_watchers(
     carries on with the previous release, which is version skew with
     nothing to connect it to its cause (#188).
 
-    Restarting them is deliberately not done here: it would interrupt a
-    watcher mid-dispatch, which is a policy an upgrade should not decide
-    on its own.
+    Each watcher compares its loaded version with the installed distribution
+    at the top of its loop. It finishes any synchronous dispatch, stops its
+    change source, and starts the same marked subscription through the current
+    launcher. The upgrade reports the temporary skew; it never kills the
+    watcher mid-dispatch.
 
     Reported per watcher rather than per process: one watcher is more
     than one process on Windows (the shim executes an interpreter, which
@@ -381,17 +383,17 @@ def _report_stale_watchers(
         return
     end["stale_watcher_agents"] = ", ".join(
         sorted({name for name, _ in stale}))
-    print(f"warning: {len(stale)} watcher(s) are still running the "
-          f"previous version and will until restarted:", file=sys.stderr)
+    print(f"note: {len(stale)} watcher(s) are finishing on the previous "
+          f"version and will restart themselves from the new runtime:",
+          file=sys.stderr)
     for (name, project), pids in sorted(stale.items(),
                                         key=lambda row: (row[0][0],
                                                          min(row[1]))):
         where = project if project else "project not named on the command line"
         listed = ", ".join(str(pid) for pid in sorted(pids))
         print(f"  {name} (pid {listed}, {where})", file=sys.stderr)
-    print("restart each one in its own project: `agents-live --repo <path> "
-          "stop <name>` then `agents-live --repo <path> start <name>`",
-          file=sys.stderr)
+        print("each watcher hands off at its next idle version check (within "
+                    "60 seconds when already idle)", file=sys.stderr)
 
 
 def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
@@ -474,6 +476,15 @@ def main() -> int:
                 code="source_missing")
             return 1
         source = source.resolve()
+
+    if source is None and not args.skills_only and package_index.configured():
+        cached = update_check.cached_result() or {}
+        index = package_index.check(
+            __version__, latest=cached.get("latest_version"))
+        if not index.ok:
+            preflight.emit_failure("upgrade", index.detail, code="package_index_stale")
+            return 1
+        print(index.detail)
 
     continuation_environment = args.continuation_environment
     if continuation_environment is not None:
