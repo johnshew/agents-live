@@ -6,6 +6,30 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: refuse package-index downgrades before upgrade mutation. (#320)
+  An explicitly configured uv mirror must fresh-resolve at least the installed
+  stable version, or the newer stable release already found by the update
+  check. Failure stops upgrade before any mutation or deferred handoff.
+- fix: let stale watchers hand off after a runtime upgrade. (#204)
+  A watcher finishes any active dispatch, stops its change source, and
+  immediately relaunches its marked subscription through the current runtime;
+  an idle watcher checks within 60 seconds.
+- fix: diagnose dependency failures after Python processor crashes. (#254)
+  A failed PEP 723 processor is never rerun; dispatch fresh-resolves only its
+  dependency graph and records whether resolution failed or an import/API
+  incompatibility remains.
+- fix: restore isolated, schema-checked Copilot-family pipeline runs. (#317)
+  The standalone stdio bridge no longer shadows the MCP SDK, fenced `put`
+  blocks seed frozen run-scoped schemas again, and Copilot exposes only the
+  pipeline tools plus its inert completion control. Post-processed runs retain
+  provider usage and transcript metadata, and a real subprocess handshake now
+  guards the bridge on Windows and Ubuntu.
+- docs: add complete mediated Markdown-polisher examples and clarify local operational boundaries. (#116, #215, #234)
+  Runnable plan and pipeline variants enforce the changed-file set before
+  writing. The command and diagnostics guides describe uninstall refusal and
+  deferred Windows completion, while the dashboard endpoint records why its
+  unauthenticated inventory requires a loopback-only bind.
+
 ## 6.3.2 - 2026-08-13
 
 - fix: let a state write wait out a Windows hold on its destination.

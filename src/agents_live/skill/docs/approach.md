@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-13
+ms.date: 2026-08-14
 ms.topic: concept-article
 ---
 
@@ -34,6 +34,11 @@ or stale record triggers that same maintenance operation once, followed by one
 more freshness check. The command answers only for the runtime where it runs;
 it neither discovers nor probes another runtime.
 
+Long-lived watchers compare their loaded package version with the installed
+distribution at a bounded idle check. A mismatch is handled only between
+dispatches: the old loop stops its change source, launches the same marked
+subscription through the current CLI, and exits.
+
 ## Agent port
 
 `agent/` owns a runnable unit of work through five pure operations:
@@ -59,6 +64,13 @@ PTY selection, run-scoped pipeline resources, timeout enforcement, and cleanup.
 Output is normalized after child exit. The provider formats and validation
 contract require complete values, so schema version 1 has no incremental
 provider parsing hook.
+
+Pipeline definitions may declare ordered fenced `put` blocks in their body.
+Dispatch seeds those values into the run-scoped MCP before the first phase,
+and seeded paths remain frozen for the run. Copilot-family pipeline launches
+make only the `pipeline` server and Copilot's inert `task_complete` control
+available to the model; project, built-in, shell, and write tools remain
+unavailable.
 
 ## State and observability
 

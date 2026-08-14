@@ -26,6 +26,22 @@ class CopilotProvider:
         flags = ["--autopilot", "--no-ask-user", "--no-custom-instructions"]
         if spec.mode == "write":
             flags.insert(0, "--allow-all-tools")
+        elif spec.mode == "pipeline":
+            tools = spec.allow_tools or ("pipeline",)
+            disallowed = set(tools) - {"pipeline"}
+            if disallowed:
+                raise ValueError(
+                    "pipeline mode cannot allow tools: "
+                    + ", ".join(sorted(disallowed)))
+            available = (*tools, "task_complete")
+            flags.extend((
+                "--deny-tool", "shell",
+                "--deny-tool", "write",
+                "--disable-builtin-mcps",
+                "--available-tools", *available,
+            ))
+            for tool in available:
+                flags.extend(("--allow-tool", tool))
         else:
             flags.extend(("--deny-tool", "shell", "--deny-tool", "write"))
             for tool in spec.allow_tools:

@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-08-09
+ms.date: 2026-08-14
 ms.topic: reference
 ---
 
@@ -84,6 +84,30 @@ The Agents Live key can only narrow tools during an unattended run.
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired
 5.x names.
+
+## Pipeline seed values
+
+A `pipeline` definition can pre-populate the run-scoped side channel with
+fenced `put` blocks in its body:
+
+````markdown
+```put /output/result/$schema
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["summary"]
+}
+```
+````
+
+The path must start with `/`, and the fence body must be one JSON value.
+Agents Live parses the blocks in document order before any processor or
+provider runs. Seeded paths are read-only to the agent, so an output schema or
+referenced schema document cannot be replaced by the value it validates.
+
+Use a pre-processor for values that depend on files, changed paths, or current
+host state. Pre-processors and post-processors receive `PIPELINE_MCP_URL` and
+`PIPELINE_MCP_TOKEN` and can use the MCP SDK to call `put` and `get`.
 
 ## Migrating from 5.x
 

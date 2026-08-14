@@ -66,6 +66,7 @@ class AgentSpec:
     execution: AgentsLiveConfig | None
     body: str
     unknown_metadata: tuple[str, ...] = ()
+    pipeline_puts: tuple[tuple[str, object], ...] = ()
 
     @property
     def name(self) -> str:

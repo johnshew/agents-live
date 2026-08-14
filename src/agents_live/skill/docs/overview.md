@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-08-08
+ms.date: 2026-08-14
 ms.topic: overview
 ---
 
@@ -69,6 +69,11 @@ waits for a fresh beacon, and only then replaces the prior task.
   before a post-processor receives output.
 - Definitions and repository registries never contain machine-local started
   state, process records, logs, credentials, or host assignment.
+
+The quick-start Markdown polisher uses `write` mode for a minimal first run.
+The complete [plan and pipeline variants](markdown-polisher.md) perform the
+same task with schema validation and deterministic processors that enforce the
+changed-file set before writing.
 
 Malformed definitions fail closed. An unreadable registry or started-state
 record causes convergence to abstain rather than prune. Two narrower failures

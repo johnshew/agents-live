@@ -20,6 +20,13 @@ through refactors. Every infrastructure change should name the
 cheapest executable check that can falsify it before running the
 broader suite.
 
+A behavior is owed an executing test when it crosses a platform seam, is
+observable only as a side effect, or is a documented user-facing exit path.
+Drive the real boundary and assert the observable outcome rather than source
+text or a mocked translation. Before keeping a regression test, demonstrate
+that it fails when its fix is absent; a test that stays green does not guard
+the defect.
+
 ## Test boundaries
 
 Keep these execution modes distinct. A passing editable-source command does

@@ -214,9 +214,33 @@ def _load_prompt(prompt: Path, repository: Path) -> AgentSpec:
     unknown_metadata = tuple(sorted(
         key for key, _ in properties.metadata
         if key.startswith("agents-live.") and key not in _EXECUTION_FIELDS))
+    pipeline_puts = (
+        _parse_put_fences(body, prompt)
+        if execution is not None and execution.mode == "pipeline"
+        else ()
+    )
     return AgentSpec(
         repository, skill_root, prompt, properties, execution, body,
-        unknown_metadata)
+        unknown_metadata, pipeline_puts)
+
+
+def _parse_put_fences(body: str, prompt: Path) -> tuple[tuple[str, object], ...]:
+    """Return ordered static values declared by fenced pipeline puts."""
+    pattern = re.compile(
+        r"^```put[ \t]+(/[^\s`]+)[ \t]*\n(.*?)\n```",
+        re.DOTALL | re.MULTILINE,
+    )
+    puts: list[tuple[str, object]] = []
+    for match in pattern.finditer(body):
+        path = match.group(1)
+        try:
+            value = json.loads(match.group(2))
+        except json.JSONDecodeError as exc:
+            raise DefinitionError(
+                f"invalid JSON in `put {path}` fence in {prompt}: {exc}"
+            ) from exc
+        puts.append((path, value))
+    return tuple(puts)
 
 
 def _explicit_prompt(candidate: Path, repository: Path) -> Path:
