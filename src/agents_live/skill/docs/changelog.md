@@ -14,10 +14,11 @@ history is retained in the source repository.
   A watcher finishes any active dispatch, stops its change source, and
   immediately relaunches its marked subscription through the current runtime;
   an idle watcher checks within 60 seconds.
-- feat: add an opt-in fresh dependency check for Python processors. (#254)
-  `doctor --check-processors` resolves directly declared PEP 723 processor
-  dependencies and literal repository-local `uv run --script` children from a
-  fresh temporary uv cache without executing scripts or writing lockfiles.
+- feat: add automatic dependency diagnosis for Python processor crashes. (#254)
+  A failed PEP 723 processor is never rerun; dispatch fresh-resolves only its
+  dependency graph and records whether resolution failed or an import/API
+  incompatibility remains. `doctor --check-processors` keeps the same
+  non-executing resolver as an optional repository-wide release check.
 - fix: restore isolated, schema-checked Copilot-family pipeline runs. (#317)
   The standalone stdio bridge no longer shadows the MCP SDK, fenced `put`
   blocks seed frozen run-scoped schemas again, and Copilot exposes only the
