@@ -463,7 +463,7 @@ class TestDoctor(unittest.TestCase):
         self.assertTrue(result.ok, result)
         self.assertEqual(2, result.checked)
         self.assertFalse(processor_executed)
-        self.assertEqual({str(processor), str(task)}, {
+        self.assertEqual({str(processor.resolve()), str(task.resolve())}, {
             args[2] for args in call_args
         })
         for args in call_args:
