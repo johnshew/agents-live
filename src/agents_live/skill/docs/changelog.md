@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.2 - 2026-08-13
+
 - fix: let a state write wait out a Windows hold on its destination.
   Every durable file this tool keeps goes through one atomic write, whose
   concluding rename succeeds on POSIX no matter who holds the target open.
