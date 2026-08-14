@@ -6,6 +6,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: stop sending provider CLIs an `--mcp` flag they never accepted. (#296)
+  Neither `copilot` nor `claude` has ever had a bare `--mcp` option, so every
+  agent declaring `agents-live.mcps` outside pipeline mode was rejected at
+  startup before the agent ran. Server definitions already reach both CLIs
+  through their config-file flags, which is the mechanism pipeline mode has
+  always used. The fifth cross-module invariant now probes each installed
+  CLI's own help text and fails on any flag a provider emits that the CLI
+  does not accept, so a fake runner can no longer enshrine an argument the
+  real command rejects.
+
 ## 6.3.0 - 2026-08-13
 
 - fix: report an oversized prompt as an oversized prompt.

@@ -17,7 +17,9 @@ import io
 import importlib
 import json
 import os
+import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,7 +37,7 @@ from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import start
 from agents_live.legacy import health_check
 from agents_live.obs import qlog
-from agents_live.agent.values import RawOutput, Request, ResolvedSpec
+from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
 from agents_live.runtime import artifacts
@@ -1600,6 +1602,52 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     "--output-format", self._launch(name).argv,
                     f"{name} would parse a human-facing footer, which is "
                     "printed on some hosts and not others")
+
+    def test_every_flag_a_provider_emits_is_one_its_cli_accepts(self) -> None:
+        """A fake runner accepts any flag; the real CLI does not.
+
+        The provider seam was covered by tests that recorded argv and
+        asserted what the code already emitted, so ``--mcp`` -- a flag
+        neither ``copilot`` nor ``claude`` has ever had -- was asserted
+        into place and every agent declaring ``mcps`` failed at startup
+        against the real binary (#296). Ask the installed CLI what it
+        accepts instead of asking the code what it sends.
+        """
+        checked = 0
+        for name in providers.names():
+            argv = self._launch_with_project_mcp(name).argv
+            if argv[0] == sys.executable:
+                continue  # an in-tree double, whose flags this repo defines
+            executable = shutil.which(argv[0])
+            if executable is None:
+                continue  # the CLI this provider drives is not installed here
+            help_text = subprocess.run(
+                [executable, "--help"], capture_output=True, text=True,
+                check=False, timeout=120).stdout
+            if "--help" not in help_text:
+                continue  # the probe itself did not answer; prove nothing
+            checked += 1
+            for flag in (token for token in argv if token.startswith("--")):
+                with self.subTest(provider=name, flag=flag):
+                    self.assertRegex(
+                        help_text, re.escape(flag) + r"(?![\w-])",
+                        f"{name} sends {flag}, which {argv[0]} does not "
+                        "accept, so every run of an agent that reaches "
+                        "this path fails before the agent starts")
+        if not checked:
+            self.skipTest("no provider CLI is installed on this host")
+
+    def _launch_with_project_mcp(self, name: str):
+        """A launch that exercises the project-MCP path, which is where a
+        declared ``mcps`` list turns into flags."""
+        return providers.get(name).prepare(
+            ResolvedSpec(
+                "invariant", "prompt", "write", (),
+                (McpServer("repo-tool", {"type": "stdio", "command": "uv"}),),
+                (("AGENTS_LIVE_PROJECT_MCP_CONFIG", "config.json"),),
+                name, None, None),
+            Request(),
+        )
 
     def test_every_test_file_is_run_by_the_gates_and_by_ci(self) -> None:
         """A suite the release does not run is not a gate.
