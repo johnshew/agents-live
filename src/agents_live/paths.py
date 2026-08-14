@@ -62,6 +62,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -427,6 +428,39 @@ def validated_plugins(root: Path, values: object, *,
     return result
 
 
+_REPLACE_DEADLINE_SECONDS = 2.0
+
+
+def _replace_when_windows_lets_go(temporary: str, path: Path) -> None:
+    """``os.replace``, waiting out a Windows hold on the destination.
+
+    POSIX ``rename`` succeeds no matter who holds the target open, so
+    this loop is inert there: the first attempt either works or fails
+    for a reason waiting cannot cure. Windows instead refuses with
+    ``ERROR_ACCESS_DENIED`` for as long as any process holds the
+    destination open without ``FILE_SHARE_DELETE`` -- which every plain
+    ``open()`` omits, so one process merely *reading* a state file
+    defeats another's write. Antivirus and search indexers take the same
+    kind of hold on a freshly written file.
+
+    Every such holder releases in milliseconds, so a bounded retry turns
+    a spurious hard failure into a brief wait. A caller that still times
+    out sees the original error, because at that point the destination
+    is genuinely unavailable rather than momentarily busy.
+    """
+    deadline = time.monotonic() + _REPLACE_DEADLINE_SECONDS
+    delay = 0.005
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.05)
+
+
 def atomic_write_text(path: Path, content: str, *,
                       mode: int | None = None) -> None:
     """Write-temp-then-rename so readers never observe a partial file.
@@ -434,7 +468,8 @@ def atomic_write_text(path: Path, content: str, *,
     The temp file lives in the target directory (same filesystem, so
     ``os.replace`` is atomic), is fsynced before the rename, and is
     removed on any failure. ``mode`` restricts permissions before any
-    content is written."""
+    content is written. The rename waits out a momentary Windows hold on
+    the destination rather than failing the write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent, text=True)
@@ -457,7 +492,7 @@ def atomic_write_text(path: Path, content: str, *,
         os.fsync(handle.fileno())
         handle.close()
         handle = None
-        os.replace(temporary, path)
+        _replace_when_windows_lets_go(temporary, path)
     except BaseException:
         # Close before unlinking: Windows refuses to remove a file that
         # anything still holds open, and a failure before fdopen leaves

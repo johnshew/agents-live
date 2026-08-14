@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -1039,6 +1040,69 @@ class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
             "Run completed\nhandler output\n", encoding="utf-8")
         self.assertEqual(2, obs.query.damaged(obs.files(directory)))
         self.assertEqual(1, len(obs.load(obs.files(directory))))
+
+
+class TestStateSurvivesAConcurrentReader(TempRepository):
+    """One process reading a state file must not fail another's write.
+
+    Every durable file this tool keeps - started intent, the dashboard
+    registry, health and update records - is written through
+    `atomic_write_text`. On POSIX the concluding `rename` succeeds no
+    matter who holds the target open, so the primitive read as safe.
+    Windows refuses with `ERROR_ACCESS_DENIED` while any process holds
+    the destination open without `FILE_SHARE_DELETE`, which every plain
+    `open()` omits. So one command merely *reading* a state file made
+    another's write fail outright, and the same hold is what antivirus
+    and search indexers take on a freshly written file.
+
+    That surfaced as a traceback from `dashboard`, but the registry it
+    failed on is the least of the files involved: the same primitive
+    records which agents are started.
+    """
+
+    def _target(self) -> Path:
+        target = paths.repo_state_dir(self.root) / "registry.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("original\n", encoding="utf-8")
+        return target
+
+    def test_a_write_waits_out_a_reader_holding_the_destination(self) -> None:
+        target = self._target()
+        reader = target.open("r", encoding="utf-8")
+        timer = threading.Timer(0.2, reader.close)
+        timer.start()
+        try:
+            paths.atomic_write_text(target, "replacement\n")
+        finally:
+            timer.cancel()
+            reader.close()
+        self.assertEqual("replacement\n", target.read_text(encoding="utf-8"))
+
+    def test_a_destination_that_never_frees_still_reports_the_failure(self) -> None:
+        """Waiting must not become swallowing: a real block still raises."""
+        target = self._target()
+        with mock.patch.object(
+                paths.os, "replace",
+                side_effect=PermissionError(13, "held")):
+            with self.assertRaises(PermissionError):
+                paths.atomic_write_text(target, "replacement\n")
+        self.assertEqual("original\n", target.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [], [entry for entry in target.parent.iterdir()
+                 if entry.name.startswith(f".{target.name}.")],
+            "a failed write left its temp file behind")
+
+    def test_waiting_is_bounded(self) -> None:
+        """An unavailable destination fails in seconds, not never."""
+        target = self._target()
+        with mock.patch.object(
+                paths.os, "replace",
+                side_effect=PermissionError(13, "held")):
+            started = time.monotonic()
+            with self.assertRaises(PermissionError):
+                paths.atomic_write_text(target, "replacement\n")
+            waited = time.monotonic() - started
+        self.assertLess(waited, 30.0, f"waited {waited:.1f}s before failing")
 
 
 class TestRunsRecordWhatTheySpent(TempRepository):
