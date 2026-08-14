@@ -35,6 +35,7 @@ class ProcessorCheck:
 
 def processor_paths(root: Path) -> tuple[Path, ...]:
     """Declared processors and literal repository-local scripts they invoke."""
+    root = root.resolve()
     found: set[Path] = set()
     pending: list[Path] = []
     for spec in agent.discover(root).specs:
@@ -98,6 +99,7 @@ def check(
     timeout: float = 120,
 ) -> ProcessorCheck:
     """Resolve processor dependencies from an empty cache without execution."""
+    root = root.resolve()
     try:
         prefix = command or (find_uv(),)
         paths = processor_paths(root)
