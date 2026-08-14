@@ -1920,6 +1920,46 @@ class TestAgentPipeline(TempRepository):
         self.assertTrue(result.ok, result)
         self.assertIsNone(runner.inputs[-1])
 
+    def test_pipeline_definition_put_fences_seed_the_resource(self) -> None:
+        self.skill(
+            "seeded-pipeline",
+            [
+                'agents-live.selector: "fake"',
+                'agents-live.mode: "pipeline"',
+            ],
+            body=(
+                "Publish a result.\n\n"
+                "```put /output/result/$schema\n"
+                '{"type":"object","required":["ok"]}\n'
+                "```"
+            ),
+        )
+        runner = RecordingRunner([
+            ChildResult(
+                ("fake",), 0,
+                json.dumps({"text": "done", "structured": {"ok": True}}),
+                "",
+            ),
+        ])
+
+        result = dispatch(
+            Firing("seeded-pipeline", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        pipeline_logs = list(
+            (paths.repo_state_dir(self.root) / "runs" / "seeded-pipeline").glob(
+                "*-pipeline.jsonl"))
+        self.assertEqual(1, len(pipeline_logs))
+        records = obs.load(pipeline_logs)
+        seeded = [
+            record for record in records
+            if record.get("op") == "seed"
+            and record.get("path") == "/output/result/$schema"
+        ]
+        self.assertEqual(1, len(seeded))
+
     def test_transcript_records_the_argv_the_child_was_launched_with(self) -> None:
         """The transcript is the only place the launched command survives.
 
@@ -1940,6 +1980,31 @@ class TestAgentPipeline(TempRepository):
         self.assertIsNotNone(result.transcript)
         transcript = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
         self.assertEqual(list(argv), transcript["argv"])
+
+    def test_post_processor_preserves_agent_usage_and_transcript(self) -> None:
+        self.skill("telemetry", [
+            'agents-live.selector: "fake"',
+            'agents-live.post-processor: "scripts/post.py"',
+        ])
+        spec = agent.load("telemetry", root=self.root)
+        result = agent.outcome(spec, {
+            agent.Step.AGENT: agent.StepResult(
+                agent.Step.AGENT,
+                True,
+                text="provider output",
+                usage=(("premium_requests", "1"),),
+                transcript="provider-transcript.json",
+            ),
+            agent.Step.POST: agent.StepResult(
+                agent.Step.POST,
+                True,
+                text="post-processor output",
+            ),
+        })
+
+        self.assertEqual("post-processor output", result.text)
+        self.assertEqual((("premium_requests", "1"),), result.usage)
+        self.assertEqual("provider-transcript.json", result.transcript)
 
     def test_a_quiet_run_records_what_the_processor_produced(self) -> None:
         """A scheduled run is quiet and its streams go nowhere.
@@ -2101,6 +2166,34 @@ class TestAgentPipeline(TempRepository):
         self.assertEqual("agent_invalid", result.category)
         self.assertIn("pipeline mode", result.message)
         self.assertEqual([], runner.argv)
+
+    def test_copilot_pipeline_exposes_only_the_pipeline_tool(self) -> None:
+        self.skill("isolated-copilot", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mode: "pipeline"',
+        ])
+        runner = RecordingRunner([
+            ChildResult(("copilot",), 0, "done", ""),
+        ])
+
+        result = dispatch(
+            Firing("isolated-copilot", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        argv = runner.argv[-1]
+        self.assertIn("--disable-builtin-mcps", argv)
+        self.assertEqual(
+            ("--available-tools", "pipeline", "task_complete"),
+            argv[argv.index("--available-tools"):argv.index("--available-tools") + 3],
+        )
+        allowed = [
+            argv[index + 1]
+            for index, value in enumerate(argv[:-1])
+            if value == "--allow-tool"
+        ]
+        self.assertEqual(["pipeline", "task_complete"], allowed)
 
     def test_declared_mcp_without_project_definition_fails_before_cli(self) -> None:
         self.skill("missing-mcp", [

@@ -60,6 +60,13 @@ Output is normalized after child exit. The provider formats and validation
 contract require complete values, so schema version 1 has no incremental
 provider parsing hook.
 
+Pipeline definitions may declare ordered fenced `put` blocks in their body.
+Dispatch seeds those values into the run-scoped MCP before the first phase,
+and seeded paths remain frozen for the run. Copilot-family pipeline launches
+make only the `pipeline` server and Copilot's inert `task_complete` control
+available to the model; project, built-in, shell, and write tools remain
+unavailable.
+
 ## State and observability
 
 Repository registration says where to collect. Machine-local started state says

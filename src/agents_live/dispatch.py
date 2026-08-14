@@ -296,7 +296,11 @@ def _resource(spec, needed: bool, run_id: str):
                 / f"{run_id}-pipeline.jsonl"
             )
             environment.update(
-                stack.enter_context(pipeline_runtime(log, run_id=run_id))
+                stack.enter_context(pipeline_runtime(
+                    log,
+                    seed_puts=list(spec.pipeline_puts),
+                    run_id=run_id,
+                ))
             )
         yield tuple(sorted(environment.items()))
 

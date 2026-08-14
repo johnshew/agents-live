@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-13
+ms.date: 2026-08-14
 ms.topic: reference
 ---
 
@@ -91,7 +91,11 @@ agents-live stop link-check --dry-run
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.
   A scan covers `Agents/` and every configured `agent_directories` root.
-- `uninstall` removes host integration.
+- `uninstall` removes host integration and the uv-managed tool. If a watcher
+  from that installation does not stop within the grace period, the command
+  exits nonzero before host cleanup and names the processes to stop. On native
+  Windows, a successful command queues final tool removal until its own
+  processes exit; `uv tool list` can show the tool briefly afterward.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.
 - `dashboard` opens the local operational UI.

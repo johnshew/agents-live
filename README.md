@@ -79,10 +79,9 @@ This is tool policy, not a sandbox. Agents still inherit the permissions of
 your local account and agent CLI.
 
 The example uses `write` so it can fix documents directly. For tighter
-control, use [`plan`](src/agents_live/skill/docs/approach.md#execution-modes)
-with a validated post-processor or
-[`pipeline`](src/agents_live/skill/docs/approach.md#execution-modes) with
-schema-checked pre-processors and post-processors.
+control, use the complete [plan and pipeline Markdown-polisher
+examples](src/agents_live/skill/docs/markdown-polisher.md). They apply the
+same correction task through validated, deterministic write boundaries.
 
 ## Installation
 

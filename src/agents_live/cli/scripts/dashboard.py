@@ -791,6 +791,10 @@ def api_agents() -> dict:
     the served HTML. Checks that run outside a browser, the framework
     smoketest among them, read this instead, which makes "the dashboard
     started, resolved a project, and can see its agents" one assertion.
+
+    This endpoint exposes the host label, absolute repository path, and agent
+    inventory without authentication. Keep DASHBOARD_HOST loopback-only unless
+    the endpoint gains an authentication and network-exposure design (#215).
     """
     return {
         "host": ownership.current_label(),

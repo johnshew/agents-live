@@ -284,6 +284,20 @@ Never inspect runtime log files by hand. Use `agents-live logs` and
 `agents-live logs timeline`; they correlate versioned event records and
 provider transcripts.
 
+## Uninstall outcomes
+
+`agents-live uninstall` stops watchers running from the managed tool
+environment before it removes host integration. If a watcher remains alive
+after the grace period, uninstall exits nonzero, names the surviving process,
+and removes nothing. Stop the named watcher, or use `agents-live stop` for its
+definition, then run uninstall again.
+
+Native Windows cannot delete the executable that is running the uninstall.
+After host cleanup succeeds, the command queues an external helper, reports
+that removal will finish after the command exits, and returns success.
+`uv tool list` can continue to show Agents Live briefly while that helper waits
+for the tool environment to become idle.
+
 ## Dispatch skips
 
 Automatic firings can be skipped because the definition is stopped, a clock

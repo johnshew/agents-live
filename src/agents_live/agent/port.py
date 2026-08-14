@@ -204,14 +204,15 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
     if pre is not None and pre.skip:
         return Outcome(True, "skipped", pre.text)
     final = results.get(Step.POST) or results.get(Step.AGENT) or pre
+    telemetry = results.get(Step.AGENT) or final
     return Outcome(
         True,
         "success",
         final.text if final else "",
         final.structured if final else None,
         message=final.message if final else "",
-        usage=final.usage if final else (),
-        transcript=final.transcript if final else None,
+        usage=telemetry.usage if telemetry else (),
+        transcript=telemetry.transcript if telemetry else None,
     )
 
 
