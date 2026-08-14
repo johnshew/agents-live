@@ -404,7 +404,7 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual("5.5.2", result.resolved)
         self.assertIn("agents-live>=6.3.2 is required", result.detail)
 
-    def test_processor_check_resolves_without_executing_the_processor(self) -> None:
+    def test_processor_diagnosis_resolves_without_executing_the_processor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             skill = root / "Agents" / "processor-check"
@@ -452,16 +452,20 @@ class TestDoctor(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.dict(os.environ, {"CALLS": str(calls)}):
-                result = processor_check.check(
-                    root, command=(sys.executable, str(resolver)))
+                result = processor_check.diagnose(
+                    root,
+                    processor,
+                    "ModuleNotFoundError: removed_api",
+                    command=(sys.executable, str(resolver)),
+                )
             call_args = [
                 json.loads(line)
                 for line in calls.read_text(encoding="utf-8").splitlines()
             ]
             processor_executed = executed.exists()
 
-        self.assertTrue(result.ok, result)
-        self.assertEqual(2, result.checked)
+        self.assertIsNotNone(result)
+        self.assertIn("compatible version bound", result)
         self.assertFalse(processor_executed)
         self.assertEqual({str(processor.resolve()), str(task.resolve())}, {
             args[2] for args in call_args

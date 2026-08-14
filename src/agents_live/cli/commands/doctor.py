@@ -11,9 +11,9 @@ import sys
 import time
 from pathlib import Path
 
-from ... import __version__, paths, runtime, state
+from ... import paths, runtime, state
 from ...state import registry as repos
-from .. import lifecycle, package_index, processor_check, update_check
+from .. import lifecycle, update_check
 from . import internal
 
 
@@ -26,21 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quick", action="store_true")
-    parser.add_argument("--check-processors", action="store_true")
-    parser.add_argument("--check-index", action="store_true")
     args = parser.parse_args(argv)
     if args.quick:
         return _quick()
     checks: list[dict[str, object]] = []
-    if args.check_index:
-        cached = update_check.cached_result() or {}
-        result = package_index.check(
-            __version__, latest=cached.get("latest_version"))
-        checks.append({
-            "check": "configured package index",
-            "ok": result.ok,
-            "detail": result.detail,
-        })
     try:
         registry = repos.load()
     except ValueError as exc:
@@ -77,13 +66,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 checks.append({
                     "check": f"started state {name}", "ok": True, "detail": "readable"})
-                if args.check_processors:
-                    result = processor_check.check(root)
-                    checks.append({
-                        "check": f"processor dependencies {name}",
-                        "ok": result.ok,
-                        "detail": result.detail,
-                    })
                 torn = _damaged_records(root)
                 if torn:
                     # Reported, not failed: the loss is in history a

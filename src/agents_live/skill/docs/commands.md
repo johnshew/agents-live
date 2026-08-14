@@ -80,15 +80,6 @@ agents-live stop link-check --dry-run
   returns immediately; a missing or stale record runs automatic maintenance
   once and checks again. The command exits nonzero unless a current record
   exists after that attempt. It checks only the runtime where it runs.
-- `doctor --check-index` asks uv's configured resolver to supply at least the
-  installed stable version, or the newer stable version already found by the
-  update check. It uses a fresh temporary cache and does not mutate the tool.
-- `doctor --check-processors` fresh-resolves PEP 723 dependencies for directly
-  declared Python pre-processors and post-processors without executing them or
-  writing lockfiles. It recursively follows literal repository-local paths
-  passed to `uv run --script`; dynamically constructed paths are not
-  discoverable. This is an optional networked deep check for release or host
-  validation, not a prerequisite for ordinary `run` or `start` commands.
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
@@ -149,7 +140,7 @@ logs         ::= "logs" ( logs_query | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
-doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ] [ "--check-processors" ] [ "--check-index" ]
+doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
 init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--runtime-only" ] [ "--skills-only" ] [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
@@ -172,7 +163,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
-| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick, --check-processors, --check-index | Check environment and installation readiness. |
+| doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --runtime-only, --skills-only, --from | Upgrade runtime and project skill payloads. |
 | migrate | in-process | required |  |  |  |  | --dry-run, --bundle | Convert 5.x flat definitions. |

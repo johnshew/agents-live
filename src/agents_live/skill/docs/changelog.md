@@ -9,16 +9,15 @@ history is retained in the source repository.
 - fix: refuse package-index downgrades before upgrade mutation. (#320)
   An explicitly configured uv mirror must fresh-resolve at least the installed
   stable version, or the newer stable release already found by the update
-  check. `doctor --check-index` exposes the same read-only diagnostic.
+  check. Failure stops upgrade before any mutation or deferred handoff.
 - fix: let stale watchers hand off after a runtime upgrade. (#204)
   A watcher finishes any active dispatch, stops its change source, and
   immediately relaunches its marked subscription through the current runtime;
   an idle watcher checks within 60 seconds.
-- feat: add automatic dependency diagnosis for Python processor crashes. (#254)
+- fix: diagnose dependency failures after Python processor crashes. (#254)
   A failed PEP 723 processor is never rerun; dispatch fresh-resolves only its
   dependency graph and records whether resolution failed or an import/API
-  incompatibility remains. `doctor --check-processors` keeps the same
-  non-executing resolver as an optional repository-wide release check.
+  incompatibility remains.
 - fix: restore isolated, schema-checked Copilot-family pipeline runs. (#317)
   The standalone stdio bridge no longer shadows the MCP SDK, fenced `put`
   blocks seed frozen run-scoped schemas again, and Copilot exposes only the

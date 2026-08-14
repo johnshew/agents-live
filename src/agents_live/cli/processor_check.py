@@ -8,7 +8,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import agent
 from ..runtime.spawn import find_uv
 
 _PEP_723 = re.compile(
@@ -31,24 +30,6 @@ class ProcessorCheck:
                 + "; ".join(self.failures)
             )
         return f"{self.checked} PEP 723 processor(s) resolved from a fresh cache"
-
-
-def processor_paths(root: Path) -> tuple[Path, ...]:
-    """Declared processors and literal repository-local scripts they invoke."""
-    root = root.resolve()
-    pending: list[Path] = []
-    for spec in agent.discover(root).specs:
-        config = spec.execution
-        if config is None:
-            continue
-        for reference in (config.pre_processor, config.post_processor):
-            if not reference:
-                continue
-            path = (spec.skill_root / reference).resolve()
-            if path.suffix.lower() != ".py":
-                continue
-            pending.append(path)
-    return _expanded_paths(root, pending)
 
 
 def _expanded_paths(root: Path, pending: list[Path]) -> tuple[Path, ...]:
@@ -96,22 +77,6 @@ def _script_references(text: str) -> tuple[str, ...]:
     return tuple(sorted(references))
 
 
-def check(
-    root: Path,
-    *,
-    command: tuple[str, ...] | None = None,
-    timeout: float = 120,
-) -> ProcessorCheck:
-    """Resolve processor dependencies from an empty cache without execution."""
-    root = root.resolve()
-    try:
-        prefix = command or (find_uv(),)
-        paths = processor_paths(root)
-    except (OSError, UnicodeError, agent.DefinitionError) as exc:
-        return ProcessorCheck(False, 0, (str(exc),))
-    return _check_paths(root, paths, prefix, timeout)
-
-
 def diagnose(
     root: Path,
     processor: Path,
@@ -130,7 +95,7 @@ def diagnose(
         if not paths:
             return None
         prefix = command or (find_uv(),)
-    except (OSError, UnicodeError, agent.DefinitionError):
+    except (OSError, UnicodeError):
         return None
     result = _check_paths(root, paths, prefix, timeout)
     if not result.ok:
@@ -201,4 +166,4 @@ def _check_paths(
     return ProcessorCheck(not failures, len(paths), tuple(failures))
 
 
-__all__ = ["ProcessorCheck", "check", "diagnose", "processor_paths"]
+__all__ = ["diagnose"]

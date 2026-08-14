@@ -13,24 +13,7 @@ agents-live doctor --all-repos
 agents-live logs timeline --all
 ```
 
-Use the networked checks only when you want fresh external resolution:
-
-```bash
-agents-live doctor --check-index
-agents-live doctor --check-processors
-```
-
-The index check asks the configured uv resolver for a non-downgrading Agents
-Live version. The processor check asks uv to resolve each directly declared
-PEP 723 Python processor from a fresh temporary cache without executing the
-script or writing a lockfile. Literal repository-local paths passed to
-`uv run --script` are followed recursively. A processor can construct paths at
-runtime; those dynamic scripts must be checked separately or promoted to
-directly declared processors.
-
-The full processor check is intentionally explicit because fresh network
-resolution across a repository can take minutes. Users do not need to run it
-before ordinary work. When a PEP 723 pre-processor or post-processor crashes,
+When a PEP 723 pre-processor or post-processor crashes,
 dispatch automatically fresh-resolves only that processor and its literal
 script children, then appends one of two diagnoses to the recorded failure:
 resolution itself failed, or resolution succeeded and the processor failed
