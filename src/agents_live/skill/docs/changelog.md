@@ -6,6 +6,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: let a state write wait out a Windows hold on its destination.
+  Every durable file this tool keeps goes through one atomic write, whose
+  concluding rename succeeds on POSIX no matter who holds the target open.
+  Windows refuses while any process holds it without share-delete, which a
+  plain read omits, so one command reading a state file made another's write
+  fail outright, as do antivirus and indexer scans of a freshly written file.
+  The rename now waits briefly for the holder to let go and still reports a
+  destination that never frees.
+
 ## 6.3.1 - 2026-08-13
 
 - fix: stop sending provider CLIs an `--mcp` flag they never accepted. (#296)
