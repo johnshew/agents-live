@@ -6,6 +6,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: refuse package-index downgrades before upgrade mutation. (#320)
+  An explicitly configured uv mirror must fresh-resolve at least the installed
+  stable version, or the newer stable release already found by the update
+  check. `doctor --check-index` exposes the same read-only diagnostic.
+- fix: let stale watchers hand off after a runtime upgrade. (#204)
+  A watcher finishes any active dispatch, stops its change source, and
+  immediately relaunches its marked subscription through the current runtime;
+  an idle watcher checks within 60 seconds.
+- feat: add an opt-in fresh dependency check for Python processors. (#254)
+  `doctor --check-processors` resolves directly declared PEP 723 processor
+  dependencies and literal repository-local `uv run --script` children from a
+  fresh temporary uv cache without executing scripts or writing lockfiles.
 - fix: restore isolated, schema-checked Copilot-family pipeline runs. (#317)
   The standalone stdio bridge no longer shadows the MCP SDK, fenced `put`
   blocks seed frozen run-scoped schemas again, and Copilot exposes only the
