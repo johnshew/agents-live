@@ -11,6 +11,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: quiesce and restore installed-tool watchers during Windows upgrades. (#324)
+  Started intent remains unchanged while watchers finish active dispatches and
+  exit at idle boundaries. The replacement runtime restores them through
+  ordinary convergence, while dashboards remain explicit blockers and every
+  upgrade phase shares one correlation ID.
+- docs: consolidate current architecture and operations guidance.
+  Obsolete historical pages and duplicate status material were removed, with
+  maintained Windows, WSL, lifecycle, and release guidance linked from the
+  remaining repository and shipped documentation.
+
 ## 6.3.4 - 2026-08-14
 
 - fix: refresh dashboard health through modern automatic maintenance. (#325)
