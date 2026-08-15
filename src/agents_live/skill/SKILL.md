@@ -37,12 +37,11 @@ authentication, or reasoning.
 | `install` or `doctor` | [docs/commands.md](docs/commands.md) -- or just run the command; output is self-documenting |
 | Installing or upgrading on Microsoft-managed Windows or WSL | [docs/diagnostics.md](docs/diagnostics.md) section "Microsoft-managed package source" |
 | `smoketest` | [docs/commands.md](docs/commands.md) section "smoketest" |
-| `release` | [docs/release-process.md](docs/release-process.md) |
 | Editing any script | [docs/approach.md](docs/approach.md) (architecture) |
 | Understanding services available to agents and handlers (env, MCPs, `Agents/lib/` helpers, pipeline side-channel) | [docs/approach.md](docs/approach.md) |
 | Debugging log issues | [docs/diagnostics.md](docs/diagnostics.md) (log inventory, procedures, patterns, query recipes) |
 | Debugging cron/watcher lifecycle | [docs/key-learnings.md](docs/key-learnings.md) |
-| Debugging WSL/9P issues | [docs/reference/wsl-runbook.md](docs/reference/wsl-runbook.md) |
+| Debugging WSL/9P issues | [docs/diagnostics.md](docs/diagnostics.md) section "WSL liveness" |
 | Choosing or changing an agent selector/model | [docs/model-selection.md](docs/model-selection.md) |
 | Reviewing implementation history | [docs/changelog.md](docs/changelog.md) |
 
@@ -84,7 +83,7 @@ artifacts use hidden internal commands and are not a user-facing contract.
 | `stop <name>` | `agents-live stop <name>` |
 | `status [name] [--json]` | `agents-live status [name] [--json]` |
 | `status --all-repos` | `agents-live status --all-repos` *(read-only, repo-qualified)* |
-| `repos` | `agents-live repos list|default|remove` |
+| `repos` | `agents-live repos list|add|default|remove` |
 | `dashboard` | `agents-live dashboard --dev` |
 | `dashboard --all-repos` | `agents-live dashboard --all-repos` *(read-only)* |
 | `logs [name]` | `agents-live logs [name] [--errors] [--all] [--limit 50]` |
@@ -97,7 +96,6 @@ artifacts use hidden internal commands and are not a user-facing contract.
 | `repair` | `agents-live doctor --repair [--dry-run]` |
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
-| `release` | Preview, prepare, inspect, then publish with `tools/release.py` *(publisher-side; see [docs/release-process.md](docs/release-process.md))* |
 
 **Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 

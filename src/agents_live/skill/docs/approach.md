@@ -89,8 +89,9 @@ event envelope are deliberately separate.
 
 - Runtime and agent ports never import each other.
 - Only immutable primitive records cross seams.
-- Unknown metadata, versions, providers, trigger syntax, and retired fields
-  fail closed.
+- Unknown `agents-live.*` metadata is additive and reported by `status` and
+  `doctor`. Unsupported schema versions, providers, trigger syntax, and
+  retired fields fail closed.
 - Global pruning occurs only after complete registry and started-state
   collection.
 - An unreadable registry abstains. A registered repository that cannot be

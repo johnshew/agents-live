@@ -4,9 +4,7 @@ description: Required checks and commands for publishing agents-live releases
 ---
 
 Checklist for cutting a release from this repository, the definitive
-source since 2026-07-18 (the retired assembly flow is described for
-historical context in
-[release-process.md](../src/agents_live/skill/docs/release-process.md)).
+source since 2026-07-18.
 Use [testing.md](testing.md) to validate source, target-version artifacts, and
 the installed PyPI tool as separate execution modes.
 

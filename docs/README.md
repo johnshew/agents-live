@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
-description: Index of current architecture, decisions, platform guides, status, and backlog
-ms.date: 2026-08-11
+description: Index of current architecture, decisions, platform guides, and backlog
+ms.date: 2026-08-14
 ms.topic: overview
 ---
 
@@ -27,8 +27,6 @@ this directory is installed by `agents-live init` or `upgrade`.
   runtime flow, state, compatibility boundary, and invariants.
 - [testing-methodology.md](testing-methodology.md) - what earns a test, which
   layer proves what, and why each release gate exists.
-- [project-status.md](project-status.md) - implementation state, platform
-  maturity, validation baseline, and linked remaining work.
 - [windows-support.md](windows-support.md) - native Windows host architecture.
 - [wsl-support.md](wsl-support.md) - POSIX runtime composition and
   Windows-side distro liveness under WSL.
@@ -53,7 +51,6 @@ named after the topic.
 - Retire a superseded document rather than leaving it beside the record that
   replaced it, and name it in that record's `History` section so its
   reasoning stays findable by path in git history.
-- `project-status.md` states verified current status and links remaining work.
 - Keep detail in GitHub issues. Link to an issue rather than restating
   its acceptance criteria here.
 - The export-clean rule applies: no personal information, secrets,

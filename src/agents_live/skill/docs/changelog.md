@@ -1,4 +1,9 @@
-# Changelog
+---
+title: Changelog
+description: Reverse-chronological log of significant Agents Live changes
+ms.date: 2026-08-14
+ms.topic: reference
+---
 
 Reverse-chronological log of significant changes, newest first. The
 changelog starts at the initial public release; earlier development

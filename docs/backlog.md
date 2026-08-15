@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-08-09
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -26,27 +26,6 @@ status keeps showing a fresh error time, and the health beacon reports
 only infrastructure state. Escalating that from existing log data comes
 before any richer export.
 ([#123](https://github.com/johnshew/agents-live/issues/123))
-
-## Host changes that cannot half-finish
-
-Several commands mutate host state that they may not be able to finish
-mutating. `init` registers a repository before plugin convergence can
-fail ([#226](https://github.com/johnshew/agents-live/issues/226));
-`upgrade` lets uv remove a plugin before discovering that a running
-process locks the launcher it has to replace
-([#231](https://github.com/johnshew/agents-live/issues/231)). Both leave
-the host in a state the operator did not ask for and cannot easily read.
-
-`uninstall` already sets the precedent. It detects the processes running
-from the tool environment before touching anything, refuses outright
-while one survives, and hands the last step to a helper that waits
-outside the environment being removed. The direction is to hold every
-host-mutating command to that shape: know the blockers before the first
-write, and leave the prior state intact when you cannot proceed.
-
-Whether an upgrade should go further and restart the watchers it makes
-stale is a separate policy question, still open
-([#204](https://github.com/johnshew/agents-live/issues/204)).
 
 ## Observability a processor can contribute to
 
@@ -111,15 +90,6 @@ are not sufficient. What #184 still has to settle is which behaviours are
 owed an executing test, now that there is no large mock population to
 argue about.
 
-## Safer execution modes in practice
-
-`plan` and `pipeline` are documented as the safe defaults, but the
-runnable example in the README uses `write`. Publish complete `plan` and
-`pipeline` variants of the same watcher task, including schemas,
-handlers, and processors, so the safer modes are as easy to adopt as the
-permissive one.
-([#116](https://github.com/johnshew/agents-live/issues/116))
-
 ## Platform coverage
 
 Linux is the primary platform, with Ubuntu on WSL as the reference setup.
@@ -149,13 +119,6 @@ behaviour the actual defect? The second test retired a hidden
 and what was really wrong was that the maintenance sweep tried to adopt
 an ephemeral fixture. Fixtures now belong to the run that creates them,
 named once as `headless.is_ephemeral` and honoured everywhere.
-
-What is not settled is process and file lifecycle on that platform.
-Windows will not delete or replace a running executable, and the defects
-that follow from it keep arriving through the seam rather than in it:
-locked launchers during upgrade, deferred self-removal during uninstall,
-and detached processes that outlive the run that started them. Those are
-tracked under the theme above rather than here.
 
 Installation and first-run readiness on native Windows is the remaining
 gap before the platform is releasable from an installed artifact

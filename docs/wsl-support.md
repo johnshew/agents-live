@@ -1,7 +1,7 @@
 ---
 title: WSL Support
 description: Current WSL host architecture, Windows-side liveness, migration, and limitations
-ms.date: 2026-08-09
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -87,7 +87,8 @@ PowerShell interop.
 - A moved or renamed distribution requires task repair from inside that
   distribution.
 
-The user-facing operational reference is
-[windows-heartbeat.md](../src/agents_live/skill/docs/windows-heartbeat.md).
-Issue [#242](https://github.com/johnshew/agents-live/issues/242) tracks the
-remaining shell-initialization correction in the detailed WSL runbook.
+The user-facing references are
+[windows-heartbeat.md](../src/agents_live/skill/docs/windows-heartbeat.md) for
+the liveness mechanism and
+[diagnostics.md](../src/agents_live/skill/docs/diagnostics.md#wsl-liveness) for
+repair, shell initialization, and 9P troubleshooting.

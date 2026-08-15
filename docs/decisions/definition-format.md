@@ -1,7 +1,7 @@
 ---
 title: Definition Format Decision
 description: Why Agents Live uses Agent Skills with namespaced execution metadata
-ms.date: 2026-08-09
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -77,10 +77,13 @@ The loader accepts a deliberately restricted profile:
 - no anchors, aliases, merge keys, explicit tags, or complex keys;
 - specification-defined top-level fields only;
 - string metadata keys and quoted string values; and
-- known `agents-live.*` keys under a supported schema version.
+- a supported Agents Live schema version.
 
-Unknown metadata owned by another client is preserved. Unknown Agents Live
-keys and schema versions fail closed.
+Unknown metadata owned by another client is preserved. Unknown
+`agents-live.*` keys are additive: the current runtime executes the fields it
+understands and reports the unknown keys through `status` and `doctor`.
+Unsupported schema versions fail closed because they may change existing
+field meanings.
 
 ## Alternatives rejected
 
@@ -109,9 +112,9 @@ The retired-field diagnostics and migration support expire in 7.0.
 
 ## History
 
-`docs/frontmatter-convergence.md` preceded this record and is not maintained.
-It holds the Agent Skills conformance analysis and the field-by-field
-convergence table behind the decision above.
+`docs/frontmatter-convergence.md` preceded this record and was removed when
+this decision became authoritative. Retrieve it from git history only when the
+Agent Skills conformance analysis or field-by-field option table is needed:
 
 ```bash
 git log --oneline -- docs/frontmatter-convergence.md

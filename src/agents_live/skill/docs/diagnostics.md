@@ -273,10 +273,15 @@ Interpret the result in layers:
 ## Definition failures
 
 The loader reports the exact `SKILL.md` and rejected property. Common causes
-are an unquoted metadata value, an unknown `agents-live.*` key, a directory and
-`name` mismatch, invalid selector or trigger syntax, a path that escapes the
-skill, or a 5.x flat definition. Use `agents-live migrate --dry-run` before the
-one-shot conversion.
+are an unquoted metadata value, a directory and `name` mismatch, invalid
+selector or trigger syntax, an unsupported schema version, a path that escapes
+the skill, or a 5.x flat definition. Use `agents-live migrate --dry-run` before
+the one-shot conversion.
+
+An unknown `agents-live.*` key does not block execution. `status --json`
+reports it in `unknown_metadata`, and `doctor` reports that it may be a typo or
+may require a newer runtime. A newer schema version is different: it may change
+the meaning of existing fields, so the runtime refuses it until upgraded.
 
 ## Collection failures
 
@@ -343,3 +348,43 @@ A repair stages a distinct Windows task and requires a fresh beacon before
 swapping. If it fails, verify PowerShell interop, the stable uv tool shim,
 `wslg.exe`, Task Scheduler policy, and `WSL_DISTRO_NAME` in the interactive
 session. The previous working task remains registered after a failed stage.
+
+After a WSL restart, verify and repair the recorded started intent from inside
+the distribution:
+
+```bash
+systemctl is-active cron
+agents-live --repo /path/to/repository status --json
+agents-live --repo /path/to/repository doctor --repair
+agents-live --repo /path/to/repository logs --errors --since 1h --limit 10
+```
+
+`doctor --repair` restores missing or drifted artifacts for definitions already
+recorded as started. Do not use `start --all` as repair: that command
+deliberately records every executable definition as started, including ones an
+operator previously stopped.
+
+When Windows launches a WSL command that depends on Node, a provider CLI, or
+another tool initialized by `.bashrc`, use an interactive shell:
+
+```powershell
+wsl -d <distribution> --cd /path/to/repository -e bash -ic `
+	'agents-live --repo /path/to/repository doctor'
+```
+
+A login-only noninteractive shell (`bash -lc`) does not read `.bashrc` and can
+produce false missing-tool diagnoses. Commands that inspect only kernel or
+system state do not need an interactive shell.
+
+For a WSL restart loop, inspect the current kernel log inside the distribution:
+
+```bash
+dmesg --time-format iso 2>/dev/null | grep -E 'p9io|SIGTERM|corrupted' | tail -20
+```
+
+Repeated `p9io` failures followed by `SIGTERM` indicate a Windows/Linux 9P
+interop failure, not an Agents Live trigger defect. Reduce recurring access to
+Windows executables and paths, avoid a Windows credential-helper executable in
+scheduled Linux Git work, and remove duplicate MCP server launches before
+restarting WSL. Then rerun `doctor --repair` and inspect correlated events with
+`agents-live logs timeline` rather than reading runtime files directly.
