@@ -145,9 +145,6 @@ and status in the issue, never in the backlog document.
 
 Since 2026-07-18 this repository is the definitive source for the
 agents-live framework; the earlier flow that assembled releases from a
-private source repository is retired
-([release-process.md](../src/agents_live/skill/docs/release-process.md)
-describes it for historical context). Consumer repositories receive the
-skill payload through `agents-live init`/`upgrade`; never treat an
-installed payload as a source checkout or propose back-porting changes
-into one.
+private source repository is retired. Consumer repositories receive the skill
+payload through `agents-live init`/`upgrade`; never treat an installed payload
+as a source checkout or propose back-porting changes into one.

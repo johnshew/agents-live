@@ -1,11 +1,11 @@
 ---
-title: WSL liveness
-description: How Agents Live keeps scheduled work available in WSL
-ms.date: 2026-08-08
+title: Windows task for WSL liveness
+description: How a Windows-side task keeps Agents Live scheduled work available in WSL
+ms.date: 2026-08-14
 ms.topic: concept-article
 ---
 
-# WSL liveness
+# Windows task for WSL liveness
 
 WSL can stop when no Windows-side process keeps the distribution available.
 Agents Live therefore treats liveness as runtime-owned durable state, not as a
@@ -45,4 +45,5 @@ Healthy means the POSIX trigger store is readable, the distro-scoped Windows
 task has the expected windowless action and five-minute interval, and its
 beacon is no more than ten minutes old. A cron or systemd session may not carry
 `WSL_DISTRO_NAME`; a fresh beacon remains the read-side liveness fact in that
-case.
+case. See [diagnostics.md](diagnostics.md#wsl-liveness) for restart recovery,
+shell initialization, and 9P failure diagnosis.

@@ -1,7 +1,7 @@
 ---
 title: Runtime and provider learnings
 description: Constraints established while extracting the 6.0 seams
-ms.date: 2026-08-08
+ms.date: 2026-08-14
 ms.topic: concept-article
 ---
 
@@ -41,13 +41,31 @@ overlap. Dead lock owners are recoverable. The dispatch budget is atomically
 updated under an inter-process lock and deliberately fails open if its own
 state is unavailable.
 
+## Bound cascading watcher writes
+
+Watchers that write into one another's watched paths form a directed graph.
+Before enabling such a system, enumerate every watcher and file, trace each
+cycle from an external edit back to quiescence, and identify the deterministic
+guard that breaks every re-trigger path. Suitable guards include unchanged
+content checks, stable content hashes, monotonic source/output timestamps, and
+idempotent writes.
+
+Each cycle needs a bounded termination argument. A healthy path normally does
+one meaningful dispatch and at most one skipped re-trigger. Log both guard
+passes and skips with the value that made the decision; otherwise a loop can
+burn provider requests while appearing idle, or silently suppress a real edit.
+
+Processor-only tests do not exercise the change source, debounce window, or
+dispatcher guards. Validate the deterministic guards directly, then run one
+live watcher flow to prove that the complete cycle reaches quiescence.
+
 ## Normalize at the right boundary
 
-Claude emits a complete JSON document. Copilot needs a PTY and complete-line TUI
-noise filtering. Output schemas, provenance, size caps, path roots, and
-post-processors all consume a completed value. A fake streaming CLI produced no
-provider-independent partial contract, so interpretation happens once after
-child exit.
+Claude and Copilot emit complete machine-readable values through
+provider-specific formats. Output schemas, provenance, size caps, path roots,
+and post-processors all consume a completed value. A fake streaming CLI
+produced no provider-independent partial contract, so interpretation happens
+once after child exit.
 
 Provider quirks belong in provider plugins. Due-time, retries, concurrency,
 budget, resources, and child cleanup belong in dispatch. Error classification

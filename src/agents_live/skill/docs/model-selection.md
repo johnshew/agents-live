@@ -1,7 +1,7 @@
 ---
 title: Choose a model for an Agents Live definition
 description: Select models by workload and validate unattended defaults with provider telemetry
-ms.date: 08/12/2026
+ms.date: 2026-08-12
 ms.topic: concept
 ---
 

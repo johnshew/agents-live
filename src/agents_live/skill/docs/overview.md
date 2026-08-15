@@ -118,5 +118,5 @@ For an existing repository that already tracks the payload, run
 `git add -f .claude/skills/agents-live/.gitignore`. Agents Live never changes the
 Git index itself.
 
-For details, see the [command reference](commands.md), [diagnostics
-guide](diagnostics.md), and [release process](release-process.md).
+For details, see the [command reference](commands.md) and [diagnostics
+guide](diagnostics.md).
