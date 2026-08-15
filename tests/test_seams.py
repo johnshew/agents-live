@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -1155,7 +1156,10 @@ class TestRuntimeCore(unittest.TestCase):
                 (paths.repo_state_dir(root) / "started.json").read_bytes(),
             )
             record.assert_called_once()
-            self.assertEqual("quiesce-requested", record.call_args.kwargs["phase"])
+            self.assertEqual(
+                "quiesce-requested",
+                record.call_args.kwargs["upgrade_phase"],
+            )
             self.assertEqual(operation_id, record.call_args.kwargs["correlation_id"])
 
     def test_windows_upgrade_keeps_dashboard_as_fail_closed_blocker(self) -> None:
@@ -1225,6 +1229,57 @@ class TestRuntimeCore(unittest.TestCase):
                 )
                 self.assertIsNone(
                     upgrade_handoff.quiesce_operation(executable))
+
+    def test_quiescence_is_not_visible_before_request_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            environment.mkdir(parents=True)
+            executable = environment / "Scripts" / "python.exe"
+            recording = threading.Event()
+            release_record = threading.Event()
+            query_started = threading.Event()
+            query_done = threading.Event()
+            observed: list[str | None] = []
+
+            def record(*_args, **_kwargs) -> None:
+                recording.set()
+                self.assertTrue(release_record.wait(timeout=5))
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"XDG_STATE_HOME": str(state_home)}),
+                mock.patch.object(
+                    upgrade_handoff.adminlog, "record", side_effect=record),
+            ):
+                claim, existing = upgrade_handoff.claim(
+                    environment, source="candidate.whl", runtime_only=False)
+                self.assertIsNone(existing)
+                assert claim is not None
+                request = threading.Thread(
+                    target=upgrade_handoff.request_quiescence,
+                    args=(claim, [(101, "sample", "C:/repo")]),
+                )
+
+                def query() -> None:
+                    query_started.set()
+                    observed.append(
+                        upgrade_handoff.quiesce_operation(executable))
+                    query_done.set()
+
+                watcher = threading.Thread(target=query)
+                request.start()
+                self.assertTrue(recording.wait(timeout=5))
+                watcher.start()
+                self.assertTrue(query_started.wait(timeout=5))
+                self.assertFalse(query_done.is_set())
+                release_record.set()
+                request.join(timeout=5)
+                watcher.join(timeout=5)
+
+            self.assertFalse(request.is_alive())
+            self.assertFalse(watcher.is_alive())
+            self.assertEqual([claim.operation_id], observed)
 
     def test_windows_upgrade_abandons_claim_when_helper_cannot_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1687,7 +1742,7 @@ class TestStartedState(TempRepository):
         source.stop.assert_called_once_with()
         dispatch_run.assert_not_called()
         restart.assert_not_called()
-        self.assertEqual("quiesced", record.call_args.kwargs["phase"])
+        self.assertEqual("quiesced", record.call_args.kwargs["upgrade_phase"])
 
     def test_upgrade_continuation_restores_quiesced_started_watcher(self) -> None:
         self.skill("sample", [
@@ -1728,7 +1783,7 @@ class TestStartedState(TempRepository):
         self.assertEqual(1, len(host.supervisor.owned("watcher")))
         self.assertEqual(
             "upgrade-operation", record.call_args.kwargs["correlation_id"])
-        self.assertEqual("restore", record.call_args.kwargs["phase"])
+        self.assertEqual("restore", record.call_args.kwargs["upgrade_phase"])
 
     def test_failed_upgrade_restoration_leaves_intent_for_maintenance(self) -> None:
         self.skill("sample", [
@@ -2523,6 +2578,27 @@ class RecordingRunner:
 
 
 class TestObservability(unittest.TestCase):
+    def test_upgrade_watcher_fields_survive_admin_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "admin.log"
+            with mock.patch.object(obs.admin, "log_path", return_value=path):
+                obs.admin.record(
+                    "upgrade-watchers",
+                    status="ok",
+                    correlation_id="upgrade-operation",
+                    upgrade_phase="quiesced",
+                    watcher="sample-123",
+                    root="C:/repo",
+                    message="watcher quiesced",
+                )
+            records = obs.load((path,))
+        self.assertEqual(1, len(records))
+        self.assertEqual("upgrade-operation", records[0]["run_id"])
+        self.assertEqual("upgrade-watchers", records[0]["operation"])
+        self.assertEqual("quiesced", records[0]["upgrade_phase"])
+        self.assertEqual("sample-123", records[0]["watcher"])
+        self.assertEqual("C:/repo", records[0]["root"])
+
     def test_malformed_timestamp_does_not_hide_valid_timeline_events(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "mixed.log"

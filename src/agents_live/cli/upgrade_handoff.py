@@ -181,6 +181,19 @@ def request_quiescence(
             {"name": name, "project": project}
             for name, project in identities
         ]
+        pending["quiesce_active"] = False
+        _write(claim.pending_path, pending)
+        for name, project in identities:
+            adminlog.record(
+                "upgrade-watchers",
+                status="ok",
+                upgrade_phase="quiesce-requested",
+                correlation_id=claim.operation_id,
+                watcher=name,
+                root=project or "",
+                watcher_count=len(identities),
+                message=f"requested idle quiescence for {name}",
+            )
         pending["quiesce_active"] = bool(identities)
         _write(claim.pending_path, pending)
     return identities
