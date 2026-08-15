@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.5 - 2026-08-14
+
 - fix: quiesce and restore installed-tool watchers during Windows upgrades. (#324)
   Started intent remains unchanged while watchers finish active dispatches and
   exit at idle boundaries. The replacement runtime restores them through
