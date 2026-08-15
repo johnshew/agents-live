@@ -241,7 +241,7 @@ def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):
 
 
 def _finish(spec, results, firing: Firing, run_id: str, events: Path) -> Outcome:
-    result = agent.outcome(spec, results)
+    result = replace(agent.outcome(spec, results), run_id=run_id)
     obs.record(events, obs.create(
         "run",
         result.status,
@@ -272,7 +272,7 @@ def _recorded(result: Outcome) -> str:
 
 
 def _skip(events: Path, firing: Firing, run_id: str, reason: str) -> Outcome:
-    result = Outcome(True, "skipped", message=reason)
+    result = Outcome(True, "skipped", message=reason, run_id=run_id)
     obs.record(events, obs.create(
         "firing", "skipped", repository=firing.root, agent=firing.agent_id,
         run_id=run_id, origin=firing.origin, message=reason))
@@ -286,7 +286,8 @@ def _failure(
     category: str,
     message: str,
 ) -> Outcome:
-    result = Outcome(False, "failed", category=category, message=message)
+    result = Outcome(
+        False, "failed", category=category, message=message, run_id=run_id)
     obs.record(events, obs.create(
         "run", "failed", repository=firing.root, agent=firing.agent_id,
         run_id=run_id, origin=firing.origin, category=category, message=message))

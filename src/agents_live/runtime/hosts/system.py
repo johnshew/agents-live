@@ -741,6 +741,25 @@ if _IS_WINDOWS:
         finally:
             _kernel32.CloseHandle(handle)
 
+    def process_start_token(pid: int) -> int | None:
+        """Exact creation FILETIME ticks for durable process identity."""
+        handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                       False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not _kernel32.GetProcessTimes(
+                    handle, ctypes.byref(creation), ctypes.byref(exited),
+                    ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            return (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        finally:
+            _kernel32.CloseHandle(handle)
+
     def _process_table() -> list[tuple[int, int]]:
         """Every (pid, parent pid) pair currently on the host."""
         snapshot = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -975,6 +994,15 @@ else:
         except (OSError, ValueError, AttributeError):
             return None
         return time.time() - uptime + ticks / hertz
+
+    def process_start_token(pid: int) -> int | None:
+        """Exact kernel start ticks for durable process identity."""
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text(
+                encoding="utf-8").rsplit(")", 1)[-1].split()
+            return int(fields[19])
+        except (OSError, IndexError, ValueError):
+            return None
 
     def terminate(pid: int, *, grace_s: float = TERMINATE_GRACE_S) -> None:
         """Signal *pid*'s process group to stop, then force it.

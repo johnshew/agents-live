@@ -506,7 +506,10 @@ class TestDoctor(unittest.TestCase):
     def test_quick_uses_fresh_cached_health_and_always_returns_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             beacon = Path(temporary) / "health.ok"
-            beacon.write_text("cached\n", encoding="utf-8")
+            beacon.write_text(json.dumps({
+                "status": "healthy",
+                "smoketest": {"status": "pass"},
+            }), encoding="utf-8")
             stdout = io.StringIO()
             with (
                 mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": ""}),
@@ -537,7 +540,10 @@ class TestDoctor(unittest.TestCase):
             os.utime(beacon, (stale, stale))
 
             def refresh(_argv):
-                beacon.write_text("fresh\n", encoding="utf-8")
+                beacon.write_text(json.dumps({
+                    "status": "healthy",
+                    "smoketest": {"status": "pass"},
+                }), encoding="utf-8")
                 return 0
 
             stdout = io.StringIO()
@@ -554,6 +560,63 @@ class TestDoctor(unittest.TestCase):
         maintain.assert_called_once_with(["maintain", "--quiet"])
         self.assertEqual("refreshed", json.loads(
             stdout.getvalue())["checks"][0]["source"])
+
+    def test_quick_refreshes_fresh_degraded_smoketest_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text(json.dumps({
+                "status": "healthy",
+                "smoketest": {"status": "fail", "reason": "old failure"},
+            }), encoding="utf-8")
+
+            def refresh(_argv):
+                beacon.write_text(json.dumps({
+                    "status": "healthy",
+                    "smoketest": {"status": "pass"},
+                }), encoding="utf-8")
+                return 0
+
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    doctor.internal, "main", side_effect=refresh) as maintain,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(0, code)
+        maintain.assert_called_once_with(["maintain", "--quiet"])
+        self.assertEqual("refreshed", json.loads(
+            stdout.getvalue())["checks"][0]["source"])
+
+    def test_quick_refreshes_unknown_smoketest_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text(json.dumps({
+                "status": "healthy",
+                "smoketest": {"status": "error"},
+            }), encoding="utf-8")
+
+            def refresh(_argv):
+                beacon.write_text(json.dumps({
+                    "status": "healthy",
+                    "smoketest": {"status": "pass"},
+                }), encoding="utf-8")
+                return 0
+
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    doctor.internal, "main", side_effect=refresh) as maintain,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(0, code)
+        maintain.assert_called_once_with(["maintain", "--quiet"])
 
     def test_quick_fails_when_maintenance_does_not_write_health(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

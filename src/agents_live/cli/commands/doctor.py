@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _quick() -> int:
     beacon = paths.health_beacon_path()
-    if _fresh(beacon):
+    if _healthy(beacon):
         return _quick_result(True, "fresh", "cached")
     try:
         with (
@@ -133,9 +133,13 @@ def _quick() -> int:
             internal.main(["maintain", "--quiet"])
     except (OSError, RuntimeError, ValueError):
         return _quick_result(False, "health refresh failed", "refresh-failed")
-    if _fresh(beacon):
+    if _healthy(beacon):
         return _quick_result(True, "fresh", "refreshed")
-    return _quick_result(False, "health record remained stale", "refresh-failed")
+    detail = (
+        "health record remained degraded"
+        if _fresh(beacon) else "health record remained stale"
+    )
+    return _quick_result(False, detail, "refresh-failed")
 
 
 def _fresh(beacon: Path) -> bool:
@@ -143,6 +147,22 @@ def _fresh(beacon: Path) -> bool:
         return time.time() - beacon.stat().st_mtime <= HEALTH_STALE_SECONDS
     except OSError:
         return False
+
+
+def _healthy(beacon: Path) -> bool:
+    if not _fresh(beacon):
+        return False
+    try:
+        payload = json.loads(beacon.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("status") != "healthy":
+        return False
+    smoketest = payload.get("smoketest")
+    return (
+        isinstance(smoketest, dict)
+        and str(smoketest.get("status", "")).lower() == "pass"
+    )
 
 
 def _quick_result(ok: bool, detail: str, source: str) -> int:

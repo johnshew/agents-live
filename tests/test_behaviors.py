@@ -1301,6 +1301,11 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
 
         with (
             mock.patch.object(dashboard, "do_action", side_effect=run_action),
+            mock.patch.object(
+                dashboard, "_smoketest_result_path", return_value=mock.Mock(
+                    unlink=mock.Mock())),
+            mock.patch.object(
+                dashboard, "_current_smoketest_pass", return_value=True),
             mock.patch.object(dashboard, "system_health", return_value={
                 "level": "ok", "tip": "healthy",
             }),
@@ -1311,6 +1316,58 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
             ("Health check", "internal", ["maintain"]),
             actions[-1],
         )
+        self.assertNotIn(("Start", "start", ["--all"]), actions)
+
+    async def test_health_check_stops_after_smoketest_timeout(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        actions: list[tuple[str, str]] = []
+
+        async def run_action(label, script, _args, **_kwargs):
+            actions.append((label, script))
+            return 124 if label == "Smoketest" else 0
+
+        with (
+            mock.patch.object(dashboard, "do_action", side_effect=run_action),
+            mock.patch.object(
+                dashboard, "_smoketest_result_path", return_value=mock.Mock(
+                    unlink=mock.Mock())),
+            mock.patch.object(dashboard, "_current_smoketest_pass") as verdict,
+        ):
+            await dashboard.health_check()
+        self.assertEqual([
+            ("Doctor", "doctor"),
+            ("Smoketest", "smoketest"),
+        ], actions)
+        verdict.assert_not_called()
+
+    async def test_health_check_does_not_report_failed_maintenance(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        actions: list[str] = []
+
+        async def run_action(label, _script, _args, **_kwargs):
+            actions.append(label)
+            return 1 if label == "Health check" else 0
+
+        with (
+            mock.patch.object(dashboard, "do_action", side_effect=run_action),
+            mock.patch.object(
+                dashboard, "_smoketest_result_path", return_value=mock.Mock(
+                    unlink=mock.Mock())),
+            mock.patch.object(
+                dashboard, "_current_smoketest_pass", return_value=True),
+            mock.patch.object(dashboard, "system_health") as health,
+        ):
+            await dashboard.health_check()
+        self.assertEqual(["Doctor", "Smoketest", "Health check"], actions)
+        health.assert_not_called()
 
     async def test_shutdown_during_action_does_not_unpack_a_missing_result(
             self) -> None:
@@ -1331,6 +1388,124 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaises(asyncio.CancelledError):
                 await dashboard._execute_action(request)
+
+    async def test_skipped_dashboard_run_is_logged_as_failure(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        request = dashboard._ActionRequest(
+            "Run", "run", ["--name", "sample"], "sample", None,
+            asyncio.get_running_loop().create_future())
+        logged = mock.Mock()
+        with (
+            mock.patch.object(
+                dashboard.ng_run, "io_bound",
+                new=mock.AsyncMock(return_value=(
+                    0,
+                    json.dumps({
+                        "ok": True,
+                        "status": "skipped",
+                        "run_id": "abc123",
+                    }),
+                    "skipped run transcript",
+                ))),
+            mock.patch.object(dashboard, "_log_action", logged),
+            mock.patch.object(dashboard, "_refresh_views"),
+            mock.patch.object(
+                dashboard, "output_log", mock.Mock(), create=True),
+        ):
+            code = await dashboard._execute_action(request)
+        self.assertEqual(-1, code)
+        self.assertEqual("abc123", logged.call_args.kwargs["run_id"])
+        self.assertEqual("skipped", logged.call_args.kwargs["run_status"])
+        self.assertEqual(-1, logged.call_args.args[3])
+
+    async def test_dashboard_run_parses_stdout_not_stderr(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        request = dashboard._ActionRequest(
+            "Run", "run", ["--name", "sample"], "sample", None,
+            asyncio.get_running_loop().create_future())
+        logged = mock.Mock()
+        stdout = json.dumps({
+            "ok": True,
+            "status": "success",
+            "run_id": "abc123",
+        })
+        with (
+            mock.patch.object(
+                dashboard.ng_run, "io_bound",
+                new=mock.AsyncMock(return_value=(
+                    0, stdout, stdout + "\nlauncher warning\n"))),
+            mock.patch.object(dashboard, "_log_action", logged),
+            mock.patch.object(dashboard, "_refresh_views"),
+            mock.patch.object(
+                dashboard, "output_log", mock.Mock(), create=True),
+        ):
+            code = await dashboard._execute_action(request)
+        self.assertEqual(0, code)
+        self.assertEqual("abc123", logged.call_args.kwargs["run_id"])
+        self.assertIn("launcher warning", logged.call_args.args[4])
+
+
+class TestDashboardProcessIdentity(unittest.TestCase):
+    def test_dashboard_stop_rejects_pid_reuse(self) -> None:
+        from agents_live.cli.scripts import dashboards
+
+        entry = {
+            "port": 8232,
+            "pid": 42,
+            "start_token": 100,
+            "repo": "C:/repo",
+        }
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(dashboards, "running", return_value=[entry]),
+            mock.patch.object(
+                dashboards.hostruntime, "process_start_token",
+                return_value=101),
+            mock.patch.object(dashboards.hostruntime, "terminate") as terminate,
+            mock.patch.object(dashboards, "forget") as forget,
+            mock.patch.object(
+                sys, "argv", ["dashboards.py", "stop", "--port", "8232"]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = dashboards.main()
+        self.assertEqual(1, code)
+        self.assertIn("process_identity_unknown", stdout.getvalue())
+        terminate.assert_not_called()
+        forget.assert_not_called()
+
+    def test_dashboard_stop_terminates_matching_process(self) -> None:
+        from agents_live.cli.scripts import dashboards
+
+        entry = {
+            "port": 8232,
+            "pid": 42,
+            "start_token": 100,
+            "repo": "C:/repo",
+        }
+        with (
+            mock.patch.object(dashboards, "running", return_value=[entry]),
+            mock.patch.object(
+                dashboards.hostruntime, "process_start_token",
+                return_value=100),
+            mock.patch.object(dashboards.hostruntime, "terminate") as terminate,
+            mock.patch.object(dashboards, "forget") as forget,
+            mock.patch.object(dashboards, "port_answers", return_value=False),
+            mock.patch.object(
+                sys, "argv", ["dashboards.py", "stop", "--port", "8232"]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = dashboards.main()
+        self.assertEqual(0, code)
+        terminate.assert_called_once_with(42)
+        forget.assert_called_once_with(8232, 42)
 
 
 class TestOwnershipMovesInBothDirections(TempRepository):
@@ -1953,6 +2128,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "commit": "candidate-commit",
                 "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
                 "wheel_sha256": release["_sha256"](wheel),
+                "operational": True,
+                "operational_agent": "sample-123",
+                "cost_agent": "cost-agent-456",
             }
             receipt.write_text(json.dumps(expected), encoding="utf-8")
             with mock.patch.dict(scope, {
@@ -1993,15 +2171,17 @@ class TestCrossModuleAgreements(unittest.TestCase):
         }
         all_status = {
             "ok": True,
-            "agents": [
-                *status["agents"],
-                {
-                    "repository": "C:/other",
-                    "identifier": "other-456",
-                    "state": "started",
-                    "loadable": True,
-                    "execution": {"watch": "docs/** debounce 1s"},
-                },
+            "repos": [
+                {"name": "selected", "path": "C:/repo", "ok": True,
+                 "result": status},
+                {"name": "other", "path": "C:/other", "ok": True,
+                 "result": {"ok": True, "agents": [{
+                     "repository": "C:/other",
+                     "identifier": "other-456",
+                     "state": "started",
+                     "loadable": True,
+                     "execution": {"watch": "docs/** debounce 1s"},
+                 }]}},
             ],
         }
         doctor = {"ok": True, "checks": []}
@@ -2023,18 +2203,24 @@ class TestCrossModuleAgreements(unittest.TestCase):
             {"status": "ok", "message": "deferred Windows upgrade completed"},
         ]
         written = mock.Mock(return_value=Path("acceptance.json"))
+        operational = mock.Mock()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             wheel = root / "candidate.whl"
             wheel.write_bytes(b"wheel")
             repo_results = iter((status, status))
-            all_results = iter((all_status, doctor, all_status, doctor))
+            all_results = iter((
+                all_status, doctor,
+                all_status, doctor,
+                all_status, doctor,
+            ))
             fake_os = mock.Mock()
             fake_os.name = "nt"
             with mock.patch.dict(scope, {
                 "_require_tools": lambda: None,
                 "_current_version": lambda: "1.2.3",
                 "_check_publish_state": lambda _version: True,
+                "_acceptance_path": lambda _version: root / "acceptance.json",
                 "_candidate_wheel": lambda _version: wheel,
                 "_installed_version": mock.Mock(side_effect=("1.2.3", "1.2.3")),
                 "_installed_json": lambda _repo, _command: next(repo_results),
@@ -2043,14 +2229,694 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_wait_for_upgrade_result": lambda _path: {
                     "status": "terminal", "operation_id": "abc123", "exit_code": 0},
                 "_candidate_events": lambda _operation: events,
+                "_run_operational_acceptance": operational,
                 "_write_candidate_acceptance": written,
                 "os": fake_os,
             }):
-                accept(root)
+                accept(root, "sample-123", "cost-agent-456")
             written.assert_called_once_with(
                 "1.2.3", root.resolve(), wheel,
                 operation_id="abc123",
-                watchers=(("C:/repo", "sample-123"),))
+                watchers=(("C:/repo", "sample-123"),),
+                operational_agent="sample-123",
+                cost_agent="cost-agent-456")
+            operational.assert_called_once_with(
+                root.resolve(), "sample-123", "cost-agent-456")
+            self.assertFalse((root / "acceptance.json").exists())
+
+    def test_candidate_status_contract_rejects_malformed_rows(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        contract = release["_status_contract"]
+        valid = {
+            "repository": "C:/repo",
+            "identifier": "sample-123",
+            "state": "started",
+            "loadable": True,
+        }
+        for payload in (
+            {"ok": True, "agents": [valid, "malformed"]},
+            {"ok": True, "repos": [{
+                "name": "selected",
+                "ok": True,
+                "result": {"ok": True, "agents": [valid, 42]},
+            }]},
+            {"ok": True, "agents": [{
+                "repository": "C:/repo",
+                "identifier": "sample-123",
+                "state": "started",
+                "loadable": "yes",
+            }]},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(
+                        release["ReleaseError"],
+                        "non-object agent row|malformed agent row"):
+                    contract(payload)
+
+    def test_failed_candidate_rerun_invalidates_previous_receipt(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        accept = release["accept_candidate"]
+        scope = accept.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = root / "acceptance.json"
+            receipt.write_text('{"accepted":true}', encoding="utf-8")
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            with mock.patch.dict(scope, {
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.2.3",
+                "_check_publish_state": lambda _version: True,
+                "_acceptance_path": lambda _version: receipt,
+                "_candidate_wheel": lambda _version: wheel,
+                "_installed_version": lambda: "0.0.0",
+            }):
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "installed tool is 0.0.0"):
+                    accept(root, "sample-123", "cost-agent-456")
+            self.assertFalse(receipt.exists())
+
+    def test_candidate_rerun_invalidates_receipt_before_state_check(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        accept = release["accept_candidate"]
+        scope = accept.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = Path(temporary) / "acceptance.json"
+            receipt.write_text('{"accepted":true}', encoding="utf-8")
+            with mock.patch.dict(scope, {
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.2.3",
+                "_acceptance_path": lambda _version: receipt,
+                "_check_publish_state": mock.Mock(
+                    side_effect=release["ReleaseError"]("state changed")),
+            }):
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "state changed"):
+                    accept(Path(temporary), "sample-123", "cost-agent-456")
+            self.assertFalse(receipt.exists())
+
+    def test_operational_acceptance_uses_uv_script_and_pinned_cli(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        run_operational = release["_run_operational_acceptance"]
+        scope = run_operational.__globals__
+        commands: list[list[str]] = []
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: "C:/uv/tools/agents-live/agents-live.exe",
+            "_run": lambda command, **_kwargs: commands.append(command) or "",
+        }):
+            run_operational(
+                Path("C:/repo"), "sample-123", "cost-agent-456")
+        self.assertEqual([
+            "uv", "run", "--script", "tools/candidate-operational.py",
+            "--cli", "C:/uv/tools/agents-live/agents-live.exe",
+            "--repo", str(Path("C:/repo")),
+            "--agent", "sample-123",
+            "--cost-agent", "cost-agent-456",
+        ], commands[0])
+
+    def test_operational_cost_probe_requires_positive_list_cost(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        verify = script["_verify_cost_capture"]
+        scope = verify.__globals__
+        positive = {
+            "ok": True,
+            "records": [{
+                "agent_name": "cost-agent-456",
+                "run_id": "abc123",
+                "status": "ok",
+                "usage": [["list_cost_usd", "0.25"]],
+            }],
+        }
+        run = {"ok": True, "status": "success", "run_id": "abc123"}
+        with mock.patch.dict(scope, {
+            "_json": mock.Mock(side_effect=(run, positive)),
+        }):
+            self.assertEqual(
+                ("abc123", 0.25),
+                verify(
+                    Path("agents-live"), Path("C:/repo"),
+                    "cost-agent-456"))
+        missing = {"ok": True, "records": [{
+            "agent_name": "cost-agent-456", "run_id": "abc123",
+            "status": "ok", "usage": [],
+        }]}
+        with mock.patch.dict(scope, {
+            "_json": mock.Mock(side_effect=(run, missing)),
+        }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"], "no positive list_cost_usd"):
+                verify(Path("agents-live"), Path("C:/repo"), "cost-agent-456")
+
+    def test_operational_dashboard_cost_includes_accepted_run(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        verify = script["_verify_dashboard_cost"]
+        before = {"agents": [{
+            "identifier": "cost-agent-456",
+            "cost_day_value": 10.0,
+            "cost_week_value": 20.0,
+        }]}
+        unchanged = {"agents": [dict(before["agents"][0])]}
+        with self.assertRaisesRegex(
+                script["OperationalError"],
+            "did not equal accepted run cost"):
+            verify(
+                before, unchanged, "cost-agent-456", 0.25)
+        after = {"agents": [{
+            "identifier": "cost-agent-456",
+            "cost_day_value": 10.25,
+            "cost_week_value": 20.25,
+        }]}
+        verify(before, after, "cost-agent-456", 0.25)
+        for daily, weekly in ((10.25, 20.0), (10.0, 20.25)):
+            with self.subTest(daily=daily, weekly=weekly):
+                one_sided = {"agents": [{
+                    "identifier": "cost-agent-456",
+                    "cost_day_value": daily,
+                    "cost_week_value": weekly,
+                }]}
+                with self.assertRaisesRegex(
+                        script["OperationalError"],
+                        "did not equal accepted run cost"):
+                    verify(before, one_sided, "cost-agent-456", 0.25)
+
+    def test_operational_cost_attribution_rejects_intervening_run(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        verify = script["_verify_cost_attribution"]
+        scope = verify.__globals__
+        concurrent = {"ok": True, "records": [
+            {"run_id": "abc123"},
+            {"run_id": "other456"},
+        ]}
+        with mock.patch.dict(scope, {
+            "_json": mock.Mock(return_value=concurrent),
+        }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "expected only abc123"):
+                verify(
+                    Path("agents-live"), Path("C:/repo"),
+                    "cost-agent-456", "abc123",
+                    "2026-01-01T00:00:00+00:00")
+
+    def test_operational_runner_restores_baseline_after_dashboard_failure(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        main = script["main"]
+        scope = main.__globals__
+        row = {
+            "identifier": "sample-123",
+            "name": "sample",
+            "state": "started",
+            "loadable": True,
+        }
+        transitions: list[bool] = []
+
+        def payload(_cli, _repo, command, *_args):
+            if command == "status":
+                return {"ok": True, "agents": [row]}
+            if command == "logs":
+                return {"ok": True, "records": [{
+                    "agent_name": "sample-123", "phase": "done",
+                    "status": "ok", "run_id": "abc123"}]}
+            if command == "run":
+                return {"ok": True, "status": "success", "run_id": "abc123"}
+            return {"ok": True}
+
+        with (
+            mock.patch.object(
+                sys, "argv", [
+                    "candidate-operational.py",
+                    "--cli", str(REPOSITORY / "agents-live"),
+                    "--repo", str(REPOSITORY),
+                    "--agent", "sample-123",
+                    "--cost-agent", "cost-agent-456",
+                ]),
+            mock.patch.dict(scope, {
+                "_json": payload,
+                "_run": lambda *_args, **_kwargs: mock.Mock(
+                    stdout="sample-123 timeline"),
+                "_set_started": lambda _cli, _repo, _agent, started: (
+                    transitions.append(started)),
+                "_dashboard_actions": mock.Mock(
+                    side_effect=script["OperationalError"]("dashboard failed")),
+                "_verify_cost_capture": mock.Mock(),
+            }),
+        ):
+            with self.assertRaisesRegex(
+                    script["OperationalError"], "dashboard failed"):
+                main()
+        self.assertEqual([False, True, True], transitions)
+
+    def test_operational_runner_restores_baseline_after_interrupt(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        main = script["main"]
+        scope = main.__globals__
+        row = {
+            "identifier": "sample-123",
+            "name": "sample",
+            "state": "started",
+            "loadable": True,
+        }
+        transitions: list[bool] = []
+
+        def payload(_cli, _repo, command, *_args):
+            if command == "status":
+                return {"ok": True, "agents": [row]}
+            if command == "logs":
+                return {"ok": True, "records": [{
+                    "agent_name": "sample-123", "phase": "done",
+                    "status": "ok", "run_id": "abc123"}]}
+            if command == "run":
+                return {"ok": True, "status": "success", "run_id": "abc123"}
+            return {"ok": True}
+
+        with (
+            mock.patch.object(
+                sys, "argv", [
+                    "candidate-operational.py",
+                    "--cli", str(REPOSITORY / "agents-live"),
+                    "--repo", str(REPOSITORY),
+                    "--agent", "sample-123",
+                    "--cost-agent", "cost-agent-456",
+                ]),
+            mock.patch.dict(scope, {
+                "_json": payload,
+                "_run": lambda *_args, **_kwargs: mock.Mock(
+                    stdout="sample-123 timeline"),
+                "_set_started": lambda _cli, _repo, _agent, started: (
+                    transitions.append(started)),
+                "_dashboard_actions": mock.Mock(
+                    side_effect=KeyboardInterrupt()),
+                "_verify_cost_capture": mock.Mock(),
+            }),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main()
+        self.assertEqual([False, True, True], transitions)
+
+    def test_operational_runner_rejects_skipped_run_with_fresh_other_record(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        main = script["main"]
+        scope = main.__globals__
+        row = {
+            "identifier": "sample-123", "name": "sample",
+            "state": "started", "loadable": True,
+        }
+
+        def payload(_cli, _repo, command, *_args):
+            if command == "status":
+                return {"ok": True, "agents": [row]}
+            if command == "logs":
+                return {"ok": True, "records": [{
+                    "agent_name": "sample-123", "phase": "done", "status": "ok",
+                    "run_id": "concurrent456"}]}
+            if command == "run":
+                return {"ok": True, "status": "skipped",
+                        "run_id": "skipped123", "message": "already-running"}
+            return {"ok": True}
+
+        with (
+            mock.patch.object(
+                sys, "argv", [
+                    "candidate-operational.py", "--cli", "agents-live",
+                    "--repo", str(REPOSITORY), "--agent", "sample-123",
+                    "--cost-agent", "cost-agent-456",
+                ]),
+            mock.patch.dict(scope, {
+                "_json": payload,
+                "_run": lambda *_args, **_kwargs: mock.Mock(stdout=""),
+                "_set_started": mock.Mock(),
+                "_dashboard_actions": mock.Mock(),
+                "_verify_cost_capture": mock.Mock(),
+            }),
+        ):
+            with self.assertRaisesRegex(
+                    script["OperationalError"], "explicit run.*was skipped"):
+                main()
+
+    def test_operational_dashboard_run_requires_successful_terminal_event(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        await_run = script["_await_dashboard_run"]
+        scope = await_run.__globals__
+        skipped = {"ok": True, "records": [{
+            "agent_name": "sample-123",
+            "run_id": "abc123",
+            "status": "error",
+        }]}
+        with mock.patch.dict(scope, {
+            "_json": mock.Mock(return_value=skipped),
+        }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "dashboard Run was not successful"):
+                await_run(
+                    Path("agents-live"), Path("C:/repo"),
+                    "sample-123", "2026-01-01T00:00:00+00:00")
+
+        action = {"ok": True, "records": [{
+            "agent_name": "sample-123",
+            "run_id": "abc123",
+            "status": "ok",
+        }]}
+        terminal = {"ok": True, "records": [{
+            "agent_name": "sample-123",
+            "run_id": "abc123",
+            "phase": "done",
+            "status": "ok",
+        }]}
+        with mock.patch.dict(scope, {
+            "_json": mock.Mock(side_effect=(action, terminal)),
+        }):
+            self.assertEqual(
+                "abc123",
+                await_run(
+                    Path("agents-live"), Path("C:/repo"),
+                    "sample-123", "2026-01-01T00:00:00+00:00"))
+
+    def test_dashboard_process_cleanup_runs_after_browser_close_error(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        dashboard_actions = script["_dashboard_actions"]
+        scope = dashboard_actions.__globals__
+        process = mock.Mock()
+        process.pid = 42
+        process.poll.return_value = None
+        browser = mock.Mock()
+        browser.close.side_effect = RuntimeError("browser close failed")
+        playwright = mock.Mock()
+        playwright.chromium.launch.return_value = browser
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = playwright
+        manager.__exit__.return_value = False
+        sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
+        terminated: list[list[str]] = []
+        dashboard_lists = iter((
+            "No dashboard started by this host is running.",
+            "PORT PID\n8232 42",
+            "No dashboard started by this host is running.",
+        ))
+        with (
+            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            mock.patch.dict(scope, {
+                "_free_port": lambda: 8232,
+                "_await_api": lambda *_args, **kwargs: (
+                    kwargs.get("observe", lambda: None)()
+                    or {"agents": [{
+                        "identifier": "cost-agent-456",
+                        "cost_day_value": 0.25,
+                        "cost_week_value": 0.25,
+                    }]}),
+                "_registered_dashboard_pid": lambda *_args: 42,
+                "_api": lambda _port: {"agents": [{
+                    "identifier": "cost-agent-456",
+                    "cost_day_value": 0.25,
+                    "cost_week_value": 0.25,
+                }]},
+                "_verify_cost_capture": lambda *_args: ("abc123", 0.25),
+                "_await_dashboard_cost": lambda *_args: None,
+                "_verify_cost_attribution": lambda *_args: None,
+                "_run": lambda *_args, **_kwargs: mock.Mock(
+                    stdout=next(dashboard_lists)),
+                "_port_answers": lambda _port: False,
+                "_browser_executable": lambda: Path("browser.exe"),
+                "subprocess": mock.Mock(
+                    Popen=mock.Mock(return_value=process),
+                    run=mock.Mock(side_effect=lambda command, **_kwargs: (
+                        terminated.append(command) or mock.Mock(returncode=0)))),
+                "os": mock.Mock(name="nt"),
+            }),
+        ):
+            scope["os"].name = "nt"
+            with self.assertRaisesRegex(RuntimeError, "browser close failed"):
+                dashboard_actions(
+                    Path("agents-live.exe"), Path("C:/repo"),
+                    "sample-123", "sample", True,
+                    "cost-agent-456")
+        self.assertIn([
+            "agents-live.exe", "--repo", str(Path("C:/repo")),
+            "dashboard", "stop", "--port", "8232",
+        ], terminated)
+        self.assertNotIn(["taskkill", "/T", "/F", "/PID", "42"], terminated)
+
+    def test_dashboard_stop_requires_browser_visible_stopped_state(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        dashboard_actions = script["_dashboard_actions"]
+        scope = dashboard_actions.__globals__
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        start_button = mock.Mock()
+        start_button.wait_for.side_effect = RuntimeError(
+            "start control never appeared")
+        row = mock.Mock()
+
+        def row_button(_role, *, name):
+            if isinstance(name, re.Pattern):
+                return start_button
+            return mock.Mock()
+
+        row.get_by_role.side_effect = row_button
+        row.count.return_value = 1
+        page = mock.Mock()
+        page.get_by_role.return_value.filter.return_value = row
+        browser = mock.Mock()
+        browser.new_page.return_value = page
+        playwright = mock.Mock()
+        playwright.chromium.launch.return_value = browser
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = playwright
+        sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
+        dashboard_lists = iter((
+            "No dashboard started by this host is running.",
+            "PORT PID\n8232 42",
+            "No dashboard started by this host is running.",
+        ))
+        with (
+            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            mock.patch.dict(scope, {
+                "_free_port": lambda: 8232,
+                "_await_api": lambda *_args, **kwargs: (
+                    kwargs.get("observe", lambda: None)()
+                    or {"agents": [{
+                        "identifier": "cost-agent-456",
+                        "cost_day_value": 0.25,
+                        "cost_week_value": 0.25,
+                    }]}),
+                "_registered_dashboard_pid": lambda *_args: 42,
+                "_api": lambda _port: {"agents": [{
+                    "identifier": "cost-agent-456",
+                    "cost_day_value": 0.25,
+                    "cost_week_value": 0.25,
+                }]},
+                "_verify_cost_capture": lambda *_args: ("abc123", 0.25),
+                "_await_dashboard_cost": lambda *_args: None,
+                "_verify_cost_attribution": lambda *_args: None,
+                "_run": lambda *_args, **_kwargs: mock.Mock(
+                    stdout=next(dashboard_lists)),
+                "_port_answers": lambda _port: False,
+                "_action_count": lambda *_args: 0,
+                "_await_action": lambda *_args: None,
+                "_await_dashboard_run": lambda *_args: "abc123",
+                "_browser_executable": lambda: Path("browser.exe"),
+                "subprocess": mock.Mock(
+                    Popen=mock.Mock(return_value=process),
+                    run=mock.Mock(return_value=mock.Mock(returncode=0))),
+                "os": mock.Mock(name="nt"),
+            }),
+        ):
+            scope["os"].name = "nt"
+            with self.assertRaisesRegex(
+                    RuntimeError, "start control never appeared"):
+                dashboard_actions(
+                    Path("agents-live.exe"), Path("C:/repo"),
+                    "sample-123", "sample", True,
+                    "cost-agent-456")
+
+    def test_dashboard_posix_cleanup_escalates_process_group(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        terminate = script["_terminate_dashboard"]
+        scope = terminate.__globals__
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.side_effect = (
+            subprocess.TimeoutExpired("dashboard", 10), 0)
+        killpg = mock.Mock(side_effect=(None, None, ProcessLookupError()))
+        operating_system = mock.Mock(name="posix")
+        operating_system.name = "posix"
+        operating_system.getpgid.return_value = 84
+        operating_system.killpg = killpg
+        posix_signals = mock.Mock(SIGTERM=15, SIGKILL=9)
+        with mock.patch.dict(scope, {
+            "os": operating_system,
+            "signal": posix_signals,
+        }):
+            terminate(process)
+        self.assertEqual([
+            mock.call(84, 15),
+            mock.call(84, 9),
+            mock.call(84, 0),
+        ], killpg.call_args_list)
+        process.kill.assert_called_once_with()
+        self.assertEqual(2, process.wait.call_count)
+
+    def test_dashboard_cleanup_rejects_unconfirmed_survivors(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        terminate = script["_terminate_dashboard"]
+        scope = terminate.__globals__
+        windows_process = mock.Mock(pid=42)
+        windows_process.poll.return_value = None
+        windows_os = mock.Mock(name="nt")
+        windows_os.name = "nt"
+        with mock.patch.dict(scope, {
+            "os": windows_os,
+            "subprocess": mock.Mock(
+                run=mock.Mock(return_value=mock.Mock(returncode=1))),
+            "OperationalError": script["OperationalError"],
+        }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "could not terminate dashboard process tree"):
+                terminate(windows_process)
+
+        posix_process = mock.Mock(pid=42)
+        posix_process.poll.return_value = None
+        posix_process.wait.side_effect = (
+            subprocess.TimeoutExpired("dashboard", 10), 0)
+        posix_os = mock.Mock(name="posix")
+        posix_os.name = "posix"
+        posix_os.getpgid.return_value = 84
+        posix_os.killpg.return_value = None
+        clock = iter(range(100))
+        with mock.patch.dict(scope, {
+            "os": posix_os,
+            "signal": mock.Mock(SIGTERM=15, SIGKILL=9),
+            "subprocess": subprocess,
+            "time": mock.Mock(
+                monotonic=mock.Mock(side_effect=lambda: next(clock)),
+                sleep=mock.Mock()),
+            "OperationalError": script["OperationalError"],
+        }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "process group 84 survived cleanup"):
+                terminate(posix_process)
+
+    def test_dashboard_posix_cleanup_uses_group_after_launcher_exit(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        terminate = script["_terminate_dashboard"]
+        scope = terminate.__globals__
+        exited = mock.Mock(pid=42)
+        exited.poll.return_value = 0
+
+        posix_os = mock.Mock(name="posix")
+        posix_os.name = "posix"
+        posix_os.killpg.side_effect = (None, ProcessLookupError())
+        with mock.patch.dict(scope, {
+            "os": posix_os,
+            "signal": mock.Mock(SIGTERM=15, SIGKILL=9),
+        }):
+            terminate(exited, process_group=84)
+        self.assertEqual([
+            mock.call(84, 15),
+            mock.call(84, 0),
+        ], posix_os.killpg.call_args_list)
+
+    def test_dashboard_managed_stop_falls_back_to_live_launcher(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        stop = script["_stop_dashboard"]
+        scope = stop.__globals__
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        commands: list[list[str]] = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            return mock.Mock(returncode=1 if len(commands) == 1 else 0)
+
+        windows_os = mock.Mock(name="nt")
+        windows_os.name = "nt"
+        with mock.patch.dict(scope, {
+            "os": windows_os,
+            "subprocess": mock.Mock(run=mock.Mock(side_effect=run)),
+            "_port_answers": mock.Mock(side_effect=(True, False)),
+            "_verify_dashboard_stopped": lambda *_args: None,
+        }):
+            stop(
+                Path("agents-live.exe"), Path("C:/repo"), 8232, process,
+                process_group=None, dashboard_pid=84)
+        self.assertEqual([
+            ["agents-live.exe", "--repo", str(Path("C:/repo")),
+             "dashboard", "stop", "--port", "8232"],
+            ["taskkill", "/T", "/F", "/PID", "42"],
+        ], commands)
+
+    def test_dashboard_readiness_failure_retains_registered_pid(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        dashboard_actions = script["_dashboard_actions"]
+        scope = dashboard_actions.__globals__
+        process = mock.Mock(pid=42)
+        process.poll.return_value = 0
+        taskkill = mock.Mock(return_value=mock.Mock(returncode=0))
+
+        def fail_readiness(_process, _port, *, observe):
+            observe()
+            observe()
+            raise script["OperationalError"]("dashboard failed readiness")
+
+        dashboard_lists = iter((
+            "No dashboard started by this host is running.",
+            "No dashboard started by this host is running.",
+        ))
+        windows_os = mock.Mock(name="nt")
+        windows_os.name = "nt"
+        sync_api = mock.Mock(sync_playwright=mock.Mock())
+        registered_pids = iter((None, 84))
+        with (
+            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            mock.patch.dict(scope, {
+                "_free_port": lambda: 8232,
+                "_await_api": fail_readiness,
+                "_registered_dashboard_pid": lambda *_args: next(
+                    registered_pids),
+                "_run": lambda *_args, **_kwargs: mock.Mock(
+                    stdout=next(dashboard_lists)),
+                "_port_answers": lambda _port: False,
+                "subprocess": mock.Mock(
+                    Popen=mock.Mock(return_value=process),
+                    run=taskkill,
+                    DEVNULL=subprocess.DEVNULL,
+                ),
+                "os": windows_os,
+            }),
+        ):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "dashboard failed readiness"):
+                dashboard_actions(
+                    Path("agents-live.exe"), Path("C:/repo"),
+                    "sample-123", "sample", True,
+                    "cost-agent-456")
+        taskkill.assert_called_once_with(
+            ["agents-live.exe", "--repo", str(Path("C:/repo")),
+             "dashboard", "stop", "--port", "8232"],
+            cwd=Path("C:/repo"), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False)
 
     def test_candidate_acceptance_uses_uv_managed_launcher_not_path(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -2197,7 +3063,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     return_value=["/env/bin/agents-live"]):
                 argv = dashboard._command_argv("run", ["--name", "sample"])
         self.assertEqual(
-            ["/env/bin/agents-live", "run", "--name", "sample"], argv)
+            ["/env/bin/agents-live", "--json", "run", "--name", "sample"],
+            argv)
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
         body = source.split("def _command_argv", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("[sys.executable", body)

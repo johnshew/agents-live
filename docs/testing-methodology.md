@@ -1,7 +1,7 @@
 ---
 title: Testing Methodology
 description: What this project tests, at which layer, and why each gate exists
-ms.date: 2026-08-14
+ms.date: 2026-08-15
 ms.topic: concept
 ---
 
@@ -46,6 +46,51 @@ deleting whatever is red.
 A gate that runs the source does not cover the artifact. Six consecutive
 dashboard defects were reachable only by starting a packaged dashboard, which
 no gate did.
+
+The next failure was more instructive. Even after source, wheel, CI, and
+dashboard-readiness gates were restored, releases still found obvious defects
+minutes after publication: a live dashboard retained a degraded smoketest
+verdict, Windows installed-tool replacement needed a workflow the release had
+not exercised, and tests accepted mocked CLI envelopes that the actual CLI
+never emitted. The missing layer was not another unit suite. It was a release
+candidate installed into the real consumer tool and operated through the same
+CLI, browser, host scheduler, plugin environment, logs, and health surfaces a
+developer uses.
+
+### What has worked
+
+- Cross-platform CI catches host-specific parsing, path, and process behavior.
+- Built-wheel dashboard readiness catches packaging, reload-worker, API-row,
+  and action-availability failures.
+- Executing tests at translation boundaries catch malformed CLI envelopes,
+  DuckDB serialization, and provider argv drift when they invoke the actual
+  boundary rather than a local stand-in.
+- Exact before/after state snapshots catch destructive convergence and failed
+  restoration.
+- Independent adversarial review has repeatedly found races and bypasses that
+  the implementation author normalized while working.
+- Correlating exact run IDs catches zero-exit skipped work and unrelated fresh
+  records that count-based checks accept.
+
+### What has not worked
+
+- Source-only success has repeatedly been mistaken for artifact success.
+- Mocked subprocess output has encoded impossible CLI response shapes and kept
+  tests green while real commands failed immediately.
+- Readiness checks have proved that a page or endpoint exists without running
+  the user action behind it.
+- Exit-zero action logs have been mistaken for successful work even when the
+  child reported `skipped`, and cleanup calls have been mistaken for process
+  exit without confirming that the process tree disappeared.
+- Freshness has been treated as health, allowing a fresh file containing an
+  old failed verdict to pass diagnostics.
+- Post-publication installed-tool checks have been called validation even
+  though the tag and artifacts were already irreversible.
+- Manual release verification has drifted between operators and has skipped
+  recently filed issues that described the exact failure being encountered.
+
+The correction is to move installed operational acceptance before publication
+and make its receipt a mechanical precondition of `--publish`.
 
 ## The layers
 
@@ -144,6 +189,17 @@ YAML once shipped a release past a gate the local run kept.
 7. `tools/dashboard-readiness.py` - the built wheel serves `/api/agents` with
    the expected row, its state, and its Start and Stop availability, in normal
    and reload-worker modes.
+8. `tools/release.py --accept-candidate` - the exact locally tagged wheel is
+  installed into the uv-managed consumer tool and upgrades itself from that
+  wheel. All registered repository state and health are compared before and
+  after. A safe selected agent is exercised through CLI and browser-driven
+  dashboard health, Run, Start, and Stop actions. The dashboard Run must report
+  semantic success and have an exact successful terminal event. The dashboard
+  daily and weekly row totals must both increase by exactly the provider cost
+  captured after their baseline, with no intervening run. Health requires the current smoketest to
+  write a fresh passing verdict, process identity is retained before later
+  probes, process-tree cleanup is confirmed, and exact state restoration is
+  required.
 
 CI runs the same suites on Ubuntu and Windows for every push and pull request,
 and the publish workflow cannot publish until both hosts pass.
@@ -153,6 +209,18 @@ and the publish workflow cannot publish until both hosts pass.
 Automated gates cannot cover ownership transfer, host schedulers, or behavior
 at real scale. Before a release that touches those, exercise them on a host
 and record what was observed.
+
+Prepared releases enforce this through `tools/release.py --accept-candidate`.
+After the exact locally tagged wheel upgrades the uv-managed installed tool,
+the acceptance phase snapshots every registered repository and exercises a
+safe operator-selected agent through CLI status, doctor, run, start, stop, and
+timeline queries. It then launches the installed dashboard and uses a real
+headless browser to run the health check and click Run, Start, and Stop. The
+release cannot be published unless dashboard action records and healthy state
+are observed, both dashboard cost totals increase by exactly the accepted run
+cost without another run in the attribution window, the current smoketest
+passes, the dashboard process tree exits, and the final all-repository snapshot
+matches the baseline.
 
 Capture a baseline first and compare against it at the end:
 
@@ -180,6 +248,32 @@ registry and reports the same ownership before attempting a transfer. A
 runtime whose declared ownership plugin was never converged into its tool
 environment fails closed and cannot participate, which is invisible from the
 first host until someone tries.
+
+## Candidate stabilization loop
+
+Release preparation creates a local commit, annotated tag, wheel, and source
+distribution. Nothing is public at that point. Stabilize that candidate using
+this loop:
+
+1. Install the exact local wheel into the uv-managed user tool.
+2. Restore a healthy representative live repository and choose an agent whose
+  immediate run is safe.
+3. Run enforced candidate acceptance. It performs a second same-wheel upgrade,
+  snapshots all repositories, exercises CLI and dashboard operations, queries
+  logs and health, and restores the baseline.
+4. Treat every failure, stale badge, missing event, UI mismatch, plugin defect,
+  cost or usage omission, or cleanup residue as a release blocker.
+5. Fix on a branch, add an executing regression at the boundary that failed,
+  merge through a PR, prepare a new local candidate, and start again from
+  step 1. A prior acceptance receipt is invalidated at retry entry, before any
+  precondition can reject the new attempt.
+6. Publish only after one candidate completes the full loop without a code,
+  configuration, or manual-repair change.
+
+Do not weaken an assertion because a live host exposed a mismatch. First ask
+whether the test modeled the real response, process, or UI. Replace mocks with
+the actual parser, serializer, subprocess, browser, or host seam whenever that
+boundary is where the failure occurred.
 
 ## History
 

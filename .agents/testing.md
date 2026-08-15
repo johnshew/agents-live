@@ -206,7 +206,8 @@ a local commit and annotated tag. Before publication:
 
    ```bash
    uv run --script tools/release.py --accept-candidate \
-     --repo <live-repository> --yes
+     --repo <live-repository> --agent <safe-agent-identifier> \
+     --cost-agent <safe-provider-agent-identifier> --yes
    ```
 
 Candidate acceptance performs a second same-wheel `upgrade --from` using the
@@ -215,6 +216,17 @@ file rather than polling the launcher being replaced. It rejects changed
 started state in any registered repository, missing representative-watcher
 restoration, unhealthy all-repository diagnostics, missing correlated lifecycle
 events, or a wheel that no longer matches the prepared commit and tag.
+
+The selected agent must be safe to run immediately. Acceptance exercises it
+through both surfaces: CLI status, doctor, run, start, stop, and logs, followed
+by browser-driven dashboard health, Run, Start, and Stop actions against the
+installed dashboard. The final all-repository state must exactly match the
+pre-upgrade baseline.
+
+The cost agent must also be safe to run immediately and use a real provider
+that reports spend. Acceptance requires a new positive `list_cost_usd` value
+from its installed-candidate run, covering plugin launch, provider parsing,
+log persistence, and the cost field consumed by the dashboard.
 
 Publish only after those checks pass:
 

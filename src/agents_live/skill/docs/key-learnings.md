@@ -1,7 +1,7 @@
 ---
 title: Runtime and provider learnings
 description: Constraints established while extracting the 6.0 seams
-ms.date: 2026-08-14
+ms.date: 2026-08-15
 ms.topic: concept-article
 ---
 
@@ -89,3 +89,40 @@ WSL liveness is not a fourth lifecycle verb. A replacement task is staged and
 started under a distinct name, then a fresh atomic beacon is verified before
 the stable task or any legacy task is replaced. A failed verification leaves
 the working task unchanged.
+
+## Validate the consumer before publication
+
+A source checkout, built wheel in isolation, and installed tool are different
+systems. The installed tool adds launcher replacement, uv receipts,
+co-installed plugins, native triggers, long-lived watcher processes, real
+logs, and browser state. Those are exactly where release-only defects have
+appeared.
+
+Prepare and tag locally, then install the exact wheel and operate it before the
+tag is pushed. Exercise CLI Run, Start, Stop, status, doctor, logs, plugin
+convergence, usage and cost capture where the selected provider reports it,
+health beacon repair, and dashboard health plus Run, Start, and Stop through a
+real browser. Snapshot every registered repository before and after. Any
+mismatch invalidates the candidate.
+
+Do not equate process exit zero with successful work. A dispatch may exit zero
+after reporting `skipped`; acceptance must retain its run ID and require the
+matching successful terminal event. Verify cost through the dashboard's own
+row model as a before/after increase, not an absolute historical total or a
+duplicate parser. Require both cost windows to increase by the correlated run
+cost and reject any intervening run ID. Dashboard health must consume a fresh verdict
+from the current smoketest, not a prior pass. Retain process identity before
+later probes, then verify that dashboard descendants have exited after cleanup.
+A termination request is not proof of termination.
+
+Mock only dependencies outside the decision under test. If production reads a
+CLI JSON envelope, qlog JSONL, DuckDB attributes, a Windows helper result, or a
+NiceGUI websocket-rendered button, the regression must cross that same
+boundary. Several green tests failed because they asserted locally invented
+shapes.
+
+Independent review is most valuable before commit and before publication,
+focused on bypasses, races, cleanup, stale authorization, and false success.
+When review finds a defect, add a discriminating regression, rerun the complete
+candidate loop, and do not reuse an earlier acceptance result. Revoke the old
+receipt before evaluating any retry precondition.

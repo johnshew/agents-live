@@ -463,12 +463,13 @@ def _command_argv(command: str, args: list[str]) -> list[str]:
     Not ``sys.executable``: this script runs under ``uv run --script``,
     whose environment holds NiceGUI and no agents-live (#288).
     """
-    return [*repos.cli_base(), command, *args]
+    json_option = ["--json"] if command == "run" else []
+    return [*repos.cli_base(), *json_option, command, *args]
 
 
 def _run_script(command: str, args: list[str],
-                *, timeout: float | None = None) -> tuple[int, str]:
-    """Run a lifecycle script with the given args; return (exit_code, output).
+                *, timeout: float | None = None) -> tuple[int, str, str]:
+    """Run a lifecycle script; return (exit_code, stdout, transcript).
 
     ``timeout`` caps slow checks (e.g. the health-check worker, which runs
     the framework smoketest) so the dashboard can never spin forever; a
@@ -490,12 +491,18 @@ def _run_script(command: str, args: list[str],
         captured = (exc.stdout or "") + (exc.stderr or "")
         if isinstance(captured, bytes):
             captured = captured.decode("utf-8", "replace")
-        return 124, (captured.strip() + f"\n[dashboard] timed out after {timeout:.0f}s").strip()
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
+        output = (
+            captured.strip()
+            + f"\n[dashboard] timed out after {timeout:.0f}s").strip()
+        return 124, "", output
+    stdout = proc.stdout.strip()
+    return proc.returncode, stdout, (proc.stdout + proc.stderr).strip()
 
 
 def _log_action(label: str, command: str, args: list[str], code: int,
-                out: str, *, agent_name: str | None) -> None:
+                out: str, *, agent_name: str | None,
+                run_id: str | None = None,
+                run_status: str | None = None) -> None:
     """Persist a dashboard action: a JSONL event plus a full transcript.
 
     `dashboard.log` is the structured record (qlog/timeline-readable);
@@ -507,10 +514,11 @@ def _log_action(label: str, command: str, args: list[str], code: int,
         "success" if code == 0 else "failed",
         repository=str(_require_repo_path(REPO_ROOT)),
         agent=agent_name or "dashboard",
-        run_id=str(time.time_ns()),
+        run_id=run_id or str(time.time_ns()),
         origin="dashboard",
         category=None if code == 0 else "command_failed",
         message=f"{label}: {command} {' '.join(args)}",
+        attributes=(("run_status", run_status),) if run_status else (),
     ))
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = " ".join([command, *args])
@@ -581,15 +589,28 @@ async def _execute_action(request: _ActionRequest) -> int:
             _run_script, request.script, request.args, timeout=request.timeout)
         if result is None:
             raise asyncio.CancelledError
-        code, out = result
+        code, stdout, out = result
     finally:
         if note is not None:
             _safe_ui(note.dismiss)
+    run_id = None
+    run_status = None
+    if request.script == "run" and code == 0:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            code = -1
+        else:
+            run_id = payload.get("run_id")
+            run_status = payload.get("status")
+            if run_status != "success" or not isinstance(run_id, str):
+                code = -1
     ok = code == 0
     # Persist the outcome first so a disconnected client never loses the record.
     _log_action(
         request.label, request.script, request.args, code, out,
-        agent_name=request.agent_name)
+        agent_name=request.agent_name, run_id=run_id,
+        run_status=run_status)
     _safe_ui(
         ui.notify,
         f"{request.label} {target}: {'ok' if ok else f'failed (exit {code})'}",
@@ -668,10 +689,8 @@ async def health_check() -> None:
      1. `doctor` - environment readiness (gate: abort if a required
        prerequisite is missing, so the failure surfaces up front instead
        of as a cryptic mid-activation error).
-     2. `start --all` - ensure every agent owned by this host (or `*`)
-       with a trigger is actually registered and running.
-     3. `smoketest` - run the framework's end-to-end validation.
-         4. `internal maintain` - converge host state and write the canonical
+         2. `smoketest` - run the framework's end-to-end validation.
+         3. `internal maintain` - converge existing started intent and write the canonical
              health beacon with the current smoketest verdict.
 
     The header label then reflects the refreshed beacon (`system_health`),
@@ -687,9 +706,28 @@ async def health_check() -> None:
         )
         return
 
-    await do_action("Start", "start", ["--all"])
-    await do_action("Smoketest", "smoketest", [], timeout=WORKER_TIMEOUT)
-    await do_action("Health check", "internal", ["maintain"])
+    smoketest_result = _smoketest_result_path()
+    try:
+        smoketest_result.unlink(missing_ok=True)
+    except OSError:
+        _safe_ui(
+            ui.notify,
+            "Could not clear the previous smoketest verdict.",
+            type="negative", timeout=8000,
+        )
+        return
+    if await do_action(
+            "Smoketest", "smoketest", [], timeout=WORKER_TIMEOUT) != 0:
+        return
+    if not _current_smoketest_pass(smoketest_result):
+        _safe_ui(
+            ui.notify,
+            "Smoketest did not write a current passing verdict.",
+            type="negative", timeout=8000,
+        )
+        return
+    if await do_action("Health check", "internal", ["maintain"]) != 0:
+        return
     # Summarise the refreshed beacon so the user sees infra + smoketest,
     # not just exit codes. system_health reads the host health.ok beacon.
     h = system_health()
@@ -699,6 +737,19 @@ async def health_check() -> None:
         type=severity.get(h["level"], "negative"),
         timeout=12000, multi_line=True,
     )
+
+
+def _smoketest_result_path() -> Path:
+    return paths.repo_state_dir(_require_repo_path(REPO_ROOT)) / "logs" / \
+        "smoketest-framework-result.json"
+
+
+def _current_smoketest_pass(result: Path) -> bool:
+    try:
+        payload = json.loads(result.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "pass"
 
 
 async def pause_all(names: list[str]) -> None:

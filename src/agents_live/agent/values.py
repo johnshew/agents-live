@@ -202,3 +202,4 @@ class Outcome:
     message: str = ""
     usage: tuple[tuple[str, str | None], ...] = ()
     transcript: str | None = None
+    run_id: str | None = None

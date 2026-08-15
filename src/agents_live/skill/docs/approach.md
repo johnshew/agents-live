@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-14
+ms.date: 2026-08-15
 ms.topic: concept-article
 ---
 
@@ -29,10 +29,11 @@ repairs drift. There is no held plan and no second mutation path. `health()` is
 the read-side operation.
 
 Automatic maintenance is the sole writer of the host-local health record.
-`doctor --quick` treats a record younger than 70 minutes as current. A missing
-or stale record triggers that same maintenance operation once, followed by one
-more freshness check. The command answers only for the runtime where it runs;
-it neither discovers nor probes another runtime.
+`doctor --quick` treats a record as healthy only when it is both fresh and
+semantically healthy. A missing, stale, degraded, or failed-smoketest record
+triggers that same maintenance operation once, followed by one more content and
+freshness check. The command answers only for the runtime where it runs; it
+neither discovers nor probes another runtime.
 
 Long-lived watchers compare their loaded package version with the installed
 distribution at a bounded idle check. A mismatch is handled only between
@@ -99,3 +100,24 @@ event envelope are deliberately separate.
   they already own until they resolve again or are stopped.
 - Concurrency and misfire policy are fixed to skip.
 - Definitions, artifacts, started state, and events have one owner each.
+- Release readiness is a state machine, not a checklist. Preparation creates a
+  local tagged artifact; installed-candidate acceptance exercises that exact
+  artifact against real host state; only a commit/tag/wheel-bound acceptance
+  receipt authorizes publication.
+- Operational acceptance must use the uv-managed launcher and real CLI,
+  serialization, browser, plugin, scheduler, logs, and health boundaries. A
+  source import, mocked envelope, or HTTP bind alone cannot certify release
+  behavior.
+- Dashboard actions are successful only when the child reports semantic
+  success and its exact run ID reaches a successful terminal event. Exit zero
+  and a fresh unrelated log record are insufficient.
+- Cost acceptance requires exact before/after increases in both dashboard cost
+  windows and rejects intervening run IDs. Dashboard health requires the
+  current smoketest action and a fresh passing verdict. Cleanup retains process
+  identity before later probes and requires confirmed process-tree exit.
+  Calling a parser or a termination API is not evidence that the consumer
+  surface worked.
+- Candidate probes restore the exact all-repository baseline. Failure or
+  interruption leaves no durable test intent, dashboard process, or stale
+  acceptance authorization. A retry revokes prior authorization before it
+  checks whether the candidate is still publishable.
