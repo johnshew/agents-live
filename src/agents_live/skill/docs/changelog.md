@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.6 - 2026-08-15
+
 - fix: require full installed candidate acceptance before publication.
   A prepared local tag cannot be pushed until its exact wheel has upgraded the
   uv-managed consumer tool and passed live CLI, browser dashboard, semantic
