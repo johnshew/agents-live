@@ -7,8 +7,8 @@ unlike a crontab, which is one file a developer already knows how to
 read - keeps registrations across reboots and outlives whatever created
 them.
 
-Nothing outside :mod:`schedules` imports this module. Everything above
-that dispatch point speaks ``TriggerSpec``.
+The Windows host adapter and the explicit compatibility migration boundary
+use this store. Current lifecycle code speaks runtime subscriptions.
 
 The parts that decide what Windows will be told - argument quoting, task
 naming, XML rendering, cron translation - are pure and run on any
@@ -268,10 +268,8 @@ _HIDDEN_ARGS = ("-P", "-m", _HIDDEN_MODULE)
 def hidden_host() -> Path | None:
     """The windowless interpreter beside this one, or None if absent.
 
-    Same installation the pinned executable comes from:
-    :func:`headless.cli_shim_path` also resolves against the interpreter
-    that is running, and both end up in the environment ``uv tool
-    install`` made.
+    It resolves beside the running interpreter, in the same environment
+    created by ``uv tool install``.
     """
     if not sys.executable:
         return None
@@ -403,7 +401,7 @@ def translate(schedule: str) -> list[dict[str, object]]:
     Exact wherever cron maps cleanly onto a trigger. Everywhere else the
     trigger is a superset - a repetition on a minute step that covers
     every minute the expression can name - and the dueness check in
-    :func:`agents_live.legacy.schedules.claim_due_minute` declines the fires
+    Dispatch-time schedule claiming declines the fires
     that are not real firing times. Guaranteeing a superset is much
     easier than guaranteeing exactness, which is why no valid
     expression is refused (docs/windows-support.md, Scheduling on
@@ -1236,7 +1234,7 @@ def installed_names(root: Path | str, *, kind: str | None = None) -> list[str]:
     return names
 
 
-# --- The store-level questions `schedules` asks of either store --------------
+# --- Compatibility store operations -----------------------------------------
 #
 # Their crontab peers are in `crontasks`; the two answer with the same
 # signatures so the dispatch point selects a module instead of branching

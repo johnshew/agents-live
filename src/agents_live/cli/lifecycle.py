@@ -1,6 +1,7 @@
 """Lifecycle composition above the runtime and agent ports."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ class Collected:
     broken_definitions: tuple[tuple[Path, str], ...] = ()
     protected_scopes: tuple[str, ...] = ()
     protected_targets: tuple[str, ...] = ()
+    protected_process_keys: tuple[str, ...] = ()
     unknown_metadata: tuple[tuple[Path, tuple[str, ...]], ...] = ()
 
 
@@ -27,6 +29,7 @@ def collect(
     *,
     additions: dict[Path, set[str]] | None = None,
     removals: dict[Path, set[str]] | None = None,
+    selected_roots: Iterable[Path] | None = None,
     persist: bool = True,
 ) -> Collected:
     additions = {
@@ -37,18 +40,41 @@ def collect(
         registry = repos.load()
     except ValueError as exc:
         raise CollectionUnavailable(str(exc)) from exc
-    roots = [(Path(value).resolve(), Path(value).is_dir())
-             for value in registry["repos"].values()]
+    candidates = (
+        (Path(value) for value in registry["repos"].values())
+        if selected_roots is None else selected_roots
+    )
+    roots_by_path: dict[Path, bool] = {}
+    for root in candidates:
+        resolved = root.resolve()
+        roots_by_path[resolved] = resolved.is_dir()
+    roots = list(roots_by_path.items())
     host = runtime.current()
     try:
-        installed = {item.key for item in host.trigger_store.list()}
+        installed_items = host.trigger_store.list()
+        installed = {item.key for item in installed_items}
+        running_watchers = (
+            host.supervisor.owned(role="watcher")
+            if selected_roots is not None else []
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         raise CollectionUnavailable(
             f"trigger store is unreadable: {exc}") from exc
     discovered: dict[Path, dict[str, tuple[runtime.Subscription, ...]]] = {}
     specs_by_root: dict[Path, dict[str, agent.AgentSpec]] = {}
     unavailable: list[str] = []
-    protected: list[str] = []
+    selected_scopes = {f"repo:{root}" for root in roots_by_path}
+    selected_installed_keys = {
+        item.key for item in installed_items if item.scope in selected_scopes}
+    protected: list[str] = (
+        sorted({
+            item.scope
+            for item in installed_items
+            if selected_roots is not None
+            and item.scope.startswith("repo:")
+            and item.scope not in selected_scopes
+        })
+    )
     broken: list[tuple[Path, str]] = []
     broken_by_root: dict[Path, tuple[agent.BrokenDefinition, ...]] = {}
     for root, readable in roots:
@@ -166,7 +192,7 @@ def collect(
                 if owner is not None and not ownership.owns(owner):
                     continue
             desired.extend(definitions.get(identifier, ()))
-    desired.append(_maintenance())
+    desired.append(maintenance_subscription())
     # A started definition that stopped parsing has an unknown desired state,
     # not an empty one, so its artifacts are held rather than withdrawn.
     protected_targets = [
@@ -182,6 +208,13 @@ def collect(
         tuple(broken),
         tuple(protected),
         tuple(protected_targets),
+        tuple(sorted({
+            process.key
+            for process in running_watchers
+            if selected_roots is not None
+            and process.key
+            and process.key not in selected_installed_keys
+        })),
         tuple(
             (spec.prompt_path, spec.unknown_metadata)
             for specs in specs_by_root.values()
@@ -195,11 +228,13 @@ def converge(
     *,
     additions: dict[Path, set[str]] | None = None,
     removals: dict[Path, set[str]] | None = None,
+    selected_roots: Iterable[Path] | None = None,
     dry_run: bool = False,
 ) -> runtime.Converged:
     collected = collect(
         additions=additions,
         removals=removals,
+        selected_roots=selected_roots,
         persist=not dry_run,
     )
     converged = runtime.converge(
@@ -207,6 +242,7 @@ def converge(
         dry_run=dry_run,
         protected_scopes=collected.protected_scopes,
         protected_targets=collected.protected_targets,
+        protected_process_keys=collected.protected_process_keys,
     )
     if dry_run or converged.failed:
         return converged
@@ -260,7 +296,7 @@ def _discover(
     return discovery.specs, result, discovery.broken
 
 
-def _maintenance() -> runtime.Subscription:
+def maintenance_subscription() -> runtime.Subscription:
     identity = ownership.current_owner_id()
     installation = identity.rsplit(":", 1)[-1]
     return runtime.Subscription.create(

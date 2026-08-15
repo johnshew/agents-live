@@ -14,11 +14,12 @@ from pathlib import Path
 
 from ... import __version__, agent, paths, plugins, preflight, runtime
 from ...obs import admin as adminlog
-from ...legacy import triggers
+from ...legacy import migrate as legacy_migration
 from ...runtime.hosts import system as hostruntime
-from ...runtime.spawn import find_uv
+from ...runtime.hosts.processes import watchers_on_host, within
+from ...runtime.spawn import cli_executable_path, find_uv
 from ...state import registry as repos
-from .. import package_index, update_check, upgrade_handoff
+from .. import lifecycle, package_index, update_check, upgrade_handoff
 from ..scripts import dashboards
 from . import init
 
@@ -42,8 +43,7 @@ def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
             continue
         root = Path(value)
         targets.setdefault(root, alias)
-    from ...legacy import health_check  # noqa: PLC0415
-    for root in health_check.persisted_roots():
+    for root in legacy_migration.persisted_roots():
         targets.setdefault(root, f"active workspace {root.name}")
     return [(label, root) for root, label in targets.items()], errors
 
@@ -137,12 +137,10 @@ def _holders(environment: Path) -> list[str]:
     :func:`plugins.only_the_launcher_failed`. Only processes an operator
     can act on are named.
     """
-    from ...legacy.headless import watchers_on_host  # noqa: PLC0415
-
     try:
         held = {
             pid for pid, command in hostruntime.process_command_lines()
-            if any(triggers.within(arg, environment)
+            if any(within(arg, environment)
                    for arg in hostruntime.split_command_line(command))
         }
         watchers = watchers_on_host(under=environment)
@@ -207,7 +205,7 @@ def _handoff_windows_upgrade(
         return None
     environment = plugins.tool_environment()
     if (environment is None
-            or not triggers.within(sys.executable, environment)):
+            or not within(sys.executable, environment)):
         return None
     try:
         uv = find_uv()
@@ -339,8 +337,6 @@ def _warn_launcher_kept() -> None:
 
 def _running_watchers() -> list[tuple[int, str, str | None]]:
     """Every watcher on this host, or nothing if the host will not say."""
-    from ...legacy.headless import watchers_on_host  # noqa: PLC0415
-
     try:
         return watchers_on_host()
     except OSError:
@@ -397,14 +393,12 @@ def _report_stale_watchers(
 
 
 def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
-    # cli_shim_path prefers the entry point beside the interpreter (the
+    # cli_executable_path prefers the entry point beside the interpreter (the
     # uv tool env), so a freshly installed shim is found even when
     # ~/.local/bin is not on PATH yet.
-    from ...legacy.headless import AgentsLiveError, cli_shim_path  # noqa: PLC0415
-
     try:
-        executable = str(cli_shim_path())
-    except AgentsLiveError as exc:
+        executable = str(cli_executable_path())
+    except RuntimeError as exc:
         detail = f"agents-live executable not found after runtime upgrade: {exc}"
         if refresh_skills:
             preflight.emit_failure("upgrade", detail)
@@ -492,7 +486,7 @@ def main() -> int:
         if (hostruntime.id() != hostruntime.WINDOWS
                 or installed_environment is None
                 or continuation_environment.resolve() != installed_environment.resolve()
-                or triggers.within(sys.executable, installed_environment)):
+                or within(sys.executable, installed_environment)):
             preflight.emit_failure(
                 "upgrade", "invalid internal Windows upgrade continuation",
                 code="invalid_arguments")
@@ -551,16 +545,27 @@ def main() -> int:
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)
 
-    # Converge the built-in automatic maintenance crontab entries: a
-    # runtime upgrade can re-home the pinned shim path they carry. This
-    # branch runs in the freshly installed CLI, so the canonical lines
-    # are the new install's. Best-effort: no crontab is not fatal.
+    # Converge the built-in automatic maintenance subscription: a runtime
+    # upgrade can re-home the executable path it carries. This branch runs
+    # in the freshly installed CLI, so the rendered artifact is current.
     try:
-        from ...legacy import health_check  # noqa: PLC0415
-        if health_check.ensure_health_cron_lines():
+        host = runtime.current()
+        host.prepare()
+        rendered = host.render(lifecycle.maintenance_subscription())
+        installed = next(
+            (item for item in host.trigger_store.list()
+             if item.key == rendered.key),
+            None,
+        )
+        if (
+            installed is None
+            or installed.fingerprint != rendered.fingerprint
+            or installed.rendered != rendered.rendered
+        ):
+            host.trigger_store.install(rendered)
             print("Converged the automatic maintenance schedule")
     except Exception as exc:
-        print(f"warning: could not converge health-check crontab entries: "
+        print(f"warning: could not converge automatic maintenance: "
               f"{exc}", file=sys.stderr)
 
     if not targets:

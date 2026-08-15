@@ -37,6 +37,7 @@ def converge(
     dry_run: bool = False,
     protected_scopes: Collection[str] = (),
     protected_targets: Collection[str] = (),
+    protected_process_keys: Collection[str] = (),
     _host: HostAdapter | None = None,
 ) -> Converged:
     host = _host or current()
@@ -63,6 +64,7 @@ def converge(
             host.supervisor.owned(role="watcher"),
             protected_scopes,
             protected_targets,
+            protected_process_keys,
         )
         if dry_run:
             return Converged(True, operations, (), _health(host))

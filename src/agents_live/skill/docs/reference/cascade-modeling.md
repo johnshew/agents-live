@@ -1,4 +1,11 @@
-# Modeling Cascading File Modifications
+---
+title: Modeling Cascading File Modifications
+description: Prove that chains of watcher-driven file changes terminate
+ms.date: 2026-08-14
+ms.topic: concept
+---
+
+## Modeling cascading file modifications
 
 When multiple file-watch tasks write into each other's watched directories,
 changes propagate in chains that can loop indefinitely. This document
@@ -56,7 +63,7 @@ re-trigger to be skipped. Guards are layered (defense in depth):
 
 | Layer | Guard type | Mechanism | Where |
 |-------|-----------|-----------|-------|
-| G1 | Dispatcher hash | SHA-256 per-file; skip if unchanged within cascade window | activate.py |
+| G1 | Dispatcher hash | SHA-256 per-file; skip if unchanged within cascade window | `runtime/policy.py` |
 | G2 | Pre-proc mtime | Skip if source mtime ≤ output mtime | Task pre-processor |
 | G3 | Pre-proc content hash | Skip if SHA-256(source) == cached hash | Task pre-processor |
 | G4 | No-write | Skip write if new content == original content | Sync script |

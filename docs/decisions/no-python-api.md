@@ -1,7 +1,7 @@
 ---
 title: No Python API for Processors Decision
 description: Why agents-live exposes a CLI and environment contract instead of an importable Python surface, and what handlers should use instead
-ms.date: 2026-08-13
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -9,9 +9,12 @@ ms.topic: concept
 
 ## Status
 
-Accepted for 6.0. Handler-authored schema-5 JSONL records in the repository
-log directory are supported. A richer environment-provided append-only handle
-with correlation context is still deferred to
+Accepted for 6.0. The import-only legacy execution modules were retired after
+their final runtime caller moved to current lifecycle convergence. Explicit
+5.x trigger artifact conversion remains available through the hidden migration
+adapter for the rest of 6.x. Handler-authored schema-5 JSONL records in the
+repository log directory are supported. A richer environment-provided
+append-only handle with correlation context is still deferred to
 [#105](https://github.com/johnshew/agents-live/issues/105).
 
 ## Context
@@ -27,8 +30,8 @@ exports only `__version__`, so every internal move silently broke consumer
 code. During the 6.0 seam refactor
 ([#256](https://github.com/johnshew/agents-live/issues/256)) that happened
 twice in one session: once when definition bundling changed, and again when
-`headless` moved under `legacy/`. `legacy/` is removed in 7.0, so those
-imports break again on that release.
+`headless` moved under `legacy/`. Those imports were never a supported API and
+were removed once modern lifecycle and migration no longer called them.
 
 The question raised was whether to answer this with a supported
 `agents_live.api` facade over functions the suite already covers.
@@ -152,7 +155,7 @@ If a handler imports `agents_live`, replace the import with a CLI call.
 | `headless.list_active_agent_names()` | `agents-live status --json`, `state` field (`started`, `stopped`, `unloadable`) |
 | `headless.list_spawned_definitions()` | `agents-live status --json`, derived from `execution.schedules` and `execution.watch` |
 | `headless.load_agent_config(name)` | `agents-live status --json`, `execution` object: `selector`, `provider`, `model`, `mode`, `schedules`, `watch`, `mcps`, `pre_processor`, `post_processor` |
-| `legacy.mcp_config_loader` | no CLI replacement in 6.x. Vendor the loader logic into the consumer if it must survive 7.0, or read the consumer's own MCP configuration directly. `legacy/` is removed in 7.0 |
+| `legacy.mcp_config_loader` | removed. Vendor the loader logic into the consumer or read the consumer's own MCP configuration directly |
 | `headless.EventLog` (reading) | `agents-live logs --json` - `ts`, `agent_name`, `phase`, `status`, `message`, `trigger`, `duration_s` |
 | `headless.EventLog` (writing) | append schema-5 JSONL to the repository log directory when you need structured, queryable handler events. For ordinary diagnostics, write stderr and let dispatch attach it to the run event. A richer append handle remains #105 |
 | `headless.AgentsLiveError` | `agents-live status --json`, `loadable` plus `error` per row; or a non-zero CLI exit status |
@@ -192,8 +195,8 @@ Notes on the two that are not mechanical substitutions:
   `doctor --json`, or `run`. The two real gaps were fields missing from
   existing JSON output, not missing functions; execution policy was added to
   the status row instead.
-- **Blessing `legacy.headless` as public.** It is removed in 7.0 and must not
-  receive new behavior.
+- **Blessing `legacy.headless` as public.** It was removed after current
+  lifecycle replaced its final supported compatibility caller.
 - **Stdout control commands for observability.** Disqualified by the
   injection risk from model-authored text and by stdout already carrying
   control meaning.
@@ -207,6 +210,8 @@ Notes on the two that are not mechanical substitutions:
   breaking handlers.
 - 6.x supports structured handler emission through schema-5 JSONL files, but
   does not provide an importable writer helper.
+- 6.x retains explicit 5.x artifact migration without retaining the old
+  execution engine as an importable compatibility surface.
 - Introspection features must be added to the JSON CLI rather than to a
   library, which keeps one tested surface.
 - A future helper remains possible, but only as emission-only convenience over

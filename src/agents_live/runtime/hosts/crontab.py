@@ -1,16 +1,9 @@
-"""The user crontab as a trigger store, the POSIX peer of ``wintasks``.
+"""The user crontab as the POSIX trigger store.
 
-``schedules`` asks one of these two modules every question about what
-this host has registered. They answer the same questions with the same
-signatures, so the dispatch point picks a module once instead of
-branching per operation; what a stored trigger looks like - a crontab
-line here, a registered task there - never leaves the store.
-
-The mechanics were previously spread through ``headless``, where the
-crontab was reachable from anywhere and the dispatch point had to know
-which half of the pair it was talking to. Nothing about the lines
-themselves changed in the move: ``triggers`` still renders and matches
-them, and this module is the read-modify-write around that.
+What a stored trigger looks like, a crontab line here and a registered task
+on Windows, stays inside the host adapter. The compatibility trigger grammar
+still renders and recognizes pre-6.0 lines; this module owns the atomic
+read-modify-write around them.
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 ---
 title: Agents Live WSL Operational Runbook
 description: Diagnose, recover, and verify agents-live infrastructure on WSL
-ms.date: 2026-07-19
+ms.date: 2026-08-14
 ms.topic: troubleshooting
 ---
 
@@ -174,8 +174,8 @@ wsl -d Ubuntu --cd ~/repos/<target-project> -e bash -lc 'agents-live logs --erro
 | `wsl.conf` | `/etc/wsl.conf` (Linux) | Per-distro: interop, automount, boot |
 | `.wslconfig` | `C:\Users\<user>\.wslconfig` | VM-level: memory, swap, experimental |
 | `.mcp.json` | Repo root (Linux) | Copilot CLI auto-loads these MCP servers |
-| `.vscode/mcp.json` | Repo root (Linux) | headless.py reads MCP configs from here |
+| `.vscode/mcp.json` | Repo root (Linux) | Current agent MCP resolution reads definitions from here |
 | `~/.gitconfig` | Linux home | Git credential helper config |
 | `.agents-live.toml` | Repo (Linux) | Project marker, task directories, and ownership mode |
 | crontab `@reboot` entries | Host (Linux) | Durable watcher respawn intent |
-| `~/.local/state/agents-live/health.ok` | Host (Linux) | Host beacon written by the built-in health-check loop; embeds per-repo sweep summaries and the smoketest verdict |
+| `~/.local/state/agents-live/health.ok` | Host (Linux) | Host beacon written by automatic maintenance; includes current infrastructure and smoketest health |

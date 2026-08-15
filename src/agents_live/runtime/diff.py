@@ -12,6 +12,7 @@ def diff(
     processes: Sequence[ProcessRef] = (),
     protected_scopes: Collection[str] = (),
     protected_targets: Collection[str] = (),
+    protected_process_keys: Collection[str] = (),
 ) -> tuple[Operation, ...]:
     """Operations that make the host match ``desired``.
 
@@ -23,7 +24,7 @@ def diff(
     wanted = {item.key: item for item in desired}
     installed = {item.key: item for item in actual}
     watchers = {item.key: item for item in processes if item.role == "watcher" and item.key}
-    protected_keys = {
+    protected_keys = set(protected_process_keys) | {
         key for key, item in installed.items()
         if item.scope in protected_scopes
         or (item.target and item.target in protected_targets)

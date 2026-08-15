@@ -36,7 +36,6 @@ from agents_live import agent, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import start
-from agents_live.legacy import health_check
 from agents_live.obs import qlog
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
@@ -362,36 +361,13 @@ class TestHostMaintenanceEntries(TempRepository):
     """The tool's own host entries, which no repository owns."""
 
     def test_maintenance_lines_name_no_repository(self) -> None:
-        """Host-scoped by construction: it resolves repositories itself.
-
-        A ``cd`` or ``--repo`` here would pin the loop that repairs every
-        registered project to whichever project happened to install it.
-        """
-        with mock.patch.object(
-                health_check, "cli_shim_path",
-                return_value=Path("/opt/bin/agents-live")):
-            lines = health_check.build_health_cron_lines()
-        self.assertEqual(len(health_check.HEALTH_SCHEDULES), len(lines))
-        for line in lines:
-            self.assertNotIn(" cd ", line)
-            self.assertNotIn("--repo", line)
-            self.assertIn("internal maintain --quiet", line)
-            self.assertTrue(health_check.health_cron_line_matches(line))
-
-    def test_the_matcher_ignores_agent_and_foreign_lines(self) -> None:
-        """Removal is keyed on this matcher, so a false positive deletes
-        an entry this tool did not write."""
-        for line in (
-            "0 3 * * * /home/someone/backup.sh",
-            "0 8 * * * cd /repo && agents-live run --name maintain 2>&1",
-            "0 * * * * /usr/bin/maintain --quiet",
-            "0 * * * * internal maintain --quiet",
-        ):
-            with self.subTest(line=line):
-                self.assertFalse(health_check.health_cron_line_matches(line))
-        self.assertTrue(health_check.health_cron_line_matches(
-            "0 * * * * PATH=/bin /opt/bin/agents-live internal maintain "
-            "--quiet 2>&1"))
+        rendered = PosixHost().render(lifecycle.maintenance_subscription())
+        self.assertNotIn(" cd ", rendered.rendered)
+        self.assertNotIn("--repo", rendered.rendered)
+        self.assertIn("internal maintain --quiet", rendered.rendered)
+        marker = artifacts.from_rendered(rendered.rendered)
+        self.assertIsNotNone(marker)
+        self.assertEqual("runtime", marker["target"])
 
     def test_the_loop_is_reachable_only_through_the_internal_command(self) -> None:
         """`health-check` was a public verb in 5.x. Its absence is the
@@ -1306,6 +1282,36 @@ class TestRunsRecordWhatTheySpent(TempRepository):
 
 
 class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_health_check_finishes_with_modern_maintenance(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        actions: list[tuple[str, str, list[str]]] = []
+
+        async def run_action(
+            label: str,
+            script: str,
+            args: list[str],
+            **_kwargs,
+        ) -> int:
+            actions.append((label, script, args))
+            return 0
+
+        with (
+            mock.patch.object(dashboard, "do_action", side_effect=run_action),
+            mock.patch.object(dashboard, "system_health", return_value={
+                "level": "ok", "tip": "healthy",
+            }),
+        ):
+            await dashboard.health_check()
+
+        self.assertEqual(
+            ("Health check", "internal", ["maintain"]),
+            actions[-1],
+        )
+
     async def test_shutdown_during_action_does_not_unpack_a_missing_result(
             self) -> None:
         nicegui = mock.MagicMock()
@@ -1583,27 +1589,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
     def _parse(self, name: str, stdout: str):
         return providers.get(name).parse(RawOutput(0, stdout, ""))
-
-    def test_an_outer_timeout_outlives_the_work_it_bounds(self) -> None:
-        """A budget that expires first reports a healthy run as failed.
-
-        The dashboard's Smoketest button bounds a framework smoketest that
-        carries its own internal timeout, and the agent call underneath
-        retries. Each number lives in a different module, so raising the
-        inner one silently makes the outer one a false failure (#178).
-        """
-        from agents_live.legacy import headless, health_check
-
-        dashboard = self._dashboard()
-        self.assertGreater(
-            dashboard.WORKER_TIMEOUT, health_check.SMOKETEST_TIMEOUT_S,
-            "the dashboard would kill a smoketest that is still within "
-            "its own timeout and report the failure as the agent's")
-        self.assertGreaterEqual(
-            dashboard.WORKER_TIMEOUT,
-            headless.HEADLESS_TIMEOUT * (headless.HEADLESS_TIMEOUT_RETRIES + 1),
-            "the retry-inclusive worst case of one agent call already "
-            "exceeds the outer bound the dashboard allows for all of them")
 
     def test_a_provider_that_reports_cost_reports_it_under_one_key(self) -> None:
         """Zero spend and unreported spend look identical on screen.
@@ -1918,13 +1903,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 cwd=root, input=b"version\n", capture_output=True, check=True,
             ).stdout.decode("ascii").strip()
             self.assertEqual(expected, actual)
-
-    def test_the_smoketest_waits_longer_than_an_agent_may_take(self) -> None:
-        """A supervisor that gives up before its child can finish reports
-        a healthy system as broken."""
-        self.assertGreater(
-            health_check.SMOKETEST_TIMEOUT_S,
-            health_check.SWEEP_TIMEOUT_S)
 
     def test_the_dashboard_resolves_the_cli_the_same_way_the_registry_does(self) -> None:
         """The dashboard runs in an isolated ``uv run --script``

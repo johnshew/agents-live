@@ -12,9 +12,9 @@ or, in a flat scripts checkout:
     sys.path.insert(0, str(Path.cwd() / ".claude" / "skills" / "agents-live" / "scripts"))
     from spawn import find_uv, spawn_agent
 
-This module stays stdlib-only at import time: standalone sys.path
-consumers may lack the third-party deps the rest of the runtime carries,
-so the headless helpers used for packaged execution are imported lazily.
+This module stays stdlib-only at import time because standalone sys.path
+consumers may lack the third-party dependencies the rest of the runtime
+carries.
 """
 from __future__ import annotations
 
@@ -61,6 +61,26 @@ def find_uv() -> str:
     )
 
 
+def packaged_execution() -> bool:
+    """Whether this module is running from the installed package layout."""
+    return bool(__package__)
+
+
+def cli_executable_path() -> Path:
+    """Resolve the Agents Live entry point beside this interpreter or on PATH."""
+    filename = _hostruntime().executable_filename("agents-live")
+    beside_interpreter = Path(sys.executable).with_name(filename)
+    if beside_interpreter.is_file():
+        return beside_interpreter.resolve()
+    found = shutil.which("agents-live")
+    if found:
+        return Path(found).resolve()
+    raise RuntimeError(
+        "cannot resolve the agents-live executable; install with "
+        "`uv tool install agents-live`"
+    )
+
+
 def _run_invocation(root: Path, agent_name: str) -> list[str] | None:
     """argv that executes one run of *agent_name*, for either layout.
 
@@ -69,15 +89,9 @@ def _run_invocation(root: Path, agent_name: str) -> list[str] | None:
     Flat checkout: the classic ``uv run --script run.py`` form. Returns
     None (with a stderr log) when neither is resolvable.
     """
-    try:
-        from ..legacy.headless import cli_shim_path, packaged_execution
-    except ImportError:
-        packaged = False
-    else:
-        packaged = packaged_execution()
-    if packaged:
+    if packaged_execution():
         try:
-            return [str(cli_shim_path()), "--repo", str(root),
+            return [str(cli_executable_path()), "--repo", str(root),
                     "run", "--name", agent_name]
         except Exception as exc:
             print(f"[spawn] Agent skipped: {exc}", file=sys.stderr)

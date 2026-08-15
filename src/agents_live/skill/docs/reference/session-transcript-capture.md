@@ -1,7 +1,16 @@
-# Research: Full CLI Session Transcript for Triggered Tasks
+---
+title: Full CLI Session Transcript Research
+description: Historical 5.x research into transcript capture for triggered tasks
+ms.date: 2026-08-14
+ms.topic: concept
+---
 
-> **Status**: Research complete, key recommendations implemented.
-> `--share` transcript capture is live in `headless.py`.
+## Full CLI session transcript research
+
+> **Historical 5.x research.** The `activate.py` and `headless.py` pipeline
+> described below has been removed. Current execution lives in `dispatch.py`,
+> `agent/port.py`, and provider modules under `agent/providers/`; provider
+> transcript identifiers flow through the current observability records.
 > **Issue**: #101
 > **Date**: April 2026 (updated 2026-05-12)
 

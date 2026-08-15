@@ -9,7 +9,8 @@ from pathlib import Path
 
 from ... import plugins, preflight, runtime
 from ...obs import admin as adminlog
-from ...legacy import health_check, schedules
+from ...legacy import migrate as legacy_migration
+from ...runtime.hosts.processes import watchers_on_host
 from ...runtime.hosts import wsl_liveness
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
@@ -46,8 +47,6 @@ def _stop_own_watchers(environment: Path | None
     they are exactly the ones that block it. A watcher started from a
     checkout is somebody's working tree and is left alone.
     """
-    from ...legacy.headless import watchers_on_host  # noqa: PLC0415
-
     if environment is None:
         return []
     try:
@@ -82,7 +81,7 @@ def _sweep_triggers(environment: Path | None) -> None:
               "stop --all` before uninstalling", file=sys.stderr)
         return
     try:
-        removed = schedules.remove_all_under(environment)
+        removed = legacy_migration.remove_under(environment)
     except Exception as exc:
         print(f"warning: could not withdraw scheduled triggers: {exc}",
               file=sys.stderr)
@@ -117,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
     environment = plugins.tool_environment()
-    _sweep_runtime()
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
     survivors = _stop_own_watchers(environment)
@@ -126,9 +124,19 @@ def main(argv: list[str] | None = None) -> int:
         preflight.emit_failure(
             "uninstall",
             f"watchers still running from this installation: {named}; "
-            "nothing was removed; stop them and run uninstall again")
+            "runtime artifacts remain installed; stop them and run "
+            "uninstall again")
         return 1
-    if hostruntime.id() == hostruntime.WSL:
+    try:
+        uv = find_uv()
+    except FileNotFoundError:
+        preflight.emit_failure(
+            "uninstall",
+            "uv was not found; restore or install uv before uninstalling "
+            "agents-live")
+        return 1
+    runtime_id = hostruntime.id()
+    if runtime_id == hostruntime.WSL:
         try:
             wsl_liveness.uninstall(args.distro, retain_state=args.retain_state)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
@@ -148,14 +156,16 @@ def main(argv: list[str] | None = None) -> int:
         # runs its own triggers, which the loop removal below withdraws.
         # A hard dependency here would make uninstall impossible off WSL.
         print("no cross-host integrations to remove; uninstalling the tool")
-    # After host cleanup succeeded (never before: a failed uninstall must
-    # not strand an installed tool without its check-and-repair loop).
-    try:
-        if health_check.remove_health_cron_lines():
-            print("Removed the check-and-repair loop from this host")
-    except Exception as exc:
-        print(f"warning: could not remove the check-and-repair loop: "
-              f"{exc}", file=sys.stderr)
+    deferred = False
+    if environment is not None and runtime_id == hostruntime.WINDOWS:
+        if not _handoff_windows_uninstall(uv, environment):
+            preflight.emit_failure(
+                "uninstall",
+                "the Windows uninstall helper could not start; runtime "
+                "artifacts remain installed")
+            return 1
+        deferred = True
+    _sweep_runtime()
     _sweep_triggers(environment)
     try:
         for path in completions.remove():
@@ -163,22 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"warning: could not remove shell completions: {exc}",
               file=sys.stderr)
-    try:
-        uv = find_uv()
-    except FileNotFoundError:
-        preflight.emit_failure(
-            "uninstall",
-            "host cleanup succeeded, but uv was not found; restore or install "
-            "uv, then run `uv tool uninstall agents-live`")
-        return 1
-    if environment is not None and hostruntime.id() == hostruntime.WINDOWS:
-        if not _handoff_windows_uninstall(uv, environment):
-            preflight.emit_failure(
-                "uninstall",
-                "host cleanup succeeded, but the Windows uninstall helper "
-                "could not start; run `uv tool uninstall agents-live` after "
-                "this command exits")
-            return 1
+    if deferred:
         adminlog.record("uninstall", status="ok", deferred=True)
         return 0
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)

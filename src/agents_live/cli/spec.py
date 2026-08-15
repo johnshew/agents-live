@@ -134,7 +134,11 @@ COMMANDS = (
             Cmd(
                 "migrate", "Converge persisted trigger invocations.",
                 "legacy.migrate", "in-process", hidden=True,
-                args=(Arg(("--dry-run",), "Show planned trigger rewrites."),),
+                args=(
+                    Arg(("--dry-run",), "Show planned trigger rewrites."),
+                    Arg(("--adopt",), "Adopt triggers from a moved root.",
+                        kind="value"),
+                ),
             ),
         ),
     ),

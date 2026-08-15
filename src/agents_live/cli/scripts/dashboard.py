@@ -6,7 +6,7 @@
 """Interactive agents-live control panel (single host).
 
 The dashboard reads the agent, state, and observability ports and invokes the
-public ``run``, ``start``, ``stop``, ``doctor``, and ``smoketest`` commands.
+public lifecycle commands plus modern automatic maintenance.
 Every action is recorded in the repository event stream, with full command
 output retained in ``dashboard-transcript.log``.
 
@@ -671,6 +671,8 @@ async def health_check() -> None:
      2. `start --all` - ensure every agent owned by this host (or `*`)
        with a trigger is actually registered and running.
      3. `smoketest` - run the framework's end-to-end validation.
+         4. `internal maintain` - converge host state and write the canonical
+             health beacon with the current smoketest verdict.
 
     The header label then reflects the refreshed beacon (`system_health`),
     and a final notification summarises infrastructure + smoketest so the
@@ -687,6 +689,7 @@ async def health_check() -> None:
 
     await do_action("Start", "start", ["--all"])
     await do_action("Smoketest", "smoketest", [], timeout=WORKER_TIMEOUT)
+    await do_action("Health check", "internal", ["maintain"])
     # Summarise the refreshed beacon so the user sees infra + smoketest,
     # not just exit codes. system_health reads the host health.ok beacon.
     h = system_health()
