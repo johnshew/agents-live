@@ -2048,7 +2048,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             }):
                 accept(root)
             written.assert_called_once_with(
-                "1.2.3", root, wheel,
+                "1.2.3", root.resolve(), wheel,
                 operation_id="abc123",
                 watchers=(("C:/repo", "sample-123"),))
 
@@ -2144,6 +2144,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env={
+                    **os.environ,
+                    "AGENTS_LIVE_REPO": str(Path(temporary).resolve()),
+                },
                 check=False,
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
