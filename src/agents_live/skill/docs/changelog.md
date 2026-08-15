@@ -6,6 +6,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.4 - 2026-08-14
+
 - fix: refresh dashboard health through modern automatic maintenance. (#325)
   A successful rerun replaces a stale failing smoketest verdict, while a
   current failure records a degraded beacon through the same canonical writer.
