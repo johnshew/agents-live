@@ -274,25 +274,15 @@ def _handoff_windows_upgrade(
             preflight.emit_failure("upgrade", end["message"])
             return 1
         if identities:
-            named = ", ".join(
-                f"{name} ({project})" if project else name
-                for name, project in identities
-            )
-            adminlog.record(
-                "upgrade-watchers",
-                status="ok",
-                phase="quiesce-requested",
-                correlation_id=claim.operation_id,
-                watchers=named,
-                watcher_count=len(identities),
-                message=f"requested idle quiescence for {named}",
-            )
             end["quiesce_watchers"] = len(identities)
         end["status"] = "deferred"
         end["transcript"] = str(claim.transcript_path)
         end["message"] = "upgrade queued until this process exits"
-    print(f"Upgrade queued as {claim.operation_id}; run `agents-live logs admin` "
-          "after this process exits to see its outcome")
+    print(
+        f"Upgrade queued as {claim.operation_id}; "
+        f"result: {claim.result_path}; run `agents-live logs admin` "
+        "after this process exits to see its outcome"
+    )
     return 0
 
 
@@ -314,15 +304,17 @@ def _restore_quiesced_watchers(correlation_id: str) -> int:
         detail = str(exc)
     else:
         if not result.failed and result.health.healthy:
-            adminlog.record(
-                "upgrade-watchers",
-                status="ok",
-                phase="restore",
-                correlation_id=correlation_id,
-                watchers=named,
-                watcher_count=len(identities),
-                message=f"restored quiesced watchers: {named}",
-            )
+            for name, project in identities:
+                adminlog.record(
+                    "upgrade-watchers",
+                    status="ok",
+                    upgrade_phase="restore",
+                    correlation_id=correlation_id,
+                    watcher=name,
+                    root=project or "",
+                    watcher_count=len(identities),
+                    message=f"restored quiesced watcher: {name}",
+                )
             return 0
         detail = "; ".join(
             f"{operation.key}: {error}"
@@ -332,7 +324,7 @@ def _restore_quiesced_watchers(correlation_id: str) -> int:
         "upgrade-watchers",
         status="error",
         level="error",
-        phase="restore",
+        upgrade_phase="restore",
         correlation_id=correlation_id,
         watchers=named,
         watcher_count=len(identities),

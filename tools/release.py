@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-from datetime import date
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -45,6 +47,11 @@ BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
 # Rows are ordered by what the change is, breaking first; anything with an
 # unrecognised prefix sorts last rather than failing the release.
 TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore")
+ACCEPTANCE_SCHEMA = 1
+QUEUED_UPGRADE_RE = re.compile(
+    r"Upgrade queued as (?P<operation>[0-9a-f]+); "
+    r"result: (?P<result>.+?); run `agents-live logs admin`"
+)
 
 
 class ReleaseError(RuntimeError):
@@ -497,6 +504,312 @@ def _check_publish_state(version: str) -> bool:
     return needs_push
 
 
+def _candidate_wheel(version: str) -> Path:
+    wheel = ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl"
+    if not wheel.is_file():
+        raise ReleaseError(
+            f"prepared wheel is missing: {wheel.relative_to(ROOT)}; "
+            "rerun --prepare"
+        )
+    return wheel
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _acceptance_path(version: str) -> Path:
+    value = _git(
+        "rev-parse", "--git-path",
+        f"agents-live-release/acceptance-{version}.json")
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _installed_cli() -> str:
+    tool_root = Path(_run(["uv", "tool", "dir"], capture=True))
+    environment = tool_root / "agents-live"
+    filename = "agents-live.exe" if os.name == "nt" else "agents-live"
+    candidates = (
+        environment / "Scripts" / filename,
+        environment / "bin" / filename,
+    )
+    executable = next((path for path in candidates if path.is_file()), None)
+    if executable is None:
+        raise ReleaseError(
+            "the uv-managed agents-live launcher is required for candidate "
+            f"acceptance under {environment}")
+    return str(executable.resolve())
+
+
+def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.pop("AGENTS_LIVE_REPO", None)
+    return subprocess.run(
+        [_installed_cli(), *argv], cwd=ROOT, env=environment,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        check=False)
+
+
+def _installed_version() -> str:
+    completed = _installed_run(["--version"])
+    match = re.fullmatch(
+        r"agents-live (\d+\.\d+\.\d+)\s*", completed.stdout)
+    if completed.returncode != 0 or match is None:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ReleaseError(
+            f"could not read installed candidate version: {detail}")
+    return match.group(1)
+
+
+def _installed_json(repo: Path, command: str) -> dict:
+    completed = _installed_run(
+        ["--json", "--repo", str(repo), command])
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ReleaseError(
+            f"installed candidate {command} returned invalid JSON: {detail}"
+        ) from exc
+    if completed.returncode != 0 or not isinstance(payload, dict):
+        detail = payload.get("error", payload) if isinstance(payload, dict) else payload
+        raise ReleaseError(
+            f"installed candidate {command} failed: {detail}")
+    return payload
+
+
+def _installed_all_json(command: str) -> dict:
+    completed = _installed_run(["--json", command, "--all-repos"])
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ReleaseError(
+            f"installed candidate {command} --all-repos returned invalid "
+            f"JSON: {detail}") from exc
+    if completed.returncode != 0 or not isinstance(payload, dict):
+        detail = payload.get("error", payload) if isinstance(payload, dict) else payload
+        raise ReleaseError(
+            f"installed candidate {command} --all-repos failed: {detail}")
+    return payload
+
+
+def _status_contract(payload: dict) -> tuple[tuple[object, ...], ...]:
+    rows = payload.get("agents")
+    if not isinstance(rows, list):
+        raise ReleaseError("installed candidate status has no agents array")
+    return tuple(sorted(
+        (
+            str(row.get("repository", "")),
+            str(row.get("identifier", "")),
+            str(row.get("state", "")),
+            bool(row.get("loadable")),
+        )
+        for row in rows if isinstance(row, dict)
+    ))
+
+
+def _started_watchers(payload: dict) -> tuple[tuple[str, str], ...]:
+    rows = payload.get("agents", [])
+    return tuple(sorted(
+        (str(row.get("repository", "")), str(row.get("identifier")))
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("state") == "started"
+        and isinstance(row.get("execution"), dict)
+        and row["execution"].get("watch")
+        and row.get("identifier")
+    ))
+
+
+def _wait_for_upgrade_result(
+    result_path: Path, *, timeout_s: float = 900.0,
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    last: object = None
+    while time.monotonic() < deadline:
+        try:
+            last = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            last = None
+        if isinstance(last, dict) and last.get("status") == "terminal":
+            return last
+        time.sleep(0.2)
+    raise ReleaseError(
+        f"candidate upgrade did not reach a terminal result within "
+        f"{timeout_s:.0f}s: {last!r}")
+
+
+def _candidate_events(operation_id: str) -> list[dict]:
+    if not re.fullmatch(r"[0-9a-f]+", operation_id):
+        raise ReleaseError("candidate upgrade returned an invalid operation ID")
+    sql = (
+        "select run_id, status, message, attributes from log "
+        f"where run_id = '{operation_id}' order by ts"
+    )
+    completed = _installed_run(
+        ["logs", "--all", "--sql", sql, "--format", "jsonl"])
+    if completed.returncode != 0:
+        raise ReleaseError(
+            "could not query candidate upgrade events: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}")
+    try:
+        rows = [json.loads(line) for line in completed.stdout.splitlines() if line]
+    except json.JSONDecodeError as exc:
+        raise ReleaseError("candidate upgrade events were not valid JSONL") from exc
+    return [_decode_candidate_event(row) for row in rows]
+
+
+def _decode_candidate_event(row: dict) -> dict:
+    def scalar(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value.replace("NULL", "null"))
+        except json.JSONDecodeError:
+            return value
+
+    event = dict(row)
+    values = event.pop("attributes", [])
+    if not isinstance(values, list):
+        return event
+    for value in values:
+        try:
+            pair = scalar(value)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(pair, list) and len(pair) == 2:
+            pair = [scalar(pair[0]), scalar(pair[1])]
+        if (
+            isinstance(pair, list)
+            and len(pair) == 2
+            and isinstance(pair[0], str)
+            and pair[0] not in event
+        ):
+            event[pair[0]] = pair[1]
+    return event
+
+
+def _verify_candidate_events(
+    events: list[dict], watchers: tuple[tuple[str, str], ...],
+) -> None:
+    def normalized_root(value: object) -> str:
+        path = str(Path(str(value)).resolve())
+        return path.casefold() if os.name == "nt" else path
+
+    def watcher_index(phase: str, root: str, watcher: str) -> int:
+        wanted_root = normalized_root(root)
+        for index, event in enumerate(events):
+            if (
+                event.get("status") == "ok"
+                and event.get("upgrade_phase") == phase
+                and event.get("watcher") == watcher
+                and normalized_root(event.get("root", "")) == wanted_root
+            ):
+                return index
+        raise ReleaseError(
+            f"candidate upgrade has no exact {phase} event for "
+            f"{watcher} in {root}")
+
+    plugin_indexes = [
+        index for index, event in enumerate(events)
+        if event.get("status") == "ok"
+        and (
+            event.get("operation") == "plugin-converge"
+            or event.get("message") in {
+                "plugin-converge", "plugins already converged"}
+        )
+    ]
+    terminal_indexes = [
+        index for index, event in enumerate(events)
+        if event.get("status") == "ok"
+        and event.get("message") == "deferred Windows upgrade completed"
+    ]
+    if not plugin_indexes:
+        raise ReleaseError("candidate upgrade has no successful plugin event")
+    if not terminal_indexes:
+        raise ReleaseError("candidate upgrade has no successful terminal event")
+    plugin_index = plugin_indexes[-1]
+    terminal_index = terminal_indexes[-1]
+    for root, watcher in watchers:
+        requested = watcher_index("quiesce-requested", root, watcher)
+        quiesced = watcher_index("quiesced", root, watcher)
+        restored = watcher_index("restore", root, watcher)
+        if not requested < quiesced < plugin_index < restored < terminal_index:
+            raise ReleaseError(
+                f"candidate upgrade lifecycle is out of order for "
+                f"{watcher} in {root}")
+
+
+def _write_candidate_acceptance(
+    version: str,
+    repo: Path,
+    wheel: Path,
+    *,
+    operation_id: str | None,
+    watchers: tuple[tuple[str, str], ...],
+) -> Path:
+    destination = _acceptance_path(version)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": ACCEPTANCE_SCHEMA,
+        "accepted": True,
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "version": version,
+        "tag": f"v{version}",
+        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "commit": _git("rev-parse", "HEAD"),
+        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel_sha256": _sha256(wheel),
+        "repo": str(repo),
+        "platform": sys.platform,
+        "operation_id": operation_id,
+        "started_watchers": [
+            {"repo": root, "identifier": watcher}
+            for root, watcher in watchers
+        ],
+    }
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+    return destination
+
+
+def _check_candidate_acceptance(version: str) -> dict:
+    receipt_path = _acceptance_path(version)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseError(
+            "prepared candidate has not passed installed-tool acceptance; "
+            "run --accept-candidate --repo <live-repository> --yes") from exc
+    wheel = _candidate_wheel(version)
+    expected = {
+        "schema": ACCEPTANCE_SCHEMA,
+        "accepted": True,
+        "version": version,
+        "tag": f"v{version}",
+        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "commit": _git("rev-parse", "HEAD"),
+        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel_sha256": _sha256(wheel),
+    }
+    mismatched = [key for key, value in expected.items()
+                  if receipt.get(key) != value]
+    if mismatched:
+        raise ReleaseError(
+            "candidate acceptance receipt is stale for: "
+            + ", ".join(mismatched)
+            + "; rerun --accept-candidate")
+    return receipt
+
+
 def _check_release_diff() -> None:
     changed = set(_git("diff", "--name-only").splitlines())
     staged = set(_git("diff", "--cached", "--name-only").splitlines())
@@ -630,6 +943,9 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         *(shlex.join(command) for command in _gate_commands()),
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
+        "agents-live upgrade --from <target wheel>  # bootstrap candidate",
+        "uv run --script tools/release.py --accept-candidate "
+        "--repo <live-repository> --yes",
         f"git push --atomic origin main {tag}",
         f"gh release create {tag} --verify-tag "
         "--notes-file <changelog entries + merged pull requests>",
@@ -652,6 +968,7 @@ def prepare(bump: str) -> None:
     minimum_bump = _check_bump(bump)
     _print_plan(current, target, minimum_bump)
     _check_prepare_state(target, fetch=True)
+    _acceptance_path(target).unlink(missing_ok=True)
     original = {path: path.read_bytes() for path in RELEASE_FILES}
     original_head = _git("rev-parse", "HEAD")
     release_head: str | None = None
@@ -702,7 +1019,81 @@ def prepare(bump: str) -> None:
     tag = f"v{target}"
     _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
+    print("  agents-live upgrade --from <target wheel>")
+    print("  uv run --script tools/release.py --accept-candidate "
+          "--repo <live-repository> --yes")
     print("  uv run --script tools/release.py --publish --yes")
+
+
+def accept_candidate(repo: Path) -> None:
+    """Exercise the installed tagged candidate before any public push."""
+    _require_tools()
+    version = _current_version()
+    _check_publish_state(version)
+    wheel = _candidate_wheel(version)
+    root = repo.expanduser().resolve()
+    if not root.is_dir():
+        raise ReleaseError(f"candidate test repository does not exist: {root}")
+    installed = _installed_version()
+    if installed != version:
+        raise ReleaseError(
+            f"installed tool is {installed}, but prepared candidate is {version}; "
+            f"bootstrap it first with `agents-live upgrade --from {wheel}`")
+
+    representative = _installed_json(root, "status")
+    before_status = _installed_all_json("status")
+    before_doctor = _installed_all_json("doctor")
+    if not before_doctor.get("ok"):
+        raise ReleaseError("candidate test repository is unhealthy before upgrade")
+    watchers = _started_watchers(representative)
+    if not watchers:
+        raise ReleaseError(
+            "candidate acceptance requires at least one started watcher in "
+            f"{root}")
+    before_contract = _status_contract(before_status)
+
+    completed = _installed_run(
+        ["--repo", str(root), "upgrade", "--from", str(wheel)])
+    if completed.stdout:
+        print(completed.stdout.rstrip())
+    if completed.stderr:
+        print(completed.stderr.rstrip(), file=sys.stderr)
+    if completed.returncode != 0:
+        raise ReleaseError(
+            f"candidate local-wheel upgrade exited {completed.returncode}")
+
+    operation_id: str | None = None
+    match = QUEUED_UPGRADE_RE.search(completed.stdout)
+    if match is not None:
+        operation_id = match.group("operation")
+        result = _wait_for_upgrade_result(Path(match.group("result").strip()))
+        if result.get("operation_id") != operation_id:
+            raise ReleaseError("candidate upgrade result has the wrong operation ID")
+        if result.get("exit_code") != 0:
+            raise ReleaseError(
+                f"candidate deferred upgrade exited {result.get('exit_code')}")
+    elif os.name == "nt":
+        raise ReleaseError(
+            "Windows candidate upgrade did not queue a durable helper result")
+
+    if _installed_version() != version:
+        raise ReleaseError("installed version changed after same-wheel acceptance")
+    after_representative = _installed_json(root, "status")
+    after_status = _installed_all_json("status")
+    after_doctor = _installed_all_json("doctor")
+    if _status_contract(after_status) != before_contract:
+        raise ReleaseError(
+            "candidate upgrade changed repository started/loadable state")
+    if not after_doctor.get("ok"):
+        raise ReleaseError("candidate test repository is unhealthy after upgrade")
+    if _started_watchers(after_representative) != watchers:
+        raise ReleaseError("candidate upgrade did not restore the started watchers")
+
+    if operation_id is not None:
+        _verify_candidate_events(_candidate_events(operation_id), watchers)
+    receipt = _write_candidate_acceptance(
+        version, root, wheel, operation_id=operation_id, watchers=watchers)
+    print(f"Accepted installed candidate {version}; receipt: {receipt}")
 
 
 def publish() -> None:
@@ -720,9 +1111,12 @@ def publish() -> None:
         print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
         print(f"  Rerun the notes with: --notes {tag} --yes")
         return
+    _check_candidate_acceptance(version)
     notes = _release_notes(version)
     for command in _gate_commands():
         _run(command)
+    needs_push = _check_publish_state(version)
+    _check_candidate_acceptance(version)
     if needs_push:
         _run(["git", "push", "--atomic", "origin", "main", tag])
     _write_release_notes(tag, notes, create=True)
@@ -753,6 +1147,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Verify and publish a prepared release",
     )
     parser.add_argument(
+        "--accept-candidate",
+        action="store_true",
+        help="Reinstall and verify the prepared candidate before publication",
+    )
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        help="Live repository used by --accept-candidate",
+    )
+    parser.add_argument(
         "--gates",
         action="store_true",
         help="Run the release gates that do not need a live agent CLI",
@@ -768,21 +1172,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Confirm commit, tag, push, and GitHub release creation",
     )
     args = parser.parse_args(argv)
-    selected = sum((args.dry_run, args.prepare, args.publish, args.gates,
-                    args.notes is not None))
+    selected = sum((args.dry_run, args.prepare, args.publish,
+                    args.accept_candidate, args.gates, args.notes is not None))
     if selected != 1:
         parser.error(
-            "choose exactly one of --dry-run, --prepare, --publish, --gates, "
-            "or --notes")
-    if (args.prepare or args.publish) and not args.yes:
-        parser.error("--prepare and --publish require --yes")
-    if (args.publish or args.gates or args.notes) and args.bump != "patch":
-        parser.error("--bump applies to --dry-run and --prepare only")
+            "choose exactly one of --dry-run, --prepare, --accept-candidate, "
+            "--publish, --gates, or --notes")
+    if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
+        parser.error("--prepare, --accept-candidate, and --publish require --yes")
+    if args.accept_candidate and args.repo is None:
+        parser.error("--accept-candidate requires --repo")
+    if args.repo is not None and not args.accept_candidate:
+        parser.error("--repo applies only to --accept-candidate")
+    if (args.publish or args.accept_candidate or args.gates or args.notes) \
+            and args.bump != "patch":
+        parser.error(
+            "--bump applies only to --dry-run and --prepare")
     try:
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:
             prepare(args.bump)
+        elif args.accept_candidate:
+            assert args.repo is not None
+            accept_candidate(args.repo)
         elif args.gates:
             gates()
         elif args.notes:

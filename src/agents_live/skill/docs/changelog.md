@@ -11,6 +11,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: require installed candidate acceptance before publication.
+  A prepared local tag cannot be pushed until its exact wheel has upgraded the
+  uv-managed consumer tool, preserved all registered repository state, restored
+  a representative watcher, and produced ordered correlated lifecycle evidence.
+  The acceptance receipt is bound to the commit, annotated tag object, and
+  wheel digest and is revalidated after release gates.
+
 ## 6.3.5 - 2026-08-14
 
 - fix: quiesce and restore installed-tool watchers during Windows upgrades. (#324)

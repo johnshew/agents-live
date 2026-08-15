@@ -117,6 +117,39 @@ documentation-link, and changelog versions, runs every release gate, and
 creates the release commit and annotated tag locally. Inspect the
 target-version artifacts under `dist/` and review the commit.
 
+## Candidate acceptance
+
+The local release commit, annotated tag, and artifacts are not public yet.
+Install that exact wheel into the user-level tool through the supported local
+artifact upgrade path, restore a healthy representative repository with at
+least one started watcher, then run the mandatory acceptance command:
+
+```bash
+agents-live upgrade --from dist/agents_live-<version>-py3-none-any.whl
+uv run --script tools/release.py --accept-candidate \
+	--repo <live-repository> --yes
+```
+
+The first command bootstraps the candidate. The acceptance command then makes
+the installed candidate upgrade itself from the same wheel. It captures every
+registered repository's started and loadable state, requires a started watcher
+in the selected representative repository, waits for any deferred Windows
+helper without repeatedly launching the held executable, and requires:
+
+- the same exact candidate version after replacement;
+- unchanged started and loadable state across all registered repositories;
+- healthy all-repository `doctor` results before and after;
+- restoration of every started watcher; and
+- correlated quiesce, plugin convergence, restoration, and terminal events on
+  deferred Windows upgrades.
+
+Success writes an untracked receipt under the repository's Git metadata. The
+receipt binds acceptance to the release commit, annotated tag, and wheel
+SHA-256. `--publish` checks it both before and after rebuilding artifacts and
+refuses a missing or stale receipt. Never use a source-only or isolated `uvx`
+check as a substitute; those do not exercise replacement of the installed
+consumer tool.
+
 Publish the prepared commit and tag:
 
 ```bash

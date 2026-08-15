@@ -200,6 +200,21 @@ a local commit and annotated tag. Before publication:
 2. Inspect the target-version wheel and source distribution.
 3. Run the built-wheel checks from this runbook.
 4. Confirm bare `agents-live` still represents the previously published tool.
+5. Bootstrap the exact target wheel into the installed tool.
+6. Restore a healthy live test repository with at least one started watcher.
+7. Run the enforced installed-candidate acceptance:
+
+   ```bash
+   uv run --script tools/release.py --accept-candidate \
+     --repo <live-repository> --yes
+   ```
+
+Candidate acceptance performs a second same-wheel `upgrade --from` using the
+installed candidate. On native Windows it waits on the helper's durable result
+file rather than polling the launcher being replaced. It rejects changed
+started state in any registered repository, missing representative-watcher
+restoration, unhealthy all-repository diagnostics, missing correlated lifecycle
+events, or a wheel that no longer matches the prepared commit and tag.
 
 Publish only after those checks pass:
 

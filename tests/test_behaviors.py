@@ -1781,6 +1781,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_check_bump": lambda _bump: "minor",
                 "_print_plan": lambda *_args: None,
                 "_check_prepare_state": lambda *_args, **_kwargs: None,
+                "_acceptance_path": lambda _version: root / "acceptance.json",
                 "_update_versions": update_versions,
                 "_gate_commands": lambda: [["gate"]],
                 "_git": git,
@@ -1884,6 +1885,283 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(release["ReleaseError"], message):
                     check_release_commit(validated)
+
+    def test_publish_rejects_missing_candidate_acceptance_before_gates(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        publish = release["publish"]
+        scope = publish.__globals__
+        gate_commands = mock.Mock(return_value=[])
+        with mock.patch.dict(scope, {
+            "_require_tools": lambda: None,
+            "_current_version": lambda: "1.2.3",
+            "_check_publish_state": lambda _version: True,
+            "_check_candidate_acceptance": mock.Mock(
+                side_effect=release["ReleaseError"]("accept candidate first")),
+            "_gate_commands": gate_commands,
+        }), mock.patch.object(
+            scope["subprocess"], "run", return_value=mock.Mock(returncode=1)
+        ):
+            with self.assertRaisesRegex(
+                    release["ReleaseError"], "accept candidate first"):
+                publish()
+        gate_commands.assert_not_called()
+
+    def test_publish_revalidates_state_and_acceptance_after_gates(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        publish = release["publish"]
+        scope = publish.__globals__
+        publish_states = mock.Mock(side_effect=(True, True))
+        acceptance = mock.Mock(return_value={"accepted": True})
+        commands: list[list[str]] = []
+        with mock.patch.dict(scope, {
+            "_require_tools": lambda: None,
+            "_current_version": lambda: "1.2.3",
+            "_check_publish_state": publish_states,
+            "_check_candidate_acceptance": acceptance,
+            "_release_notes": lambda _version: "notes",
+            "_gate_commands": lambda: [["gate"]],
+            "_run": lambda command, **_kwargs: commands.append(command) or "",
+            "_write_release_notes": lambda *_args, **_kwargs: None,
+        }), mock.patch.object(
+            scope["subprocess"], "run", return_value=mock.Mock(returncode=1)
+        ):
+            publish()
+        self.assertEqual(2, publish_states.call_count)
+        self.assertEqual(2, acceptance.call_count)
+        self.assertEqual(
+            [["gate"], ["git", "push", "--atomic", "origin", "main", "v1.2.3"]],
+            commands,
+        )
+
+    def test_candidate_acceptance_receipt_binds_commit_and_wheel(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = release["_check_candidate_acceptance"]
+        scope = check.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "dist" / "agents_live-1.2.3-py3-none-any.whl"
+            wheel.parent.mkdir()
+            wheel.write_bytes(b"candidate wheel")
+            receipt = root / "git" / "acceptance-1.2.3.json"
+            receipt.parent.mkdir()
+            expected = {
+                "schema": release["ACCEPTANCE_SCHEMA"],
+                "accepted": True,
+                "version": "1.2.3",
+                "tag": "v1.2.3",
+                "tag_object": "annotated-tag-object",
+                "commit": "candidate-commit",
+                "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
+                "wheel_sha256": release["_sha256"](wheel),
+            }
+            receipt.write_text(json.dumps(expected), encoding="utf-8")
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_acceptance_path": lambda _version: receipt,
+                "_candidate_wheel": lambda _version: wheel,
+                "_git": lambda *args: (
+                    "annotated-tag-object"
+                    if args == ("rev-parse", "refs/tags/v1.2.3")
+                    else "candidate-commit"),
+            }):
+                self.assertEqual(expected, check("1.2.3"))
+                expected["tag_object"] = "stale-tag-object"
+                receipt.write_text(json.dumps(expected), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "stale.*tag_object"):
+                    check("1.2.3")
+                expected["tag_object"] = "annotated-tag-object"
+                expected["wheel_sha256"] = "stale"
+                receipt.write_text(json.dumps(expected), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "stale.*wheel_sha256"):
+                    check("1.2.3")
+
+    def test_candidate_acceptance_reinstalls_and_preserves_live_state(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        accept = release["accept_candidate"]
+        scope = accept.__globals__
+        status = {
+            "ok": True,
+            "agents": [{
+                "repository": "C:/repo",
+                "identifier": "sample-123",
+                "state": "started",
+                "loadable": True,
+                "execution": {"watch": "src/** debounce 1s"},
+            }],
+        }
+        all_status = {
+            "ok": True,
+            "agents": [
+                *status["agents"],
+                {
+                    "repository": "C:/other",
+                    "identifier": "other-456",
+                    "state": "started",
+                    "loadable": True,
+                    "execution": {"watch": "docs/** debounce 1s"},
+                },
+            ],
+        }
+        doctor = {"ok": True, "checks": []}
+        completed = subprocess.CompletedProcess(
+            [], 0,
+            "Upgrade queued as abc123; result: C:/result.json; "
+            "run `agents-live logs admin` after this process exits\n",
+            "",
+        )
+        events = [
+            {"status": "ok", "upgrade_phase": "quiesce-requested",
+             "watcher": "sample-123", "root": "C:/repo"},
+            {"status": "ok", "upgrade_phase": "quiesced",
+             "watcher": "sample-123", "root": "C:/repo"},
+            {"status": "ok", "operation": "plugin-converge",
+             "message": "plugins already converged"},
+            {"status": "ok", "upgrade_phase": "restore",
+             "watcher": "sample-123", "root": "C:/repo"},
+            {"status": "ok", "message": "deferred Windows upgrade completed"},
+        ]
+        written = mock.Mock(return_value=Path("acceptance.json"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            repo_results = iter((status, status))
+            all_results = iter((all_status, doctor, all_status, doctor))
+            fake_os = mock.Mock()
+            fake_os.name = "nt"
+            with mock.patch.dict(scope, {
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.2.3",
+                "_check_publish_state": lambda _version: True,
+                "_candidate_wheel": lambda _version: wheel,
+                "_installed_version": mock.Mock(side_effect=("1.2.3", "1.2.3")),
+                "_installed_json": lambda _repo, _command: next(repo_results),
+                "_installed_all_json": lambda _command: next(all_results),
+                "_installed_run": mock.Mock(return_value=completed),
+                "_wait_for_upgrade_result": lambda _path: {
+                    "status": "terminal", "operation_id": "abc123", "exit_code": 0},
+                "_candidate_events": lambda _operation: events,
+                "_write_candidate_acceptance": written,
+                "os": fake_os,
+            }):
+                accept(root)
+            written.assert_called_once_with(
+                "1.2.3", root.resolve(), wheel,
+                operation_id="abc123",
+                watchers=(("C:/repo", "sample-123"),))
+
+    def test_candidate_acceptance_uses_uv_managed_launcher_not_path(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        installed_cli = release["_installed_cli"]
+        scope = installed_cli.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = root / "agents-live"
+            directory = environment / (
+                "Scripts" if os.name == "nt" else "bin")
+            directory.mkdir(parents=True)
+            filename = "agents-live.exe" if os.name == "nt" else "agents-live"
+            managed = directory / filename
+            managed.write_text("managed", encoding="utf-8")
+            shadow = root / "shadow" / filename
+            shadow.parent.mkdir()
+            shadow.write_text("shadow", encoding="utf-8")
+            with (
+                mock.patch.dict(scope, {
+                    "_run": lambda *_args, **_kwargs: str(root),
+                }),
+                mock.patch.object(scope["shutil"], "which", return_value=str(shadow)),
+            ):
+                self.assertEqual(str(managed.resolve()), installed_cli())
+
+    def test_candidate_event_order_and_identity_are_exact(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        verify = release["_verify_candidate_events"]
+        watchers = (("C:/repo", "sample"),)
+        valid = [
+            {"status": "ok", "upgrade_phase": "quiesce-requested",
+             "watcher": "sample", "root": "C:/repo"},
+            {"status": "ok", "upgrade_phase": "quiesced",
+             "watcher": "sample", "root": "C:/repo"},
+            {"status": "ok", "operation": "plugin-converge"},
+            {"status": "ok", "upgrade_phase": "restore",
+             "watcher": "sample", "root": "C:/repo"},
+            {"status": "ok", "message": "deferred Windows upgrade completed"},
+        ]
+        verify(valid, watchers)
+        with self.assertRaisesRegex(
+                release["ReleaseError"], "out of order"):
+            verify([valid[0], valid[1], valid[3], valid[2], valid[4]], watchers)
+        prefix_only = [dict(item) for item in valid]
+        for item in prefix_only:
+            if item.get("watcher") == "sample":
+                item["watcher"] = "sample-other"
+        with self.assertRaisesRegex(
+                release["ReleaseError"], "no exact"):
+            verify(prefix_only, watchers)
+        wrong_root = [dict(item) for item in valid]
+        for item in wrong_root:
+            if item.get("root") == "C:/repo":
+                item["root"] = "C:/other"
+        with self.assertRaisesRegex(
+                release["ReleaseError"], "no exact"):
+            verify(wrong_root, watchers)
+
+    def test_candidate_event_query_decodes_real_duckdb_attributes(self) -> None:
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            self.skipTest("duckdb is not installed")
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        decode = release["_decode_candidate_event"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "admin.log"
+            with mock.patch.object(obs.admin, "log_path", return_value=path):
+                obs.admin.record(
+                    "upgrade-watchers",
+                    status="ok",
+                    correlation_id="upgrade-operation",
+                    upgrade_phase="quiesced",
+                    watcher="sample-123",
+                    root="C:/repo",
+                    message="watcher quiesced",
+                )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(qlog.__file__).resolve()),
+                    "--log",
+                    str(path),
+                    "--sql",
+                    "select run_id, status, message, attributes from log "
+                    "where run_id = 'upgrade-operation' order by ts",
+                    "--format",
+                    "jsonl",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={
+                    **os.environ,
+                    "AGENTS_LIVE_REPO": str(Path(temporary).resolve()),
+                },
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            serialized = [
+                json.loads(line) for line in completed.stdout.splitlines()
+                if line.strip()
+            ]
+            self.assertIsInstance(serialized[0]["attributes"], list)
+            rows = [decode(row) for row in serialized]
+        self.assertEqual(1, len(rows))
+        self.assertEqual("upgrade-watchers", rows[0]["operation"])
+        self.assertEqual("quiesced", rows[0]["upgrade_phase"])
+        self.assertEqual("sample-123", rows[0]["watcher"])
+        self.assertEqual("C:/repo", rows[0]["root"])
 
     def test_release_blob_validation_applies_git_clean_filters(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))

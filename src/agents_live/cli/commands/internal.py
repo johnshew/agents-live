@@ -143,7 +143,7 @@ def _watch(args) -> int:
             adminlog.record(
                 "upgrade-watchers",
                 status="ok",
-                phase="quiesced",
+                upgrade_phase="quiesced",
                 correlation_id=retirement["operation"],
                 root=str(root),
                 watcher=args.name,
