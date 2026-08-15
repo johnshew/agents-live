@@ -1,7 +1,7 @@
 ---
 title: Project Status
 description: Current implementation state, platform maturity, validation, and remaining work
-ms.date: 2026-08-09
+ms.date: 2026-08-14
 ms.topic: concept
 ---
 
@@ -96,7 +96,8 @@ closed. That pattern, not the individual defects, is what
 - Git-index diagnosis:
   [#253](https://github.com/johnshew/agents-live/issues/253).
 - Watcher restart policy after upgrade:
-  [#204](https://github.com/johnshew/agents-live/issues/204).
+  [#204](https://github.com/johnshew/agents-live/issues/204) and
+  [#324](https://github.com/johnshew/agents-live/issues/324).
 
 The complete work-item list remains in GitHub issues. Themes rather than issue
 details belong in [backlog.md](backlog.md).

@@ -97,6 +97,13 @@ external helper for that tool environment, prints its operation ID, and exits.
 It does not report the runtime replacement as complete at that point. A second
 upgrade for the same environment is refused while that helper is pending.
 
+Installed-tool watchers are not a blocker. The upgrade asks them to finish any
+active dispatch and exit at the next idle check without changing started state.
+The helper waits for the environment to become free, replaces the runtime, and
+runs ordinary convergence to restore every still-started watcher. Managed
+dashboards remain a fail-closed blocker because an interactive session cannot
+be quiesced and recreated transparently; stop the named dashboard and retry.
+
 Run any Agents Live command after the helper finishes, then query the admin
 events:
 
@@ -105,7 +112,8 @@ agents-live logs admin --since 30m --all `
 	--columns ts,run_id,status,message,exit_code,transcript
 ```
 
-The queued and terminal events carry the printed correlation ID in `run_id`.
+The quiesce, runtime replacement, plugin convergence, watcher restoration, and
+terminal events carry the printed correlation ID in `run_id`.
 A failed terminal event includes the helper exit code and the path to a bounded
 local transcript. If the helper exits without writing a terminal result, the
 next CLI invocation records that condition as an error and releases the
