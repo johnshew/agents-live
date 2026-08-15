@@ -165,6 +165,76 @@ def spawned(claim: Claim, helper: ProcessRef) -> None:
         _write(claim.pending_path, pending)
 
 
+def request_quiescence(
+    claim: Claim,
+    watchers: list[tuple[int, str, str | None]],
+) -> tuple[tuple[str, str | None], ...]:
+    """Ask installed-tool watchers to exit at their next idle boundary."""
+    identities = tuple(sorted({
+        (name, project) for _pid, name, project in watchers
+    }, key=lambda item: (item[0], item[1] or "")))
+    with hostruntime.exclusive_lock(_lock_path(), blocking=True):
+        pending = _read(claim.pending_path)
+        if pending is None or pending.get("operation_id") != claim.operation_id:
+            raise RuntimeError("Windows upgrade handoff claim was lost")
+        pending["quiesce_watchers"] = [
+            {"name": name, "project": project}
+            for name, project in identities
+        ]
+        pending["quiesce_active"] = bool(identities)
+        _write(claim.pending_path, pending)
+    return identities
+
+
+def quiesce_operation(executable: Path | str) -> str | None:
+    """Operation asking a watcher in this executable's environment to exit."""
+    candidate = Path(executable).resolve()
+    try:
+        with hostruntime.exclusive_lock(_lock_path(), blocking=True):
+            _reconcile_locked()
+            for pending_path in _directory().glob("*.pending.json"):
+                pending = _read(pending_path)
+                if pending is None or not pending.get("quiesce_active"):
+                    continue
+                environment = Path(str(pending.get("environment", ""))).resolve()
+                if candidate == environment or environment in candidate.parents:
+                    return str(pending.get("operation_id", "")) or None
+    except Exception:
+        return None
+    return None
+
+
+def begin_restoration(
+    operation_id: str,
+) -> tuple[tuple[str, str | None], ...]:
+    """Deactivate quiescence and return identities for restoration."""
+    try:
+        with hostruntime.exclusive_lock(_lock_path(), blocking=True):
+            for pending_path in _directory().glob("*.pending.json"):
+                pending = _read(pending_path)
+                if pending is None or pending.get("operation_id") != operation_id:
+                    continue
+                values = pending.get("quiesce_watchers", [])
+                if not isinstance(values, list):
+                    raise RuntimeError("upgrade quiesce identities are unreadable")
+                identities = tuple(
+                    (str(item["name"]), item.get("project"))
+                    for item in values
+                    if isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and item["name"]
+                    and (item.get("project") is None
+                         or isinstance(item.get("project"), str))
+                )
+                pending["quiesce_active"] = False
+                _write(pending_path, pending)
+                return identities
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            f"could not read Windows upgrade quiescence: {exc}") from exc
+    return ()
+
+
 def _process_ref(value: object) -> ProcessRef | None:
     if not isinstance(value, dict):
         return None
