@@ -11,12 +11,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- fix: require installed candidate acceptance before publication.
+- fix: require full installed candidate acceptance before publication.
   A prepared local tag cannot be pushed until its exact wheel has upgraded the
-  uv-managed consumer tool, preserved all registered repository state, restored
-  a representative watcher, and produced ordered correlated lifecycle evidence.
-  The acceptance receipt is bound to the commit, annotated tag object, and
-  wheel digest and is revalidated after release gates.
+  uv-managed consumer tool and passed live CLI, browser dashboard, semantic
+  health, plugin cost, log-correlation, lifecycle restoration, and process
+  cleanup checks. The acceptance receipt is bound to the commit, annotated tag
+  object, and wheel digest, revoked before every retry, and revalidated after
+  release gates.
 
 ## 6.3.5 - 2026-08-14
 

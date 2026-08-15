@@ -600,9 +600,16 @@ def _installed_all_json(command: str) -> dict:
 
 
 def _status_contract(payload: dict) -> tuple[tuple[object, ...], ...]:
-    rows = payload.get("agents")
-    if not isinstance(rows, list):
-        raise ReleaseError("installed candidate status has no agents array")
+    rows = _status_rows(payload)
+    required = ("repository", "identifier", "state")
+    for row in rows:
+        if (
+            not all(isinstance(row.get(field), str) and row.get(field)
+                    for field in required)
+            or not isinstance(row.get("loadable"), bool)
+        ):
+            raise ReleaseError(
+                f"installed candidate status has a malformed agent row: {row}")
     return tuple(sorted(
         (
             str(row.get("repository", "")),
@@ -610,8 +617,36 @@ def _status_contract(payload: dict) -> tuple[tuple[object, ...], ...]:
             str(row.get("state", "")),
             bool(row.get("loadable")),
         )
-        for row in rows if isinstance(row, dict)
+        for row in rows
     ))
+
+
+def _status_rows(payload: dict) -> list[dict]:
+    rows = payload.get("agents")
+    if isinstance(rows, list):
+        if not all(isinstance(row, dict) for row in rows):
+            raise ReleaseError(
+                "installed candidate status has a non-object agent row")
+        return rows
+    repositories = payload.get("repos")
+    if not isinstance(repositories, list):
+        raise ReleaseError("installed candidate status has no agent results")
+    found: list[dict] = []
+    for item in repositories:
+        if not isinstance(item, dict) or not item.get("ok"):
+            raise ReleaseError(
+                f"installed candidate status has an unhealthy repository: {item}")
+        result = item.get("result")
+        agents = result.get("agents") if isinstance(result, dict) else None
+        if not isinstance(agents, list):
+            raise ReleaseError(
+                f"installed candidate status has no agents for {item.get('name')}")
+        if not all(isinstance(row, dict) for row in agents):
+            raise ReleaseError(
+                "installed candidate status has a non-object agent row for "
+                f"{item.get('name')}")
+        found.extend(agents)
+    return found
 
 
 def _started_watchers(payload: dict) -> tuple[tuple[str, str], ...]:
@@ -753,6 +788,8 @@ def _write_candidate_acceptance(
     *,
     operation_id: str | None,
     watchers: tuple[tuple[str, str], ...],
+    operational_agent: str,
+    cost_agent: str,
 ) -> Path:
     destination = _acceptance_path(version)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -769,6 +806,9 @@ def _write_candidate_acceptance(
         "repo": str(repo),
         "platform": sys.platform,
         "operation_id": operation_id,
+        "operational": True,
+        "operational_agent": operational_agent,
+        "cost_agent": cost_agent,
         "started_watchers": [
             {"repo": root, "identifier": watcher}
             for root, watcher in watchers
@@ -788,7 +828,9 @@ def _check_candidate_acceptance(version: str) -> dict:
     except (OSError, json.JSONDecodeError) as exc:
         raise ReleaseError(
             "prepared candidate has not passed installed-tool acceptance; "
-            "run --accept-candidate --repo <live-repository> --yes") from exc
+            "run --accept-candidate --repo <live-repository> "
+            "--agent <safe-agent-identifier> "
+            "--cost-agent <safe-provider-agent-identifier> --yes") from exc
     wheel = _candidate_wheel(version)
     expected = {
         "schema": ACCEPTANCE_SCHEMA,
@@ -802,6 +844,12 @@ def _check_candidate_acceptance(version: str) -> dict:
     }
     mismatched = [key for key, value in expected.items()
                   if receipt.get(key) != value]
+    if receipt.get("operational") is not True \
+            or not isinstance(receipt.get("operational_agent"), str) \
+            or not receipt["operational_agent"] \
+            or not isinstance(receipt.get("cost_agent"), str) \
+            or not receipt["cost_agent"]:
+        mismatched.append("operational")
     if mismatched:
         raise ReleaseError(
             "candidate acceptance receipt is stale for: "
@@ -945,7 +993,8 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         f"git tag -a {tag}",
         "agents-live upgrade --from <target wheel>  # bootstrap candidate",
         "uv run --script tools/release.py --accept-candidate "
-        "--repo <live-repository> --yes",
+        "--repo <live-repository> --agent <safe-agent-identifier> "
+        "--cost-agent <safe-provider-agent-identifier> --yes",
         f"git push --atomic origin main {tag}",
         f"gh release create {tag} --verify-tag "
         "--notes-file <changelog entries + merged pull requests>",
@@ -1021,14 +1070,28 @@ def prepare(bump: str) -> None:
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
     print("  agents-live upgrade --from <target wheel>")
     print("  uv run --script tools/release.py --accept-candidate "
-          "--repo <live-repository> --yes")
+            "--repo <live-repository> --agent <safe-agent-identifier> "
+            "--cost-agent <safe-provider-agent-identifier> --yes")
     print("  uv run --script tools/release.py --publish --yes")
 
 
-def accept_candidate(repo: Path) -> None:
+def _run_operational_acceptance(
+    repo: Path, agent_id: str, cost_agent: str,
+) -> None:
+    _run([
+        "uv", "run", "--script", "tools/candidate-operational.py",
+        "--cli", _installed_cli(),
+        "--repo", str(repo),
+        "--agent", agent_id,
+        "--cost-agent", cost_agent,
+    ])
+
+
+def accept_candidate(repo: Path, agent_id: str, cost_agent: str) -> None:
     """Exercise the installed tagged candidate before any public push."""
     _require_tools()
     version = _current_version()
+    _acceptance_path(version).unlink(missing_ok=True)
     _check_publish_state(version)
     wheel = _candidate_wheel(version)
     root = repo.expanduser().resolve()
@@ -1091,8 +1154,18 @@ def accept_candidate(repo: Path) -> None:
 
     if operation_id is not None:
         _verify_candidate_events(_candidate_events(operation_id), watchers)
+    _run_operational_acceptance(root, agent_id, cost_agent)
+    final_status = _installed_all_json("status")
+    final_doctor = _installed_all_json("doctor")
+    if _status_contract(final_status) != before_contract:
+        raise ReleaseError(
+            "candidate operational pass did not restore repository state")
+    if not final_doctor.get("ok"):
+        raise ReleaseError(
+            "candidate operational pass left repository health degraded")
     receipt = _write_candidate_acceptance(
-        version, root, wheel, operation_id=operation_id, watchers=watchers)
+        version, root, wheel, operation_id=operation_id, watchers=watchers,
+        operational_agent=agent_id, cost_agent=cost_agent)
     print(f"Accepted installed candidate {version}; receipt: {receipt}")
 
 
@@ -1157,6 +1230,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Live repository used by --accept-candidate",
     )
     parser.add_argument(
+        "--agent",
+        help="Safe live agent exercised by CLI and dashboard acceptance",
+    )
+    parser.add_argument(
+        "--cost-agent",
+        help="Safe provider-backed agent required to report list cost",
+    )
+    parser.add_argument(
         "--gates",
         action="store_true",
         help="Run the release gates that do not need a live agent CLI",
@@ -1180,10 +1261,15 @@ def main(argv: list[str] | None = None) -> int:
             "--publish, --gates, or --notes")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
-    if args.accept_candidate and args.repo is None:
-        parser.error("--accept-candidate requires --repo")
-    if args.repo is not None and not args.accept_candidate:
-        parser.error("--repo applies only to --accept-candidate")
+    if args.accept_candidate and (
+            args.repo is None or not args.agent or not args.cost_agent):
+        parser.error(
+            "--accept-candidate requires --repo, --agent, and --cost-agent")
+    if (args.repo is not None or args.agent is not None
+            or args.cost_agent is not None) \
+            and not args.accept_candidate:
+        parser.error(
+            "--repo, --agent, and --cost-agent apply only to --accept-candidate")
     if (args.publish or args.accept_candidate or args.gates or args.notes) \
             and args.bump != "patch":
         parser.error(
@@ -1195,7 +1281,9 @@ def main(argv: list[str] | None = None) -> int:
             prepare(args.bump)
         elif args.accept_candidate:
             assert args.repo is not None
-            accept_candidate(args.repo)
+            assert args.agent is not None
+            assert args.cost_agent is not None
+            accept_candidate(args.repo, args.agent, args.cost_agent)
         elif args.gates:
             gates()
         elif args.notes:

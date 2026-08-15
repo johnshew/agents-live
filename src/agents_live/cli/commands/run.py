@@ -54,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             "structured": result.structured,
             "transcript": result.transcript,
             "usage": dict(result.usage),
+            "run_id": result.run_id,
         }))
     elif not args.quiet:
         if result.ok and result.text:

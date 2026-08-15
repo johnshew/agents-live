@@ -127,7 +127,8 @@ least one started watcher, then run the mandatory acceptance command:
 ```bash
 agents-live upgrade --from dist/agents_live-<version>-py3-none-any.whl
 uv run --script tools/release.py --accept-candidate \
-	--repo <live-repository> --yes
+  --repo <live-repository> --agent <safe-agent-identifier> \
+  --cost-agent <safe-provider-agent-identifier> --yes
 ```
 
 The first command bootstraps the candidate. The acceptance command then makes
@@ -142,6 +143,22 @@ helper without repeatedly launching the held executable, and requires:
 - restoration of every started watcher; and
 - correlated quiesce, plugin convergence, restoration, and terminal events on
   deferred Windows upgrades.
+
+After replacement succeeds, acceptance runs a full operational pass through
+the uv-managed candidate. Choose an agent whose immediate run is safe and
+whose started state may be toggled temporarily. The pass exercises CLI
+`status`, `doctor`, `run`, `start`, `stop`, and log queries. It then launches
+the installed dashboard, drives its real browser UI, runs the dashboard health
+check, and clicks Run, Start, and Stop on that agent. Dashboard action records,
+healthy header state, and every state transition must be observed. The exact
+all-repository baseline is checked again afterward, and cleanup restores the
+agent's initial started state even when a probe fails.
+
+Choose a second safe provider-backed agent for `--cost-agent`. Acceptance runs
+it after the candidate is installed and requires a new successful log record
+with a positive normalized `list_cost_usd` usage value. This proves the real
+provider plugin, output parser, observability schema, and dashboard cost input
+agree; a fake or handler-only agent cannot satisfy this check.
 
 Success writes an untracked receipt under the repository's Git metadata. The
 receipt binds acceptance to the release commit, annotated tag, and wheel

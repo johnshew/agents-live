@@ -83,8 +83,20 @@ def _save(entries: list[dict]) -> None:
 def running() -> list[dict]:
     """Recorded dashboards whose process is still alive."""
     entries = _load()
-    live = [entry for entry in entries
-            if hostruntime.is_alive(int(entry["pid"]))]
+    live = []
+    for entry in entries:
+        pid = int(entry["pid"])
+        if not hostruntime.is_alive(pid):
+            continue
+        start_token = entry.get("start_token")
+        actual = hostruntime.process_start_token(pid)
+        if (
+            isinstance(start_token, int)
+            and actual is not None
+            and start_token != actual
+        ):
+            continue
+        live.append(entry)
     if len(live) != len(entries):
         _save(live)
     return live
@@ -96,6 +108,7 @@ def record(port: int, pid: int, repo: Path | None) -> None:
     entries.append({
         "port": port,
         "pid": pid,
+        "start_token": hostruntime.process_start_token(pid),
         "repo": str(repo) if repo else "",
         "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
@@ -141,6 +154,17 @@ def _stop(targets: list[dict]) -> int:
     code = 0
     for entry in sorted(targets, key=lambda item: item["port"]):
         port, pid = int(entry["port"]), int(entry["pid"])
+        start_token = entry.get("start_token")
+        actual = hostruntime.process_start_token(pid)
+        if (
+            not isinstance(start_token, int)
+            or actual is None
+            or start_token != actual
+        ):
+            print(f"error [process_identity_unknown] dashboard stop: "
+                  f"refusing to terminate unverified pid {pid} on port {port}")
+            code = 1
+            continue
         hostruntime.terminate(pid)
         forget(port, pid)
         # Stopping the recorded dashboard does not free a port that a
