@@ -18,6 +18,32 @@ completes issue hygiene, and recommends the minimum semantic version bump.
 Commit any resulting changelog update before continuing because preparation
 requires a clean tree.
 
+## Recent issue gate
+
+Before the release preview, fetch open GitHub issues and review every issue
+created or updated since the latest release tag. Also review older open issues
+that match the code paths, platforms, or live-host operations changed or used
+during release validation. Do not infer release readiness from commit history
+alone.
+
+```bash
+git log -1 --format=%cs "$(git describe --tags --abbrev=0)"
+gh issue list --state open --limit 100 \
+	--json number,title,createdAt,updatedAt,labels
+```
+
+For each relevant issue, choose one outcome:
+
+- Fix an obvious, bounded defect on the release branch, add executing coverage,
+  and rerun the affected gates.
+- Present the issue number, release impact, workaround, and deferral rationale
+  to the developer and receive explicit approval to release without the fix.
+
+An issue that describes the exact failure or workaround encountered during
+release validation is relevant even when it is labeled as an enhancement. Do
+not preview, prepare, or publish while a relevant recent issue has neither been
+fixed nor explicitly accepted for deferral.
+
 ## Versioning
 
 Semantic versioning; the version lives in `pyproject.toml`.

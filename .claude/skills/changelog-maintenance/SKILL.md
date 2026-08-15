@@ -40,9 +40,17 @@ changelog, to `docs/backlog.md`, or to an issue, and delete it.
 Run `/changelog-maintenance` before the release preview. The handoff must:
 
 1. Compare every commit since the latest release tag with `Unreleased`.
-2. Add any missing user-visible entries and complete issue hygiene.
-3. Recommend the minimum semantic version bump from the reviewed changes.
-4. Leave changelog changes committed so the release starts from a clean tree.
+2. Fetch open issues and review those created or updated since the latest tag,
+  plus older issues matching changed or live-validated surfaces.
+3. Add any missing user-visible entries and complete issue hygiene.
+4. Fix obvious, bounded release-relevant issues, or obtain explicit developer
+  approval to defer each one after stating its impact and workaround.
+5. Recommend the minimum semantic version bump from the reviewed changes.
+6. Leave changelog changes committed so the release starts from a clean tree.
+
+The release handoff is blocked while a relevant issue has no recorded outcome.
+Issue labels do not decide relevance: an enhancement that describes the exact
+release-validation failure or manual workaround must still be surfaced.
 
 The release tool independently enforces the minimum implied by conventional
 changelog prefixes: `feat:` requires at least minor, `feat!:` or `fix!:` and
@@ -129,17 +137,23 @@ Rules:
 
 The backlog is `gh issue list`. When updating the changelog:
 
-1. **Close out resolved issues.** For each recent commit or PR, check
+1. **Review recent open issues before release.** Use the latest release tag as
+  the minimum time window, then include older issues that match changed code,
+  affected platforms, or live validation. For every relevant issue, either
+  fix a bounded defect and rerun its checks, or ask the developer to approve
+  deferral with the issue number, impact, workaround, and rationale. Do not
+  silently defer an issue because its label says `enhancement`.
+2. **Close out resolved issues.** For each recent commit or PR, check
    whether it resolves an open issue. Commits should carry `Fixes #N`
    so the merge closes the issue; if one merged without it, close the
    issue manually with a comment citing the commit.
-2. **File follow-up issues** for work uncovered during the session -
+3. **File follow-up issues** for work uncovered during the session -
    both follow-ups surfaced by a commit and deferred items from the
    conversation (design tensions, gaps, refactors postponed). Re-read
    the session when running this skill; a non-trivial decision to defer
    something becomes an issue with a one-line "why deferred" note.
    Label priority when the user expressed urgency.
-3. **No scattered backlogs.** Never add TODO or backlog sections to
+4. **No scattered backlogs.** Never add TODO or backlog sections to
    arbitrary docs; convert them to issues. `docs/backlog.md` is the one
    exception and holds themes only.
 
