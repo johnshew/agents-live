@@ -11,9 +11,10 @@ from pathlib import Path
 
 from ... import __version__, agent, paths, runtime
 from ...dispatch import Firing, dispatch
+from ...obs import admin as adminlog
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
-from .. import lifecycle
+from .. import lifecycle, upgrade_handoff
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,6 +123,33 @@ def _smoketest_verdict(previous: dict) -> dict:
 
 def _watch(args) -> int:
     root = paths.resolve_root()
+    retirement: dict[str, str | None] = {"reason": None, "operation": None}
+
+    def should_continue() -> bool:
+        operation = upgrade_handoff.quiesce_operation(sys.executable)
+        if operation is not None:
+            retirement.update(reason="quiesce", operation=operation)
+            return False
+        if not _runtime_is_current():
+            retirement["reason"] = "replacement"
+            return False
+        return True
+
+    def on_retire(expression: str) -> None:
+        if retirement["reason"] == "replacement":
+            _restart_watcher(args, root, expression)
+            return
+        if retirement["reason"] == "quiesce":
+            adminlog.record(
+                "upgrade-watchers",
+                status="ok",
+                phase="quiesced",
+                correlation_id=retirement["operation"],
+                root=str(root),
+                watcher=args.name,
+                message=f"watcher '{args.name}' quiesced at idle boundary",
+            )
+
     try:
         spec = agent.load(args.name, root=root)
         if spec.execution is None or not spec.execution.watch:
@@ -144,8 +172,8 @@ def _watch(args) -> int:
                 args.subscription_key,
                 changed,
             )),
-            should_continue=_runtime_is_current,
-            on_retire=lambda: _restart_watcher(args, root, expression),
+            should_continue=should_continue,
+            on_retire=lambda: on_retire(expression),
         )
     except (agent.DefinitionError, RuntimeError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

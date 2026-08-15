@@ -122,7 +122,7 @@ def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
     return tuple(dict.fromkeys(errors))
 
 
-def _holders(environment: Path) -> list[str]:
+def _holders(environment: Path, *, include_watchers: bool = True) -> list[str]:
     """The long-lived agents-live processes running out of *environment*.
 
     Watchers and dashboards outlive the command that started them and
@@ -143,7 +143,8 @@ def _holders(environment: Path) -> list[str]:
             if any(within(arg, environment)
                    for arg in hostruntime.split_command_line(command))
         }
-        watchers = watchers_on_host(under=environment)
+        watchers = (
+            watchers_on_host(under=environment) if include_watchers else [])
     except OSError:
         # An unreadable process table must not fail an upgrade that would
         # otherwise work; uv still reports whatever it cannot replace.
@@ -151,7 +152,7 @@ def _holders(environment: Path) -> list[str]:
     holders = [
         f"watcher '{name}'{f' in {project}' if project else ''} (pid {pid})"
         for pid, name, project in watchers
-    ]
+    ] if include_watchers else []
     holders += [
         f"dashboard on port {entry['port']} (pid {entry['pid']})"
         for entry in dashboards.running() if int(entry["pid"]) in held
@@ -159,7 +160,7 @@ def _holders(environment: Path) -> list[str]:
     return sorted(holders)
 
 
-def _refuse_while_held(end: dict) -> bool:
+def _refuse_while_held(end: dict, *, allow_watchers: bool = False) -> bool:
     """Whether processes hold the installation this upgrade would rewrite.
 
     Only where the host locks a running image: POSIX replaces one without
@@ -175,19 +176,31 @@ def _refuse_while_held(end: dict) -> bool:
     environment = plugins.tool_environment()
     if environment is None:
         return False
-    holders = _holders(environment)
+    if allow_watchers:
+        holders = [
+            f"dashboard on port {entry['port']} (pid {entry['pid']})"
+            for entry in dashboards.running()
+        ]
+    else:
+        holders = _holders(environment)
     if not holders:
         return False
     end["status"] = "error"
     end["level"] = "error"
     end["held_by"] = len(holders)
     end["message"] = "installation in use; nothing was changed"
+    if allow_watchers:
+        guidance = (
+            "Stop the managed dashboard and run upgrade again "
+            "(`agents-live dashboard stop --port <port>`)")
+    else:
+        guidance = (
+            "Stop them and run upgrade again (`agents-live --repo <path> "
+            "stop <name>`, `agents-live dashboard stop --port <port>`)")
     preflight.emit_failure(
         "upgrade",
         "this installation is in use, so nothing was changed: "
-        f"{'; '.join(holders)}. Stop them and run upgrade again "
-        "(`agents-live --repo <path> stop <name>`, "
-        "`agents-live dashboard --stop`)")
+        f"{'; '.join(holders)}. {guidance}")
     return True
 
 
@@ -231,7 +244,7 @@ def _handoff_windows_upgrade(
     with adminlog.operation(
             "upgrade-runtime", version_before=__version__, source=package,
             deferred=True, correlation_id=claim.operation_id) as end:
-        if _refuse_while_held(end):
+        if _refuse_while_held(end, allow_watchers=True):
             upgrade_handoff.abandon(claim)
             return 1
         helper = runtime.current().supervisor.defer_until_environment_exits(
@@ -249,12 +262,88 @@ def _handoff_windows_upgrade(
                 "agents-live upgrade` after this command exits")
             return 1
         upgrade_handoff.spawned(claim, helper)
+        try:
+            watchers = watchers_on_host(under=environment)
+            identities = upgrade_handoff.request_quiescence(claim, watchers)
+        except (OSError, RuntimeError, ValueError) as exc:
+            runtime.current().supervisor.terminate(helper)
+            upgrade_handoff.abandon(claim)
+            end["status"] = "error"
+            end["level"] = "error"
+            end["message"] = f"could not request watcher quiescence: {exc}"
+            preflight.emit_failure("upgrade", end["message"])
+            return 1
+        if identities:
+            named = ", ".join(
+                f"{name} ({project})" if project else name
+                for name, project in identities
+            )
+            adminlog.record(
+                "upgrade-watchers",
+                status="ok",
+                phase="quiesce-requested",
+                correlation_id=claim.operation_id,
+                watchers=named,
+                watcher_count=len(identities),
+                message=f"requested idle quiescence for {named}",
+            )
+            end["quiesce_watchers"] = len(identities)
         end["status"] = "deferred"
         end["transcript"] = str(claim.transcript_path)
         end["message"] = "upgrade queued until this process exits"
     print(f"Upgrade queued as {claim.operation_id}; run `agents-live logs admin` "
           "after this process exits to see its outcome")
     return 0
+
+
+def _restore_quiesced_watchers(correlation_id: str) -> int:
+    try:
+        identities = upgrade_handoff.begin_restoration(correlation_id)
+    except RuntimeError as exc:
+        preflight.emit_failure("upgrade", str(exc))
+        return 1
+    if not identities:
+        return 0
+    named = ", ".join(
+        f"{name} ({project})" if project else name
+        for name, project in identities
+    )
+    try:
+        result = lifecycle.converge()
+    except lifecycle.CollectionUnavailable as exc:
+        detail = str(exc)
+    else:
+        if not result.failed and result.health.healthy:
+            adminlog.record(
+                "upgrade-watchers",
+                status="ok",
+                phase="restore",
+                correlation_id=correlation_id,
+                watchers=named,
+                watcher_count=len(identities),
+                message=f"restored quiesced watchers: {named}",
+            )
+            return 0
+        detail = "; ".join(
+            f"{operation.key}: {error}"
+            for operation, error in result.failed
+        ) or "; ".join(result.health.detail) or "runtime health is degraded"
+    adminlog.record(
+        "upgrade-watchers",
+        status="error",
+        level="error",
+        phase="restore",
+        correlation_id=correlation_id,
+        watchers=named,
+        watcher_count=len(identities),
+        message=f"could not restore quiesced watchers: {detail}",
+    )
+    preflight.emit_failure(
+        "upgrade",
+        f"runtime upgraded, but quiesced watchers were not restored: {detail}; "
+        "started intent is unchanged and automatic maintenance can retry",
+    )
+    return 1
 
 
 def _upgrade_runtime(roots: list[Path] | None = None,
@@ -303,7 +392,8 @@ def _upgrade_runtime(roots: list[Path] | None = None,
         try:
             plugins.converge(
                 roots or [], trigger="upgrade", pin_primary=False,
-                receipt_environment=receipt_environment)
+                receipt_environment=receipt_environment,
+                correlation_id=correlation_id)
         except (OSError, ValueError, plugins.PluginError) as exc:
             end["status"] = "error"
             end["level"] = "error"
@@ -532,6 +622,8 @@ def main() -> int:
             **runtime_options)
         if runtime_status != 0:
             return runtime_status
+        if args.upgrade_id and _restore_quiesced_watchers(args.upgrade_id) != 0:
+            return 1
         if args.runtime_only:
             return _refresh_with_installed_cli(refresh_skills=False)
         # After the runtime upgrade this process is still the old

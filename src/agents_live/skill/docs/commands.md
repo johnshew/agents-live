@@ -85,8 +85,12 @@ agents-live stop link-check --dry-run
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload. An installed
   native Windows tool queues runtime replacement until the invoking process
-  exits. The command prints an operation ID; use `agents-live logs admin` on
-  the next invocation to inspect the correlated terminal outcome.
+  exits. Installed-tool watchers keep started intent unchanged, finish any
+  active dispatch, quiesce at their next idle check, and are restored by
+  ordinary convergence from the new runtime. A managed dashboard remains a
+  fail-closed blocker and must be stopped first. The command prints an
+  operation ID; use `agents-live logs admin` on the next invocation to inspect
+  the correlated quiesce, replacement, restoration, and terminal events.
 - `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.

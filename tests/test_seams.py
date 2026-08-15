@@ -1081,6 +1081,12 @@ class TestRuntimeCore(unittest.TestCase):
     def test_windows_upgrade_queues_one_correlated_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state_home = Path(temporary) / "state"
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            state.replace(root, {"sample-123"})
+            started_before = (
+                paths.repo_state_dir(root) / "started.json"
+            ).read_bytes()
             environment = Path(temporary) / "tools" / "agents-live"
             environment.mkdir(parents=True)
             helper = ProcessRef(
@@ -1096,13 +1102,25 @@ class TestRuntimeCore(unittest.TestCase):
                     upgrade.plugins, "tool_environment", return_value=environment),
                 mock.patch.object(upgrade, "within", return_value=True),
                 mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
-                mock.patch.object(upgrade, "_refuse_while_held", return_value=False),
+                mock.patch.object(
+                    upgrade.hostruntime, "locks_running_image", return_value=True),
+                mock.patch.object(
+                    upgrade.hostruntime, "process_command_lines", return_value=[]),
+                mock.patch.object(upgrade.dashboards, "running", return_value=[]),
+                mock.patch.object(
+                    upgrade, "watchers_on_host",
+                    return_value=[
+                        (101, "sample-123", str(root)),
+                        (102, "sample-123", str(root)),
+                    ],
+                ),
                 mock.patch.object(
                     upgrade.runtime, "current",
                     return_value=mock.Mock(supervisor=supervisor)),
                 mock.patch.object(
                     upgrade.adminlog, "operation",
                     return_value=contextlib.nullcontext({})) as operation,
+                mock.patch.object(upgrade.adminlog, "record") as record,
                 contextlib.redirect_stdout(stdout),
             ):
                 self.assertEqual(
@@ -1125,8 +1143,88 @@ class TestRuntimeCore(unittest.TestCase):
                 (state_home / "agents-live" / "upgrade-handoffs").glob(
                     "*.pending.json"))
             self.assertEqual(1, len(pending))
-            self.assertEqual(42, json.loads(
-                pending[0].read_text(encoding="utf-8"))["helper"]["pid"])
+            payload = json.loads(pending[0].read_text(encoding="utf-8"))
+            self.assertEqual(42, payload["helper"]["pid"])
+            self.assertEqual(
+                [{"name": "sample-123", "project": str(root)}],
+                payload["quiesce_watchers"],
+            )
+            self.assertTrue(payload["quiesce_active"])
+            self.assertEqual(
+                started_before,
+                (paths.repo_state_dir(root) / "started.json").read_bytes(),
+            )
+            record.assert_called_once()
+            self.assertEqual("quiesce-requested", record.call_args.kwargs["phase"])
+            self.assertEqual(operation_id, record.call_args.kwargs["correlation_id"])
+
+    def test_windows_upgrade_keeps_dashboard_as_fail_closed_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            environment.mkdir(parents=True)
+            supervisor = mock.Mock()
+            stderr = io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}),
+                mock.patch.object(
+                    upgrade.hostruntime, "id", return_value=upgrade.hostruntime.WINDOWS),
+                mock.patch.object(
+                    upgrade.hostruntime, "locks_running_image", return_value=True),
+                mock.patch.object(
+                    upgrade.plugins, "tool_environment", return_value=environment),
+                mock.patch.object(upgrade, "within", return_value=True),
+                mock.patch.object(upgrade, "find_uv", return_value="uv.exe"),
+                mock.patch.object(upgrade, "_running_watchers", return_value=[]),
+                mock.patch.object(
+                    upgrade.dashboards, "running",
+                    return_value=[{"pid": 88, "port": 8231}],
+                ),
+                mock.patch.object(
+                    upgrade.hostruntime, "process_command_lines", return_value=[]),
+                mock.patch.object(
+                    upgrade, "watchers_on_host", return_value=[]),
+                mock.patch.object(
+                    upgrade.runtime, "current",
+                    return_value=mock.Mock(supervisor=supervisor)),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(
+                    1, upgrade._handoff_windows_upgrade(None, runtime_only=False))
+            supervisor.defer_until_environment_exits.assert_not_called()
+            self.assertIn("dashboard on port 8231", stderr.getvalue())
+            self.assertEqual(
+                [],
+                list((state_home / "agents-live" / "upgrade-handoffs").glob(
+                    "*.pending.json")),
+            )
+
+    def test_upgrade_disables_quiescence_before_restoring_watchers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_home = Path(temporary) / "state"
+            environment = Path(temporary) / "tools" / "agents-live"
+            environment.mkdir(parents=True)
+            executable = environment / "Scripts" / "python.exe"
+            with mock.patch.dict(
+                    os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                claim, existing = upgrade_handoff.claim(
+                    environment, source="candidate.whl", runtime_only=False)
+                self.assertIsNone(existing)
+                self.assertIsNotNone(claim)
+                assert claim is not None
+                upgrade_handoff.request_quiescence(
+                    claim, [(101, "sample", "C:/repo")])
+
+                self.assertEqual(
+                    claim.operation_id,
+                    upgrade_handoff.quiesce_operation(executable),
+                )
+                self.assertEqual(
+                    (("sample", "C:/repo"),),
+                    upgrade_handoff.begin_restoration(claim.operation_id),
+                )
+                self.assertIsNone(
+                    upgrade_handoff.quiesce_operation(executable))
 
     def test_windows_upgrade_abandons_claim_when_helper_cannot_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1495,6 +1593,183 @@ class TestStartedState(TempRepository):
             item.target == f"agent:{spec.identifier}"
             for item in host.trigger_store.list()
         ))
+
+    def test_active_watcher_quiesces_after_dispatch_without_restart(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1ms"',
+        ])
+
+        class Source:
+            def __init__(self) -> None:
+                self.started = False
+                self.stopped = False
+                self.polls = 0
+
+            def start(self) -> None:
+                self.started = True
+
+            def poll(self, _timeout: float | None) -> list[str]:
+                self.polls += 1
+                return [str(self.root / "src" / "changed.py")] \
+                    if self.polls == 1 else []
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        source = Source()
+        source.root = self.root
+        request = {"operation": None}
+        dispatched: list[str] = []
+        host = mock.Mock()
+        host.change_source.return_value = source
+        args = mock.Mock()
+        args.name = "sample"
+        args.watch_expression = None
+        args.subscription_key = "watch-key"
+        args.subscription_fingerprint = "watch-fingerprint"
+
+        def fire(firing) -> mock.Mock:
+            dispatched.append(firing.agent_id)
+            request["operation"] = "upgrade-operation"
+            return mock.Mock()
+
+        with (
+            mock.patch.object(internal.runtime, "current", return_value=host),
+            mock.patch.object(internal, "dispatch", side_effect=fire),
+            mock.patch.object(
+                internal.upgrade_handoff,
+                "quiesce_operation",
+                side_effect=lambda _executable: request["operation"],
+            ),
+            mock.patch.object(internal, "_restart_watcher") as restart,
+            mock.patch.object(internal.adminlog, "record") as record,
+        ):
+            self.assertEqual(0, internal._watch(args))
+
+        self.assertEqual(["sample"], dispatched)
+        self.assertTrue(source.started)
+        self.assertTrue(source.stopped)
+        restart.assert_not_called()
+        record.assert_called_once()
+        self.assertEqual(
+            "upgrade-operation", record.call_args.kwargs["correlation_id"])
+
+    def test_idle_watcher_quiesces_before_poll_without_restart(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1s"',
+        ])
+
+        source = mock.Mock()
+        host = mock.Mock()
+        host.change_source.return_value = source
+        args = mock.Mock()
+        args.name = "sample"
+        args.watch_expression = None
+        args.subscription_key = "watch-key"
+        args.subscription_fingerprint = "watch-fingerprint"
+        with (
+            mock.patch.object(internal.runtime, "current", return_value=host),
+            mock.patch.object(
+                internal.upgrade_handoff,
+                "quiesce_operation",
+                return_value="upgrade-operation",
+            ),
+            mock.patch.object(internal, "dispatch") as dispatch_run,
+            mock.patch.object(internal, "_restart_watcher") as restart,
+            mock.patch.object(internal.adminlog, "record") as record,
+        ):
+            self.assertEqual(0, internal._watch(args))
+
+        source.start.assert_called_once_with()
+        source.poll.assert_not_called()
+        source.stop.assert_called_once_with()
+        dispatch_run.assert_not_called()
+        restart.assert_not_called()
+        self.assertEqual("quiesced", record.call_args.kwargs["phase"])
+
+    def test_upgrade_continuation_restores_quiesced_started_watcher(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1s"',
+        ])
+        spec = agent.load("sample", root=self.root)
+        state.replace(self.root, {spec.identifier})
+        before = (paths.repo_state_dir(self.root) / "started.json").read_bytes()
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            with (
+                mock.patch.object(lifecycle.repos, "load", return_value={
+                    "repos": {"sample": str(self.root)},
+                    "default_repo": "sample",
+                }),
+                mock.patch.object(
+                    upgrade.upgrade_handoff,
+                    "begin_restoration",
+                    return_value=((spec.identifier, str(self.root)),),
+                ),
+                mock.patch.object(
+                    upgrade.adminlog,
+                    "record",
+                    side_effect=lambda _name, **_fields: self.assertEqual(
+                        1, len(host.supervisor.owned("watcher"))),
+                ) as record,
+            ):
+                self.assertEqual(
+                    0, upgrade._restore_quiesced_watchers("upgrade-operation"))
+        finally:
+            runtime.configure(previous)
+
+        self.assertEqual(
+            before, (paths.repo_state_dir(self.root) / "started.json").read_bytes())
+        self.assertEqual(1, len(host.supervisor.owned("watcher")))
+        self.assertEqual(
+            "upgrade-operation", record.call_args.kwargs["correlation_id"])
+        self.assertEqual("restore", record.call_args.kwargs["phase"])
+
+    def test_failed_upgrade_restoration_leaves_intent_for_maintenance(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1s"',
+        ])
+        spec = agent.load("sample", root=self.root)
+        state.replace(self.root, {spec.identifier})
+        host = MemoryHost()
+        previous = runtime.current()
+        runtime.configure(host)
+        failed = mock.Mock(
+            failed=((mock.Mock(key="watch-key"), "blocked"),),
+            health=Health(False, detail=("watcher restore blocked",)),
+        )
+        try:
+            with (
+                mock.patch.object(lifecycle.repos, "load", return_value={
+                    "repos": {"sample": str(self.root)},
+                    "default_repo": "sample",
+                }),
+                mock.patch.object(
+                    upgrade.upgrade_handoff,
+                    "begin_restoration",
+                    return_value=((spec.identifier, str(self.root)),),
+                ),
+                mock.patch.object(upgrade.adminlog, "record"),
+            ):
+                with mock.patch.object(
+                        upgrade.lifecycle, "converge", return_value=failed):
+                    self.assertEqual(
+                        1,
+                        upgrade._restore_quiesced_watchers(
+                            "upgrade-operation"),
+                    )
+                self.assertIn(spec.identifier, state.load(self.root).agents)
+                self.assertFalse(lifecycle.converge().failed)
+        finally:
+            runtime.configure(previous)
+
+        self.assertEqual(1, len(host.supervisor.owned("watcher")))
 
     def test_internal_migrate_preserves_legacy_trigger_when_replacement_fails(
             self) -> None:
@@ -3128,7 +3403,54 @@ class TestArchitectureFitness(unittest.TestCase):
             self.assertEqual(0, upgrade._upgrade_runtime([]))
         converge_plugins.assert_called_once_with(
             [], trigger="upgrade", pin_primary=False,
-            receipt_environment=tool_environment)
+            receipt_environment=tool_environment, correlation_id=None)
+
+    def test_upgrade_records_noop_plugin_convergence_under_correlation(self) -> None:
+        with mock.patch.object(plugins.adminlog, "record") as record:
+            self.assertFalse(plugins.converge(
+                [], trigger="upgrade", correlation_id="upgrade-operation"))
+        record.assert_called_once_with(
+            "plugin-converge",
+            status="ok",
+            correlation_id="upgrade-operation",
+            trigger="upgrade",
+            changed=False,
+            pending=[],
+            message="plugins already converged",
+        )
+
+    def test_upgrade_correlates_pending_plugin_convergence(self) -> None:
+        declaration = plugins.Plugin(
+            name="example", path=Path("example.whl"),
+            sha256=None, version="1.0")
+        primary = plugins.ReceiptRequirement("agents-live==6.3.4")
+        operation = mock.MagicMock()
+        operation.__enter__.return_value = {}
+        with (
+            mock.patch.object(plugins, "union", return_value={
+                "example": declaration}),
+            mock.patch.object(
+                plugins, "_installed_state", return_value=(False, "missing")),
+            mock.patch.object(plugins, "validation_errors", return_value=[]),
+            mock.patch.object(
+                plugins, "_receipt_requirements", return_value=(primary, {})),
+            mock.patch.object(plugins, "find_uv", return_value="uv"),
+            mock.patch.object(
+                plugins.subprocess, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(plugins, "launcher_stamp", return_value=None),
+            mock.patch.object(plugins, "installed_version", return_value="6.3.5"),
+            mock.patch.object(
+                plugins.adminlog, "operation", return_value=operation,
+            ) as operation_call,
+        ):
+            self.assertTrue(plugins.converge(
+                [Path("/repo")], trigger="upgrade",
+                correlation_id="upgrade-operation"))
+        self.assertEqual(
+            "upgrade-operation",
+            operation_call.call_args.kwargs["correlation_id"],
+        )
+        self.assertTrue(operation.__enter__.return_value["changed"])
 
     def test_a_retired_plugin_group_is_refused_even_beside_a_current_one(self) -> None:
         """Half-recognising a plugin is worse than refusing it.

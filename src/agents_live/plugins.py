@@ -489,7 +489,8 @@ def tool_environment() -> Path | None:
 
 def converge(roots: list[Path], *, trigger: str = "unspecified",
              pin_primary: bool = True,
-             receipt_environment: Path | None = None) -> bool:
+             receipt_environment: Path | None = None,
+             correlation_id: str | None = None) -> bool:
     """Converge the host-global uv tool environment.
 
     Return True when plugins were installed and False when already converged.
@@ -508,6 +509,16 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
         if not _installed_state(plugin)[0]
     }
     if not pending:
+        if correlation_id is not None:
+            adminlog.record(
+                "plugin-converge",
+                status="ok",
+                correlation_id=correlation_id,
+                trigger=trigger,
+                changed=False,
+                pending=[],
+                message="plugins already converged",
+            )
         return False
     validation = validation_errors(roots)
     if validation:
@@ -533,6 +544,7 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
         command.extend([flag, requirement.value])
     with adminlog.operation(
             "plugin-converge",
+            correlation_id=correlation_id,
             trigger=trigger,
             version_before=__version__,
             primary=primary.value,
@@ -549,6 +561,7 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
                 f"plugin convergence failed with exit code {completed.returncode}; "
                 "run `agents-live upgrade` to retry")
         end["version_after"] = installed_version()
+        end["changed"] = True
     return True
 
 
