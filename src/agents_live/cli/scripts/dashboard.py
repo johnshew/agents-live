@@ -737,6 +737,7 @@ async def health_check() -> None:
         type=severity.get(h["level"], "negative"),
         timeout=12000, multi_line=True,
     )
+    _push_log("Health check dashboard refresh complete")
 
 
 def _smoketest_result_path() -> Path:

@@ -1335,6 +1335,7 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
         actions: list[tuple[str, str, list[str]]] = []
+        markers: list[str] = []
 
         async def run_action(
             label: str,
@@ -1355,6 +1356,8 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(dashboard, "system_health", return_value={
                 "level": "ok", "tip": "healthy",
             }),
+            mock.patch.object(
+                dashboard, "_push_log", side_effect=markers.append),
         ):
             await dashboard.health_check()
 
@@ -1363,6 +1366,8 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
             actions[-1],
         )
         self.assertNotIn(("Start", "start", ["--all"]), actions)
+        self.assertEqual(
+            ["Health check dashboard refresh complete"], markers)
 
     async def test_health_check_stops_after_smoketest_timeout(self) -> None:
         nicegui = mock.MagicMock()
@@ -1382,6 +1387,7 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
                 dashboard, "_smoketest_result_path", return_value=mock.Mock(
                     unlink=mock.Mock())),
             mock.patch.object(dashboard, "_current_smoketest_pass") as verdict,
+            mock.patch.object(dashboard, "_push_log") as push_log,
         ):
             await dashboard.health_check()
         self.assertEqual([
@@ -1389,6 +1395,7 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
             ("Smoketest", "smoketest"),
         ], actions)
         verdict.assert_not_called()
+        push_log.assert_not_called()
 
     async def test_health_check_does_not_report_failed_maintenance(self) -> None:
         nicegui = mock.MagicMock()
@@ -1410,10 +1417,12 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(
                 dashboard, "_current_smoketest_pass", return_value=True),
             mock.patch.object(dashboard, "system_health") as health,
+            mock.patch.object(dashboard, "_push_log") as push_log,
         ):
             await dashboard.health_check()
         self.assertEqual(["Doctor", "Smoketest", "Health check"], actions)
         health.assert_not_called()
+        push_log.assert_not_called()
 
     async def test_shutdown_during_action_does_not_unpack_a_missing_result(
             self) -> None:
@@ -2833,16 +2842,18 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 row.count.return_value = 1
                 page = mock.Mock()
                 page.get_by_role.return_value.filter.return_value = row
-                health_ready = mock.Mock()
-                health_ready.last.wait_for.side_effect = (
+                refresh_lines = mock.Mock()
+                refresh_lines.count.return_value = 1
+                refresh_lines.nth.return_value.wait_for.side_effect = (
                     lambda **_kwargs: action_order.append("health-ready"))
 
                 def page_text(value, **_kwargs):
-                    if (
-                        isinstance(value, re.Pattern)
-                        and value.pattern == r"^Infrastructure healthy \("
-                    ):
-                        return health_ready
+                    rendered = (
+                        "[14:00:00 MDT] "
+                        "Health check dashboard refresh complete"
+                    )
+                    if isinstance(value, re.Pattern) and value.search(rendered):
+                        return refresh_lines
                     return mock.Mock()
 
                 page.get_by_text.side_effect = page_text
@@ -2902,6 +2913,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             Path("agents-live.exe"), Path("C:/repo"),
                             "sample-123", "sample", baseline,
                             "cost-agent-456")
+                refresh_lines.nth.assert_called_once_with(1)
                 self.assertEqual(["health-ready", "run"], action_order[:2])
 
     def test_dashboard_posix_cleanup_escalates_process_group(self) -> None:
