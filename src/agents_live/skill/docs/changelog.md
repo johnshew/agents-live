@@ -15,7 +15,10 @@ history is retained in the source repository.
   Preparation records immutable gate and artifact receipts on an isolated
   candidate branch, acceptance preflights and resumes from verified replacement,
   paid provider validation runs last, and publish reuses exact-SHA CI artifacts
-  without duplicate `main` or publish-job gate runs.
+  without duplicate `main` or publish-job gate runs. A focused local deployment
+  workflow applies the same evidence-invalidation model to merged `main`, while
+  reusing release-owned state and Windows handoff checks and preserving managed
+  dashboards around installation.
 
 ## 6.3.6 - 2026-08-16
 
