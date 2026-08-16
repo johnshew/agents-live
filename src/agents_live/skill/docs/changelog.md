@@ -21,7 +21,8 @@ history is retained in the source repository.
   health, plugin cost, log-correlation, lifecycle restoration, and process
   cleanup checks. The acceptance receipt is bound to the commit, annotated tag
   object, and wheel digest, revoked before every retry, and revalidated after
-  release gates.
+  release gates. Cost verification handles current and historical usage
+  encodings while rejecting malformed, non-positive, and non-finite values.
 
 ## 6.3.5 - 2026-08-14
 
