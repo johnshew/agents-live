@@ -540,14 +540,18 @@ def _dashboard_actions(
 
                 health_before = _action_count(
                     cli, repo, "dashboard", "Health check")
+                refresh_lines = page.get_by_text(
+                    re.compile(
+                        r"^\[[^\]]+\] Health check dashboard refresh complete$"
+                    )
+                )
+                refresh_count = refresh_lines.count()
                 page.get_by_role("button", name="Run health check").click()
                 _await_action(
                     cli, repo, "dashboard", "Health check", health_before)
                 page.get_by_text(re.compile(r"^healthy ")).first.wait_for(
                     state="visible", timeout=ACTION_TIMEOUT_S * 1000)
-                page.get_by_text(
-                    re.compile(r"^Infrastructure healthy \(")
-                ).last.wait_for(
+                refresh_lines.nth(refresh_count).wait_for(
                     state="visible", timeout=ACTION_TIMEOUT_S * 1000)
 
                 dashboard_run_started = datetime.now(timezone.utc).isoformat()
