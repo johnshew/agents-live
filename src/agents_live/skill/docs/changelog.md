@@ -17,6 +17,9 @@ history is retained in the source repository.
   answers keep precedence, and provider usage remains attached to the result.
 - fix: decode current and historical candidate cost usage encodings.
   Cost verification rejects malformed, non-positive, and non-finite values.
+- fix: drive candidate dashboard Start controls by accessible name.
+  Browser acceptance now exercises both initially started and initially stopped
+  agents without serializing the apostrophe-bearing label as an invalid selector.
 
 ## 6.3.6 - 2026-08-15
 
