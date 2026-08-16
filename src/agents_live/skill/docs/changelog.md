@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: reuse verified evidence across release phases.
+  Preparation records immutable gate and artifact receipts on an isolated
+  candidate branch, acceptance preflights and resumes from verified replacement,
+  paid provider validation runs last, and publish reuses exact-SHA CI artifacts
+  without duplicate `main` or publish-job gate runs.
+
 ## 6.3.6 - 2026-08-16
 
 - fix: preserve structured Copilot answers when JSON events omit their phase. (#335)
