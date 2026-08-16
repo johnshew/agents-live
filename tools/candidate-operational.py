@@ -561,20 +561,20 @@ def _dashboard_actions(
                     _await_action(cli, repo, agent_id, "Stop", before)
                     row.get_by_role(
                         "button",
-                        name=re.compile(r"Register this host's cron/watcher"),
+                        name="Register this host's cron/watcher",
                     ).wait_for(
                         state="visible", timeout=ACTION_TIMEOUT_S * 1000)
                     before = _action_count(cli, repo, agent_id, "Start")
                     row.get_by_role(
                         "button",
-                        name=re.compile(r"Register this host's cron/watcher"),
+                        name="Register this host's cron/watcher",
                     ).click()
                     _await_action(cli, repo, agent_id, "Start", before)
                 else:
                     before = _action_count(cli, repo, agent_id, "Start")
                     row.get_by_role(
                         "button",
-                        name=re.compile(r"Register this host's cron/watcher"),
+                        name="Register this host's cron/watcher",
                     ).click()
                     _await_action(cli, repo, agent_id, "Start", before)
                     row.get_by_role(
@@ -590,7 +590,7 @@ def _dashboard_actions(
                     _await_action(cli, repo, agent_id, "Stop", before)
                     row.get_by_role(
                         "button",
-                        name=re.compile(r"Register this host's cron/watcher"),
+                        name="Register this host's cron/watcher",
                     ).wait_for(
                         state="visible", timeout=ACTION_TIMEOUT_S * 1000)
             finally:

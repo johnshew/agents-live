@@ -2809,75 +2809,81 @@ class TestCrossModuleAgreements(unittest.TestCase):
             str(REPOSITORY / "tools" / "candidate-operational.py"))
         dashboard_actions = script["_dashboard_actions"]
         scope = dashboard_actions.__globals__
-        process = mock.Mock(pid=42)
-        process.poll.return_value = None
-        process.wait.return_value = 0
-        start_button = mock.Mock()
-        start_button.wait_for.side_effect = RuntimeError(
-            "start control never appeared")
-        row = mock.Mock()
+        for baseline in (True, False):
+            with self.subTest(baseline=baseline):
+                process = mock.Mock(pid=42)
+                process.poll.return_value = None
+                process.wait.return_value = 0
+                start_button = mock.Mock()
+                start_button.wait_for.side_effect = RuntimeError(
+                    "start control never appeared")
+                row = mock.Mock()
 
-        def row_button(_role, *, name):
-            if isinstance(name, re.Pattern):
-                return start_button
-            return mock.Mock()
+                def row_button(_role, *, name):
+                    if name == "Register this host's cron/watcher":
+                        return start_button
+                    return mock.Mock()
 
-        row.get_by_role.side_effect = row_button
-        row.count.return_value = 1
-        page = mock.Mock()
-        page.get_by_role.return_value.filter.return_value = row
-        browser = mock.Mock()
-        browser.new_page.return_value = page
-        playwright = mock.Mock()
-        playwright.chromium.launch.return_value = browser
-        manager = mock.MagicMock()
-        manager.__enter__.return_value = playwright
-        sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
-        dashboard_lists = iter((
-            "No dashboard started by this host is running.",
-            "PORT PID\n8232 42",
-            "No dashboard started by this host is running.",
-        ))
-        with (
-            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
-            mock.patch.dict(scope, {
-                "_free_port": lambda: 8232,
-                "_await_api": lambda *_args, **kwargs: (
-                    kwargs.get("observe", lambda: None)()
-                    or {"agents": [{
-                        "identifier": "cost-agent-456",
-                        "cost_day_value": 0.25,
-                        "cost_week_value": 0.25,
-                    }]}),
-                "_registered_dashboard_pid": lambda *_args: 42,
-                "_api": lambda _port: {"agents": [{
-                    "identifier": "cost-agent-456",
-                    "cost_day_value": 0.25,
-                    "cost_week_value": 0.25,
-                }]},
-                "_verify_cost_capture": lambda *_args: ("abc123", 0.25),
-                "_await_dashboard_cost": lambda *_args: None,
-                "_verify_cost_attribution": lambda *_args: None,
-                "_run": lambda *_args, **_kwargs: mock.Mock(
-                    stdout=next(dashboard_lists)),
-                "_port_answers": lambda _port: False,
-                "_action_count": lambda *_args: 0,
-                "_await_action": lambda *_args: None,
-                "_await_dashboard_run": lambda *_args: "abc123",
-                "_browser_executable": lambda: Path("browser.exe"),
-                "subprocess": mock.Mock(
-                    Popen=mock.Mock(return_value=process),
-                    run=mock.Mock(return_value=mock.Mock(returncode=0))),
-                "os": mock.Mock(name="nt"),
-            }),
-        ):
-            scope["os"].name = "nt"
-            with self.assertRaisesRegex(
-                    RuntimeError, "start control never appeared"):
-                dashboard_actions(
-                    Path("agents-live.exe"), Path("C:/repo"),
-                    "sample-123", "sample", True,
-                    "cost-agent-456")
+                row.get_by_role.side_effect = row_button
+                row.count.return_value = 1
+                page = mock.Mock()
+                page.get_by_role.return_value.filter.return_value = row
+                browser = mock.Mock()
+                browser.new_page.return_value = page
+                playwright = mock.Mock()
+                playwright.chromium.launch.return_value = browser
+                manager = mock.MagicMock()
+                manager.__enter__.return_value = playwright
+                sync_api = mock.Mock(
+                    sync_playwright=mock.Mock(return_value=manager))
+                dashboard_lists = iter((
+                    "No dashboard started by this host is running.",
+                    "PORT PID\n8232 42",
+                    "No dashboard started by this host is running.",
+                ))
+                with (
+                    mock.patch.dict(
+                        sys.modules, {"playwright.sync_api": sync_api}),
+                    mock.patch.dict(scope, {
+                        "_free_port": lambda: 8232,
+                        "_await_api": lambda *_args, **kwargs: (
+                            kwargs.get("observe", lambda: None)()
+                            or {"agents": [{
+                                "identifier": "cost-agent-456",
+                                "cost_day_value": 0.25,
+                                "cost_week_value": 0.25,
+                            }]}),
+                        "_registered_dashboard_pid": lambda *_args: 42,
+                        "_api": lambda _port: {"agents": [{
+                            "identifier": "cost-agent-456",
+                            "cost_day_value": 0.25,
+                            "cost_week_value": 0.25,
+                        }]},
+                        "_verify_cost_capture": (
+                            lambda *_args: ("abc123", 0.25)),
+                        "_await_dashboard_cost": lambda *_args: None,
+                        "_verify_cost_attribution": lambda *_args: None,
+                        "_run": lambda *_args, **_kwargs: mock.Mock(
+                            stdout=next(dashboard_lists)),
+                        "_port_answers": lambda _port: False,
+                        "_action_count": lambda *_args: 0,
+                        "_await_action": lambda *_args: None,
+                        "_await_dashboard_run": lambda *_args: "abc123",
+                        "_browser_executable": lambda: Path("browser.exe"),
+                        "subprocess": mock.Mock(
+                            Popen=mock.Mock(return_value=process),
+                            run=mock.Mock(
+                                return_value=mock.Mock(returncode=0))),
+                        "os": mock.Mock(name="nt"),
+                    }),
+                ):
+                    scope["os"].name = "nt"
+                    with self.assertRaisesRegex(
+                            RuntimeError, "start control never appeared"):
+                        dashboard_actions(
+                            Path("agents-live.exe"), Path("C:/repo"),
+                            "sample-123", "sample", baseline,
+                            "cost-agent-456")
 
     def test_dashboard_posix_cleanup_escalates_process_group(self) -> None:
         script = runpy.run_path(
