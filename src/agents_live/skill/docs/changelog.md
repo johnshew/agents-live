@@ -23,8 +23,9 @@ history is retained in the source repository.
   Browser acceptance now exercises both initially started and initially stopped
   agents without serializing the apostrophe-bearing label as an invalid selector.
 - fix: wait for candidate dashboard health refresh before Run.
-  Browser acceptance now waits for the final healthy notification after the
-  table refresh, so the next action cannot race a replacing row.
+  Browser acceptance now waits for a persistent final-health marker after the
+  table refresh, so the next action cannot race a replacing row or depend on a
+  transient notification.
 - fix: require full installed candidate acceptance before publication.
   A prepared local tag cannot be pushed until its exact wheel has upgraded the
   uv-managed consumer tool and passed live CLI, browser dashboard, semantic
