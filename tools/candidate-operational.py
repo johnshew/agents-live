@@ -161,6 +161,25 @@ def _browser_executable() -> Path:
     return browser
 
 
+def _preflight(cli: Path, repo: Path, agent_id: str, cost_agent_id: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    if agent_id == cost_agent_id:
+        raise OperationalError(
+            "operational and cost acceptance agents must be distinct")
+    existing = _run(cli, repo, "dashboard", "list")
+    if "No dashboard started by this host is running." not in existing.stdout:
+        raise OperationalError(
+            "candidate acceptance requires no pre-existing managed dashboard")
+    status = _json(cli, repo, "status")
+    _row(status, agent_id)
+    _row(status, cost_agent_id)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(_browser_executable()), headless=True)
+        browser.close()
+
+
 def _action_count(cli: Path, repo: Path, agent_id: str, label: str) -> int:
     safe_agent = agent_id.replace("'", "''")
     safe_label = label.replace("'", "''")
@@ -472,7 +491,7 @@ def _stop_dashboard(
     if managed.returncode != 0 or _port_answers(port):
         _terminate_dashboard(
             process, process_group=process_group,
-            dashboard_pid=None)
+            dashboard_pid=dashboard_pid)
     _verify_dashboard_stopped(cli, repo, port)
 
 
@@ -514,17 +533,6 @@ def _dashboard_actions(
         if dashboard_pid is None:
             raise OperationalError(
                 "dashboard list did not report its process identity")
-        cost_window_started = datetime.now(timezone.utc).isoformat()
-        dashboard = _api(port)
-        if dashboard is None:
-            raise OperationalError(
-                "dashboard API was unavailable before the cost probe")
-        cost_run_id, accepted_cost = _verify_cost_capture(
-            cli, repo, cost_agent_id)
-        _await_dashboard_cost(
-            port, dashboard, cost_agent_id, accepted_cost)
-        _verify_cost_attribution(
-            cli, repo, cost_agent_id, cost_run_id, cost_window_started)
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 executable_path=str(_browser_executable()), headless=True)
@@ -601,6 +609,19 @@ def _dashboard_actions(
                         name="Register this host's cron/watcher",
                     ).wait_for(
                         state="visible", timeout=ACTION_TIMEOUT_S * 1000)
+
+                cost_window_started = datetime.now(timezone.utc).isoformat()
+                dashboard = _api(port)
+                if dashboard is None:
+                    raise OperationalError(
+                        "dashboard API was unavailable before the cost probe")
+                cost_run_id, accepted_cost = _verify_cost_capture(
+                    cli, repo, cost_agent_id)
+                _await_dashboard_cost(
+                    port, dashboard, cost_agent_id, accepted_cost)
+                _verify_cost_attribution(
+                    cli, repo, cost_agent_id, cost_run_id,
+                    cost_window_started)
             finally:
                 browser.close()
     finally:
@@ -615,9 +636,17 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--agent", required=True)
     parser.add_argument("--cost-agent", required=True)
+    parser.add_argument(
+        "--preflight", action="store_true",
+        help="Validate browser, dashboard, and selected agents without mutation",
+    )
     args = parser.parse_args()
     cli = args.cli.resolve()
     repo = args.repo.resolve()
+    if args.preflight:
+        _preflight(cli, repo, args.agent, args.cost_agent)
+        print(json.dumps({"ok": True, "phase": "preflight"}))
+        return 0
     before = _row(_json(cli, repo, "status", args.agent), args.agent)
     baseline = before.get("state") == "started"
     display_name = str(before.get("name") or args.agent)

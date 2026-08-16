@@ -48,6 +48,8 @@ BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
 # unrecognised prefix sorts last rather than failing the release.
 TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore")
 ACCEPTANCE_SCHEMA = 1
+PREPARATION_SCHEMA = 1
+CHECKPOINT_SCHEMA = 1
 QUEUED_UPGRADE_RE = re.compile(
     r"Upgrade queued as (?P<operation>[0-9a-f]+); "
     r"result: (?P<result>.+?); run `agents-live logs admin`"
@@ -367,18 +369,35 @@ def _release_notes(version: str) -> str:
     return "\n\n".join(sections)
 
 
-def _write_release_notes(tag: str, notes: str, *, create: bool) -> None:
+def _write_release_notes(
+    tag: str, notes: str, *, create: bool, assets: tuple[Path, ...] = (),
+    resume_draft: bool = False,
+) -> None:
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", suffix=".md", delete_on_close=False
     ) as notes_file:
         notes_file.write(notes + "\n")
         notes_file.close()
         if create:
-            _run([
-                "gh", "release", "create", tag,
-                "--verify-tag", "--notes-file", notes_file.name,
-                "--title", f"agents-live {tag}",
-            ])
+            if resume_draft:
+                _run([
+                    "gh", "release", "edit", tag,
+                    "--notes-file", notes_file.name,
+                    "--title", f"agents-live {tag}",
+                ])
+            else:
+                _run([
+                    "gh", "release", "create", tag,
+                    "--verify-tag", "--draft",
+                    "--notes-file", notes_file.name,
+                    "--title", f"agents-live {tag}",
+                ])
+            if assets:
+                _run([
+                    "gh", "release", "upload", tag,
+                    *(str(path) for path in assets), "--clobber",
+                ])
+            _run(["gh", "release", "edit", tag, "--draft=false"])
         else:
             _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
 
@@ -460,6 +479,14 @@ def _check_prepare_state(target: str, *, fetch: bool) -> None:
         _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
     if _git("rev-parse", "HEAD") != _git("rev-parse", "origin/main"):
         raise ReleaseError("main must match origin/main before release")
+    branch = _candidate_branch(target)
+    local_branch = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=ROOT,
+    )
+    if local_branch.returncode == 0:
+        raise ReleaseError(
+            f"candidate branch {branch} already exists; finish or delete it")
     tag = f"v{target}"
     local_tag = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
@@ -473,13 +500,19 @@ def _check_publish_state(version: str) -> bool:
     """Validate a prepared release and return whether it still needs pushing."""
     if _git("status", "--porcelain"):
         raise ReleaseError("working tree must be clean")
-    if _git("branch", "--show-current") != "main":
-        raise ReleaseError("releases must run from main")
+    branch = _git("branch", "--show-current")
+    candidate_branch = _candidate_branch(version)
+    if branch not in {"main", candidate_branch}:
+        raise ReleaseError(
+            f"prepared release must run from main or {candidate_branch}")
     _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
     head = _git("rev-parse", "HEAD")
     origin = _git("rev-parse", "origin/main")
     needs_push = head != origin
     if needs_push:
+        if branch != candidate_branch:
+            raise ReleaseError(
+                f"an unpublished release must remain on {candidate_branch}")
         if _git("rev-list", "--count", "origin/main..HEAD") != "1":
             raise ReleaseError(
                 "prepared main must be exactly one commit ahead of origin/main")
@@ -523,11 +556,109 @@ def _sha256(path: Path) -> str:
 
 
 def _acceptance_path(version: str) -> Path:
+    return _release_state_path("acceptance", version)
+
+
+def _preparation_path(version: str) -> Path:
+    return _release_state_path("preparation", version)
+
+
+def _checkpoint_path(version: str) -> Path:
+    return _release_state_path("checkpoint", version)
+
+
+def _artifact_manifest_path(version: str) -> Path:
     value = _git(
         "rev-parse", "--git-path",
-        f"agents-live-release/acceptance-{version}.json")
+        f"agents-live-release/SHA256SUMS-{version}")
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
+
+
+def _release_state_path(kind: str, version: str) -> Path:
+    value = _git(
+        "rev-parse", "--git-path",
+        f"agents-live-release/{kind}-{version}.json")
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _candidate_branch(version: str) -> str:
+    return f"release/v{version}-candidate"
+
+
+def _release_identity(version: str, wheel: Path) -> dict[str, object]:
+    sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
+    if not sdist.is_file():
+        raise ReleaseError(
+            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+    return {
+        "version": version,
+        "tag": f"v{version}",
+        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "commit": _git("rev-parse", "HEAD"),
+        "base_commit": _git("rev-parse", "HEAD^"),
+        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel_sha256": _sha256(wheel),
+        "sdist": sdist.relative_to(ROOT).as_posix(),
+        "sdist_sha256": _sha256(sdist),
+    }
+
+
+def _write_preparation(version: str, wheel: Path) -> Path:
+    destination = _preparation_path(version)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": PREPARATION_SCHEMA,
+        "prepared": True,
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+        **_release_identity(version, wheel),
+        "platform": sys.platform,
+        "gates": _gate_commands(),
+    }
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+    return destination
+
+
+def _check_preparation(version: str) -> dict:
+    receipt_path = _preparation_path(version)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseError(
+            "prepared release has no gate receipt; rerun --prepare") from exc
+    wheel = _candidate_wheel(version)
+    expected = {
+        "schema": PREPARATION_SCHEMA,
+        "prepared": True,
+        **_release_identity(version, wheel),
+        "gates": _gate_commands(),
+    }
+    mismatched = [
+        key for key, value in expected.items() if receipt.get(key) != value
+    ]
+    if mismatched:
+        raise ReleaseError(
+            "preparation receipt is stale for: " + ", ".join(mismatched)
+            + "; rerun --prepare")
+    return receipt
+
+
+def _write_artifact_manifest(version: str, preparation: dict) -> Path:
+    destination = _artifact_manifest_path(version)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for path_key, hash_key in (
+        ("wheel", "wheel_sha256"),
+        ("sdist", "sdist_sha256"),
+    ):
+        path = Path(str(preparation[path_key]))
+        lines.append(f"{preparation[hash_key]}  {path.name}")
+    destination.write_text("\n".join(lines) + "\n", encoding="ascii")
+    return destination
 
 
 def _installed_cli() -> str:
@@ -988,6 +1119,7 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         print(f"  {path.relative_to(ROOT)}")
     print("Commands:")
     commands = (
+        f"git switch -c {_candidate_branch(target)}",
         *(shlex.join(command) for command in _gate_commands()),
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
@@ -995,7 +1127,8 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         "uv run --script tools/release.py --accept-candidate "
         "--repo <live-repository> --agent <safe-agent-identifier> "
         "--cost-agent <safe-provider-agent-identifier> --yes",
-        f"git push --atomic origin main {tag}",
+        f"git push --atomic origin HEAD:main {tag}",
+        "attach SHA256SUMS manifest from the accepted candidate",
         f"gh release create {tag} --verify-tag "
         "--notes-file <changelog entries + merged pull requests>",
     )
@@ -1018,11 +1151,15 @@ def prepare(bump: str) -> None:
     _print_plan(current, target, minimum_bump)
     _check_prepare_state(target, fetch=True)
     _acceptance_path(target).unlink(missing_ok=True)
+    _preparation_path(target).unlink(missing_ok=True)
+    _checkpoint_path(target).unlink(missing_ok=True)
     original = {path: path.read_bytes() for path in RELEASE_FILES}
     original_head = _git("rev-parse", "HEAD")
+    candidate_branch = _candidate_branch(target)
     release_head: str | None = None
     committed = False
     try:
+        _run(["git", "switch", "-c", candidate_branch])
         _update_versions(current, target)
         _check_release_diff()
         validated = {path: path.read_bytes() for path in RELEASE_FILES}
@@ -1062,37 +1199,173 @@ def prepare(bump: str) -> None:
             )
             for path, content in original.items():
                 path.write_bytes(content)
+            if _git("branch", "--show-current") == candidate_branch:
+                subprocess.run(
+                    ["git", "switch", "main"], cwd=ROOT, check=False)
+                subprocess.run(
+                    ["git", "branch", "-D", candidate_branch],
+                    cwd=ROOT, check=False)
             print("Restored release files after the failed preparation.", file=sys.stderr)
         raise
 
     tag = f"v{target}"
     _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
+    receipt = _write_preparation(target, _candidate_wheel(target))
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
+    print(f"  preparation receipt: {receipt}")
     print("  agents-live upgrade --from <target wheel>")
     print("  uv run --script tools/release.py --accept-candidate "
             "--repo <live-repository> --agent <safe-agent-identifier> "
             "--cost-agent <safe-provider-agent-identifier> --yes")
+    print("  # after an operational failure with restored state, add --resume")
     print("  uv run --script tools/release.py --publish --yes")
 
 
 def _run_operational_acceptance(
-    repo: Path, agent_id: str, cost_agent: str,
+    repo: Path, agent_id: str, cost_agent: str, *, preflight: bool = False,
 ) -> None:
-    _run([
+    command = [
         "uv", "run", "--script", "tools/candidate-operational.py",
         "--cli", _installed_cli(),
         "--repo", str(repo),
         "--agent", agent_id,
         "--cost-agent", cost_agent,
-    ])
+    ]
+    if preflight:
+        command.append("--preflight")
+    _run(command)
 
 
-def accept_candidate(repo: Path, agent_id: str, cost_agent: str) -> None:
+def _write_acceptance_checkpoint(
+    version: str,
+    repo: Path,
+    wheel: Path,
+    *,
+    operation_id: str | None,
+    contract: tuple[tuple[object, ...], ...],
+    watchers: tuple[tuple[str, str], ...],
+    operational_agent: str,
+    cost_agent: str,
+) -> Path:
+    destination = _checkpoint_path(version)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": CHECKPOINT_SCHEMA,
+        "phase": "upgrade-complete",
+        "written_at": datetime.now(timezone.utc).isoformat(),
+        **_release_identity(version, wheel),
+        "repo": str(repo),
+        "platform": sys.platform,
+        "operation_id": operation_id,
+        "contract": [list(row) for row in contract],
+        "watchers": [list(row) for row in watchers],
+        "operational_agent": operational_agent,
+        "cost_agent": cost_agent,
+    }
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+    return destination
+
+
+def _check_acceptance_checkpoint(
+    version: str, repo: Path, wheel: Path,
+    operational_agent: str, cost_agent: str,
+) -> dict:
+    path = _checkpoint_path(version)
+    try:
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseError(
+            "candidate acceptance has no resumable upgrade checkpoint") from exc
+    expected = {
+        "schema": CHECKPOINT_SCHEMA,
+        "phase": "upgrade-complete",
+        **_release_identity(version, wheel),
+        "repo": str(repo),
+        "platform": sys.platform,
+        "operational_agent": operational_agent,
+        "cost_agent": cost_agent,
+    }
+    mismatched = [
+        key for key, value in expected.items() if checkpoint.get(key) != value
+    ]
+    if mismatched:
+        raise ReleaseError(
+            "candidate checkpoint is stale for: " + ", ".join(mismatched))
+    contract = checkpoint.get("contract")
+    watchers = checkpoint.get("watchers")
+    if not isinstance(contract, list) or not contract \
+            or not isinstance(watchers, list) or not watchers:
+        raise ReleaseError("candidate checkpoint has no restorable baseline")
+    for row in contract:
+        if (
+            not isinstance(row, list)
+            or len(row) != 4
+            or not all(isinstance(value, str) and value for value in row[:3])
+            or not isinstance(row[3], bool)
+        ):
+            raise ReleaseError(
+                f"candidate checkpoint has a malformed status row: {row}")
+    for row in watchers:
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not all(isinstance(value, str) and value for value in row)
+        ):
+            raise ReleaseError(
+                f"candidate checkpoint has a malformed watcher row: {row}")
+    operation_id = checkpoint.get("operation_id")
+    if operation_id is not None and (
+        not isinstance(operation_id, str)
+        or re.fullmatch(r"[0-9a-f]+", operation_id) is None
+    ):
+        raise ReleaseError("candidate checkpoint has an invalid operation ID")
+    if os.name == "nt" and operation_id is None:
+        raise ReleaseError(
+            "Windows candidate checkpoint has no deferred operation ID")
+    return checkpoint
+
+
+def _finish_operational_acceptance(
+    version: str,
+    root: Path,
+    wheel: Path,
+    *,
+    operation_id: str | None,
+    before_contract: tuple[tuple[object, ...], ...],
+    watchers: tuple[tuple[str, str], ...],
+    operational_agent: str,
+    cost_agent: str,
+) -> Path:
+    _run_operational_acceptance(root, operational_agent, cost_agent)
+    final_status = _installed_all_json("status")
+    final_doctor = _installed_all_json("doctor")
+    if _status_contract(final_status) != before_contract:
+        raise ReleaseError(
+            "candidate operational pass did not restore repository state")
+    if not final_doctor.get("ok"):
+        raise ReleaseError(
+            "candidate operational pass left repository health degraded")
+    final_representative = _installed_json(root, "status")
+    if _started_watchers(final_representative) != watchers:
+        raise ReleaseError(
+            "candidate operational pass changed the representative watchers")
+    return _write_candidate_acceptance(
+        version, root, wheel, operation_id=operation_id, watchers=watchers,
+        operational_agent=operational_agent, cost_agent=cost_agent)
+
+
+def accept_candidate(
+    repo: Path, agent_id: str, cost_agent: str, *, resume: bool = False,
+) -> None:
     """Exercise the installed tagged candidate before any public push."""
     _require_tools()
     version = _current_version()
     _acceptance_path(version).unlink(missing_ok=True)
     _check_publish_state(version)
+    _check_preparation(version)
     wheel = _candidate_wheel(version)
     root = repo.expanduser().resolve()
     if not root.is_dir():
@@ -1102,6 +1375,43 @@ def accept_candidate(repo: Path, agent_id: str, cost_agent: str) -> None:
         raise ReleaseError(
             f"installed tool is {installed}, but prepared candidate is {version}; "
             f"bootstrap it first with `agents-live upgrade --from {wheel}`")
+
+    _run_operational_acceptance(root, agent_id, cost_agent, preflight=True)
+
+    if resume:
+        checkpoint = _check_acceptance_checkpoint(
+            version, root, wheel, agent_id, cost_agent)
+        before_contract = tuple(
+            tuple(row) for row in checkpoint.get("contract", []))
+        watchers = tuple(
+            (str(row[0]), str(row[1]))
+            for row in checkpoint.get("watchers", [])
+            if isinstance(row, list) and len(row) == 2)
+        current_status = _installed_all_json("status")
+        current_doctor = _installed_all_json("doctor")
+        current_representative = _installed_json(root, "status")
+        if _status_contract(current_status) != before_contract:
+            raise ReleaseError(
+                "candidate state changed since the resumable checkpoint")
+        if not current_doctor.get("ok"):
+            raise ReleaseError(
+                "candidate repository is unhealthy at resume")
+        if _started_watchers(current_representative) != watchers:
+            raise ReleaseError(
+                "candidate watchers changed since the resumable checkpoint")
+        receipt = _finish_operational_acceptance(
+            version, root, wheel,
+            operation_id=checkpoint.get("operation_id"),
+            before_contract=before_contract,
+            watchers=watchers,
+            operational_agent=agent_id,
+            cost_agent=cost_agent,
+        )
+        _checkpoint_path(version).unlink(missing_ok=True)
+        print(f"Accepted installed candidate {version}; receipt: {receipt}")
+        return
+
+    _checkpoint_path(version).unlink(missing_ok=True)
 
     representative = _installed_json(root, "status")
     before_status = _installed_all_json("status")
@@ -1154,18 +1464,15 @@ def accept_candidate(repo: Path, agent_id: str, cost_agent: str) -> None:
 
     if operation_id is not None:
         _verify_candidate_events(_candidate_events(operation_id), watchers)
-    _run_operational_acceptance(root, agent_id, cost_agent)
-    final_status = _installed_all_json("status")
-    final_doctor = _installed_all_json("doctor")
-    if _status_contract(final_status) != before_contract:
-        raise ReleaseError(
-            "candidate operational pass did not restore repository state")
-    if not final_doctor.get("ok"):
-        raise ReleaseError(
-            "candidate operational pass left repository health degraded")
-    receipt = _write_candidate_acceptance(
-        version, root, wheel, operation_id=operation_id, watchers=watchers,
+    _write_acceptance_checkpoint(
+        version, root, wheel, operation_id=operation_id,
+        contract=before_contract, watchers=watchers,
         operational_agent=agent_id, cost_agent=cost_agent)
+    receipt = _finish_operational_acceptance(
+        version, root, wheel, operation_id=operation_id,
+        before_contract=before_contract, watchers=watchers,
+        operational_agent=agent_id, cost_agent=cost_agent)
+    _checkpoint_path(version).unlink(missing_ok=True)
     print(f"Accepted installed candidate {version}; receipt: {receipt}")
 
 
@@ -1175,24 +1482,36 @@ def publish() -> None:
     needs_push = _check_publish_state(version)
     tag = f"v{version}"
     existing = subprocess.run(
-        ["gh", "release", "view", tag, "--json", "url"],
+        ["gh", "release", "view", tag, "--json", "url,isDraft"],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
+    resume_draft = False
     if existing.returncode == 0:
-        print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
-        print(f"  Rerun the notes with: --notes {tag} --yes")
-        return
+        try:
+            existing_release = json.loads(existing.stdout)
+        except json.JSONDecodeError as exc:
+            raise ReleaseError(
+                f"could not read existing GitHub release {tag}") from exc
+        if not existing_release.get("isDraft"):
+            print(f"GitHub release {tag} already exists: {existing.stdout.strip()}")
+            print(f"  Rerun the notes with: --notes {tag} --yes")
+            return
+        resume_draft = True
+    preparation = _check_preparation(version)
     _check_candidate_acceptance(version)
     notes = _release_notes(version)
-    for command in _gate_commands():
-        _run(command)
-    needs_push = _check_publish_state(version)
-    _check_candidate_acceptance(version)
+    manifest = _write_artifact_manifest(version, preparation)
     if needs_push:
-        _run(["git", "push", "--atomic", "origin", "main", tag])
-    _write_release_notes(tag, notes, create=True)
+        _run([
+            "git", "push", "--atomic", "origin",
+            f"{preparation['commit']}:refs/heads/main",
+            f"{preparation['tag_object']}:refs/tags/{tag}",
+        ])
+    _write_release_notes(
+        tag, notes, create=True, assets=(manifest,),
+        resume_draft=resume_draft)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
 
@@ -1238,6 +1557,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Safe provider-backed agent required to report list cost",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume candidate acceptance after a verified upgrade checkpoint",
+    )
+    parser.add_argument(
         "--gates",
         action="store_true",
         help="Run the release gates that do not need a live agent CLI",
@@ -1266,10 +1590,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--accept-candidate requires --repo, --agent, and --cost-agent")
     if (args.repo is not None or args.agent is not None
-            or args.cost_agent is not None) \
+            or args.cost_agent is not None or args.resume) \
             and not args.accept_candidate:
         parser.error(
-            "--repo, --agent, and --cost-agent apply only to --accept-candidate")
+            "--repo, --agent, --cost-agent, and --resume apply only to "
+            "--accept-candidate")
     if (args.publish or args.accept_candidate or args.gates or args.notes) \
             and args.bump != "patch":
         parser.error(
@@ -1283,7 +1608,8 @@ def main(argv: list[str] | None = None) -> int:
             assert args.repo is not None
             assert args.agent is not None
             assert args.cost_agent is not None
-            accept_candidate(args.repo, args.agent, args.cost_agent)
+            accept_candidate(
+                args.repo, args.agent, args.cost_agent, resume=args.resume)
         elif args.gates:
             gates()
         elif args.notes:

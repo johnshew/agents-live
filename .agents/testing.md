@@ -62,7 +62,7 @@ tested for factual wording when an association cannot be inferred.
 Run the portable suite and release gates:
 
 ```bash
-uv run --with-editable . python -m unittest discover -s tests -v
+uv run --with-editable . --with duckdb python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
 uv run --script tools/pre-release-audit.py
 uv build
@@ -73,7 +73,11 @@ CI runs the same suites one file at a time
 so the query tool is started rather than skipped. Reproduce that form when a
 failure appears only in CI.
 
-The Test workflow runs both Ubuntu and Windows for pushes and pull requests.
+The Test workflow runs both Ubuntu and Windows for pull requests and merge
+groups. Documentation-only changes retain the Linux export audit and required
+job contexts but skip source suites and artifact startup. Ordinary `main` pushes
+do not repeat a PR's identical matrix; the publish workflow verifies the exact
+release commit on both hosts.
 Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
 single host needs to be isolated. The publish workflow calls the same workflow
 against the resolved release commit and cannot publish until both hosts pass.
@@ -192,9 +196,10 @@ uv run --script tools/release.py --prepare --bump patch --yes
 ```
 
 Run `/changelog-maintenance` first and replace `patch` with its recommended
-bump. Preparation rejects an empty changelog or an undersized bump, updates
-every version surface, runs the gates, builds the target artifacts, and creates
-a local commit and annotated tag. Before publication:
+bump. Preparation rejects an empty changelog or an undersized bump, creates an
+isolated candidate branch, updates every version surface, runs the gates, builds
+the target artifacts, and creates a local commit, annotated tag, and immutable
+preparation receipt. Before publication:
 
 1. Review the release commit and tag.
 2. Inspect the target-version wheel and source distribution.
@@ -216,6 +221,10 @@ file rather than polling the launcher being replaced. It rejects changed
 started state in any registered repository, missing representative-watcher
 restoration, unhealthy all-repository diagnostics, missing correlated lifecycle
 events, or a wheel that no longer matches the prepared commit and tag.
+It preflights the browser, dashboard state, and both selected agents before
+replacement. After replacement is fully verified it writes a resumable
+checkpoint; use the same command with `--resume` after a later operational
+failure only when cleanup restored the exact recorded baseline.
 
 The selected agent must be safe to run immediately. Acceptance exercises it
 through both surfaces: CLI status, doctor, run, start, stop, and logs, followed
@@ -223,10 +232,12 @@ by browser-driven dashboard health, Run, Start, and Stop actions against the
 installed dashboard. The final all-repository state must exactly match the
 pre-upgrade baseline.
 
-The cost agent must also be safe to run immediately and use a real provider
-that reports spend. Acceptance requires a new positive `list_cost_usd` value
+The cost agent must be distinct from the operational agent, safe to run
+immediately, and use a real provider that reports spend. Acceptance requires a
+new positive `list_cost_usd` value
 from its installed-candidate run, covering plugin launch, provider parsing,
-log persistence, and the cost field consumed by the dashboard.
+log persistence, and the cost field consumed by the dashboard. This paid probe
+runs last, after CLI and browser lifecycle checks.
 
 Publish only after those checks pass:
 

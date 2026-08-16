@@ -1945,12 +1945,24 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertIn(f"tests/{name}", gates)
                 self.assertIn(f"tests/{name}", workflow)
 
-    def test_the_publish_workflow_runs_the_declared_gates(self) -> None:
-        """Restating the gate list in YAML is how a release once shipped
-        past a gate the local run kept (#218)."""
+    def test_publish_reuses_artifacts_from_exact_sha_verification(self) -> None:
         publish = self._workflow_text("publish.yml")
-        self.assertIn("tools/release.py --gates", publish)
+        workflow = self._workflow_text("test.yml")
+        self.assertIn("artifact-name: verified-release-dist", publish)
+        self.assertIn("actions/download-artifact@v4", publish)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("sha256sum --check", publish)
+        self.assertNotIn("tools/release.py --gates", publish)
         self.assertNotIn("tests/test_", publish)
+
+    def test_ci_avoids_duplicate_main_runs_and_keeps_merge_queue_checks(
+            self) -> None:
+        workflow = self._workflow_text("test.yml")
+        self.assertNotRegex(workflow, r"(?m)^  push:")
+        self.assertRegex(workflow, r"(?m)^  merge_group:")
+        self.assertIn("Documentation-only change", workflow)
+        self.assertIn("src/agents_live/skill/SKILL.md", workflow)
+        self.assertIn("src/agents_live/skill/templates/*", workflow)
 
     def test_the_release_gates_pin_the_smoketest_to_this_checkout(self) -> None:
         """Without ``--repo`` the smoketest acts on whatever root
@@ -1977,6 +1989,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 path.write_bytes(content)
                 original[path] = content
             commands: list[list[str]] = []
+            current_branch = "main"
 
             def update_versions(_current: str, _target: str) -> None:
                 for path in files:
@@ -1985,6 +1998,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             def git(*args: str) -> str:
                 if args == ("rev-parse", "HEAD"):
                     return "original-head"
+                if args == ("branch", "--show-current"):
+                    return current_branch
                 if args == ("diff", "--name-only"):
                     return "\n".join(
                         path.name for path in files
@@ -1997,7 +2012,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 raise AssertionError(args)
 
             def run(command: list[str], *, capture: bool = False) -> str:
+                nonlocal current_branch
                 commands.append(command)
+                if command[:3] == ["git", "switch", "-c"]:
+                    current_branch = command[3]
                 if command == ["gate"]:
                     files[-1].write_bytes(original[files[-1]])
                 return ""
@@ -2012,10 +2030,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_print_plan": lambda *_args: None,
                 "_check_prepare_state": lambda *_args, **_kwargs: None,
                 "_acceptance_path": lambda _version: root / "acceptance.json",
+                "_preparation_path": lambda _version: root / "preparation.json",
+                "_checkpoint_path": lambda _version: root / "checkpoint.json",
+                "_candidate_branch": lambda _version: "release/v1.1.0-candidate",
                 "_update_versions": update_versions,
                 "_gate_commands": lambda: [["gate"]],
                 "_git": git,
                 "_run": run,
+                "subprocess": mock.Mock(run=mock.Mock()),
             })
 
             with self.assertRaisesRegex(
@@ -2028,6 +2050,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertNotIn(["git", "add"], [command[:2] for command in commands])
             self.assertNotIn(
                 ["git", "commit"], [command[:2] for command in commands])
+            self.assertIn(
+                ["git", "switch", "-c", "release/v1.1.0-candidate"],
+                commands)
 
     def test_release_diff_rejects_staged_and_untracked_files(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -2116,6 +2141,38 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with self.assertRaisesRegex(release["ReleaseError"], message):
                     check_release_commit(validated)
 
+    def test_unpublished_release_requires_the_candidate_branch(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = release["_check_publish_state"]
+        scope = check.__globals__
+        expected_files = "\n".join(
+            path.relative_to(REPOSITORY).as_posix()
+            for path in release["RELEASE_FILES"])
+        branch = "release/v1.2.3-candidate"
+
+        def git(*args: str) -> str:
+            return {
+                ("status", "--porcelain"): "",
+                ("branch", "--show-current"): branch,
+                ("rev-parse", "HEAD"): "candidate",
+                ("rev-parse", "origin/main"): "base",
+                ("rev-list", "--count", "origin/main..HEAD"): "1",
+                ("merge-base", "HEAD", "origin/main"): "base",
+                ("cat-file", "-t", "v1.2.3"): "tag",
+                ("rev-parse", "v1.2.3^{}"): "candidate",
+                ("diff", "--name-only", "HEAD^..HEAD"): expected_files,
+            }[args]
+
+        with mock.patch.dict(scope, {
+            "_git": git,
+            "_run": mock.Mock(),
+        }):
+            self.assertTrue(check("1.2.3"))
+            branch = "main"
+            with self.assertRaisesRegex(
+                    release["ReleaseError"], "must remain on"):
+                check("1.2.3")
+
     def test_publish_rejects_missing_candidate_acceptance_before_gates(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         publish = release["publish"]
@@ -2125,6 +2182,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "_require_tools": lambda: None,
             "_current_version": lambda: "1.2.3",
             "_check_publish_state": lambda _version: True,
+            "_check_preparation": lambda _version: {"prepared": True},
             "_check_candidate_acceptance": mock.Mock(
                 side_effect=release["ReleaseError"]("accept candidate first")),
             "_gate_commands": gate_commands,
@@ -2136,32 +2194,108 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 publish()
         gate_commands.assert_not_called()
 
-    def test_publish_revalidates_state_and_acceptance_after_gates(self) -> None:
+    def test_publish_uses_receipts_without_rerunning_gates(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         publish = release["publish"]
         scope = publish.__globals__
-        publish_states = mock.Mock(side_effect=(True, True))
+        publish_states = mock.Mock(return_value=True)
+        preparation = mock.Mock(return_value={
+            "prepared": True,
+            "commit": "candidate-commit",
+            "tag_object": "annotated-tag-object",
+        })
         acceptance = mock.Mock(return_value={"accepted": True})
+        release_notes = mock.Mock()
         commands: list[list[str]] = []
         with mock.patch.dict(scope, {
             "_require_tools": lambda: None,
             "_current_version": lambda: "1.2.3",
             "_check_publish_state": publish_states,
+            "_check_preparation": preparation,
             "_check_candidate_acceptance": acceptance,
             "_release_notes": lambda _version: "notes",
-            "_gate_commands": lambda: [["gate"]],
+            "_write_artifact_manifest": lambda *_args: Path("SHA256SUMS-1.2.3"),
             "_run": lambda command, **_kwargs: commands.append(command) or "",
-            "_write_release_notes": lambda *_args, **_kwargs: None,
+            "_write_release_notes": release_notes,
         }), mock.patch.object(
             scope["subprocess"], "run", return_value=mock.Mock(returncode=1)
         ):
             publish()
-        self.assertEqual(2, publish_states.call_count)
-        self.assertEqual(2, acceptance.call_count)
+        publish_states.assert_called_once_with("1.2.3")
+        preparation.assert_called_once_with("1.2.3")
+        acceptance.assert_called_once_with("1.2.3")
         self.assertEqual(
-            [["gate"], ["git", "push", "--atomic", "origin", "main", "v1.2.3"]],
+            [[
+                "git", "push", "--atomic", "origin",
+                "candidate-commit:refs/heads/main",
+                "annotated-tag-object:refs/tags/v1.2.3",
+            ]],
             commands,
         )
+        release_notes.assert_called_once_with(
+            "v1.2.3", "notes", create=True,
+            assets=(Path("SHA256SUMS-1.2.3"),),
+            resume_draft=False)
+
+    def test_release_manifest_is_uploaded_before_draft_publication(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        write_notes = release["_write_release_notes"]
+        scope = write_notes.__globals__
+        commands: list[list[str]] = []
+        with mock.patch.dict(scope, {
+            "_run": lambda command, **_kwargs: commands.append(command) or "",
+        }):
+            write_notes(
+                "v1.2.3", "notes", create=True,
+                assets=(Path("SHA256SUMS-1.2.3"),))
+        self.assertEqual("create", commands[0][2])
+        self.assertIn("--draft", commands[0])
+        self.assertNotIn("SHA256SUMS-1.2.3", commands[0])
+        self.assertEqual([
+            "gh", "release", "upload", "v1.2.3",
+            "SHA256SUMS-1.2.3", "--clobber",
+        ], commands[1])
+        self.assertEqual([
+            "gh", "release", "edit", "v1.2.3", "--draft=false",
+        ], commands[2])
+
+    def test_preparation_receipt_binds_gates_commit_and_artifacts(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        write = release["_write_preparation"]
+        check = release["_check_preparation"]
+        scope = write.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "dist" / "agents_live-1.2.3-py3-none-any.whl"
+            sdist = root / "dist" / "agents_live-1.2.3.tar.gz"
+            wheel.parent.mkdir()
+            wheel.write_bytes(b"candidate wheel")
+            sdist.write_bytes(b"candidate sdist")
+            receipt = root / "preparation.json"
+
+            def git(*args: str) -> str:
+                return {
+                    ("rev-parse", "refs/tags/v1.2.3"): "tag-object",
+                    ("rev-parse", "HEAD"): "candidate-commit",
+                    ("rev-parse", "HEAD^"): "base-commit",
+                }[args]
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_preparation_path": lambda _version: receipt,
+                "_candidate_wheel": lambda _version: wheel,
+                "_gate_commands": lambda: [["gate", "--exact"]],
+                "_git": git,
+            }):
+                write("1.2.3", wheel)
+                payload = check("1.2.3")
+                self.assertEqual("candidate-commit", payload["commit"])
+                self.assertEqual([["gate", "--exact"]], payload["gates"])
+                payload["wheel_sha256"] = "stale"
+                receipt.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "stale.*wheel_sha256"):
+                    check("1.2.3")
 
     def test_candidate_acceptance_receipt_binds_commit_and_wheel(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -2258,12 +2392,13 @@ class TestCrossModuleAgreements(unittest.TestCase):
             {"status": "ok", "message": "deferred Windows upgrade completed"},
         ]
         written = mock.Mock(return_value=Path("acceptance.json"))
+        checkpoint = mock.Mock(return_value=Path("checkpoint.json"))
         operational = mock.Mock()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             wheel = root / "candidate.whl"
             wheel.write_bytes(b"wheel")
-            repo_results = iter((status, status))
+            repo_results = iter((status, status, status))
             all_results = iter((
                 all_status, doctor,
                 all_status, doctor,
@@ -2275,7 +2410,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_require_tools": lambda: None,
                 "_current_version": lambda: "1.2.3",
                 "_check_publish_state": lambda _version: True,
+                "_check_preparation": lambda _version: {"prepared": True},
                 "_acceptance_path": lambda _version: root / "acceptance.json",
+                "_checkpoint_path": lambda _version: root / "checkpoint.json",
                 "_candidate_wheel": lambda _version: wheel,
                 "_installed_version": mock.Mock(side_effect=("1.2.3", "1.2.3")),
                 "_installed_json": lambda _repo, _command: next(repo_results),
@@ -2285,6 +2422,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     "status": "terminal", "operation_id": "abc123", "exit_code": 0},
                 "_candidate_events": lambda _operation: events,
                 "_run_operational_acceptance": operational,
+                "_write_acceptance_checkpoint": checkpoint,
                 "_write_candidate_acceptance": written,
                 "os": fake_os,
             }):
@@ -2295,9 +2433,24 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 watchers=(("C:/repo", "sample-123"),),
                 operational_agent="sample-123",
                 cost_agent="cost-agent-456")
-            operational.assert_called_once_with(
-                root.resolve(), "sample-123", "cost-agent-456")
+            self.assertEqual([
+                mock.call(
+                    root.resolve(), "sample-123", "cost-agent-456",
+                    preflight=True),
+                mock.call(root.resolve(), "sample-123", "cost-agent-456"),
+            ], operational.call_args_list)
+            checkpoint.assert_called_once_with(
+                "1.2.3", root.resolve(), wheel,
+                operation_id="abc123",
+                contract=(
+                    ("C:/other", "other-456", "started", True),
+                    ("C:/repo", "sample-123", "started", True),
+                ),
+                watchers=(("C:/repo", "sample-123"),),
+                operational_agent="sample-123",
+                cost_agent="cost-agent-456")
             self.assertFalse((root / "acceptance.json").exists())
+            self.assertFalse((root / "checkpoint.json").exists())
 
     def test_candidate_status_contract_rejects_malformed_rows(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -2328,6 +2481,178 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         "non-object agent row|malformed agent row"):
                     contract(payload)
 
+    def test_candidate_resume_reuses_only_a_matching_upgrade_checkpoint(
+            self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        accept = release["accept_candidate"]
+        scope = accept.__globals__
+        status = {"ok": True, "agents": [{
+            "repository": "C:/repo",
+            "identifier": "sample-123",
+            "state": "started",
+            "loadable": True,
+            "execution": {"watch": "src/** debounce 1s"},
+        }]}
+        doctor = {"ok": True, "checks": []}
+        finish = mock.Mock(return_value=Path("acceptance.json"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            checkpoint = root / "checkpoint.json"
+            checkpoint.write_text("{}", encoding="utf-8")
+            replacement = mock.Mock()
+            with mock.patch.dict(scope, {
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.2.3",
+                "_check_publish_state": lambda _version: True,
+                "_check_preparation": lambda _version: {"prepared": True},
+                "_acceptance_path": lambda _version: root / "acceptance.json",
+                "_checkpoint_path": lambda _version: checkpoint,
+                "_candidate_wheel": lambda _version: wheel,
+                "_installed_version": lambda: "1.2.3",
+                "_run_operational_acceptance": mock.Mock(),
+                "_check_acceptance_checkpoint": lambda *_args: {
+                    "operation_id": "abc123",
+                    "contract": [["C:/repo", "sample-123", "started", True]],
+                    "watchers": [["C:/repo", "sample-123"]],
+                },
+                "_installed_all_json": mock.Mock(side_effect=(status, doctor)),
+                "_installed_json": mock.Mock(return_value=status),
+                "_installed_run": replacement,
+                "_finish_operational_acceptance": finish,
+            }):
+                accept(
+                    root, "sample-123", "cost-agent-456", resume=True)
+            replacement.assert_not_called()
+            finish.assert_called_once_with(
+                "1.2.3", root.resolve(), wheel,
+                operation_id="abc123",
+                before_contract=(
+                    ("C:/repo", "sample-123", "started", True),),
+                watchers=(("C:/repo", "sample-123"),),
+                operational_agent="sample-123",
+                cost_agent="cost-agent-456")
+            self.assertFalse(checkpoint.exists())
+
+    def test_candidate_resume_rejects_watcher_drift(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        accept = release["accept_candidate"]
+        scope = accept.__globals__
+        status = {"ok": True, "agents": [{
+            "repository": "C:/repo", "identifier": "sample-123",
+            "state": "started", "loadable": True,
+            "execution": {"watch": None},
+        }]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            checkpoint = root / "checkpoint.json"
+            checkpoint.write_text("{}", encoding="utf-8")
+            operational = mock.Mock()
+            with mock.patch.dict(scope, {
+                "_require_tools": lambda: None,
+                "_current_version": lambda: "1.2.3",
+                "_check_publish_state": lambda _version: True,
+                "_check_preparation": lambda _version: {"prepared": True},
+                "_acceptance_path": lambda _version: root / "acceptance.json",
+                "_checkpoint_path": lambda _version: checkpoint,
+                "_candidate_wheel": lambda _version: wheel,
+                "_installed_version": lambda: "1.2.3",
+                "_run_operational_acceptance": operational,
+                "_check_acceptance_checkpoint": lambda *_args: {
+                    "operation_id": "abc123",
+                    "contract": [["C:/repo", "sample-123", "started", True]],
+                    "watchers": [["C:/repo", "sample-123"]],
+                },
+                "_installed_all_json": mock.Mock(side_effect=(
+                    status, {"ok": True})),
+                "_installed_json": mock.Mock(return_value=status),
+            }):
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "watchers changed"):
+                    accept(
+                        root, "sample-123", "cost-agent-456", resume=True)
+            self.assertEqual(1, operational.call_count)
+
+    def test_operational_acceptance_rejects_final_watcher_drift(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        finish = release["_finish_operational_acceptance"]
+        scope = finish.__globals__
+        status = {"ok": True, "agents": [{
+            "repository": "C:/repo", "identifier": "sample-123",
+            "state": "started", "loadable": True,
+            "execution": {"watch": None},
+        }]}
+        write = mock.Mock()
+        with mock.patch.dict(scope, {
+            "_run_operational_acceptance": mock.Mock(),
+            "_installed_all_json": mock.Mock(side_effect=(
+                status, {"ok": True})),
+            "_installed_json": mock.Mock(return_value=status),
+            "_write_candidate_acceptance": write,
+        }):
+            with self.assertRaisesRegex(
+                    release["ReleaseError"], "representative watchers"):
+                finish(
+                    "1.2.3", Path("C:/repo"), Path("candidate.whl"),
+                    operation_id="abc123",
+                    before_contract=(
+                        ("C:/repo", "sample-123", "started", True),),
+                    watchers=(("C:/repo", "sample-123"),),
+                    operational_agent="sample-123",
+                    cost_agent="cost-agent-456")
+        write.assert_not_called()
+
+    def test_candidate_checkpoint_rejects_malformed_baselines(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = release["_check_acceptance_checkpoint"]
+        scope = check.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            checkpoint = root / "checkpoint.json"
+            base = {
+                "schema": release["CHECKPOINT_SCHEMA"],
+                "phase": "upgrade-complete",
+                "version": "1.2.3",
+                "tag": "v1.2.3",
+                "tag_object": "tag-object",
+                "commit": "candidate",
+                "base_commit": "base",
+                "wheel": "candidate.whl",
+                "wheel_sha256": release["_sha256"](wheel),
+                "sdist": "candidate.tar.gz",
+                "sdist_sha256": "sdist-hash",
+                "repo": str(root),
+                "platform": sys.platform,
+                "operational_agent": "sample-123",
+                "cost_agent": "cost-agent-456",
+                "operation_id": None,
+            }
+            with mock.patch.dict(scope, {
+                "_checkpoint_path": lambda _version: checkpoint,
+                "_release_identity": lambda *_args: {
+                    key: base[key] for key in (
+                        "version", "tag", "tag_object", "commit",
+                        "base_commit", "wheel", "wheel_sha256",
+                        "sdist", "sdist_sha256")
+                },
+            }):
+                for contract, watchers in (
+                    (["not-a-row"], [["C:/repo", "sample-123"]]),
+                    ([ ["C:/repo", "sample-123", "started", True] ], [42]),
+                ):
+                    payload = {**base, "contract": contract, "watchers": watchers}
+                    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                            release["ReleaseError"], "malformed"):
+                        check(
+                            "1.2.3", root, wheel,
+                            "sample-123", "cost-agent-456")
+
     def test_failed_candidate_rerun_invalidates_previous_receipt(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         accept = release["accept_candidate"]
@@ -2342,6 +2667,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_require_tools": lambda: None,
                 "_current_version": lambda: "1.2.3",
                 "_check_publish_state": lambda _version: True,
+                "_check_preparation": lambda _version: {"prepared": True},
                 "_acceptance_path": lambda _version: receipt,
                 "_candidate_wheel": lambda _version: wheel,
                 "_installed_version": lambda: "0.0.0",
@@ -2381,13 +2707,55 @@ class TestCrossModuleAgreements(unittest.TestCase):
         }):
             run_operational(
                 Path("C:/repo"), "sample-123", "cost-agent-456")
-        self.assertEqual([
-            "uv", "run", "--script", "tools/candidate-operational.py",
-            "--cli", "C:/uv/tools/agents-live/agents-live.exe",
-            "--repo", str(Path("C:/repo")),
-            "--agent", "sample-123",
-            "--cost-agent", "cost-agent-456",
-        ], commands[0])
+            self.assertEqual([
+                "uv", "run", "--script", "tools/candidate-operational.py",
+                "--cli", "C:/uv/tools/agents-live/agents-live.exe",
+                "--repo", str(Path("C:/repo")),
+                "--agent", "sample-123",
+                "--cost-agent", "cost-agent-456",
+            ], commands[0])
+            commands.clear()
+            run_operational(
+                Path("C:/repo"), "sample-123", "cost-agent-456",
+                preflight=True)
+            self.assertEqual("--preflight", commands[0][-1])
+
+    def test_operational_preflight_checks_browser_dashboard_and_agents(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        preflight = script["_preflight"]
+        scope = preflight.__globals__
+        browser = mock.Mock()
+        playwright = mock.Mock()
+        playwright.chromium.launch.return_value = browser
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = playwright
+        sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
+        status = {"ok": True, "agents": [
+            {"identifier": "sample-123", "loadable": True},
+            {"identifier": "cost-agent-456", "loadable": True},
+        ]}
+        with (
+            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            mock.patch.dict(scope, {
+                "_run": mock.Mock(return_value=mock.Mock(
+                    stdout="No dashboard started by this host is running.")),
+                "_json": mock.Mock(return_value=status),
+                "_browser_executable": lambda: Path("browser.exe"),
+            }),
+        ):
+            preflight(
+                Path("agents-live.exe"), Path("C:/repo"),
+                "sample-123", "cost-agent-456")
+            with self.assertRaisesRegex(
+                    script["OperationalError"], "must be distinct"):
+                preflight(
+                    Path("agents-live.exe"), Path("C:/repo"),
+                    "sample-123", "sample-123")
+        playwright.chromium.launch.assert_called_once_with(
+            executable_path=str(Path("browser.exe")), headless=True)
+        browser.close.assert_called_once_with()
 
     def test_operational_cost_probe_requires_positive_list_cost(self) -> None:
         script = runpy.run_path(
@@ -2818,6 +3186,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             str(REPOSITORY / "tools" / "candidate-operational.py"))
         dashboard_actions = script["_dashboard_actions"]
         scope = dashboard_actions.__globals__
+        cost_probe = mock.Mock(return_value=("abc123", 0.25))
         for baseline in (True, False):
             with self.subTest(baseline=baseline):
                 process = mock.Mock(pid=42)
@@ -2888,8 +3257,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             "cost_day_value": 0.25,
                             "cost_week_value": 0.25,
                         }]},
-                        "_verify_cost_capture": (
-                            lambda *_args: ("abc123", 0.25)),
+                        "_verify_cost_capture": cost_probe,
                         "_await_dashboard_cost": lambda *_args: None,
                         "_verify_cost_attribution": lambda *_args: None,
                         "_run": lambda *_args, **_kwargs: mock.Mock(
@@ -2915,6 +3283,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             "cost-agent-456")
                 refresh_lines.nth.assert_called_once_with(1)
                 self.assertEqual(["health-ready", "run"], action_order[:2])
+            cost_probe.assert_not_called()
 
     def test_dashboard_posix_cleanup_escalates_process_group(self) -> None:
         script = runpy.run_path(
@@ -3036,8 +3405,35 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertEqual([
             ["agents-live.exe", "--repo", str(Path("C:/repo")),
              "dashboard", "stop", "--port", "8232"],
-            ["taskkill", "/T", "/F", "/PID", "42"],
+            ["taskkill", "/T", "/F", "/PID", "84"],
         ], commands)
+
+    def test_dashboard_fallback_uses_retained_pid_after_launcher_exit(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        stop = script["_stop_dashboard"]
+        scope = stop.__globals__
+        process = mock.Mock(pid=42)
+        process.poll.return_value = 0
+        commands: list[list[str]] = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            return mock.Mock(returncode=1 if len(commands) == 1 else 0)
+
+        windows_os = mock.Mock(name="nt")
+        windows_os.name = "nt"
+        with mock.patch.dict(scope, {
+            "os": windows_os,
+            "subprocess": mock.Mock(run=mock.Mock(side_effect=run)),
+            "_port_answers": mock.Mock(side_effect=(True, False)),
+            "_verify_dashboard_stopped": lambda *_args: None,
+        }):
+            stop(
+                Path("agents-live.exe"), Path("C:/repo"), 8232, process,
+                process_group=None, dashboard_pid=84)
+        self.assertEqual(
+            ["taskkill", "/T", "/F", "/PID", "84"], commands[1])
 
     def test_dashboard_readiness_failure_retains_registered_pid(self) -> None:
         script = runpy.run_path(

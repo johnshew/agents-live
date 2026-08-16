@@ -112,10 +112,13 @@ rejects an empty `Unreleased` section and any bump below the minimum implied by
 `feat:`, conventional `type!:` or `BREAKING CHANGE:` notes. Every changelog
 bullet must start with a standalone one-line summary; supporting detail belongs
 on indented continuation lines. The script requires a clean `main`
-synchronized with `origin/main`, updates all package, skill,
+synchronized with `origin/main`, creates an isolated
+`release/v<version>-candidate` branch, updates all package, skill,
 documentation-link, and changelog versions, runs every release gate, and
-creates the release commit and annotated tag locally. Inspect the
-target-version artifacts under `dist/` and review the commit.
+creates the release commit, annotated tag, and preparation receipt locally.
+The receipt binds the exact gate list, commit, base commit, tag object, wheel,
+source distribution, and artifact hashes. Inspect the target-version artifacts
+under `dist/` and review the commit.
 
 ## Candidate acceptance
 
@@ -144,6 +147,19 @@ helper without repeatedly launching the held executable, and requires:
 - correlated quiesce, plugin convergence, restoration, and terminal events on
   deferred Windows upgrades.
 
+Acceptance preflights the selected agents, absence of a managed dashboard, and
+a real headless browser launch before replacement. It writes an
+`upgrade-complete` checkpoint after replacement, plugin convergence, watcher
+restoration, all-repository state comparison, and doctor health succeed. If a
+later operational phase fails and cleanup restores that exact baseline, resume
+without repeating replacement:
+
+```bash
+uv run --script tools/release.py --accept-candidate \
+  --repo <live-repository> --agent <safe-agent-identifier> \
+  --cost-agent <safe-provider-agent-identifier> --resume --yes
+```
+
 After replacement succeeds, acceptance runs a full operational pass through
 the uv-managed candidate. Choose an agent whose immediate run is safe and
 whose started state may be toggled temporarily. The pass exercises CLI
@@ -154,18 +170,19 @@ healthy header state, and every state transition must be observed. The exact
 all-repository baseline is checked again afterward, and cleanup restores the
 agent's initial started state even when a probe fails.
 
-Choose a second safe provider-backed agent for `--cost-agent`. Acceptance runs
+Choose a distinct second safe provider-backed agent for `--cost-agent`.
+Acceptance runs
 it after the candidate is installed and requires a new successful log record
 with a positive normalized `list_cost_usd` usage value. This proves the real
 provider plugin, output parser, observability schema, and dashboard cost input
-agree; a fake or handler-only agent cannot satisfy this check.
+agree; a fake or handler-only agent cannot satisfy this check. This paid probe
+runs last, after CLI and browser lifecycle checks.
 
 Success writes an untracked receipt under the repository's Git metadata. The
 receipt binds acceptance to the release commit, annotated tag, and wheel
-SHA-256. `--publish` checks it both before and after rebuilding artifacts and
-refuses a missing or stale receipt. Never use a source-only or isolated `uvx`
-check as a substitute; those do not exercise replacement of the installed
-consumer tool.
+SHA-256. `--publish` checks both preparation and acceptance receipts and refuses
+a missing or stale receipt. Never use a source-only or isolated `uvx` check as
+a substitute; those do not exercise replacement of the installed consumer tool.
 
 Publish the prepared commit and tag:
 
@@ -173,18 +190,22 @@ Publish the prepared commit and tag:
 uv run --script tools/release.py --publish --yes
 ```
 
-For the initial push, publication reruns all gates, requires the tagged release
-commit to be exactly one commit ahead of `origin/main`, pushes the commit and
-tag atomically, and creates the GitHub release. The release body starts with
+Publication validates the two receipts instead of rerunning identical local
+gates. It requires the tagged release commit to be exactly one commit ahead of
+`origin/main`, atomically pushes candidate `HEAD` to `main` with the tag, and
+creates the GitHub release. The release body starts with
 one first-line summary per changelog entry and a link to the full changelog at
 the release tag, followed by GitHub's generated notes (merged pull requests and
 the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
 which resolves the release tag to one commit, runs the Test workflow against
-that exact commit on Ubuntu and Windows, then rebuilds, attaches the wheel and
-sdist to the GitHub release, and publishes the same artifacts to PyPI through
-trusted publishing. Publication cannot start unless both test jobs pass. Wait
+that exact commit on Ubuntu and Windows, uploads the verified Ubuntu wheel and
+sdist for the publish job, attaches them to the GitHub release, and publishes
+those artifacts to PyPI through trusted publishing. A release-attached
+`SHA256SUMS` manifest from the accepted local candidate must match the CI-built
+bytes before either artifact is uploaded. Publication cannot start
+unless both test jobs pass. Wait
 for the workflow to succeed, verify both artifacts are attached, then follow
 the two-stage PyPI and installed-tool checks in [testing.md](testing.md). In
 an interactive terminal, `gh run watch <run-id> --exit-status` can wait for
