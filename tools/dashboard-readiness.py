@@ -77,7 +77,12 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _wheel() -> Path:
+def _wheel(explicit: Path | None = None) -> Path:
+    if explicit is not None:
+        wheel = explicit.expanduser().resolve()
+        if not wheel.is_file():
+            raise ReadinessError(f"no built wheel at {wheel}")
+        return wheel
     version = subprocess.run(
         ["uv", "version", "--short"], cwd=ROOT, capture_output=True,
         text=True, check=True).stdout.strip()
@@ -88,7 +93,9 @@ def _wheel() -> Path:
     return wheel
 
 
-def _launcher(directory: Path, editable: bool) -> tuple[list[str], list[str]]:
+def _launcher(
+    directory: Path, editable: bool, wheel: Path | None = None,
+) -> tuple[list[str], list[str]]:
     """(CLI prefix, python prefix) for the artifact under test.
 
     The wheel goes into a real environment rather than an ephemeral
@@ -104,7 +111,8 @@ def _launcher(directory: Path, editable: bool) -> tuple[list[str], list[str]]:
     environment = directory / "runtime"
     for command in (
         ["uv", "venv", str(environment)],
-        ["uv", "pip", "install", "--python", str(environment), str(_wheel())],
+        ["uv", "pip", "install", "--python", str(environment),
+         str(_wheel(wheel))],
     ):
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
@@ -293,6 +301,9 @@ def main() -> int:
     parser.add_argument(
         "--skip-dev", action="store_true",
         help="skip the reload-worker mode (for a slow CI host)")
+    parser.add_argument(
+        "--wheel", type=Path,
+        help="validate this exact wheel instead of dist/ for the current version")
     args = parser.parse_args()
 
     # A Windows handle can outlive the tree kill by a moment; a lingering
@@ -303,7 +314,7 @@ def main() -> int:
         directory = Path(temp).resolve()
         _fixture(directory)
         environment = _environment(directory)
-        launcher, python = _launcher(directory, args.editable)
+        launcher, python = _launcher(directory, args.editable, args.wheel)
         _seed_started_state(python, directory, environment)
         _check(launcher, directory, environment, dev=False)
         if not args.skip_dev:

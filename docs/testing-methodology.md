@@ -209,6 +209,27 @@ groups, and exact release commits. Documentation-only pull requests run the
 export audit without rebuilding or starting the package twice. The publish
 workflow cannot publish until both exact-SHA host jobs pass.
 
+## Fast local deployment
+
+`tools/local-deploy.py --repo <live-repository>` composes the existing release
+boundaries into a repeatable fast path from merged `main` to the uv-managed
+local tool. It is not another release gate and does not mint release evidence.
+
+The workflow records focused preparation evidence for the exact commit, wheel
+digest, and local gate list. Matching evidence can be reused on a later local
+deployment, following the same invalidation principle as release preparation:
+code, artifact, or validation-list drift forces preparation again. Replacement
+then reuses release-owned installed-tool, state-contract, watcher, Windows
+handoff, and correlated-event checks while adding dashboard stop and restart
+around the installation. The final Git-local receipt identifies the deployed
+commit and immutable artifact.
+
+This path answers whether an already-reviewed merged artifact installs and
+leaves the current host operational. It intentionally omits provider-backed
+runs and mutating browser actions. Those are more expensive, may alter real
+scheduler state, and remain mandatory in prepared candidate acceptance before
+publication.
+
 ## Verifying a live deployment
 
 Automated gates cannot cover ownership transfer, host schedulers, or behavior

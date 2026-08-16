@@ -109,6 +109,36 @@ Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
 or initialize agents in `~/repos/<target-project>` unless that operational change is part
 of the test.
 
+## Deploy current main locally
+
+Use the focused local deployment workflow after pull requests have merged:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository>
+```
+
+The command requires clean `main`, fast-forwards it to `origin/main`, and
+prepares one commit-and-digest-addressed wheel. It runs the built-wheel
+dashboard readiness gate in normal and development modes, then records the
+validated commit, artifact digest, and exact gate list. A later deployment of
+the same commit reuses that preparation evidence; a changed commit, wheel, or
+gate list invalidates it mechanically.
+
+Before replacement, the workflow snapshots release-owned all-repository status
+and doctor contracts plus the selected repository's started watchers. It stops
+managed dashboards while retaining each repository and port, installs through
+`upgrade --from`, waits for the durable Windows result, and retries one failed
+Windows replacement before dashboards restart. Final checks reuse the release
+tool's version, state, watcher, event-order, and health validation, require the
+installed `direct_url.json` to name the immutable wheel, and restore dashboard
+API rows. A Git-local receipt records the verified deployment identity.
+
+This fast path does not run agents, spend provider credits, click mutating UI
+actions, or authorize publication. Run focused source tests before deployment.
+Prepared releases still require the complete preparation gates and
+`tools/release.py --accept-candidate`; their release receipts and resumable
+acceptance checkpoints remain authoritative.
+
 ## Validate the built wheel
 
 Build, select the wheel for the current version, and run it in uv's isolated

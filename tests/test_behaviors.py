@@ -2720,6 +2720,306 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 preflight=True)
             self.assertEqual("--preflight", commands[0][-1])
 
+    def test_local_deploy_preserves_dashboard_ports_and_repositories(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["_dashboards"].__globals__
+        commands = {
+            100: "agents-live --repo C:\\Users\\name\\My Repo dashboard --dev",
+            200: "agents-live dashboard --all-repos --open",
+        }
+        with mock.patch.dict(scope, {
+            "_dashboard_modes": lambda pid: tuple(
+                flag for flag in ("--all-repos", "--dev", "--open")
+                if flag in commands[pid]),
+        }):
+            dashboards = script["_dashboards"](
+                "PORT  PID  ANSWERING  STARTED  REPOSITORY\n"
+                "8231  100  yes        now      C:\\Users\\name\\My Repo\n"
+                "8247  200  yes        now      -\n"
+            )
+        self.assertEqual([
+            (8231, 100, "C:\\Users\\name\\My Repo", ("--dev",)),
+            (8247, 200, None, ("--all-repos", "--open")),
+        ], [
+            (item.port, item.pid, item.repository, item.modes)
+            for item in dashboards
+        ])
+
+    def test_local_deploy_rejects_an_implicit_version_downgrade(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy = script["deploy"]
+        scope = deploy.__globals__
+        with mock.patch.dict(scope, {
+            "_synchronize": lambda: "abc123",
+        }), mock.patch.dict(scope["RELEASE"], {
+            "_current_version": lambda: "1.2.2",
+            "_installed_version": lambda: "1.2.3",
+        }):
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "pass --allow-downgrade"):
+                deploy(Path("C:/repo"))
+
+    def test_local_deploy_reuses_only_matching_preparation_evidence(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        prepared = script["_prepared_artifact"]
+        scope = prepared.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            receipt = root / "preparation.json"
+            payload = {
+                "schema": script["LOCAL_PREPARATION_SCHEMA"],
+                "prepared": True,
+                "commit": "abc123",
+                "version": "1.2.3",
+                "wheel": str(wheel),
+                "wheel_sha256": "digest",
+                "platform": sys.platform,
+                "os_name": os.name,
+                "architecture": script["platform"].machine(),
+                "gates": [list(command) for command in script["LOCAL_GATES"]],
+            }
+            receipt.write_text(json.dumps(payload), encoding="utf-8")
+            with mock.patch.dict(scope, {
+                "_state_directory": lambda: root,
+            }), mock.patch.dict(scope["RELEASE"], {
+                "_sha256": lambda _path: "digest",
+            }):
+                self.assertEqual(
+                    (wheel.resolve(), "digest"),
+                    prepared("abc123", "1.2.3"))
+                payload["gates"] = [["stale-gate"]]
+                receipt.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(prepared("abc123", "1.2.3"))
+                payload["gates"] = [
+                    list(command) for command in script["LOCAL_GATES"]]
+                payload["platform"] = "different-platform"
+                receipt.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(prepared("abc123", "1.2.3"))
+
+    def test_local_deploy_builds_from_the_recorded_commit(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        prepare = script["_prepare_artifact"]
+        scope = prepare.__globals__
+        commands: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "built" / "agents_live-1.2.3-py3-none-any.whl"
+            wheel.parent.mkdir()
+            wheel.write_bytes(b"wheel")
+
+            def run(command, **_kwargs):
+                commands.append(command)
+                if command[:2] == ["git", "archive"]:
+                    output = next(
+                        item.removeprefix("--output=") for item in command
+                        if item.startswith("--output="))
+                    Path(output).write_bytes(b"archive")
+
+            with mock.patch.dict(scope, {
+                "_prepared_artifact": lambda *_args: None,
+                "_state_directory": lambda: root / "state",
+                "_run": run,
+                "_require_unchanged_checkout": mock.Mock(),
+            }), mock.patch.object(
+                scope["shutil"], "unpack_archive",
+                side_effect=lambda _archive, source: Path(source).mkdir(),
+            ), mock.patch.object(
+                Path, "glob", return_value=iter((wheel,)),
+            ), mock.patch.dict(scope["RELEASE"], {
+                "_sha256": lambda _path: "digest",
+            }):
+                artifact, digest = prepare("abc123", "1.2.3")
+            self.assertIn("abc123", commands[0])
+            self.assertNotIn(str(REPOSITORY), commands[1])
+            self.assertEqual("digest", digest)
+            self.assertTrue(artifact.is_file())
+
+    def test_local_deploy_rejects_checkout_drift_before_replacement(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy = script["deploy"]
+        scope = deploy.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"wheel")
+            dashboards = mock.Mock()
+            with mock.patch.dict(scope, {
+                "_synchronize": lambda: "abc123",
+                "_prepare_artifact": lambda *_args: (wheel, "digest"),
+                "_require_unchanged_checkout": mock.Mock(
+                    side_effect=script["LocalDeployError"]("checkout changed")),
+                "_running_dashboards": dashboards,
+            }), mock.patch.dict(scope["RELEASE"], {
+                "_current_version": lambda: "1.2.3",
+                "_installed_version": lambda: "1.2.3",
+            }):
+                with self.assertRaisesRegex(
+                        script["LocalDeployError"], "checkout changed"):
+                    deploy(root)
+            dashboards.assert_not_called()
+
+    def test_local_deploy_postcheck_uses_release_contract_helpers(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        postcheck = script["_postcheck"]
+        scope = postcheck.__globals__
+        baseline = (("C:/repo", "sample-123", "started", True),)
+        status = {"ok": True, "agents": []}
+        contract = mock.Mock(return_value=baseline)
+        watcher_contract = mock.Mock(return_value=(
+            ("C:/repo", "sample-123"),))
+        all_results = {
+            "status": status,
+            "doctor": {"ok": True},
+        }
+        with mock.patch.dict(scope, {
+            "_direct_url": lambda: Path("wheel.whl"),
+        }), mock.patch.dict(scope["RELEASE"], {
+            "_installed_all_json": lambda command: all_results[command],
+            "_installed_version": lambda: "1.2.3",
+            "_status_contract": contract,
+            "_status_rows": lambda _payload: [],
+            "_started_watchers": watcher_contract,
+        }):
+            postcheck(
+                Path("C:/repo"), Path("wheel.whl"), "1.2.3", baseline,
+                (("C:/repo", "sample-123"),), (), (), None)
+        contract.assert_called_once_with(status)
+        watcher_contract.assert_called_once_with({"agents": []})
+
+    def test_local_deploy_verifies_events_for_local_watchers_only(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        verify = script["_verify_upgrade_events"]
+        scope = verify.__globals__
+        events = [{
+            "status": "ok",
+            "upgrade_phase": "quiesce-requested",
+            "root": "C:/repo",
+            "watcher": "local-123",
+        }]
+        ordered = mock.Mock()
+        baseline = (("C:/repo", "local-123"),)
+        with mock.patch.dict(scope["RELEASE"], {
+            "_candidate_events": lambda _operation: events,
+            "_verify_candidate_events": ordered,
+        }):
+            verify("abc123", baseline)
+            ordered.assert_called_once_with(
+                events, (("C:/repo", "local-123"),))
+            events[0]["watcher"] = "unexpected-789"
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "exact local watcher"):
+                verify("abc123", baseline)
+            events.clear()
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "exact local watcher"):
+                verify("abc123", baseline)
+
+    def test_local_deploy_waits_through_transient_empty_dashboard_rows(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        wait = script["_await_api_rows"]
+        scope = wait.__globals__
+        responses = iter((None, {"agents": []}, {"agents": [{"name": "ok"}]}))
+        with mock.patch.dict(scope, {
+            "_api": lambda _port: next(responses),
+        }), mock.patch.object(scope["time"], "sleep", return_value=None):
+            self.assertEqual(
+                [{"name": "ok"}], wait(8231, timeout_s=10)["agents"])
+
+    def test_local_deploy_cleans_the_dashboard_tree_after_readiness_failure(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        start = script["_start_dashboard"]
+        scope = start.__globals__
+        process = mock.Mock()
+        process.poll.return_value = None
+        cleanup = mock.Mock()
+        dashboard = script["Dashboard"](8231, 100, "C:/repo", ())
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: Path("agents-live"),
+            "_await_api_rows": mock.Mock(
+                side_effect=script["LocalDeployError"]("not ready")),
+            "_terminate_dashboard_tree": cleanup,
+            "READY_TIMEOUT_S": 0,
+        }), mock.patch.object(
+            scope["subprocess"], "Popen", return_value=process,
+        ):
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "did not serve"):
+                start(dashboard)
+        cleanup.assert_called_once_with(process, 8231)
+
+    def test_local_deploy_attempts_every_dashboard_restart(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        restart = script["_restart_dashboards"]
+        scope = restart.__globals__
+        first = script["Dashboard"](8231, 100, "C:/one", ())
+        second = script["Dashboard"](8232, 200, "C:/two", ())
+        attempted = []
+
+        def start(dashboard):
+            attempted.append(dashboard.port)
+            if dashboard == first:
+                raise script["LocalDeployError"]("first failed")
+
+        with mock.patch.dict(scope, {
+            "_port_answers": lambda _port: False,
+            "_start_dashboard": start,
+        }):
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "8231.*first failed"):
+                restart((first, second))
+        self.assertEqual([8231, 8232], attempted)
+
+    def test_local_deploy_rejects_wheel_mutation_around_upgrade(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        upgrade = script["_upgrade"]
+        scope = upgrade.__globals__
+        digests = iter(("digest", "changed"))
+        with mock.patch.dict(scope["RELEASE"], {
+            "_sha256": lambda _wheel: next(digests),
+        }), mock.patch.dict(scope, {
+            "_upgrade_once": mock.Mock(return_value="operation"),
+        }):
+            with self.assertRaisesRegex(
+                    script["LocalDeployError"], "changed during replacement"):
+                upgrade(Path("C:/repo"), Path("wheel.whl"), "digest")
+
+    def test_local_deploy_retries_one_failed_windows_upgrade(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        upgrade = script["_upgrade"]
+        scope = upgrade.__globals__
+        attempts = mock.Mock(side_effect=(
+            script["LocalDeployError"]("launcher held"),
+            "operation-2",
+        ))
+        windows = mock.Mock()
+        windows.name = "nt"
+        with mock.patch.dict(scope, {
+            "os": windows,
+            "_upgrade_once": attempts,
+        }), mock.patch.dict(scope["RELEASE"], {
+            "_sha256": lambda _wheel: "digest",
+        }):
+            self.assertEqual(
+                "operation-2",
+                upgrade(Path("C:/repo"), Path("wheel.whl"), "digest"))
+        self.assertEqual(2, attempts.call_count)
+
     def test_operational_preflight_checks_browser_dashboard_and_agents(
             self) -> None:
         script = runpy.run_path(
