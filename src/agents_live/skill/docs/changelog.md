@@ -11,8 +11,6 @@ history is retained in the source repository.
 
 ## Unreleased
 
-## 6.3.6 - 2026-08-16
-
 - fix: preserve structured Copilot answers when JSON events omit their phase. (#335)
   The parser retains the last phase-less answer while excluding explicitly
   non-final messages and `task_complete` control continuations. Legacy final
