@@ -545,6 +545,10 @@ def _dashboard_actions(
                     cli, repo, "dashboard", "Health check", health_before)
                 page.get_by_text(re.compile(r"^healthy ")).first.wait_for(
                     state="visible", timeout=ACTION_TIMEOUT_S * 1000)
+                page.get_by_text(
+                    re.compile(r"^Infrastructure healthy \(")
+                ).last.wait_for(
+                    state="visible", timeout=ACTION_TIMEOUT_S * 1000)
 
                 dashboard_run_started = datetime.now(timezone.utc).isoformat()
                 row.get_by_role(
