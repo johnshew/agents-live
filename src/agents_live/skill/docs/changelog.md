@@ -20,9 +20,6 @@ history is retained in the source repository.
 - fix: drive candidate dashboard Start controls by accessible name.
   Browser acceptance now exercises both initially started and initially stopped
   agents without serializing the apostrophe-bearing label as an invalid selector.
-
-## 6.3.6 - 2026-08-15
-
 - fix: require full installed candidate acceptance before publication.
   A prepared local tag cannot be pushed until its exact wheel has upgraded the
   uv-managed consumer tool and passed live CLI, browser dashboard, semantic
