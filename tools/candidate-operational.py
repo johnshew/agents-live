@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import errno
 import json
+import math
 import os
 import re
 import signal
@@ -236,6 +237,11 @@ def _usage_map(value: object) -> dict[str, object]:
         return {}
     result = {}
     for item in value:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError:
+                continue
         if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str):
             result[item[0]] = item[1]
     return result
@@ -260,11 +266,14 @@ def _verify_cost_capture(
         ):
             continue
         usage = _usage_map(record.get("usage"))
+        value = usage.get("list_cost_usd")
+        if isinstance(value, bool):
+            continue
         try:
-            cost = float(usage.get("list_cost_usd"))
+            cost = float(value)
         except (TypeError, ValueError):
             continue
-        if cost > 0:
+        if math.isfinite(cost) and cost > 0:
             return run_id, cost
     raise OperationalError(
         f"cost probe {agent_id!r} produced no positive list_cost_usd usage")
