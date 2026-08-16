@@ -1137,6 +1137,10 @@ class TestRunsRecordWhatTheySpent(TempRepository):
                 },
             }),
             json.dumps({
+                "type": "assistant.message",
+                "data": {"content": "Later unqualified message."},
+            }),
+            json.dumps({
                 "type": "session.usage_checkpoint",
                 "data": {"totalNanoAiu": 15110175000},
             }),
@@ -1153,6 +1157,40 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             "list_cost_usd": "0.15110175",
         }, dict(completion.usage))
 
+    def test_copilot_json_accepts_the_last_answer_without_a_phase(self) -> None:
+        stream = "\n".join([
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": '{"draft": true}'},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": "  "},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": '{"ok": true}'},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "content": "The task is complete.",
+                    "toolRequests": [{"name": "task_complete"}],
+                },
+            }),
+            json.dumps({
+                "type": "session.task_complete",
+                "data": {"summary": "Completed with valid JSON."},
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 2500000000},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"ok": true}', completion.text)
+        self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
+
     def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
         self,
     ) -> None:
@@ -1162,6 +1200,13 @@ class TestRunsRecordWhatTheySpent(TempRepository):
                 "data": {"totalNanoAiu": 1000000000},
             }),
             "{malformed final event",
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "phase": "analysis",
+                    "content": "Intermediate reasoning.",
+                },
+            }),
             json.dumps({
                 "type": "session.task_complete",
                 "data": {"summary": "Completed from task summary.", "success": True},
