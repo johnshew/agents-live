@@ -113,6 +113,7 @@ def _usage(stdout: str) -> tuple[tuple[str, str | None], ...]:
 
 
 def _json_completion(stdout: str) -> Completion | None:
+    assistant_messages: list[str] = []
     final_answers: list[str] = []
     task_summary = ""
     nano_aiu: Decimal | None = None
@@ -129,9 +130,19 @@ def _json_completion(stdout: str) -> Completion | None:
         if event_type == "assistant.message" and isinstance(data, dict):
             recognized = True
             content = data.get("content")
-            if data.get("phase") == "final_answer" and isinstance(content, str):
-                if content.strip():
+            if isinstance(content, str) and content.strip():
+                phase = data.get("phase")
+                if phase == "final_answer":
                     final_answers.append(content.strip())
+                elif phase is None:
+                    tool_requests = data.get("toolRequests")
+                    completes_task = isinstance(tool_requests, list) and any(
+                        isinstance(request, dict)
+                        and request.get("name") == "task_complete"
+                        for request in tool_requests
+                    )
+                    if not completes_task:
+                        assistant_messages.append(content.strip())
         elif event_type == "session.task_complete" and isinstance(data, dict):
             recognized = True
             summary = data.get("summary")
@@ -157,7 +168,8 @@ def _json_completion(stdout: str) -> Completion | None:
             ("ai_credits", str(credits)),
             ("list_cost_usd", str(credits * Decimal("0.01"))),
         )
-    text = final_answers[-1] if final_answers else task_summary
+    answers = final_answers or assistant_messages
+    text = answers[-1] if answers else task_summary
     return Completion(text, usage=usage)
 
 

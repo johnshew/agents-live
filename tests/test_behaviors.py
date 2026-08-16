@@ -37,6 +37,7 @@ from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, upgrade_handoff
 from agents_live.cli.commands import start
 from agents_live.obs import qlog
+from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
 from agents_live.dispatch import Firing, dispatch
 from agents_live.runtime import ChildResult, ProcessRef, Subscription
@@ -1137,6 +1138,10 @@ class TestRunsRecordWhatTheySpent(TempRepository):
                 },
             }),
             json.dumps({
+                "type": "assistant.message",
+                "data": {"content": "Later unqualified message."},
+            }),
+            json.dumps({
                 "type": "session.usage_checkpoint",
                 "data": {"totalNanoAiu": 15110175000},
             }),
@@ -1153,6 +1158,40 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             "list_cost_usd": "0.15110175",
         }, dict(completion.usage))
 
+    def test_copilot_json_accepts_the_last_answer_without_a_phase(self) -> None:
+        stream = "\n".join([
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": '{"draft": true}'},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": "  "},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"content": '{"ok": true}'},
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "content": "The task is complete.",
+                    "toolRequests": [{"name": "task_complete"}],
+                },
+            }),
+            json.dumps({
+                "type": "session.task_complete",
+                "data": {"summary": "Completed with valid JSON."},
+            }),
+            json.dumps({
+                "type": "session.usage_checkpoint",
+                "data": {"totalNanoAiu": 2500000000},
+            }),
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"ok": true}', completion.text)
+        self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
+
     def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
         self,
     ) -> None:
@@ -1162,6 +1201,13 @@ class TestRunsRecordWhatTheySpent(TempRepository):
                 "data": {"totalNanoAiu": 1000000000},
             }),
             "{malformed final event",
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "phase": "analysis",
+                    "content": "Intermediate reasoning.",
+                },
+            }),
             json.dumps({
                 "type": "session.task_complete",
                 "data": {"summary": "Completed from task summary.", "success": True},
@@ -2339,21 +2385,95 @@ class TestCrossModuleAgreements(unittest.TestCase):
             str(REPOSITORY / "tools" / "candidate-operational.py"))
         verify = script["_verify_cost_capture"]
         scope = verify.__globals__
-        positive = {
-            "ok": True,
-            "records": [{
-                "agent_name": "cost-agent-456",
-                "run_id": "abc123",
-                "status": "ok",
-                "usage": [["list_cost_usd", "0.25"]],
-            }],
-        }
         run = {"ok": True, "status": "success", "run_id": "abc123"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "Agents").mkdir()
+            homes = {
+                name: str(root / directory)
+                for name, directory in _ISOLATED_HOMES.items()
+            }
+            environment = {
+                **os.environ,
+                **homes,
+                "AGENTS_LIVE_REPO": str(root),
+            }
+            with mock.patch.dict(os.environ, environment):
+                directory = paths.repo_state_dir(root) / "logs"
+                directory.mkdir(parents=True, exist_ok=True)
+                log = directory / "cost-agent-456.jsonl"
+                obs.record(log, obs.create(
+                    "done", "ok", repository=str(root),
+                    agent="cost-agent-456", run_id="abc123",
+                    origin="manual", usage=(
+                        ("ai_credits", "25"),
+                        ("list_cost_usd", "0.25"),
+                    )))
+                append_event(log, (json.dumps({
+                    "spec": 1,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "event": "run",
+                    "status": "success",
+                    "repository": str(root),
+                    "agent": "cost-agent-456",
+                    "run_id": "other-run",
+                    "origin": "manual",
+                    "usage": ['["ai_credits","1"]'],
+                }) + "\n").encode("utf-8"))
+                archive = directory / "archive"
+                archive.mkdir()
+                writer = qlog.duckdb.connect(":memory:")
+                writer.sql(
+                    "CREATE TABLE archived AS SELECT "
+                    "TIMESTAMPTZ '2026-08-16T00:00:00Z' AS ts, "
+                    "'other-agent'::VARCHAR AS agent_name, "
+                    "'done'::VARCHAR AS phase, 'ok'::VARCHAR AS status, "
+                    "'manual'::VARCHAR AS trigger, 1::INTEGER AS log_schema, "
+                    "'other-run'::VARCHAR AS run_id, "
+                    "['[\"ai_credits\",\"1\"]']::VARCHAR[] AS usage"
+                )
+                writer.sql(
+                    f"COPY archived TO '{archive / '2026-08.parquet'}' "
+                    "(FORMAT PARQUET)"
+                )
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "agents_live.cli", "--json",
+                    "--repo", str(root), "logs", "--all", "--sql",
+                    "select * from log where run_id = 'abc123' limit 20",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            positive = json.loads(completed.stdout)
+            self.assertEqual([
+                '["ai_credits","25"]',
+                '["list_cost_usd","0.25"]',
+            ], positive["records"][0]["usage"])
+            positive["records"][0]["usage"].insert(0, "{malformed")
+            with mock.patch.dict(scope, {
+                "_json": mock.Mock(side_effect=(run, positive)),
+            }):
+                self.assertEqual(
+                    ("abc123", 0.25),
+                    verify(
+                        Path("agents-live"), root,
+                        "cost-agent-456"))
+        numeric = {"ok": True, "records": [{
+            "agent_name": "cost-agent-456", "run_id": "abc123",
+            "status": "ok", "usage": [["list_cost_usd", 0.5]],
+        }]}
         with mock.patch.dict(scope, {
-            "_json": mock.Mock(side_effect=(run, positive)),
+            "_json": mock.Mock(side_effect=(run, numeric)),
         }):
             self.assertEqual(
-                ("abc123", 0.25),
+                ("abc123", 0.5),
                 verify(
                     Path("agents-live"), Path("C:/repo"),
                     "cost-agent-456"))
@@ -2367,6 +2487,23 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.assertRaisesRegex(
                     script["OperationalError"], "no positive list_cost_usd"):
                 verify(Path("agents-live"), Path("C:/repo"), "cost-agent-456")
+        for invalid in (
+            "true", "0", "-0.1", '"NaN"', '"Infinity"', '"-Infinity"',
+        ):
+            invalid_cost = {"ok": True, "records": [{
+                "agent_name": "cost-agent-456", "run_id": "abc123",
+                "status": "ok",
+                "usage": [f'["list_cost_usd",{invalid}]'],
+            }]}
+            with mock.patch.dict(scope, {
+                "_json": mock.Mock(side_effect=(run, invalid_cost)),
+            }):
+                with self.assertRaisesRegex(
+                        script["OperationalError"],
+                        "no positive list_cost_usd"):
+                    verify(
+                        Path("agents-live"), Path("C:/repo"),
+                        "cost-agent-456")
 
     def test_operational_dashboard_cost_includes_accepted_run(self) -> None:
         script = runpy.run_path(

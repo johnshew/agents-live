@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-14
+ms.date: 2026-08-16
 ms.topic: reference
 ---
 
@@ -10,6 +10,13 @@ changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
+
+- fix: preserve structured Copilot answers when JSON events omit their phase. (#335)
+  The parser retains the last phase-less answer while excluding explicitly
+  non-final messages and `task_complete` control continuations. Legacy final
+  answers keep precedence, and provider usage remains attached to the result.
+- fix: decode current and historical candidate cost usage encodings.
+  Cost verification rejects malformed, non-positive, and non-finite values.
 
 ## 6.3.6 - 2026-08-15
 
