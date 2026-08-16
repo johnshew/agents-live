@@ -2817,17 +2817,35 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 start_button = mock.Mock()
                 start_button.wait_for.side_effect = RuntimeError(
                     "start control never appeared")
+                action_order: list[str] = []
+                run_button = mock.Mock()
+                run_button.click.side_effect = lambda: action_order.append("run")
                 row = mock.Mock()
 
                 def row_button(_role, *, name):
                     if name == "Register this host's cron/watcher":
                         return start_button
+                    if name == "Run this agent once now":
+                        return run_button
                     return mock.Mock()
 
                 row.get_by_role.side_effect = row_button
                 row.count.return_value = 1
                 page = mock.Mock()
                 page.get_by_role.return_value.filter.return_value = row
+                health_ready = mock.Mock()
+                health_ready.last.wait_for.side_effect = (
+                    lambda **_kwargs: action_order.append("health-ready"))
+
+                def page_text(value, **_kwargs):
+                    if (
+                        isinstance(value, re.Pattern)
+                        and value.pattern == r"^Infrastructure healthy \("
+                    ):
+                        return health_ready
+                    return mock.Mock()
+
+                page.get_by_text.side_effect = page_text
                 browser = mock.Mock()
                 browser.new_page.return_value = page
                 playwright = mock.Mock()
@@ -2884,6 +2902,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             Path("agents-live.exe"), Path("C:/repo"),
                             "sample-123", "sample", baseline,
                             "cost-agent-456")
+                self.assertEqual(["health-ready", "run"], action_order[:2])
 
     def test_dashboard_posix_cleanup_escalates_process_group(self) -> None:
         script = runpy.run_path(
