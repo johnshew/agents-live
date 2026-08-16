@@ -1172,6 +1172,13 @@ class TestRunsRecordWhatTheySpent(TempRepository):
                 "data": {"content": '{"ok": true}'},
             }),
             json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "content": "The task is complete.",
+                    "toolRequests": [{"name": "task_complete"}],
+                },
+            }),
+            json.dumps({
                 "type": "session.task_complete",
                 "data": {"summary": "Completed with valid JSON."},
             }),

@@ -135,7 +135,14 @@ def _json_completion(stdout: str) -> Completion | None:
                 if phase == "final_answer":
                     final_answers.append(content.strip())
                 elif phase is None:
-                    assistant_messages.append(content.strip())
+                    tool_requests = data.get("toolRequests")
+                    completes_task = isinstance(tool_requests, list) and any(
+                        isinstance(request, dict)
+                        and request.get("name") == "task_complete"
+                        for request in tool_requests
+                    )
+                    if not completes_task:
+                        assistant_messages.append(content.strip())
         elif event_type == "session.task_complete" and isinstance(data, dict):
             recognized = True
             summary = data.get("summary")
