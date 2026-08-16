@@ -2746,6 +2746,28 @@ class TestCrossModuleAgreements(unittest.TestCase):
             for item in dashboards
         ])
 
+    def test_local_deploy_script_starts_in_an_isolated_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = subprocess.run(
+                [
+                    "uv", "run", "--cache-dir", temporary,
+                    "--script", "tools/local-deploy.py", "--help",
+                ],
+                cwd=REPOSITORY,
+                env={
+                    **os.environ,
+                    "VIRTUAL_ENV": "",
+                    "PYTHONPATH": "",
+                },
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("--repo", completed.stdout)
+
     def test_local_deploy_rejects_an_implicit_version_downgrade(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
