@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-14
+ms.date: 2026-08-16
 ms.topic: reference
 ---
 
@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve structured Copilot answers when JSON events omit their phase. (#335)
+  The parser retains the last phase-less answer while excluding explicitly
+  non-final messages and `task_complete` control continuations. Legacy final
+  answers keep precedence, and provider usage remains attached to the result.
 - fix: require full installed candidate acceptance before publication.
   A prepared local tag cannot be pushed until its exact wheel has upgraded the
   uv-managed consumer tool and passed live CLI, browser dashboard, semantic
