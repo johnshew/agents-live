@@ -30,6 +30,7 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
+      artifact-name: verified-release-dist
     permissions:
       contents: read
 
@@ -45,16 +46,24 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
       - uses: astral-sh/setup-uv@v5
-      # The gates are declared once, in release.py, and run from there so
-      # a manually dispatched tag cannot publish an unaudited artifact and
-      # this file cannot drift from what a local release runs (#218). The
-      # audit, the suite, and the build all run; the framework smoketest
-      # is skipped because it needs a live agent CLI.
-      - run: uv run --script tools/release.py --gates
-      # Attach the exact artifacts going to PyPI before publishing, so a
-      # failed upload can be rerun without hitting PyPI's duplicate check.
-      - run: gh release upload "$TAG" dist/* --clobber
+      # Publish the artifacts built by the exact-SHA Ubuntu verification job;
+      # do not rerun the same gates and rebuild them in this job.
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-release-dist
+          path: dist
+      - run: gh release download "$TAG" --pattern 'SHA256SUMS-*' --dir dist
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
-      - run: uv publish --trusted-publishing always
+      - run: cd dist && sha256sum --check SHA256SUMS-*
+      # Attach the exact artifacts going to PyPI before publishing, so a
+      # failed upload can be rerun without hitting PyPI's duplicate check.
+      - run: gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+      - run: >-
+          uv publish dist/*.whl dist/*.tar.gz
+          --check-url https://pypi.org/simple/
+          --trusted-publishing always

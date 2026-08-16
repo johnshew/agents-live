@@ -170,5 +170,9 @@ Run this skill **between** content commits, not bundled into them:
    for <feature>`) containing only the changelog edit - trivially
    auditable and independently revertable.
 
+The code and changelog remain separate commits, but normally travel in the same
+pull request. A second changelog-only pull request repeats review and CI without
+adding an assurance boundary.
+
 For sessions that produce no commits, skip the changelog and only file
 issues if something genuinely worth tracking came up.

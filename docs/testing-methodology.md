@@ -1,7 +1,7 @@
 ---
 title: Testing Methodology
 description: What this project tests, at which layer, and why each gate exists
-ms.date: 2026-08-15
+ms.date: 2026-08-16
 ms.topic: concept
 ---
 
@@ -176,9 +176,12 @@ seeds started state through the artifact instead of calling `start`.
 
 ## The gates
 
-`tools/release.py` declares the list once; `prepare`, `publish`, the printed
-plan, and the publish workflow all run it from there, because restating it in
-YAML once shipped a release past a gate the local run kept.
+`tools/release.py` declares the list once. Preparation runs it and records the
+exact command list and artifacts in a receipt. Publication verifies that receipt
+instead of repeating identical local evidence. The reusable Test workflow runs
+the same source and artifact gates against the exact release SHA on Ubuntu and
+Windows, and its verified Ubuntu artifacts flow into the publish job. Their
+hashes must match the accepted candidate's release-attached manifest.
 
 1. `tools/pre-release-audit.py` - export-clean tree, packaging, doc links.
 2. `tests/test_smoke.py` - the chain from definition to dispatch to stop.
@@ -201,8 +204,10 @@ YAML once shipped a release past a gate the local run kept.
   probes, process-tree cleanup is confirmed, and exact state restoration is
   required.
 
-CI runs the same suites on Ubuntu and Windows for every push and pull request,
-and the publish workflow cannot publish until both hosts pass.
+CI runs the same suites on Ubuntu and Windows for code pull requests, merge
+groups, and exact release commits. Documentation-only pull requests run the
+export audit without rebuilding or starting the package twice. The publish
+workflow cannot publish until both exact-SHA host jobs pass.
 
 ## Verifying a live deployment
 
@@ -251,9 +256,9 @@ first host until someone tries.
 
 ## Candidate stabilization loop
 
-Release preparation creates a local commit, annotated tag, wheel, and source
-distribution. Nothing is public at that point. Stabilize that candidate using
-this loop:
+Release preparation creates an isolated candidate branch, local commit,
+annotated tag, wheel, source distribution, and preparation receipt. Nothing is
+public at that point. Stabilize that candidate using this loop:
 
 1. Install the exact local wheel into the uv-managed user tool.
 2. Restore a healthy representative live repository and choose an agent whose
@@ -263,10 +268,11 @@ this loop:
   logs and health, and restores the baseline.
 4. Treat every failure, stale badge, missing event, UI mismatch, plugin defect,
   cost or usage omission, or cleanup residue as a release blocker.
-5. Fix on a branch, add an executing regression at the boundary that failed,
-  merge through a PR, prepare a new local candidate, and start again from
-  step 1. A prior acceptance receipt is invalidated at retry entry, before any
-  precondition can reject the new attempt.
+5. If replacement passed and a later operational phase failed, verify cleanup
+  restored the recorded baseline and resume from the checkpoint. If code,
+  configuration, artifacts, or baseline changed, fix on a branch, add an
+  executing regression at the boundary that failed, merge through a PR,
+  prepare a new local candidate, and start again from step 1.
 6. Publish only after one candidate completes the full loop without a code,
   configuration, or manual-repair change.
 

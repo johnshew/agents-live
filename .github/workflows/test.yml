@@ -1,9 +1,8 @@
 name: Test
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
     inputs:
       os:
@@ -26,12 +25,57 @@ on:
         required: false
         default: all
         type: string
+      artifact-name:
+        description: "Optional name for verified Ubuntu release artifacts"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+          elif [[ "$EVENT_NAME" == "merge_group" ]]; then
+            base="$MERGE_BASE"
+            head="$MERGE_HEAD"
+          else
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          full=false
+          while IFS= read -r path; do
+            case "$path" in
+              src/agents_live/skill/SKILL.md|src/agents_live/skill/templates/*)
+                full=true; break ;;
+              *.md|docs/*|src/agents_live/skill/docs/*) ;;
+              *) full=true; break ;;
+            esac
+          done < <(git diff --name-only "$base...$head")
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: changes
     strategy:
       # Both hosts report: a Windows-only break is the whole point of
       # running it, so it must not be hidden by cancelling the matrix.
@@ -48,13 +92,28 @@ jobs:
       # check - and this is the host a release is cut on.
       - if: runner.os == 'Linux'
         run: uv run --script tools/pre-release-audit.py
-      - run: uv run --with-editable . --script tests/test_smoke.py
+      - if: needs.changes.outputs.full == 'true'
+        run: uv run --with-editable . --script tests/test_smoke.py
       # duckdb is the query tool's own PEP 723 dependency; supplying it here
       # lets the suite actually start `agents-live logs` instead of skipping it.
-      - run: uv run --with-editable . --with duckdb --script tests/test_seams.py
-      - run: uv run --with-editable . --with duckdb --script tests/test_behaviors.py
+      - if: needs.changes.outputs.full == 'true'
+        run: uv run --with-editable . --with duckdb --script tests/test_seams.py
+      - if: needs.changes.outputs.full == 'true'
+        run: uv run --with-editable . --with duckdb --script tests/test_behaviors.py
       # The artifact, not the source: a packaged dashboard that cannot start
       # and rows whose actions are reversed both pass every import-level
       # check, and both shipped (#279).
-      - run: uv build
-      - run: uv run --script tools/dashboard-readiness.py
+      - if: needs.changes.outputs.full == 'true'
+        run: uv build
+      - if: needs.changes.outputs.full == 'true'
+        run: uv run --script tools/dashboard-readiness.py
+      - if: >-
+          needs.changes.outputs.full == 'true' &&
+          runner.os == 'Linux' && inputs['artifact-name'] != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs['artifact-name'] }}
+          path: dist/*
+          if-no-files-found: error
+      - if: needs.changes.outputs.full != 'true' && runner.os != 'Linux'
+        run: echo "Documentation-only change; audit runs on Linux."
