@@ -14,7 +14,7 @@ history is retained in the source repository.
 - fix: make focused local deployment resolve its runtime dependencies.
   The standalone PEP 723 script now starts outside an editable project
   environment instead of failing before deployment on its first package import.
-- feat: reuse verified evidence across release phases.
+- chore: reuse verified evidence across release phases.
   Preparation records immutable gate and artifact receipts on an isolated
   candidate branch, acceptance preflights and resumes from verified replacement,
   paid provider validation runs last, and publish reuses exact-SHA CI artifacts
