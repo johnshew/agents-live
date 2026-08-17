@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.7 - 2026-08-16
+
 - fix: make focused local deployment resolve its runtime dependencies.
   The standalone PEP 723 script now starts outside an editable project
   environment instead of failing before deployment on its first package import.
