@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: build release artifacts only from tracked source.
+  Candidate preparation now overlays validated version files onto an immutable
+  Git snapshot, preventing ignored local files from changing source archives or
+  failing exact-hash publication after a tag is published.
+
 ## 6.3.7 - 2026-08-16
 
 - fix: make focused local deployment resolve its runtime dependencies.
