@@ -1069,6 +1069,25 @@ def _smoketest_command() -> list[str]:
             "--repo", str(ROOT), "smoketest"]
 
 
+def _build_release_artifacts() -> None:
+    with tempfile.TemporaryDirectory(prefix="agents-live-release-build-") as temp:
+        temporary = Path(temp)
+        archive = temporary / "source.tar"
+        _run([
+            "git", "archive", "--format=tar", f"--output={archive}", "HEAD",
+        ])
+        source = temporary / "source"
+        shutil.unpack_archive(archive, source, filter="data")
+        for path in RELEASE_FILES:
+            relative = path.relative_to(ROOT)
+            destination = source / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+        _run([
+            "uv", "build", "--out-dir", str(ROOT / "dist"), str(source),
+        ])
+
+
 def _gate_commands() -> list[list[str]]:
     """Everything a release has to pass, in order.
 
@@ -1089,7 +1108,7 @@ def _gate_commands() -> list[list[str]]:
         ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
          "tests/test_behaviors.py"],
         _smoketest_command(),
-        ["uv", "build"],
+        ["uv", "run", "--script", "tools/release.py", "--build-artifacts"],
         ["uv", "run", "--script", "tools/dashboard-readiness.py"],
     ]
 
@@ -1567,6 +1586,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Run the release gates that do not need a live agent CLI",
     )
     parser.add_argument(
+        "--build-artifacts",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--notes",
         metavar="TAG",
         help="Rebuild the notes on an already published release",
@@ -1578,11 +1602,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     selected = sum((args.dry_run, args.prepare, args.publish,
-                    args.accept_candidate, args.gates, args.notes is not None))
+                    args.accept_candidate, args.gates, args.build_artifacts,
+                    args.notes is not None))
     if selected != 1:
         parser.error(
             "choose exactly one of --dry-run, --prepare, --accept-candidate, "
-            "--publish, --gates, or --notes")
+            "--publish, --gates, --build-artifacts, or --notes")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
     if args.accept_candidate and (
@@ -1612,6 +1637,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.repo, args.agent, args.cost_agent, resume=args.resume)
         elif args.gates:
             gates()
+        elif args.build_artifacts:
+            _build_release_artifacts()
         elif args.notes:
             notes(args.notes, apply=args.yes)
         else:

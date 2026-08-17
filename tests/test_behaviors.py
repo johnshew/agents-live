@@ -1971,6 +1971,64 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertRegex(
             gates, r'"--repo",\s*str\(ROOT\),\s*"smoketest"')
 
+    def test_release_artifacts_build_from_tracked_source_only(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        build = release["_build_release_artifacts"]
+        scope = build.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=root, check=True)
+            release_files = tuple(root / name for name in (
+                "pyproject.toml", "src/__init__.py", "src/VERSION",
+                "src/changelog.md"))
+            for path in release_files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("committed\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "."], cwd=root, check=True)
+            subprocess.run([
+                "git", "-c", "user.name=Test", "-c",
+                "user.email=test@example.invalid", "commit", "--quiet",
+                "-m", "initial",
+            ], cwd=root, check=True)
+            release_files[-1].write_text("release\n", encoding="utf-8")
+            excluded = root / ".copilot-tracking" / "pr" / "pr.md"
+            excluded.parent.mkdir(parents=True)
+            excluded.write_text("local only\n", encoding="utf-8")
+            (root / ".git" / "info" / "exclude").write_text(
+                ".copilot-tracking/\n", encoding="utf-8")
+            observed: dict[str, bool] = {}
+
+            def run(command: list[str], *, capture: bool = False) -> str:
+                if command[:2] == ["git", "archive"]:
+                    subprocess.run(command, cwd=root, check=True)
+                elif command[:2] == ["uv", "build"]:
+                    source = Path(command[-1])
+                    observed["tracked"] = (source / "tracked.txt").is_file()
+                    observed["excluded"] = (
+                        source / ".copilot-tracking" / "pr" / "pr.md").exists()
+                    observed["overlay"] = (
+                        source / "src" / "changelog.md").read_text(
+                            encoding="utf-8") == "release\n"
+                else:
+                    raise AssertionError(command)
+                return ""
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "RELEASE_FILES": release_files,
+                "_run": run,
+            }):
+                build()
+
+            self.assertEqual({
+                "tracked": True,
+                "excluded": False,
+                "overlay": True,
+            }, observed)
+
     def test_release_prepare_revalidates_files_after_gates(self) -> None:
         """A gate-time editor save must not produce a partial release (#227)."""
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
