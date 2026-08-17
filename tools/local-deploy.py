@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = []
+# dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema"]
 # ///
 """Deploy current main into the local uv tool with focused validation."""
 from __future__ import annotations
