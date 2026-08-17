@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.3.8 - 2026-08-16
+
 - fix: build release artifacts only from tracked source.
   Candidate preparation now overlays validated version files onto an immutable
   Git snapshot, preventing ignored local files from changing source archives or
