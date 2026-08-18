@@ -124,47 +124,154 @@ for what the model writes into the store. Both guard the untrusted participant.
 A processor is repository code, and validating trusted code's output against a
 schema the same author wrote is ceremony.
 
-## The store is a directory, and the MCP server is the model's door onto it
+## No new sharing mechanism: the pipeline MCP is it
 
-**Decision.** Shared state is a run-scoped ephemeral directory that processors
-read and write with ordinary file operations, in every mode. In pipeline mode
-the existing in-process MCP server is started in front of that directory and
-gives the model `get` and `put` as its only tools.
+**Decision.** Shared state stays exactly what it is today, the run-scoped
+in-process MCP with `put`, `get`, `$schema` binding, and frozen seeded paths.
+A processor that needs it connects to it, as `exercise-judgment` already does.
 
-**Why.** Processors are already full participants in the store, and that is the
-point of pipeline mode rather than an incidental use. In the
-`exercise-judgment` agent the pre-processor publishes the recommendations and
-state documents as chunked values with a manifest, the model reads them and
-publishes a patch, and the post-processor reads that patch and applies it to
-the file on disk. Three participants, one store.
+**Rejected: a run-scoped directory of JSON files** that processors would read
+and write as ordinary files, with the MCP server in front of it for the model.
+It looked like it removed a transport, and it did, but it bought that by
+inventing a second mechanism for something the system already has, and it
+quietly moved the enforcement point. Today the model physically cannot reach
+the values except through the server, because they live in another process's
+memory. With files, the only thing keeping the model out is the tool policy
+that denies it file access, so a future decision to grant a pipeline model one
+read tool would silently bypass schema validation and the seeded-path freeze.
+A safety property that holds by construction is worth more than one that holds
+by policy.
 
-What is wrong today is not who uses the store but what it costs to use. That
-pre-processor carries `dependencies = ["mcp<2"]`, an `asyncio.run`, a
-`sys.path.insert` reaching into a shared `Agents/lib`, a helper module wrapping
-session setup, and a bearer token, all to write JSON values. None of that is
-domain work, none of it survives outside a dispatch, and every processor in
-every language pays it again. A directory costs a `write_text`.
+**Cost accepted.** Stage three still costs a processor an MCP client. In
+`exercise-judgment` that is `dependencies = ["mcp<2"]`, an `asyncio.run`, a
+`sys.path.insert` into a shared `Agents/lib`, and a session helper, to write
+JSON values. That is real, and it is the reason a helper library is an open
+question rather than an obvious no.
 
-The security story does not change, because the store was never the boundary.
-The model is the untrusted participant, so validation against a bound `$schema`
-and refusal to overwrite seeded paths stay in the server, applied to the
-model's calls. Processors are repository code and were already trusted with the
-same values.
+What the contract does instead is make sure nobody pays that cost before they
+need to, which is what the staged shape below is for.
 
-**Cost accepted.** A directory cannot refuse a write, so a processor can
-overwrite anything, including a value the model just published. It could
-already do that through `put`.
+## Adoption is staged, and each stage is optional
 
-**A directory buys two things the server cannot.** The run replays, because the
-state is a set of files that can be captured and restored. And the same
-processor works standalone, which under the current shape is impossible for a
-pipeline processor: its entire job is store access, so with no server running
-there is nothing for it to do.
+**Decision.** Three stages. A plain filter; then a program that notices Agents
+Live invoked it; then a participant in the validated pipeline. A program
+written for stage one keeps working unchanged at stage three.
 
-Chunking does not go away. Splitting a large document into numbered values with
-a manifest exists because one tool call is a poor way to move a large document
-to a model, which is a property of how the model reads rather than of how the
-value is stored.
+**Why.** This is the actual life of a useful script. It starts as something
+run by hand, becomes worth automating, and eventually matters enough to want
+rigor around what the model may see and say. If each of those transitions
+demands a rewrite, the rigor gets skipped, which is the worst outcome
+available.
+
+Two design consequences follow, and both are load-bearing:
+
+**Stdin carries data, not metadata.** An envelope on stdin would break the
+filter shape at stage one, because a filter's stdin is its input. So the run is
+literally `pre | model | post`, and a developer can test it with a pipe.
+
+**The result path is snapshotted onto the post-processor's stdin.** In pipeline
+mode the model publishes to `agents-live.result-path` rather than returning
+text, and Agents Live pipes that snapshot to the post-processor. A stage one
+post-processor therefore survives the move to pipeline mode without knowing it
+happened. Without this, moving to stage three would force every post-processor
+to be rewritten as an MCP client, which is exactly the cliff the staging exists
+to remove.
+
+**Size is never a reason to move a stage.** An earlier draft offered size as a
+second motivation for stage three, on the grounds that a prompt is a
+command-line argument and a published value is not. That was a mistake. It
+asked a developer to accept a security model because of a transport limit, and
+the transport limit is the host's to fix. See the next section.
+
+## Size is the host's problem, not the developer's
+
+**Decision.** Agents Live delivers the prompt to the provider by whatever
+means that provider supports for large input. A processor writes to stdout and
+never reasons about a byte ceiling.
+
+**Why.** The ceiling is real but it is entirely a property of process
+spawning. Windows caps a command line at 32767 characters through
+`CreateProcessW`, roughly 64 times smaller than a typical Linux `ARG_MAX` of
+2 MB, and it surfaces as `OSError [WinError 206] The filename or extension is
+too long`. Nothing about that belongs in a contract between a program and its
+host.
+
+**The evidence is unusually good, because other harnesses hit this first.**
+[github/copilot-cli#3398](https://github.com/github/copilot-cli/issues/3398)
+asks for a `--prompt-file` flag and is open and unimplemented. It records two
+independent projects arriving at the same wall and solving it two ways:
+
+- One shipped a fail-fast guard telling Windows users to move to WSL, then
+  replaced it in the next release by piping the prompt on stdin,
+  `subprocess.run(input=prompt)` instead of `-p`. A Windows CI smoke
+  round-trips a 60 KB prompt and checks its SHA-256. The guard was deleted as
+  unreachable and the documentation reversed from "blocked, use WSL" to "works
+  natively on Windows".
+- The other stopped passing prompt bodies in argv at all: the prompt stays in a
+  file the harness already writes, and argv carries a fixed pointer at it. A
+  38 KB prompt became a 554-byte command line, with a regression test that a
+  200 KB prompt stays under a fixed bound.
+
+Both conclusions point the same way, and neither asks the program being invoked
+to change.
+
+**What each provider supports**, verified from vendor documentation rather than
+assumed:
+
+| | Claude Code | Copilot CLI |
+|---|---|---|
+| Prompt on stdin | Yes, alongside `-p`, documented, capped at 10 MB | Yes, but only when `-p` is omitted; piped input is ignored otherwise |
+| Prompt from a file | `--system-prompt-file`, `--append-system-prompt-file` | None; `--prompt-file` is the open request in #3398 |
+| Guidance above the cap | Write a file and reference its path in the prompt | Same, by implication |
+
+That asymmetry is why this is a provider-adapter decision rather than a
+contract rule. `Launch.input_text` already exists and is unused for the model
+step, so the seam is there.
+
+**A pointer needs a grant, which is the part that is easy to miss.** If a
+pre-processor hands the model a path instead of content, the model must be
+allowed to read it. Both CLIs take `--add-dir`, and the harness that took the
+pointer route grants "read access to the prompt file's directory and nothing
+wider". Copilot happens to grant the system temporary directory by default,
+which is what its `--disallow-temp-dir` flag revokes; Claude does not. Under
+`-p` there is nobody to approve a prompt, so an ungranted read simply fails.
+
+**Two smaller findings worth keeping.** Copilot's session semantics differ
+between argv and stdin, where stdin-mode `--resume` is resume-only and a first
+call needs `--session-id`; that costs nothing today because nothing resumes,
+and would bite immediately if something did. And one of those harnesses
+classified an oversized argv as a *retryable* crash, which burned its whole
+attempt budget rebuilding an identical command. Agents Live avoids that, though
+not by design: `retryable` is set only for `timeout` and `empty_output`, so the
+overflow lands as `cli_crash` and stops.
+
+**Cost accepted.** Prompt delivery becomes provider-specific, so a Claude agent
+and a Copilot agent have different effective ceilings until #3398 lands or
+Copilot's stdin path is exercised here. That asymmetry is invisible to
+processors, which is the point.
+
+The adapter work is [#374](https://github.com/johnshew/agents-live/issues/374).
+
+## Run context arrives in the environment, not in a file
+
+**Decision.** Everything the run knows is an environment variable: scalars
+plain, collections JSON.
+
+**Why.** The convention already exists. `AGENTS_LIVE_CHANGED_FILES` is a JSON
+array in the environment today, and `AGENTS_LIVE_AGENT_NAME` is a plain string.
+Extending a convention costs a reader nothing; introducing an envelope file
+beside it means two ways to learn the same kind of thing.
+
+It is also cheaper to consume. One value costs one line in any language, with
+no file to open and no document to parse for a program that wants a single
+field.
+
+**Cost accepted.** The environment is bounded, so `AGENTS_LIVE_INSTRUCTIONS`
+and `AGENTS_LIVE_CHANGED_FILES` need caps enforced before spawn, using the same
+limit and the same wording as the existing command-line overflow error rather
+than a second phrasing for one condition. If either genuinely outgrows the
+environment, the host writes a file and passes its path, which is the same
+answer as the prompt and for the same reason: transport is the host's job.
 
 ## Mode constrains the model, not processors
 

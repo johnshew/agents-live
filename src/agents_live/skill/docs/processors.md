@@ -10,179 +10,114 @@ ms.topic: reference
 Selected by `agents-live.schema-version: "2"`. Definitions still on schema
 version 1 use the earlier contract, which is removed in 7.0.
 
-A processor is a filter that runs around the model:
+A processor is a filter. The run is a pipeline:
 
 ```text
-pre-processor -> model -> post-processor
+pre-processor | model | post-processor
 ```
 
 Any of the three may be absent. A definition with no selector and both
 processors is a deterministic pipeline with no model in it.
 
-Input arrives on stdin, the value leaves on stdout, diagnostics go to stderr,
-and the exit code is the verdict. That is what every Unix filter does, and a
-processor is one. A program that already behaves that way is already a
-processor.
+The contract has three stages, and each one is optional. A program written for
+stage one keeps working unchanged when the agent moves to stage three.
 
-## Invocation
+| Stage | The program | What it uses |
+|---|---|---|
+| 1 | A plain filter | stdin, stdout, stderr, exit code |
+| 2 | Knows when Agents Live invoked it | Run context in the environment, the log sink, control |
+| 3 | Takes part in a validated pipeline | The pipeline MCP and its schemas |
 
-The definition names the program and the command line it wants:
+## Stage 1: a plain filter
+
+Nothing here is specific to Agents Live. Read stdin, do the work, write the
+value to stdout, put diagnostics on stderr, and exit non-zero if it went wrong.
+
+**A pre-processor** is handed nothing on stdin. What it writes to stdout is
+given to the model verbatim, under a label, the way an attachment is.
+
+**A post-processor** is handed the model's output on stdin. What it writes to
+stdout becomes the run's result.
+
+```python
+findings = audit(account)
+print(json.dumps({"findings": findings}))
+```
+
+Agents Live does not parse, validate, or reshape what a processor writes. JSON
+is the usual choice because the next reader is a model or another program, but
+a Markdown table is equally valid if that is what the model should see.
+
+The definition says how to run it, using the command line you already type:
 
 ```yaml
 metadata:
   agents-live.schema-version: "2"
   agents-live.options: '{"account": "string", "dry_run": "bool=false"}'
   agents-live.pre-processor: "scripts/email_audit.py [--account ${account}] ${dry_run}"
-  agents-live.post-processor: "scripts/send.py --account ${account}"
+  agents-live.post-processor: "scripts/apply.py"
 ```
 
-Three rules govern the command line, and there are no others:
-
-| Form | Expands to |
-|---|---|
-| `${name}` | The option's value, as one argument, whatever spaces it contains |
-| `${name}` where the option is a boolean | `--name` when true, nothing when false |
-| `[ ... ]` | The bracketed fragment, or nothing at all if any `${name}` inside it has no value |
-
-An option declared with a default always has a value. An option declared
-without one may be absent, and the brackets are how a command line stays valid
-when it is:
+That is the whole of stage one. The same program still runs by hand:
 
 ```text
-scripts/email_audit.py [--account ${account}] ${dry_run}
+uv run scripts/email_audit.py --account team-inbox
+uv run scripts/email_audit.py --account team-inbox | uv run scripts/apply.py
 ```
 
-With `account` supplied, the program runs with `--account team-inbox`. Without
-it, the whole fragment disappears and the program runs with no account flag at
-all, which is what an optional flag means.
+## Stage 2: knowing you are under Agents Live
 
-Referencing an absent option outside brackets is an error, raised before the
-program is spawned rather than passed through as a dangling `--account` with
-nothing after it.
+Sooner or later the program wants the things only the run knows: which files
+changed, what the invocation asked for, where to put structured log records,
+and how to say there is nothing to do.
 
-Agents Live appends nothing of its own, so a strict argument parser never sees
-an argument it does not know. A processor that takes no arguments is named with
-no arguments.
-
-The two processors write their own command lines, so they may take different
-flags, or different spellings of the same value. Nothing has to agree except
-the option names the definition itself declared.
-
-**Precedence** for an option's value, lowest to highest: the default in
-`agents-live.options`, then the environment, then the flag on `agents-live run`.
-
-The interpreter is chosen by extension: `.py` through `uv run`, `.js` and `.ts`
-through `node`, `.ps1` through `pwsh -NoProfile -File`, anything else executed
-directly. The working directory is the repository root.
-
-## Input
-
-Stdin carries one JSON object. `AGENTS_LIVE_INPUT` names a file holding the
-same bytes, for a program that would rather read a path. The shape is identical
-for both roles in every execution mode:
-
-```json
-{
-  "contract": 2,
-  "role": "pre",
-  "run": {
-    "id": "8f1c2a...",
-    "agent": "email-agent",
-    "agent_id": "email-agent-8a6923e6b7",
-    "origin": "watch",
-    "attempt": 1
-  },
-  "repository": {
-    "root": "/work/notes",
-    "changed_files": ["docs/guide.md"]
-  },
-  "options": {"account": "team-inbox", "dry_run": true},
-  "instructions": "Focus on the authentication changes",
-  "upstream": null
-}
-```
-
-For a post-processor, `upstream` names what the previous step produced:
-
-```json
-{
-  "upstream": {
-    "step": "agent",
-    "path": "/run/agent/result",
-    "text": "Here is the plan...",
-    "value": null
-  }
-}
-```
-
-`text` is always the previous step's output as written. `path` addresses the
-same bytes in the store: the step's captured output, or the declared
-`agents-live.result-path` when the model published there instead of returning
-text. A post-processor can therefore find the model's result without hard-coding
-the path the prompt told the model to write to. `value` is populated only where
-Agents Live already had a reason to parse, meaning the definition declared
-`agents-live.output-schema` or the model published a JSON value into the store.
-Otherwise it is null and the post-processor parses `text` itself, or does not.
-
-Rules:
-
-- `contract` is the version. Fields are additive within a version; a removal or
-  a meaning change is a new version.
-- Every field has a defined empty value. `changed_files` is `[]`,
-  `instructions` is `""`, and `options` holds every declared option with `null`
-  for any that is absent. A processor never needs a presence check.
-- `options` repeats what the flags carried, so a shell program can read the
-  envelope with `jq` instead of parsing arguments.
-- Empty stdin is legal. Run by hand with nothing piped in, the program behaves
-  as if every field held its empty value.
-
-## Output
-
-Whatever the program writes to stdout is the result. Agents Live does not parse
-it, validate it, or require it to be JSON.
-
-For a pre-processor it is handed to the model verbatim, under a label, the way
-an attachment is. For a post-processor it becomes the run's result.
+Every one of these is announced by an environment variable, and every one is
+absent when the program runs by hand. `AGENTS_LIVE_CONTRACT` is the single
+detection rule.
 
 ```python
-print(json.dumps({"findings": findings}))
+under_agents_live = "AGENTS_LIVE_CONTRACT" in os.environ
 ```
 
-A program with output too large or too binary for a pipe, or one whose stdout
-is already spoken for, may write the file at `AGENTS_LIVE_OUTPUT` instead. When
-it does, its stdout is treated as diagnostics. Most programs never need this.
+### Run context
 
-Two things are shape-checked, and neither is a processor's output:
-`agents-live.output-schema` validates what the model returns, and a bound
-`$schema` validates what the model writes into the store. Both guard the
-untrusted participant. A processor is repository code.
+Everything the run knows arrives in the environment. There is no file to open
+and no envelope to parse: a scalar is a plain value, and a collection is JSON,
+which is the convention `AGENTS_LIVE_CHANGED_FILES` already follows.
 
-## Control
-
-To end the run early, write the file at `AGENTS_LIVE_CONTROL`:
-
-```python
-Path(os.environ["AGENTS_LIVE_CONTROL"]).write_text(json.dumps({"skip": True}))
-```
-
-| Field | Type | Meaning |
+| Variable | Form | Holds |
 |---|---|---|
-| `skip` | boolean | End the run now, successfully, without running later steps |
-| `message` | string | One short line for the run record |
+| `AGENTS_LIVE_CONTRACT` | scalar | `2` |
+| `AGENTS_LIVE_ROLE` | scalar | `pre` or `post` |
+| `AGENTS_LIVE_AGENT_NAME` | scalar | The definition's name |
+| `AGENTS_LIVE_AGENT_ID` | scalar | The stable identifier used in logs and state |
+| `AGENTS_LIVE_RUN_ID` | scalar | This run |
+| `AGENTS_LIVE_ORIGIN` | scalar | `clock`, `boot`, `watch`, or `manual` |
+| `AGENTS_LIVE_ATTEMPT` | scalar | Which attempt this is |
+| `AGENTS_LIVE_REPO_ROOT` | scalar | The repository root, which is also the working directory |
+| `AGENTS_LIVE_INSTRUCTIONS` | scalar | What the invocation asked for, or empty |
+| `AGENTS_LIVE_CHANGED_FILES` | JSON array | Repository-relative paths, or `[]` |
+| `AGENTS_LIVE_OPTIONS` | JSON object | Every declared option, typed |
 
-Control never travels on stdout, so no value a processor emits can be mistaken
-for an instruction.
+So reading one value costs one line, in any language:
 
-## Failure
+```python
+options = json.loads(os.environ.get("AGENTS_LIVE_OPTIONS", "{}"))
+```
 
-A non-zero exit fails the run, and stderr becomes the recorded message.
-Exceeding the step timeout fails it as well. Processors are not retried; only
-the model step is, once on timeout and twice on empty output.
+```bash
+account=$(jq -r .account <<< "$AGENTS_LIVE_OPTIONS")
+```
 
-The step timeout is `agents-live.timeout` if declared, otherwise 120 seconds,
-applied to each step separately.
+Values in `AGENTS_LIVE_OPTIONS` are typed, so `dry_run` is `true` rather than
+`"true"`, and an option that was declared but not supplied is `null`. Nothing
+needs a presence check.
 
-## Logging
+Two of these can grow without bound, so `AGENTS_LIVE_INSTRUCTIONS` and
+`AGENTS_LIVE_CHANGED_FILES` are capped before the program is spawned, against
+the same host limit that bounds the command line.
+
+### Structured logs
 
 `AGENTS_LIVE_LOG` names a JSONL file that only this step writes. The host
 validates it, stamps identity onto every row, caps it, and merges it into the
@@ -197,114 +132,319 @@ agent log when the step exits.
   own. A processor that calls a paid API has a real reason to report spend.
 - **Stamped by the host**, and not yours to set: `run_id`, `agent_name`,
   `agent_id`, `step`, and span identity.
-- **Reserved**: a processor may not write `phase: "done"` nor a run-outcome
-  status. Those decide whether an agent is healthy. A log row is an
-  observation; the verdict is the exit code.
-- **Correlation** arrives as `TRACEPARENT`. Ignore it and your rows are still
+- **Reserved**: never write `phase: "done"` nor a run-outcome status. Those
+  decide whether an agent is healthy. A log row is an observation; the verdict
+  is the exit code.
+- **Correlation** arrives as `TRACEPARENT`. Ignore it and rows are still
   correlated, because the host stamps the step span.
 - **Sensitivity defaults closed.** Rows are local-only unless explicitly marked
   as exportable operational metadata.
 - **A malformed row is quarantined, never fatal.** Overflowing the cap
   truncates and records a marker.
-- **Standalone**, with no sink named, the same records go to stderr.
+- With no sink named, write the same records to stderr.
 
-## Shared state
+### Ending the run early
 
-`AGENTS_LIVE_STORE` names a run-scoped directory of JSON values. A path
-addresses a file, so `/in/messages` is `$AGENTS_LIVE_STORE/in/messages.json`.
-Read and write it with ordinary file operations, in every mode.
+Write `AGENTS_LIVE_CONTROL` to stop before the later steps run:
 
-The store is how the three participants pass work along. The usual pipeline
-shape is that a pre-processor publishes inputs, the model reads them and
-publishes a result, and a post-processor reads that result and applies it.
+```python
+Path(os.environ["AGENTS_LIVE_CONTROL"]).write_text(json.dumps({"skip": True}))
+```
 
-It is ephemeral: created for one run, removed when the run ends. `--keep-store`
-preserves it for debugging. Values the definition seeds through fenced `put`
-blocks are written before the first step and are read-only thereafter, which is
-where an output schema belongs so the model cannot rebind the schema it is
-validated against.
-
-A value the model will read is often split into numbered chunks with a
-manifest, because one tool call is a poor way to move a large document. That is
-an authoring choice about how the model reads, not about how the value is
-stored.
-
-## Execution mode
-
-Mode decides what the model may do. It does not change what a processor
-receives, or how a processor reaches the store.
-
-|  | `plan`, `write` | `pipeline` |
+| Field | Type | Meaning |
 |---|---|---|
-| Model tools | Provider tools per policy | Store tools only |
-| Store exposed to the model | No | Yes, as `get` and `put` |
-| Seeded paths | Not applicable | Frozen against the model |
-| What a processor receives | Envelope, store, log sink | Identical |
+| `skip` | boolean | End the run now, successfully, without running later steps |
+| `message` | string | One short line for the run record |
 
-In pipeline mode the model becomes a third participant in the store. Agents
-Live starts an ephemeral in-process MCP server in front of the same directory
-and gives the model `get` and `put` as its only tools, validating writes
-against a bound `$schema` and refusing writes to seeded paths. The server
-exists so the model's access can be constrained and mediated, not because the
-store is remote: processors keep reading and writing the directory directly.
+Control has its own file so that nothing a processor writes to stdout can be
+mistaken for an instruction. That matters most for a post-processor, whose
+stdin is literal model output.
 
-A post-processor does not need to know which of those happened. Its envelope
-names the previous step's result path either way.
+For a scheduled audit that usually finds nothing, skipping is also most of the
+cost.
 
-## Environment
+## Stage 3: taking part in the pipeline
+
+Stage 3 is where you stop trusting the model with anything a program could
+check instead.
+
+In `mode: pipeline` the model loses every tool except `get` and `put` against a
+run-scoped MCP server that exists only for the duration of the run. Four
+properties follow, and together they are the reason to be here.
+
+**It sees only what you published.** The model cannot read the repository, so
+it cannot wander into a credential, an unrelated document, or a file that
+happens to contain instructions aimed at it. A pre-processor decides what goes
+in, which means the injection surface is a set you curated rather than whatever
+the filesystem holds today.
+
+**It cannot act.** No file writes, no shell, no network tools. Every effect on
+the world happens afterwards, in a program you wrote, that you can read and
+test.
+
+**Its output is checked before anything acts on it.** A schema bound at
+`<path>/$schema` validates every `put` at the moment of writing, so a
+malformed or hostile value is refused at the boundary rather than reaching code
+that edits files. Because the schema is seeded from the definition and frozen,
+the model cannot widen its own contract.
+
+**What must be correct is computed, not asserted.** See
+[Ask for decisions, not content](#ask-for-decisions-not-content).
+
+Taken together the model becomes a pure function from curated input to a
+checked value, sandwiched between two deterministic programs. That is what
+makes an unattended agent that edits real files reviewable, testable without a
+model, and safe to leave running.
+
+That is the only reason to be here. In particular, do not move to stage 3
+because your material got large: see [Size](#size), which is the host's problem
+rather than yours.
+
+A processor joins the pipeline by connecting to the same server:
+
+```text
+PIPELINE_MCP_URL      the loopback URL, present only in pipeline mode
+PIPELINE_MCP_TOKEN    the bearer token for it
+```
+
+### Publishing inputs
+
+A pre-processor publishes what the model is allowed to see:
+
+```python
+await session.call_tool("put", {"path": "/input/recommendations", "value": text})
+```
+
+A large document is usually split into numbered values with a manifest, because
+one tool call is a poor way to move a large document to a model:
+
+```text
+/input/recommendations/manifest   {"chunks": ["/input/recommendations/0", ...]}
+/input/recommendations/0          the first 4000 characters
+```
+
+### Constraining the output
+
+Bind a schema by putting it at `<path>/$schema`, and the server validates every
+`put` to that path against it, using JSON Schema Draft 2020-12.
+
+Seed it from the definition body rather than from a processor, with a fenced
+`put` block:
+
+````markdown
+```put /output/judgment/$schema
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["patch"]
+}
+```
+````
+
+Seeded paths are written before the first step and are frozen for the rest of
+the run. That is what stops the model from publishing a permissive schema of
+its own and then validating itself against it.
+
+### Ask for decisions, not content
+
+The schema says what shape the answer takes. This says how much of the answer
+to ask for, and it is the difference between an agent you can trust and one you
+have to re-read every morning.
+
+Have the model return the judgement and keep the document. Identifiers,
+orderings, verdicts, and short rationales, not a rewritten file:
+
+```json
+{
+  "action": "update",
+  "patch": {
+    "omit": {"main": ["Bicep Curl"]},
+    "reorder": {"main": ["Farmer Carry", "Hip Abd (Push)"]}
+  },
+  "summary": "Removed Bicep Curl; reordered main."
+}
+```
+
+The post-processor holds the real file, applies the patch, and writes it. Four
+things come from that.
+
+**Rules the model cannot break, because it never touches them.** A completed
+item cannot be silently dropped if removal requests are checked against the
+file. Sections the model was not asked about pass through untouched rather than
+surviving a rewrite intact by luck.
+
+**Derived values stay derived.** Anything computable, a budget, a total, a
+safety check, is recomputed by the post-processor from the final state. A model
+asserting a number it did not compute is a defect waiting for a quiet morning.
+
+**A claim check becomes possible.** With decisions in hand you can compare what
+the model said it did against what the patch actually does, and record the
+difference.
+
+**No-change is cheap and explicit.** A verdict of "the plan is sound" is two
+lines, and it means the same thing every time.
+
+A large document goes in and a few hundred bytes of decisions come out, which
+is pleasant but not the point. Ask for decisions because they are checkable,
+not because they are small.
+
+### Reading the result
+
+Declare where the run's result lives:
+
+```yaml
+agents-live.result-path: "/output/judgment"
+```
+
+Agents Live snapshots that path when the model finishes and pipes it to the
+post-processor's stdin. **A stage 1 post-processor therefore keeps working
+after the move to pipeline mode**, because it still reads its input from stdin.
+A post-processor that wants more than the result can `get` any other path
+itself.
+
+### Keeping the command line
+
+Stage 3 does not cost you stage 1. Publish to the MCP when it is there and to
+stdout when it is not:
+
+```python
+if os.environ.get("PIPELINE_MCP_URL"):
+    publish(values)                 # put each path
+else:
+    print(json.dumps(values))       # still a filter
+```
+
+The program remains runnable by hand, testable without a model, and pipeable
+into the post-processor.
+
+## Reference
+
+### The command line
+
+Three rules govern substitution, and there are no others:
+
+| Form | Expands to |
+|---|---|
+| `${name}` | The option's value, as one argument, whatever spaces it contains |
+| `${name}` where the option is a boolean | `--name` when true, nothing when false |
+| `[ ... ]` | The bracketed fragment, or nothing at all if any `${name}` inside it has no value |
+
+An option declared with a default always has a value. One declared without a
+default may be absent, and the brackets are how a command line stays valid when
+it is: with `account` supplied the program runs with `--account team-inbox`,
+and without it the flag and its value disappear together.
+
+Referencing an absent option outside brackets is an error, raised before the
+program is spawned rather than passed through as a dangling `--account` with
+nothing after it.
+
+Agents Live appends nothing of its own, so a strict argument parser never sees
+an argument it does not know. The two processors write their own command lines,
+so they may take different flags, or different spellings of the same value.
+
+**Precedence** for an option's value, lowest to highest: the default in
+`agents-live.options`, then the environment, then the flag on `agents-live run`.
+
+The interpreter is chosen by extension: `.py` through `uv run`, `.js` and `.ts`
+through `node`, `.ps1` through `pwsh -NoProfile -File`, anything else executed
+directly. The working directory is the repository root.
+
+### Streams
+
+| Stream | Pre-processor | Post-processor |
+|---|---|---|
+| stdin | Nothing | The model's output, or the snapshot of `result-path` in pipeline mode |
+| stdout | Given to the model verbatim | Becomes the run's result |
+| stderr | Diagnostics; the recorded message on failure | Same |
+
+A program with output too large or too binary for a pipe may write the file at
+`AGENTS_LIVE_OUTPUT` instead, in which case its stdout is treated as
+diagnostics. Most programs never need this.
+
+### Size
+
+Write what you have. Agents Live is responsible for getting it to the model,
+and a processor should never choose a design because of a byte ceiling.
+
+The ceiling is real but it belongs to process spawning, not to this contract.
+Windows caps a command line at 32767 characters, roughly 64 times smaller than
+a typical Linux `ARG_MAX`, so a prompt passed as an argument is the one handoff
+with a hard limit. Agents Live delivers the prompt by whatever route the
+provider supports for large input, which for Claude Code is stdin, capped at
+10 MB, and for Copilot CLI is stdin when `-p` is omitted.
+
+Everything else already streams: stdin, stdout, and the log sink are pipes or
+files with no practical ceiling. Environment values are bounded, so
+`AGENTS_LIVE_INSTRUCTIONS` and `AGENTS_LIVE_CHANGED_FILES` are capped before
+spawn, and anything that outgrows the environment is handed over as a file path
+instead.
+
+**If you do hand the model a path**, which is reasonable when the material is
+already a file on disk, two things have to be true. Write it outside the
+repository, because a file created inside a watched tree can re-trigger the
+watcher that started the run. And make sure the model is allowed to read it:
+the model is confined to directories the run granted, so a path in the system
+temporary directory is readable under Copilot by default and not under Claude.
+Declare the directory in the definition rather than hoping. Under a
+non-interactive run there is nobody to approve a read, so an ungranted path
+fails rather than prompts.
+
+The model's own output is bounded separately by
+`agents-live.output-max-bytes`, 10 MB by default, and what lands in the run
+record is truncated because a log line is not the artifact.
+
+Moving prompt delivery off the command line is tracked in
+[#374](https://github.com/johnshew/agents-live/issues/374).
+
+### Environment
+
+Run context is listed under stage 2 above. The rest of what Agents Live sets:
 
 | Variable | Present when | Holds |
 |---|---|---|
-| `AGENTS_LIVE_CONTRACT` | Running under Agents Live | The contract version, and the signal that the rest of this table exists |
-| `AGENTS_LIVE_INPUT` | Always, under Agents Live | The envelope, as a file |
-| `AGENTS_LIVE_OUTPUT` | Always, under Agents Live | Where to write a result too large for stdout |
-| `AGENTS_LIVE_CONTROL` | Always, under Agents Live | Where to write `skip` |
-| `AGENTS_LIVE_LOG` | Always, under Agents Live | The JSONL sink for this step |
-| `AGENTS_LIVE_STORE` | Always, under Agents Live | The run-scoped store directory |
-| `TRACEPARENT` | Always, under Agents Live | The step span, as a parent |
-
-`AGENTS_LIVE_CONTRACT` is the single detection rule. Note what is absent: agent
-name, origin, changed files, and options are all in the envelope. The
-environment announces capabilities, the envelope carries data, and that is why
-an envelope replays and produces an identical run.
+| `AGENTS_LIVE_OUTPUT` | Under Agents Live | Where to write a result too large for stdout |
+| `AGENTS_LIVE_CONTROL` | Under Agents Live | Where to write `skip` |
+| `AGENTS_LIVE_LOG` | Under Agents Live | The JSONL sink for this step |
+| `TRACEPARENT` | Under Agents Live | The step span, as a parent |
+| `PIPELINE_MCP_URL`, `PIPELINE_MCP_TOKEN` | `mode: pipeline` | The run-scoped pipeline MCP |
 
 Anything in `agents-live.env` is added as well, and the `AGENTS_LIVE_`
 variables are written last, so a definition cannot override them.
 
-## Running one by hand
+Everything a program needs is therefore either an argument or an environment
+variable, which is what makes a step reproducible by hand: `agents-live context
+<agent> --role pre` prints the assignments and the command line for one step,
+ready to paste into a shell.
 
-```text
-agents-live envelope email-agent --role pre > pre.json
-uv run scripts/email_audit.py --account team-inbox < pre.json
-```
+### Failure
 
-Nothing about the program requires Agents Live to be running. Add
-`--keep-store` to a real run and the store directory survives for inspection
-alongside the envelope and the step's log.
+A non-zero exit fails the run, and stderr becomes the recorded message.
+Exceeding the step timeout fails it as well. Processors are not retried; only
+the model step is, once on timeout and twice on empty output.
 
-## The optional helper
+The step timeout is `agents-live.timeout` if declared, otherwise 120 seconds,
+applied to each step separately.
 
-Reading the envelope, defaulting its fields, writing control, and appending log
-records is a small amount of boilerplate:
+### What execution mode changes
 
-```python
-# /// script
-# dependencies = ["agents-live-processor>=1"]
-# ///
-from agents_live_processor import context
+Mode decides what the model may do. It does not change how a processor is
+invoked or what it reads and writes.
 
-ctx = context()                        # standalone-safe; every field defaulted
+|  | `plan`, `write` | `pipeline` |
+|---|---|---|
+| Model tools | Provider tools per policy | `get` and `put` only |
+| Model reads the repository | Yes, per policy | No |
+| Model output | Returned as text, optionally schema-checked | Published to a path, schema-checked on write |
+| Post-processor stdin | The model's output | The snapshot of `result-path` |
 
-if not ctx.options.dry_run:
-    send(to=ctx.options.account)
+In `plan` mode the same rigor is available without the MCP:
+`agents-live.output-schema` validates the value extracted from the model's
+reply, and `agents-live.output-path-roots` rejects any `path` in it that
+escapes the directories you named. The model proposes; your post-processor
+disposes.
 
-ctx.log("swept", threads=42)
-ctx.store.put("/out/summary", data)
-ctx.emit({"threads": 42})
-```
-
-Nothing imports `agents_live`, so no internal module path is frozen. The raw
-contract is small enough to use inline in any language.
+Both are tool policy and deterministic mediation, not an operating system
+sandbox. Processors run with the local account's permissions.
 
 ## Open decisions
 
@@ -314,8 +454,7 @@ also records the reasoning behind everything above.
 - Whether a non-zero exit always means failure. A program whose job is to
   report findings, such as an audit or a linter, conventionally exits non-zero
   when it finds something.
-- Whether the helper is a published package, as shown, or a copy written into
-  the skill.
+- Whether a helper library ships to remove the MCP client boilerplate at stage
+  three, and if so whether it is a published package or a copy in the skill.
 - Option types beyond `bool` and `string`.
-- Whether a processor may declare the capabilities it requires, so an
-  incompatible definition fails at load rather than mid-run.
+- Whether `agents-live.result-path` should be available outside pipeline mode.
