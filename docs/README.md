@@ -37,6 +37,9 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [decisions/no-python-api.md](decisions/no-python-api.md) - why processors
   use the JSON CLI and child process contract instead of importing the
   package, and what handlers should call instead.
+- [processor-contract.md](processor-contract.md) - proposed second processor
+  contract, keeping a processor an ordinary command-line program that is
+  useful outside Agents Live.
 - [backlog.md](backlog.md) - high-level themes linked to GitHub issues.
 
 Design documents are added here as they are written, one file per topic,
