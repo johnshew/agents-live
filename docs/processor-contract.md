@@ -245,6 +245,15 @@ attempt budget rebuilding an identical command. Agents Live avoids that, though
 not by design: `retryable` is set only for `timeout` and `empty_output`, so the
 overflow lands as `cli_crash` and stops.
 
+**Two findings that belong to other decisions**, surfaced by the same reading
+of provider documentation and recorded so they are not rediscovered. The two
+CLIs disagree about whether an unattended run may load repository-controlled
+hooks and MCP servers, which is
+[#375](https://github.com/johnshew/agents-live/issues/375). And Claude can
+return a schema-validated value directly, which would retire the JSON
+extraction heuristic in plan mode, which is
+[#376](https://github.com/johnshew/agents-live/issues/376).
+
 **Cost accepted.** Prompt delivery becomes provider-specific, so a Claude agent
 and a Copilot agent have different effective ceilings until #3398 lands or
 Copilot's stdin path is exercised here. That asymmetry is invisible to

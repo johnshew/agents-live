@@ -216,12 +216,18 @@ await session.call_tool("put", {"path": "/input/recommendations", "value": text}
 ```
 
 A large document is usually split into numbered values with a manifest, because
-one tool call is a poor way to move a large document to a model:
+a provider caps how much tool output it will hand the model at once. Copilot
+CLI's limit is 20 KiB by default, which is why published documents are
+typically chunked at a few thousand characters rather than at any size that
+feels tidy:
 
 ```text
 /input/recommendations/manifest   {"chunks": ["/input/recommendations/0", ...]}
 /input/recommendations/0          the first 4000 characters
 ```
+
+The manifest exists because the model cannot list the store. It can only fetch
+a path it has been told about.
 
 ### Constraining the output
 
@@ -444,7 +450,9 @@ escapes the directories you named. The model proposes; your post-processor
 disposes.
 
 Both are tool policy and deterministic mediation, not an operating system
-sandbox. Processors run with the local account's permissions.
+sandbox. Processors run with the local account's permissions, and what else a
+provider may load from the repository during a run is being settled in
+[#375](https://github.com/johnshew/agents-live/issues/375).
 
 ## Open decisions
 
