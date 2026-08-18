@@ -42,10 +42,10 @@ and testable without Agents Live.
 observation, shared state, and human narration each have their own route, so no
 content can impersonate a control word.
 
-**3. A processor declares its interface.** Flags in, result shape out. The
-declaration is what lets Agents Live validate before dispatch instead of after
-a model call, and it is what would later let the same program be offered to a
-model as a tool without a rewrite.
+**3. The definition owns the command line.** A processor declares nothing about
+itself. The definition that uses it says how to invoke it, the way a Makefile,
+a systemd unit, or a crontab entry does. Nothing has to be discovered,
+introspected, or kept in sync in a second file.
 
 **4. Capabilities are announced and optional.** Each capability is named by an
 environment variable. A program that finds none of them still runs. This is
@@ -77,64 +77,58 @@ stdout control commands and migrated to environment file handles, and the
 `stop-commands` escape hatch it still carries is the evidence for why. The risk
 is sharper here, because a post-processor's input is literal model output.
 
-## Declaring the interface
+## Invocation
 
-A processor declares what it accepts and what it returns, in a file beside it:
-
-```yaml
-# scripts/sweep_email.al.yml
-description: Sweep an inbox and report unread threads
-inputs:
-  dry_run:
-    type: boolean
-    default: false
-    description: Report what would be sent without sending
-  account:
-    type: string
-    required: true
-outputs:
-  type: object
-  properties:
-    threads: {type: integer}
-```
-
-A processor with no declaration receives no flags. That is what makes adopting
-an existing zero-argument script a no-op.
-
-The agent definition separately declares the option surface of the run, which
-is [#372](https://github.com/johnshew/agents-live/issues/372):
+The definition names the program and the command line it wants:
 
 ```yaml
 metadata:
   agents-live.schema-version: "2"
-  agents-live.pre-processor: "scripts/sweep_email.py"
-  agents-live.post-processor: "scripts/send.py"
-  agents-live.options: '{"dry_run": "bool=false", "account": "string"}'
+  agents-live.options: '{"account": "string", "dry_run": "bool=false"}'
+  agents-live.pre-processor: "scripts/sweep_email.py --account ${account} ${dry_run}"
+  agents-live.post-processor: "scripts/send.py --account ${account}"
 ```
 
-The two declarations compose by one rule: **an option reaches a processor only
-if that processor declared it.** A pre-processor and a post-processor may
-accept different subsets, and neither sees a name it did not ask for.
+`agents-live.options` is the run's option surface, which is
+[#372](https://github.com/johnshew/agents-live/issues/372). Two rules govern
+the command line:
 
-## Invocation
+- `${name}` substitutes that option's value as a single argument, whatever
+  spaces it contains.
+- A boolean substitutes `--name` when true and nothing when false, so
+  `${dry_run}` becomes `--dry-run` or disappears.
 
-Agents Live runs the program with its declared flags and nothing else:
+Referencing an option that has no value and no default is an error before
+dispatch, which keeps a dangling `--account` with nothing after it from ever
+reaching the program.
 
-```text
-uv run scripts/sweep_email.py --dry-run --account team-inbox
-```
+That is the whole grammar. It is not a templating language and it will not grow
+into one. A processor that takes no arguments is named with no arguments, which
+is what makes adopting an existing zero-argument script a no-op.
 
-Name mapping is mechanical. `dry_run` becomes `--dry-run`, a boolean is present
-or absent, and everything else takes one value. A declared input that was not
-supplied and has a default is passed with its default, so the program sees the
-same command line whether the value came from the invocation or the definition.
+The two processors may take different flags, or different names for the same
+value, because each writes its own command line. Nothing has to agree except
+the option names the definition itself declared.
 
-Precedence, lowest to highest: declaration default, agent definition,
-environment, flags. Flags win because they are the most explicit and the most
-local, which is the case that has to work while debugging.
+Agents Live passes exactly what the definition wrote and never appends anything
+of its own, so a strict argument parser never sees an argument it does not
+know.
+
+Precedence for an option's value, lowest to highest: the default in
+`agents-live.options`, then the environment, then the flag on `agents-live
+run`. The most explicit and most local wins, which is the case that has to work
+while debugging.
 
 The interpreter is still chosen by extension, and the working directory is
 still the repository root.
+
+### What this gives up
+
+Agents Live cannot check that `--account` is a flag the script actually
+accepts, because it does not know the script's interface. A wrong name is
+caught by the script's own argument parser, which exits immediately with a
+clear message and, for a pre-processor, before any model call. That is a good
+enough failure, and it costs one less file format than the alternative.
 
 ## Input: the envelope
 
@@ -170,14 +164,17 @@ For a post-processor, `upstream` names what the previous step produced:
     "step": "agent",
     "path": "/run/agent/result",
     "text": "Here is the plan...",
-    "value": {"files": [{"path": "docs/guide.md", "content": "..."}]}
+    "value": null
   }
 }
 ```
 
-`path` addresses the value in the store and `value` inlines it when it is
-small. Both are populated in every mode, which is what makes a post-processor's
-job the same whether the model wrote through the store or returned text. `step`
+`text` is always populated and is the previous step's output as written.
+`path` addresses the same bytes in the store, for output too large to inline.
+`value` is populated only when Agents Live already had a reason to parse, which
+means the definition declared `agents-live.output-schema` for the model, or the
+model wrote a value into the store in pipeline mode. Otherwise it is null and
+the post-processor parses `text` itself, or does not, as it prefers. `step`
 names what actually produced it, `agent` or `pre`.
 
 Rules that make the envelope safe to depend on:
@@ -198,13 +195,27 @@ processor, which is impossible under contract 1.
 
 ## Output: result and control
 
-The result is a JSON value written to the file at `AGENTS_LIVE_OUTPUT`. For a
-pre-processor it becomes the model's context; for a post-processor it becomes
-the run's result.
+The result is whatever the program writes to the file at
+`AGENTS_LIVE_OUTPUT`. **Agents Live does not parse it, validate it, or require
+it to be JSON.** It carries it.
+
+For a pre-processor it is handed to the model verbatim, under a label, the way
+an attachment is. For a post-processor it becomes the run's result. Neither
+case needs Agents Live to know the shape, so nothing declares one.
 
 ```python
 Path(os.environ["AGENTS_LIVE_OUTPUT"]).write_text(json.dumps({"threads": 42}))
 ```
+
+A JSON document is the usual choice because the next reader is a model or
+another program, but a Markdown table is equally valid if that is what the
+model should see.
+
+There are exactly two places where a shape is checked, and both predate this
+contract: `agents-live.output-schema` validates what the **model** returns,
+and a bound `$schema` validates what the **model** writes into the store in
+pipeline mode. Both guard the untrusted participant. A processor is trusted
+repository code, so its output is not a validation boundary.
 
 When `AGENTS_LIVE_OUTPUT` is absent, which is the standalone case, the result
 goes to stdout, because that is what a person running the program by hand
@@ -346,9 +357,13 @@ Given a script that already works:
 uv run sweep_email.py --dry-run --account team-inbox
 ```
 
-Adoption is a declaration beside it and one line in the definition. The
-program's own command line does not change, and neither does anything it
-already does with stdout, because stdout is still just printing.
+Adoption is one line in the definition, holding the command line you already
+type. The program does not change, and neither does anything it already does
+with stdout, because stdout is still just printing.
+
+```yaml
+agents-live.pre-processor: "scripts/sweep_email.py --account ${account} ${dry_run}"
+```
 
 It gains four things when it wants them, and nothing breaks if it never does:
 the envelope, the log sink, the store, and the ability to skip the run.
@@ -403,8 +418,7 @@ one. The raw contract is small enough to implement inline in any of them.
 
 | | Contract 1 | Contract 2 |
 |---|---|---|
-| Arguments | None, ever | Declared flags, and only those |
-| Interface | Undeclared | Declared beside the program |
+| Arguments | None, ever | The command line the definition wrote |
 | Input | Closed for pre, mode-dependent for post | The envelope, identically everywhere |
 | Result | Whole stdout | The result file |
 | Control | Top-level `skip` key in the payload | Its own file |
@@ -455,7 +469,12 @@ whichever lands first:
 - The helper: a published package, or a copy written into the skill.
 - Whether a processor may declare required capabilities, so an incompatible
   definition fails at load rather than mid-run.
-- Whether the interface declaration lives beside the program, as shown, or
-  inside it as a structured header comment, which keeps a processor one file.
 - Whether `agents-live envelope` is its own command, as shown, or a flag on
   `run`.
+- Whether a non-zero exit always means failure. A program whose job is to
+  report findings, such as an audit or a linter, conventionally exits non-zero
+  when it finds something, and that is data rather than a fault.
+- Whether a program that never writes the result file, but prints one JSON
+  value to stdout, should have that taken as its result. It would make
+  adoption require no code change at all, at the cost of making stdout
+  half-payload again.
