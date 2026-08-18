@@ -1522,6 +1522,10 @@ def publish() -> None:
     _check_candidate_acceptance(version)
     notes = _release_notes(version)
     manifest = _write_artifact_manifest(version, preparation)
+    accepted_artifacts = (
+        Path(str(preparation["wheel"])),
+        Path(str(preparation["sdist"])),
+    )
     if needs_push:
         _run([
             "git", "push", "--atomic", "origin",
@@ -1529,7 +1533,7 @@ def publish() -> None:
             f"{preparation['tag_object']}:refs/tags/{tag}",
         ])
     _write_release_notes(
-        tag, notes, create=True, assets=(manifest,),
+        tag, notes, create=True, assets=(manifest, *accepted_artifacts),
         resume_draft=resume_draft)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
 
