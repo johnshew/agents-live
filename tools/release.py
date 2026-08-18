@@ -538,6 +538,10 @@ def _check_publish_state(version: str) -> bool:
 
 
 def _candidate_wheel(version: str) -> Path:
+    preserved = _artifact_store_dir(version) / \
+        f"agents_live-{version}-py3-none-any.whl"
+    if preserved.is_file():
+        return preserved
     wheel = ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl"
     if not wheel.is_file():
         raise ReleaseError(
@@ -545,6 +549,29 @@ def _candidate_wheel(version: str) -> Path:
             "rerun --prepare"
         )
     return wheel
+
+
+def _artifact_store_dir(version: str) -> Path:
+    value = _git(
+        "rev-parse", "--git-path",
+        f"agents-live-release/artifacts-{version}")
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
+    sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
+    if not sdist.is_file():
+        raise ReleaseError(
+            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+    destination = _artifact_store_dir(version)
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    preserved_wheel = destination / wheel.name
+    shutil.copy2(wheel, preserved_wheel)
+    shutil.copy2(sdist, destination / sdist.name)
+    return preserved_wheel
 
 
 def _sha256(path: Path) -> str:
@@ -588,7 +615,7 @@ def _candidate_branch(version: str) -> str:
 
 
 def _release_identity(version: str, wheel: Path) -> dict[str, object]:
-    sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
+    sdist = wheel.parent / f"agents_live-{version}.tar.gz"
     if not sdist.is_file():
         raise ReleaseError(
             f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
@@ -1172,6 +1199,7 @@ def prepare(bump: str) -> None:
     _acceptance_path(target).unlink(missing_ok=True)
     _preparation_path(target).unlink(missing_ok=True)
     _checkpoint_path(target).unlink(missing_ok=True)
+    shutil.rmtree(_artifact_store_dir(target), ignore_errors=True)
     original = {path: path.read_bytes() for path in RELEASE_FILES}
     original_head = _git("rev-parse", "HEAD")
     candidate_branch = _candidate_branch(target)
@@ -1229,10 +1257,12 @@ def prepare(bump: str) -> None:
 
     tag = f"v{target}"
     _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
-    receipt = _write_preparation(target, _candidate_wheel(target))
+    wheel = _preserve_release_artifacts(
+        target, ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl")
+    receipt = _write_preparation(target, wheel)
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
     print(f"  preparation receipt: {receipt}")
-    print("  agents-live upgrade --from <target wheel>")
+    print(f"  agents-live upgrade --from {wheel}")
     print("  uv run --script tools/release.py --accept-candidate "
             "--repo <live-repository> --agent <safe-agent-identifier> "
             "--cost-agent <safe-provider-agent-identifier> --yes")

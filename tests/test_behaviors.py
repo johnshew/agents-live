@@ -19,6 +19,7 @@ import json
 import os
 import re
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2092,6 +2093,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_acceptance_path": lambda _version: root / "acceptance.json",
                 "_preparation_path": lambda _version: root / "preparation.json",
                 "_checkpoint_path": lambda _version: root / "checkpoint.json",
+                "_artifact_store_dir": lambda _version: root / "artifacts",
                 "_candidate_branch": lambda _version: "release/v1.1.0-candidate",
                 "_update_versions": update_versions,
                 "_gate_commands": lambda: [["gate"]],
@@ -2368,6 +2370,32 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with self.assertRaisesRegex(
                         release["ReleaseError"], "stale.*wheel_sha256"):
                     check("1.2.3")
+
+    def test_preparation_preserves_artifacts_outside_mutable_dist(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        preserve = release["_preserve_release_artifacts"]
+        candidate_wheel = release["_candidate_wheel"]
+        scope = preserve.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "dist" / "agents_live-1.2.3-py3-none-any.whl"
+            sdist = root / "dist" / "agents_live-1.2.3.tar.gz"
+            wheel.parent.mkdir()
+            wheel.write_bytes(b"accepted wheel")
+            sdist.write_bytes(b"accepted sdist")
+            store = root / ".git" / "release" / "artifacts-1.2.3"
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_artifact_store_dir": lambda _version: store,
+            }):
+                preserved = preserve("1.2.3", wheel)
+                wheel.write_bytes(b"later build")
+                sdist.write_bytes(b"later build")
+                self.assertEqual(b"accepted wheel", preserved.read_bytes())
+                self.assertEqual(
+                    b"accepted sdist",
+                    (store / "agents_live-1.2.3.tar.gz").read_bytes())
+                self.assertEqual(preserved, candidate_wheel("1.2.3"))
 
     def test_candidate_acceptance_receipt_binds_commit_and_wheel(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -3127,7 +3155,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
         manager.__enter__.return_value = playwright
         sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
         status = {"ok": True, "agents": [
-            {"identifier": "sample-123", "loadable": True},
+            {
+                "identifier": "sample-123", "loadable": True,
+                "state": "started", "execution": {"watch": "src/**"},
+            },
             {"identifier": "cost-agent-456", "loadable": True},
         ]}
         with (
@@ -3137,6 +3168,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     stdout="No dashboard started by this host is running.")),
                 "_json": mock.Mock(return_value=status),
                 "_browser_executable": lambda: Path("browser.exe"),
+                "_resident_watcher_ids": lambda _repo: {"sample-123"},
             }),
         ):
             preflight(
@@ -3150,6 +3182,98 @@ class TestCrossModuleAgreements(unittest.TestCase):
         playwright.chromium.launch.assert_called_once_with(
             executable_path=str(Path("browser.exe")), headless=True)
         browser.close.assert_called_once_with()
+
+    def test_operational_preflight_rejects_intent_only_watchers(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        preflight = script["_preflight"]
+        scope = preflight.__globals__
+        status = {"ok": True, "agents": [
+            {
+                "identifier": "watcher-123", "loadable": True,
+                "state": "started", "execution": {"watch": "src/**"},
+            },
+            {"identifier": "cost-agent-456", "loadable": True},
+        ]}
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = mock.Mock()
+        sync_api = mock.Mock(
+            sync_playwright=mock.Mock(return_value=manager))
+        with mock.patch.dict(
+                sys.modules, {"playwright.sync_api": sync_api}), \
+                mock.patch.dict(scope, {
+                    "_run": mock.Mock(return_value=mock.Mock(
+                        stdout="No dashboard started by this host is running.")),
+                    "_json": mock.Mock(return_value=status),
+                    "_resident_watcher_ids": lambda _repo: set(),
+                    "_browser_executable": lambda: Path("browser.exe"),
+                }):
+            with self.assertRaisesRegex(
+                    script["OperationalError"],
+                    "started watcher processes are not resident.*watcher-123"):
+                preflight(
+                    Path("agents-live.exe"), Path("C:/repo"),
+                    "watcher-123", "cost-agent-456")
+
+    def test_windows_process_query_uses_a_real_tab_delimiter(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        scope = script["_process_command_lines"].__globals__
+        windows = mock.Mock()
+        windows.name = "nt"
+        completed = mock.Mock(
+            returncode=0,
+            stdout="42\tC:\\tools\\agents-live.exe watch-loop sample-123\n",
+        )
+        run = mock.Mock(return_value=completed)
+        with mock.patch.dict(scope, {
+            "os": windows,
+            "subprocess": mock.Mock(run=run, TimeoutExpired=subprocess.TimeoutExpired),
+        }), mock.patch.object(scope["shutil"], "which", return_value="powershell"):
+            self.assertEqual(
+                ("C:\\tools\\agents-live.exe watch-loop sample-123",),
+                script["_process_command_lines"]())
+        command = run.call_args.args[0][-1]
+        self.assertIn("[char]9", command)
+        self.assertNotIn("`t", command)
+
+    def test_resident_watcher_matching_uses_the_exact_quoted_repository(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        resident = script["_resident_watcher_ids"]
+        scope = resident.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            repository = parent / "repo with space"
+            other = parent / "repo with space-copy"
+            repository.mkdir()
+            other.mkdir()
+            commands = (
+                f'agents-live --repo "{repository}" status',
+                f'not-agents-live --repo "{repository}" diagnostic watch-loop '
+                'fake-123 --runtime-role watcher',
+                f'agents-live --repo "{other}" internal watch-loop sample-123 '
+                '--runtime-role watcher',
+                f'agents-live --repo "{repository}" internal watch-loop sample-123 '
+                '--runtime-role watcher',
+            )
+            with mock.patch.dict(scope, {
+                "_process_command_lines": lambda: commands,
+            }):
+                self.assertEqual({"sample-123"}, resident(repository))
+                self.assertEqual(set(), resident(parent / "repo"))
+
+    def test_posix_process_query_preserves_nul_delimited_argv(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        argv = [
+            "agents-live", "--repo", "/tmp/repo with space",
+            "internal", "watch-loop", "sample-123",
+            "--runtime-role", "watcher",
+        ]
+        rendered = script["_decode_posix_command_line"](
+            b"\0".join(item.encode() for item in argv) + b"\0")
+        self.assertEqual(argv, shlex.split(rendered))
 
     def test_operational_cost_probe_requires_positive_list_cost(self) -> None:
         script = runpy.run_path(

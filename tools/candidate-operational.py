@@ -14,6 +14,7 @@ import math
 import os
 import re
 import signal
+import shlex
 import shutil
 import socket
 import subprocess
@@ -161,9 +162,91 @@ def _browser_executable() -> Path:
     return browser
 
 
-def _preflight(cli: Path, repo: Path, agent_id: str, cost_agent_id: str) -> None:
-    from playwright.sync_api import sync_playwright
+def _decode_posix_command_line(raw: bytes) -> str:
+    argv = [
+        item.decode("utf-8", errors="replace")
+        for item in raw.split(b"\0") if item
+    ]
+    return shlex.join(argv) if argv else ""
 
+
+def _process_command_lines() -> tuple[str, ...]:
+    if os.name == "nt":
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        if shell is None:
+            return ()
+        script = (
+            "Get-CimInstance Win32_Process | ForEach-Object { "
+            "'{0}{1}{2}' -f $_.ProcessId, [char]9, $_.CommandLine }")
+        try:
+            completed = subprocess.run(
+                [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        if completed.returncode != 0:
+            return ()
+        return tuple(
+            line.partition("\t")[2]
+            for line in completed.stdout.splitlines()
+            if "\t" in line and line.partition("\t")[2]
+        )
+    commands = []
+    for path in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if raw:
+            command = _decode_posix_command_line(raw)
+            if command:
+                commands.append(command)
+    return tuple(commands)
+
+
+def _resident_watcher_ids(repo: Path) -> set[str]:
+    repository = repo.resolve()
+    found: set[str] = set()
+    for raw in _process_command_lines():
+        try:
+            argv = shlex.split(raw, posix=os.name != "nt")
+        except ValueError:
+            continue
+        argv = [
+            item[1:-1]
+            if len(item) >= 2 and item[0] == item[-1] and item[0] in "\"'"
+            else item
+            for item in argv
+        ]
+        try:
+            candidate = Path(argv[argv.index("--repo") + 1]).resolve()
+            marker = next(
+                index for index, item in enumerate(argv)
+                if item in {"watch-loop", "--watch-loop"})
+            identifier = argv[marker + 1]
+            role = argv[argv.index("--runtime-role") + 1]
+        except (ValueError, IndexError, StopIteration):
+            continue
+        owned_launcher = any(
+            Path(item).stem.casefold() == "agents-live"
+            for item in argv[:marker]
+        )
+        same_repository = (
+            str(candidate).casefold() == str(repository).casefold()
+            if os.name == "nt" else candidate == repository
+        )
+        if (
+            owned_launcher
+            and role == "watcher"
+            and same_repository
+            and re.fullmatch(r"[A-Za-z0-9._-]+", identifier)
+        ):
+            found.add(identifier)
+    return found
+
+
+def _preflight(cli: Path, repo: Path, agent_id: str, cost_agent_id: str) -> None:
     if agent_id == cost_agent_id:
         raise OperationalError(
             "operational and cost acceptance agents must be distinct")
@@ -174,6 +257,24 @@ def _preflight(cli: Path, repo: Path, agent_id: str, cost_agent_id: str) -> None
     status = _json(cli, repo, "status")
     _row(status, agent_id)
     _row(status, cost_agent_id)
+    started_watchers = {
+        str(row["identifier"])
+        for row in status.get("agents", [])
+        if isinstance(row, dict)
+        and row.get("state") == "started"
+        and isinstance(row.get("execution"), dict)
+        and row["execution"].get("watch")
+        and row.get("identifier")
+    }
+    missing = sorted(started_watchers - _resident_watcher_ids(repo))
+    if missing:
+        raise OperationalError(
+            "started watcher processes are not resident: "
+            f"{', '.join(missing)}; cycle each through `agents-live stop` "
+            "and `agents-live start` before candidate acceptance")
+
+    from playwright.sync_api import sync_playwright
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)

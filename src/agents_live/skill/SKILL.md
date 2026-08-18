@@ -97,6 +97,12 @@ artifacts use hidden internal commands and are not a user-facing contract.
 | `uninstall` | `agents-live uninstall [--retain-state]` |
 | `install` | Install required tools *(see [docs/commands.md](docs/commands.md))* |
 
+`dashboard` is a foreground server command. Run it in a persistent terminal and
+use its API or visible page as the readiness signal; a healthy dashboard is not
+expected to make the command exit. `dashboard list` reports dashboards started
+through the managed dashboard path, not every independently launched foreground
+server.
+
 **Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
 **Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**

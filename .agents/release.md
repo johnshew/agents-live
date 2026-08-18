@@ -26,9 +26,13 @@ alone.
 
 ```bash
 git log -1 --format=%cs "$(git describe --tags --abbrev=0)"
-gh issue list --state open --limit 100 \
+
+gh issue list --state open --search "updated:>=<release-date>" --limit 100 \
 	--json number,title,createdAt,updatedAt,labels
 ```
+
+GitHub issue date qualifiers are UTC. Do not add a local-calendar upper bound:
+an issue created late today locally may already carry tomorrow's UTC date.
 
 For each relevant issue, choose one outcome:
 
@@ -64,6 +68,9 @@ uv build
 After the build, run the built-wheel dashboard readiness check described in
 [testing.md](testing.md), including `--dev`, `/api/agents`, and started/stopped
 action assertions. `dashboard --help` is not a release gate by itself.
+The dashboard itself is a foreground server. Readiness means the API and rows
+answer, not that its command exits; leave process startup/cleanup to
+`tools/dashboard-readiness.py` or candidate acceptance.
 
 The audit must report no personal information, secrets, or nonportable
 paths, and its adapter-resolution and doc-link checks must pass.
@@ -117,8 +124,11 @@ synchronized with `origin/main`, creates an isolated
 documentation-link, and changelog versions, runs every release gate, and
 creates the release commit, annotated tag, and preparation receipt locally.
 The receipt binds the exact gate list, commit, base commit, tag object, wheel,
-source distribution, and artifact hashes. Inspect the target-version artifacts
-under `dist/` and review the commit.
+source distribution, and artifact hashes. Preparation copies the wheel and
+source distribution into Git-local immutable release storage and all later
+bootstrap, acceptance, and publication steps use those copies. `dist/` may be
+rebuilt for diagnostics without changing the candidate identity. Inspect the
+receipt-bound artifacts and review the commit.
 
 ## Candidate acceptance
 
@@ -128,7 +138,7 @@ artifact upgrade path, restore a healthy representative repository with at
 least one started watcher, then run the mandatory acceptance command:
 
 ```bash
-agents-live upgrade --from dist/agents_live-<version>-py3-none-any.whl
+agents-live upgrade --from <receipt-bound-wheel-path-printed-by-prepare>
 uv run --script tools/release.py --accept-candidate \
   --repo <live-repository> --agent <safe-agent-identifier> \
   --cost-agent <safe-provider-agent-identifier> --yes
@@ -148,7 +158,11 @@ helper without repeatedly launching the held executable, and requires:
   deferred Windows upgrades.
 
 Acceptance preflights the selected agents, absence of a managed dashboard, and
-a real headless browser launch before replacement. It writes an
+a real headless browser launch before replacement. Every watcher counted in the
+baseline must also have a resident `watch-loop` process; started intent alone is
+not an acceptance baseline. If preflight names an intent-only watcher, cycle
+that one agent through public `stop`/`start` and rerun preflight before any
+replacement. It writes an
 `upgrade-complete` checkpoint after replacement, plugin convergence, watcher
 restoration, all-repository state comparison, and doctor health succeed. If a
 later operational phase fails and cleanup restores that exact baseline, resume

@@ -89,10 +89,20 @@ The standard loop for any change that lands as commits:
   pull request are its record. Reference an existing issue from a
   commit (`Fixes #N` closes on merge). `docs/backlog.md` records
   direction and links to those issues; it never restates their detail.
+- **Treat GitHub issue dates as UTC.** For a rolling recent-issue review, use
+  `updated:>=YYYY-MM-DD` or an exact timestamp and omit a local-calendar upper
+  bound. A local late-evening issue may already be dated tomorrow by GitHub;
+  `updated:<local-today>` silently excludes it.
 - **Never hand-parse runtime logs.** Use `agents-live logs` and
   `agents-live logs timeline` - they correlate events across log
   files and agent transcripts. Reading `Agents/logs/*.log` directly
   has repeatedly led to wrong conclusions.
+- **A dashboard command is a foreground server, not a one-shot check.** Start
+  it in a persistent/async terminal, prove readiness through `/api/agents` or
+  the packaged dashboard-readiness gate, and do not wait for the server process
+  to exit. `dashboard list` reports managed dashboards only; an independently
+  started foreground dashboard can be healthy without appearing there. Stop
+  only a dashboard process this task deliberately started.
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.

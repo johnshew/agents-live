@@ -11,6 +11,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve prepared release artifacts outside the mutable build directory.
+  Preparation copies the receipt-bound wheel and source distribution into
+  Git-local release storage, so later diagnostic builds cannot overwrite the
+  bytes accepted through installed-tool and browser validation.
+- fix: require resident watcher processes before candidate replacement.
+  Acceptance now rejects started intent with no matching `watch-loop` process
+  before browser setup or upgrade, naming the public stop/start recovery.
+- docs: clarify UTC issue windows and foreground dashboard readiness.
+  Agent guidance uses lower-bounded GitHub issue searches and treats dashboard
+  API availability, not server-process exit, as the readiness signal.
+
 ## 6.4.1 - 2026-08-17
 
 - fix: publish the exact artifacts that passed installed-candidate acceptance.
