@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-16
+ms.date: 2026-08-17
 ms.topic: reference
 ---
 
@@ -10,6 +10,32 @@ changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
+
+- fix: prevent plugin convergence from rewriting an active Windows tool environment. (#354)
+  Validation remains read-only, while any mutating convergence refuses before
+  receipt parsing or uv execution and names the external-runtime recovery path.
+- fix: explain cached quick-health degradation with stable categories and remedies. (#355)
+  Fresh failed or unknown smoketest verdicts and repeated agent failures no
+  longer trigger an expensive refresh or collapse into `refresh-failed`.
+- fix: use compact local timezone abbreviations on every dashboard log event. (#356)
+  Top-level startup, refresh, queued, started, completed, and failed messages
+  share one timestamp formatter, while continuation payloads remain indented.
+- fix: diagnose Windows provider shims through the executable resolver dispatch uses. (#246)
+  Doctor reports refused Claude or Copilot shims for declared providers and
+  points to the native WinGet package instead of an unusable npm path.
+- fix: surface PowerShell completion activation during native Windows init. (#244)
+  Init prints the generated script path and exact `$PROFILE` dot-source line
+  without editing the operator's shell profile.
+- feat: expose one declared PipelineMcp result through `run --json`. (#357)
+  Pipeline definitions can name an absolute result path; published, missing,
+  and JSON `null` values remain distinct without changing run success or exit.
+- feat: escalate consecutive terminal agent failures through existing health surfaces. (#123, #358)
+  A fixed three-failure threshold degrades automatic maintenance, status shows
+  the canonical agent's streak, success resets it, and skipped runs are ignored.
+- docs: make native Windows installation and first-run guidance accurate. (#243)
+  The current uv-tool workflow uses native provider installers, handles stale
+  shell PATH state explicitly, and documents completion activation without
+  promising the deferred side-by-side installation architecture.
 
 ## 6.3.8 - 2026-08-16
 
