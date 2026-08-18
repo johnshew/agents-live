@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-15
+ms.date: 2026-08-17
 ms.topic: concept-article
 ---
 
@@ -30,10 +30,11 @@ the read-side operation.
 
 Automatic maintenance is the sole writer of the host-local health record.
 `doctor --quick` treats a record as healthy only when it is both fresh and
-semantically healthy. A missing, stale, degraded, or failed-smoketest record
-triggers that same maintenance operation once, followed by one more content and
-freshness check. The command answers only for the runtime where it runs; it
-neither discovers nor probes another runtime.
+semantically healthy. A fresh degraded record returns its cached category and
+remedy without rerunning expensive diagnostics. A missing, stale, or invalid
+record triggers that same maintenance operation once, followed by one more
+content and freshness check. The command answers only for the runtime where it
+runs; it neither discovers nor probes another runtime.
 
 Long-lived watchers compare their loaded package version with the installed
 distribution at a bounded idle check. A mismatch is handled only between

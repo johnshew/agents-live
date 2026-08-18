@@ -174,6 +174,11 @@ class PipelineMcp:
         with self._lock:
             return dict(self._store)
 
+    def snapshot(self, path: str) -> tuple[bool, Any]:
+        """Return whether *path* is present and its current value."""
+        with self._lock:
+            return path in self._store, self._store.get(path)
+
     def seed(self, items: list[tuple[str, Any]]) -> None:
         """Pre-populate the store with ``(path, value)`` pairs from a
         trusted host (e.g. fenced ``put`` blocks parsed from an agent definition).

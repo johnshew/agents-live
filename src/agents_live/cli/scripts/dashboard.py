@@ -384,7 +384,10 @@ def _refresh_summary() -> str:
     error_text = ", ".join(
         f"{name} {count}" for name, count in errors.items()) or "none"
     local_now = datetime.now().astimezone()
-    timestamp = local_now.strftime("%b %d, %Y %I:%M:%S %p %Z").replace(" 0", " ")
+    timestamp = (
+        f"{local_now.strftime('%b %d, %Y %I:%M:%S %p').replace(' 0', ' ')} "
+        f"{_timezone_abbreviation(local_now)}"
+    )
     return (
         f"Agents Live {_running_version()} | errors in last hour: "
         f"{error_text} | {timestamp}"
@@ -572,8 +575,24 @@ _ACTION_RUNNING = False
 
 
 def _push_log(message: str) -> None:
-    timestamp = datetime.now().astimezone().strftime("%H:%M:%S %Z")
-    _safe_ui(output_log.push, f"[{timestamp}] {message}")
+    _safe_ui(output_log.push, f"[{_local_time()}] {message}")
+
+
+def _timezone_abbreviation(moment: datetime) -> str:
+    name = moment.tzname() or "UTC"
+    if name.casefold() in {
+        "coordinated universal time", "universal coordinated time",
+    }:
+        return "UTC"
+    if " " not in name:
+        return name
+    words = re.findall(r"[A-Za-z]+", name)
+    return "".join(word[0].upper() for word in words) or name
+
+
+def _local_time(moment: datetime | None = None) -> str:
+    local = moment or datetime.now().astimezone()
+    return f"{local.strftime('%H:%M:%S')} {_timezone_abbreviation(local)}"
 
 
 async def _execute_action(request: _ActionRequest) -> int:
@@ -1143,7 +1162,7 @@ def _refresh_views() -> None:
         summary = _refresh_summary()
         agent_grid.refresh()
         header_actions.refresh()
-    _safe_ui(output_log.push, summary)
+    _push_log(summary)
 
 
 def _timer_after_first_interval(interval: float, callback) -> None:
@@ -1179,6 +1198,14 @@ def _build_page() -> None:
         ".hdr-btn .q-btn__content{min-height:0;white-space:nowrap}"
         ".hdr-btn .q-icon{font-size:0.95em}"
         ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
+        ".dashboard-identity{min-width:0}"
+        ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        "@media(max-width:640px){"
+        ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
+        ".dashboard-identity{flex-wrap:wrap}"
+        ".dashboard-scope{max-width:100%}"
+        ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
+        "}"
         ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
         ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) auto "
         "minmax(15rem,.7fr);min-height:0}"
@@ -1188,12 +1215,14 @@ def _build_page() -> None:
     )
     host = ownership.current_label()
 
-    with ui.row().classes("w-full items-center justify-between gap-x-4 gap-y-2"):
-        with ui.row().classes("items-center gap-4 no-wrap"):
+    with ui.row().classes(
+            "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
+        with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
             ui.label("Agents Live").classes("text-xl font-semibold")
             ui.label(host).classes("text-sm text-gray-500")
-            ui.label(_scope_label()).classes("text-sm text-gray-500")
-        with ui.row().classes("items-center gap-3 no-wrap"):
+            ui.label(_scope_label()).classes(
+                "dashboard-scope text-sm text-gray-500")
+        with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
             header_actions()
             refresh_age = ui.label().classes("text-sm text-gray-500")
             ui.button(icon="refresh", on_click=_refresh_views).props("flat round dense")
@@ -1214,7 +1243,7 @@ def _build_page() -> None:
         output_log = ui.log(max_lines=300).classes(
             "w-full h-full font-mono text-xs"
         )
-        output_log.push(startup_summary)
+        _push_log(startup_summary)
 
     _timer_after_first_interval(600.0, _refresh_views)
 

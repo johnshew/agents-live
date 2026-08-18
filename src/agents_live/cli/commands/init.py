@@ -288,7 +288,17 @@ def main() -> int:
     if skill_status:
         print(f"{skill_status.capitalize()} skill payload: "
               ".claude/skills/agents-live/")
-    completions.update_best_effort("init")
+    installed_completions = completions.update_best_effort("init")
+    powershell_completion = next(
+        (path for path in installed_completions if path.suffix == ".ps1"), None)
+    if powershell_completion is not None:
+        quoted = str(powershell_completion).replace("'", "''")
+        print(
+            "\nPowerShell completion installed: "
+            f"{powershell_completion}\n"
+            "Add this line to $PROFILE, then open a new PowerShell session:\n"
+            f"  . '{quoted}'"
+        )
     try:
         convergence = lifecycle.converge()
     except lifecycle.CollectionUnavailable as exc:

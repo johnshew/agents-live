@@ -38,6 +38,7 @@ _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SCHEMA_VERSION = 1
 _EXECUTION_FIELDS = {
     "agents-live.schema-version", "agents-live.selector", "agents-live.mode",
+    "agents-live.result-path",
     "agents-live.schedule", "agents-live.watch", "agents-live.allow-tools",
     "agents-live.mcps", "agents-live.env", "agents-live.transcript",
     "agents-live.timeout", "agents-live.pre-processor",
@@ -343,7 +344,7 @@ def _properties(
     )
 
 
-def _supported(version: str | None) -> None:
+def _supported(version: str | None) -> str:
     """Reject a definition this release cannot honour, saying which way to fix it."""
     if version is None:
         raise DefinitionError(
@@ -357,6 +358,7 @@ def _supported(version: str | None) -> None:
         raise DefinitionError(
             f'agents-live.schema-version must be quoted "{SCHEMA_VERSION}" '
             "for this release")
+    return version
 
 
 def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig | None:
@@ -371,8 +373,7 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
              if key.startswith("agents-live.")}
     if not owned:
         return None
-    version = owned.get("agents-live.schema-version")
-    _supported(version)
+    version = _supported(owned.get("agents-live.schema-version"))
     selector_text = owned.get("agents-live.selector")
     if not selector_text:
         raise DefinitionError("agents-live.selector is required")
@@ -383,6 +384,13 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
     mode = owned.get("agents-live.mode", "plan")
     if mode not in {"plan", "write", "pipeline"}:
         raise DefinitionError("agents-live.mode must be plan, write, or pipeline")
+    result_path = owned.get("agents-live.result-path")
+    if result_path is not None:
+        if mode != "pipeline":
+            raise DefinitionError(
+                "agents-live.result-path is only available in pipeline mode")
+        if not result_path.startswith("/"):
+            raise DefinitionError("agents-live.result-path must start with '/'")
     schedules = _string_or_list(owned.get("agents-live.schedule"), "schedule")
     watch = owned.get("agents-live.watch")
     allow_tools = _string_list(owned.get("agents-live.allow-tools"), "allow-tools")
@@ -410,7 +418,7 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
     if mode == "pipeline" and (output_schema or output_roots or provenance):
         raise DefinitionError("stdout output validation is unavailable in pipeline mode")
     return AgentsLiveConfig(
-        version, schedules, watch, selector, mode, allow_tools, mcps,
+        version, schedules, watch, selector, mode, result_path, allow_tools, mcps,
         tuple(sorted(env.items())), transcript, timeout, pre, post,
         output_schema, output_max, output_roots, provenance,
     )

@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-14
+ms.date: 2026-08-17
 ms.topic: reference
 ---
 
@@ -31,6 +31,13 @@ post-processor pipeline. A manual run does not change started state.
 agents-live run link-check
 agents-live run link-check --changed-files '["docs/index.md"]'
 ```
+
+`run --json` returns the outcome text, structured value, transcript, usage,
+and run ID. A pipeline definition may declare one canonical MCP result with
+`agents-live.result-path`. When declared, `structured` is that path's value and
+`result_status` is `published` or `not_published`; absence remains nonfatal and
+does not change the run status or exit code. Definitions without a result path
+retain the existing envelope and do not emit `result_status`.
 
 Installed schedule and watcher artifacts use hidden origin and artifact-marker
 flags. They are runtime contracts, not author-facing options.
@@ -77,9 +84,11 @@ agents-live stop link-check --dry-run
   `--repair` invokes the same convergence path as lifecycle changes.
 - `doctor --quick` is the fast agent-facing automatic-maintenance check. It
   always emits JSON. A cached host health record younger than 70 minutes
-  returns immediately; a missing or stale record runs automatic maintenance
-  once and checks again. The command exits nonzero unless a current record
-  exists after that attempt. It checks only the runtime where it runs.
+  returns immediately, including an actionable category and remedy when the
+  cached record is degraded. A missing, invalid, or stale record runs automatic
+  maintenance once and checks again. The command exits nonzero unless a current
+  healthy record exists after that attempt. It checks only the runtime where it
+  runs.
 - `logs` and `logs timeline` query local event records.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.

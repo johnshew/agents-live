@@ -101,6 +101,9 @@ Copilot, and deterministic fake-provider plugins.
 
 ## Installation
 
+Install at least one supported provider CLI through its current official
+installer, then install Agents Live with uv:
+
 ```bash
 uv tool install agents-live
 agents-live init --repo /path/to/repository
@@ -110,6 +113,23 @@ agents-live doctor
 Python 3.12 or newer is required. POSIX schedules use the user crontab and
 watchers use `inotifywait`. Native Windows schedules use Task Scheduler and
 watchers use directory change notifications.
+
+On native Windows, install a provider CLI and uv through WinGet, open a new
+PowerShell session, then use the installed tool's absolute path until future
+shells receive uv's PATH update:
+
+```powershell
+winget install Anthropic.ClaudeCode
+# Or: winget install GitHub.Copilot
+winget install --id=astral-sh.uv -e
+uv tool install agents-live
+uv tool update-shell
+$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+& $agentsLive --repo C:\path\to\repository init
+```
+
+`init` prints the generated PowerShell completion path and the exact line to
+add to `$PROFILE`; Agents Live does not edit shell profiles itself.
 
 The installed `.claude/skills/agents-live/` payload is tool-managed and carries
 a directory-local `.gitignore`; project-authored sibling skills are unaffected.

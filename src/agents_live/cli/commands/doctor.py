@@ -7,11 +7,11 @@ import io
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-from ... import paths, runtime, state
+from ... import agent, paths, runtime, state
+from ...runtime.hosts import system as hostruntime
 from ...state import registry as repos
 from .. import lifecycle, update_check
 from . import internal
@@ -105,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
                         "a newer agents-live runtime"
                     ),
                 })
+        if hostruntime.id() == hostruntime.WINDOWS:
+            checks.extend(_provider_cli_checks(
+                _configured_provider_names(registry)))
+        health_payload = _health_payload(paths.health_beacon_path())
+        if health_payload is not None:
+            checks.extend(_agent_failure_checks(health_payload))
     if args.repair or args.dry_run:
         try:
             result = lifecycle.converge(dry_run=args.dry_run)
@@ -121,10 +127,53 @@ def main(argv: list[str] | None = None) -> int:
     return _finish(checks)
 
 
+def _configured_provider_names(registry: dict) -> set[str]:
+    names: set[str] = set()
+    for value in registry.get("repos", {}).values():
+        root = state.resolve_root(value) if os.path.isdir(value) else None
+        if root is None:
+            continue
+        try:
+            discovery = agent.discover(root)
+        except (OSError, ValueError, agent.DefinitionError):
+            continue
+        for spec in discovery.specs:
+            config = spec.execution
+            if config is not None and config.selector.provider in {"claude", "copilot"}:
+                names.add(config.selector.provider)
+    return names
+
+
+def _provider_cli_checks(names: set[str]) -> list[dict[str, object]]:
+    remediation = {
+        "claude": "winget install Anthropic.ClaudeCode",
+        "copilot": "winget install GitHub.Copilot",
+    }
+    checks = []
+    for name in sorted(names):
+        try:
+            executable = hostruntime.pin_executable(name)
+        except hostruntime.ExecutableNotFound as exc:
+            checks.append({
+                "check": f"provider CLI {name}",
+                "ok": False,
+                "detail": f"{exc}; install the native CLI with "
+                          f"`{remediation[name]}`",
+            })
+        else:
+            checks.append({
+                "check": f"provider CLI {name}",
+                "ok": True,
+                "detail": f"launchable executable: {executable}",
+            })
+    return checks
+
+
 def _quick() -> int:
     beacon = paths.health_beacon_path()
-    if _healthy(beacon):
-        return _quick_result(True, "fresh", "cached")
+    payload = _health_payload(beacon)
+    if payload is not None:
+        return _quick_payload(payload, "cached")
     try:
         with (
             contextlib.redirect_stdout(io.StringIO()),
@@ -132,14 +181,87 @@ def _quick() -> int:
         ):
             internal.main(["maintain", "--quiet"])
     except (OSError, RuntimeError, ValueError):
-        return _quick_result(False, "health refresh failed", "refresh-failed")
-    if _healthy(beacon):
-        return _quick_result(True, "fresh", "refreshed")
-    detail = (
-        "health record remained degraded"
-        if _fresh(beacon) else "health record remained stale"
+        return _quick_result(
+            False,
+            "automatic maintenance could not refresh health",
+            "refresh-failed",
+            category="maintenance_failed",
+            remedy="agents-live doctor",
+        )
+    payload = _health_payload(beacon)
+    if payload is not None:
+        return _quick_payload(payload, "refreshed")
+    return _quick_result(
+        False,
+        "automatic maintenance wrote no fresh valid health record",
+        "refresh-failed",
+        category="health_record_missing",
+        remedy="agents-live doctor",
     )
-    return _quick_result(False, detail, "refresh-failed")
+
+
+def _quick_payload(payload: dict, source: str) -> int:
+    smoketest = payload.get("smoketest")
+    smoketest_status = (
+        str(smoketest.get("status", "")).lower()
+        if isinstance(smoketest, dict) else ""
+    )
+    if payload.get("status") == "healthy" and smoketest_status == "pass":
+        return _quick_result(True, "fresh", source)
+    if smoketest_status == "fail":
+        return _quick_result(
+            False,
+            "current framework smoketest verdict is failed",
+            source,
+            category="smoketest_failed",
+            remedy="agents-live smoketest",
+        )
+    if smoketest_status != "pass":
+        return _quick_result(
+            False,
+            "current framework smoketest verdict is missing or unknown",
+            source,
+            category="smoketest_unknown",
+            remedy="agents-live smoketest",
+        )
+    agent_checks = _agent_failure_checks(payload)
+    if agent_checks:
+        check = agent_checks[0]
+        return _quick_result(
+            False,
+            str(check["detail"]),
+            source,
+            category="agent_repeated_failures",
+            remedy=str(check["remedy"]),
+        )
+    return _quick_result(
+        False,
+        "current health record is degraded",
+        source,
+        category="health_degraded",
+        remedy="agents-live doctor",
+    )
+
+
+def _agent_failure_checks(payload: dict) -> list[dict[str, object]]:
+    raw = payload.get("agent_failures")
+    if not isinstance(raw, list):
+        return []
+    checks = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        identifier = item.get("agent")
+        count = item.get("consecutive_failures")
+        if not isinstance(identifier, str) or not isinstance(count, int):
+            continue
+        checks.append({
+            "check": f"agent health {identifier}",
+            "ok": False,
+            "detail": f"{identifier} has {count} consecutive failures",
+            "remedy": f"agents-live logs --agent {identifier} --errors",
+        })
+    return checks
 
 
 def _fresh(beacon: Path) -> bool:
@@ -149,31 +271,37 @@ def _fresh(beacon: Path) -> bool:
         return False
 
 
-def _healthy(beacon: Path) -> bool:
+def _health_payload(beacon: Path) -> dict | None:
     if not _fresh(beacon):
-        return False
+        return None
     try:
         payload = json.loads(beacon.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(payload, dict) or payload.get("status") != "healthy":
-        return False
-    smoketest = payload.get("smoketest")
-    return (
-        isinstance(smoketest, dict)
-        and str(smoketest.get("status", "")).lower() == "pass"
-    )
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
-def _quick_result(ok: bool, detail: str, source: str) -> int:
+def _quick_result(
+    ok: bool,
+    detail: str,
+    source: str,
+    *,
+    category: str | None = None,
+    remedy: str | None = None,
+) -> int:
+    check = {
+        "check": "automatic maintenance",
+        "ok": ok,
+        "detail": detail,
+        "source": source,
+    }
+    if category is not None:
+        check["category"] = category
+    if remedy is not None:
+        check["remedy"] = remedy
     print(json.dumps({
         "ok": ok,
-        "checks": [{
-            "check": "automatic maintenance",
-            "ok": ok,
-            "detail": detail,
-            "source": source,
-        }],
+        "checks": [check],
     }))
     return 0 if ok else 1
 

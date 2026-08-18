@@ -44,6 +44,7 @@ class AgentsLiveConfig:
     watch: str | None
     selector: ProviderSelector
     mode: str
+    result_path: str | None
     allow_tools: tuple[str, ...]
     mcps: tuple[str, ...]
     env: tuple[tuple[str, str], ...]
@@ -203,3 +204,4 @@ class Outcome:
     usage: tuple[tuple[str, str | None], ...] = ()
     transcript: str | None = None
     run_id: str | None = None
+    result_status: str | None = None
