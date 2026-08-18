@@ -124,26 +124,47 @@ for what the model writes into the store. Both guard the untrusted participant.
 A processor is repository code, and validating trusted code's output against a
 schema the same author wrote is ceremony.
 
-## The store is a directory, and the MCP server is a model-facing adapter
+## The store is a directory, and the MCP server is the model's door onto it
 
 **Decision.** Shared state is a run-scoped ephemeral directory that processors
 read and write with ordinary file operations, in every mode. In pipeline mode
 the existing in-process MCP server is started in front of that directory and
 gives the model `get` and `put` as its only tools.
 
-**Why.** The trust boundary is the model, not the processors. The pipeline
-design already depends on processors being the mediators, so requiring them to
-speak HTTP with a bearer token to a server that exists only during dispatch
-added a transport for no security benefit and broke standalone use in the one
-mode where it matters most. A pipeline processor's whole job is store I/O, so
-"the capability may be absent" was never survivable for it.
+**Why.** Processors are already full participants in the store, and that is the
+point of pipeline mode rather than an incidental use. In the
+`exercise-judgment` agent the pre-processor publishes the recommendations and
+state documents as chunked values with a manifest, the model reads them and
+publishes a patch, and the post-processor reads that patch and applies it to
+the file on disk. Three participants, one store.
 
-A directory is equally ephemeral and additionally replayable, which is what
-makes a captured run reproducible.
+What is wrong today is not who uses the store but what it costs to use. That
+pre-processor carries `dependencies = ["mcp<2"]`, an `asyncio.run`, a
+`sys.path.insert` reaching into a shared `Agents/lib`, a helper module wrapping
+session setup, and a bearer token, all to write JSON values. None of that is
+domain work, none of it survives outside a dispatch, and every processor in
+every language pays it again. A directory costs a `write_text`.
 
-**Cost accepted.** A directory cannot refuse a write, so enforcement of frozen
-seeded paths and `$schema` validation lives in the server, applied to the
-model. That is where it was always aimed.
+The security story does not change, because the store was never the boundary.
+The model is the untrusted participant, so validation against a bound `$schema`
+and refusal to overwrite seeded paths stay in the server, applied to the
+model's calls. Processors are repository code and were already trusted with the
+same values.
+
+**Cost accepted.** A directory cannot refuse a write, so a processor can
+overwrite anything, including a value the model just published. It could
+already do that through `put`.
+
+**A directory buys two things the server cannot.** The run replays, because the
+state is a set of files that can be captured and restored. And the same
+processor works standalone, which under the current shape is impossible for a
+pipeline processor: its entire job is store access, so with no server running
+there is nothing for it to do.
+
+Chunking does not go away. Splitting a large document into numbered values with
+a manifest exists because one tool call is a poor way to move a large document
+to a model, which is a property of how the model reads rather than of how the
+value is stored.
 
 ## Mode constrains the model, not processors
 

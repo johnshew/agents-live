@@ -116,9 +116,12 @@ For a post-processor, `upstream` names what the previous step produced:
 ```
 
 `text` is always the previous step's output as written. `path` addresses the
-same bytes in the store, for output too large to inline. `value` is populated
-only where Agents Live already had a reason to parse, meaning the definition
-declared `agents-live.output-schema` or the model wrote a value into the store.
+same bytes in the store: the step's captured output, or the declared
+`agents-live.result-path` when the model published there instead of returning
+text. A post-processor can therefore find the model's result without hard-coding
+the path the prompt told the model to write to. `value` is populated only where
+Agents Live already had a reason to parse, meaning the definition declared
+`agents-live.output-schema` or the model published a JSON value into the store.
 Otherwise it is null and the post-processor parses `text` itself, or does not.
 
 Rules:
@@ -211,25 +214,42 @@ agent log when the step exits.
 addresses a file, so `/in/messages` is `$AGENTS_LIVE_STORE/in/messages.json`.
 Read and write it with ordinary file operations, in every mode.
 
+The store is how the three participants pass work along. The usual pipeline
+shape is that a pre-processor publishes inputs, the model reads them and
+publishes a result, and a post-processor reads that result and applies it.
+
 It is ephemeral: created for one run, removed when the run ends. `--keep-store`
 preserves it for debugging. Values the definition seeds through fenced `put`
-blocks are written before the first step and are read-only thereafter.
+blocks are written before the first step and are read-only thereafter, which is
+where an output schema belongs so the model cannot rebind the schema it is
+validated against.
+
+A value the model will read is often split into numbered chunks with a
+manifest, because one tool call is a poor way to move a large document. That is
+an authoring choice about how the model reads, not about how the value is
+stored.
 
 ## Execution mode
 
-Mode decides what the model may do. It does not change anything a processor
-receives.
+Mode decides what the model may do. It does not change what a processor
+receives, or how a processor reaches the store.
 
 |  | `plan`, `write` | `pipeline` |
 |---|---|---|
 | Model tools | Provider tools per policy | Store tools only |
-| Store exposed to the model | No | Yes, schema-validated, seeded paths frozen |
+| Store exposed to the model | No | Yes, as `get` and `put` |
+| Seeded paths | Not applicable | Frozen against the model |
 | What a processor receives | Envelope, store, log sink | Identical |
 
-In pipeline mode Agents Live starts an ephemeral in-process MCP server in front
-of the same store directory and gives the model `get` and `put` as its only
-tools. That server exists to constrain the model. A processor never speaks to
-it.
+In pipeline mode the model becomes a third participant in the store. Agents
+Live starts an ephemeral in-process MCP server in front of the same directory
+and gives the model `get` and `put` as its only tools, validating writes
+against a bound `$schema` and refusing writes to seeded paths. The server
+exists so the model's access can be constrained and mediated, not because the
+store is remote: processors keep reading and writing the directory directly.
+
+A post-processor does not need to know which of those happened. Its envelope
+names the previous step's result path either way.
 
 ## Environment
 
