@@ -36,8 +36,9 @@ value to stdout, put diagnostics on stderr, and exit non-zero if it went wrong.
 **A pre-processor** is handed nothing on stdin. What it writes to stdout is
 given to the model verbatim, under a label, the way an attachment is.
 
-**A post-processor** is handed the model's output on stdin. What it writes to
-stdout becomes the run's result.
+**A post-processor** is handed the model's answer on stdin: the value extracted
+from the reply, not the reply itself, because a provider wraps its answer in
+prose and a session footer. What it writes to stdout becomes the run's result.
 
 ```python
 findings = audit(account)
@@ -53,9 +54,14 @@ The definition says how to run it, using the command line you already type:
 ```yaml
 metadata:
   agents-live.schema-version: "2"
-  agents-live.options: '{"account": "string", "dry_run": "bool=false"}'
-  agents-live.pre-processor: "scripts/email_audit.py [--account ${account}] ${dry_run}"
+  agents-live.pre-processor: "scripts/email_audit.py [--account ${account}] [${dry_run}]"
   agents-live.post-processor: "scripts/apply.py"
+```
+
+The values come from the invocation, and nothing declares them in advance:
+
+```text
+agents-live run email-audit -o account=team-inbox -o dry-run
 ```
 
 That is the whole of stage one. The same program still runs by hand:
@@ -97,7 +103,7 @@ which is the convention `AGENTS_LIVE_CHANGED_FILES` already follows.
 | `AGENTS_LIVE_REPO_ROOT` | scalar | The repository root, which is also the working directory |
 | `AGENTS_LIVE_INSTRUCTIONS` | scalar | What the invocation asked for, or empty |
 | `AGENTS_LIVE_CHANGED_FILES` | JSON array | Repository-relative paths, or `[]` |
-| `AGENTS_LIVE_OPTIONS` | JSON object | Every declared option, typed |
+| `AGENTS_LIVE_OPTIONS` | JSON object | The options this invocation supplied |
 
 So reading one value costs one line, in any language:
 
@@ -109,9 +115,10 @@ options = json.loads(os.environ.get("AGENTS_LIVE_OPTIONS", "{}"))
 account=$(jq -r .account <<< "$AGENTS_LIVE_OPTIONS")
 ```
 
-Values in `AGENTS_LIVE_OPTIONS` are typed, so `dry_run` is `true` rather than
-`"true"`, and an option that was declared but not supplied is `null`. Nothing
-needs a presence check.
+Values in `AGENTS_LIVE_OPTIONS` carry the same distinction the command line
+makes: an option supplied as a bare `-o dry-run` is `true`, one supplied as
+`-o account=team-inbox` is the string, and one not supplied at all is absent
+rather than null.
 
 Two of these can grow without bound, so `AGENTS_LIVE_INSTRUCTIONS` and
 `AGENTS_LIVE_CHANGED_FILES` are capped before the program is spawned, against
@@ -327,29 +334,51 @@ into the post-processor.
 
 ### The command line
 
-Three rules govern substitution, and there are no others:
+Two rules govern the template, and there are no others:
 
 | Form | Expands to |
 |---|---|
-| `${name}` | The option's value, as one argument, whatever spaces it contains |
-| `${name}` where the option is a boolean | `--name` when true, nothing when false |
-| `[ ... ]` | The bracketed fragment, or nothing at all if any `${name}` inside it has no value |
+| `${name}` | The option, as exactly one argument |
+| `[ ... ]` | The bracketed fragment, or nothing at all if any `${name}` inside it was not supplied |
 
-An option declared with a default always has a value. One declared without a
-default may be absent, and the brackets are how a command line stays valid when
-it is: with `account` supplied the program runs with `--account team-inbox`,
-and without it the flag and its value disappear together.
+What a `${name}` becomes is decided by how the option was supplied, not by
+anything the definition declares:
 
-Referencing an absent option outside brackets is an error, raised before the
-program is spawned rather than passed through as a dangling `--account` with
-nothing after it.
+| Supplied as | `${name}` becomes |
+|---|---|
+| `-o account=team-inbox` | `team-inbox`, whatever spaces it contains |
+| `-o dry-run` | `--dry-run` |
+| `-o account=` | One empty argument |
+| Not supplied | Nothing, and the fragment around it drops |
+
+The presence of `=` is the whole distinction. A bare `-o dry-run` is for a
+program that takes `--dry-run` with no argument; `-o account=team-inbox` is for
+one that takes a value. The name is used verbatim, so `-o dry-run` produces
+`--dry-run` and `-o dry_run` produces `--dry_run`. Spell the option the way the
+program spells it.
+
+Brackets are how a command line stays valid when an option is absent: with
+`account` supplied the program runs with `--account team-inbox`, and without it
+the flag and its value disappear together.
+
+Two mistakes are caught before the program is spawned. A `${name}` outside
+brackets that was not supplied is an error rather than a dangling `--account`
+with nothing after it. And an option supplied that the template never mentions
+is reported, because it is almost always a misspelled name that would otherwise
+drop its fragment in silence.
+
+**Defaults belong in the program, not in the definition.** A processor has to
+work when you run it by hand, so `--account` falling back to the team inbox is
+the argument parser's job. The definition says what this agent passes, not what
+the program means. A scheduled or watched run passes whatever was recorded with
+its trigger.
 
 Agents Live appends nothing of its own, so a strict argument parser never sees
 an argument it does not know. The two processors write their own command lines,
 so they may take different flags, or different spellings of the same value.
-
-**Precedence** for an option's value, lowest to highest: the default in
-`agents-live.options`, then the environment, then the flag on `agents-live run`.
+Substitution builds an argument list directly and never a shell string, so a
+value containing spaces, quotes, or a semicolon is one argument and can inject
+nothing.
 
 The interpreter is chosen by extension: `.py` through `uv run`, `.js` and `.ts`
 through `node`, `.ps1` through `pwsh -NoProfile -File`, anything else executed
@@ -359,7 +388,7 @@ directly. The working directory is the repository root.
 
 | Stream | Pre-processor | Post-processor |
 |---|---|---|
-| stdin | Nothing | The model's output, or the snapshot of `result-path` in pipeline mode |
+| stdin | Nothing | The value extracted from the model's reply, or the snapshot of `result-path` in pipeline mode |
 | stdout | Given to the model verbatim | Becomes the run's result |
 | stderr | Diagnostics; the recorded message on failure | Same |
 
@@ -464,5 +493,4 @@ also records the reasoning behind everything above.
   when it finds something.
 - Whether a helper library ships to remove the MCP client boilerplate at stage
   three, and if so whether it is a published package or a copy in the skill.
-- Option types beyond `bool` and `string`.
 - Whether `agents-live.result-path` should be available outside pipeline mode.

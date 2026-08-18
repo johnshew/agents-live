@@ -109,6 +109,36 @@ express that with a default.
 **Rejected: shell-style `${account:+--account $account}`.** It is a templating
 language, and templating languages grow.
 
+## An option's arity comes from the invocation, not from a declaration
+
+**Decision.** `-o dry-run` expands `${dry_run}` to `--dry-run`, and
+`-o account=team-inbox` expands `${account}` to the value. The presence of `=`
+is the entire distinction. Nothing declares option names, types, or defaults.
+
+**Why.** The only thing Agents Live needs to know is whether a value follows
+the flag, and the person typing the option already knows that, because they
+read the program's `--help`. Asking them to also write a type map is asking
+them to say the same thing twice. The template already enumerates every option
+name, so names stay discoverable without a declaration; only arity was missing,
+and this supplies it at the point of use.
+
+**Rejected: a typed options map** of the form
+`'{"account": "string", "dry_run": "bool=false"}'`. It bought argument checking
+Agents Live cannot perform anyway, since it does not know the program's
+interface, and it introduced a type vocabulary that would have grown.
+
+**Defaults were dropped with it, and belong in the program.** A processor is a
+program that must work when run by hand, so its argument parser is where a
+default is already expressed. A default in the definition would be a second
+place to state it, reachable only under Agents Live, which is exactly the split
+brain the filter contract exists to avoid.
+
+**Cost accepted.** A misspelled name inside a bracketed fragment drops it in
+silence, and no declaration exists to catch it. Reporting a supplied option
+that the template never mentions recovers most of that at the point where the
+mistake is actually made, which is the ad hoc invocation rather than the
+reviewed definition.
+
 ## Agents Live does not know what a processor returns
 
 **Decision.** The result is opaque. It is not parsed, not validated, and not
@@ -344,10 +374,10 @@ on the same removal train as `legacy/`.
 indefinitely, which is what the no-shim rule exists to prevent. Two dispatch
 paths are themselves a burden, so the removal is dated rather than open-ended.
 
-`agents-live definition migrate` can raise the version and add an empty options
-map, but it cannot rewrite a processor's expectations. The migration note has
-to name what needs human review: a post-processor that reads a bare value from
-stdin, and a pre-processor that emits a bare `{"skip": true}`.
+`agents-live definition migrate` can raise the version, but it cannot rewrite a
+processor's expectations. The migration note has to name what needs human
+review: a post-processor that reads a bare value from stdin, and a
+pre-processor that emits a bare `{"skip": true}`.
 
 ## What is still undecided
 
