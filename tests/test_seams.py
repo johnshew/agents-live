@@ -1254,9 +1254,9 @@ class TestRuntimeCore(unittest.TestCase):
             defer = supervisor.defer_until_environment_exits
             command = defer.call_args.args[0]
             self.assertEqual(
-                ["uv.exe", "tool", "run", "--refresh", "--from",
+                ["uv.exe", "tool", "run", "--isolated", "--refresh", "--from",
                  f"agents-live>={upgrade.__version__}"],
-                command[:6])
+                command[:7])
             self.assertIn("--continuation-environment", command)
             self.assertIn("--upgrade-id", command)
             operation_id = command[command.index("--upgrade-id") + 1]
