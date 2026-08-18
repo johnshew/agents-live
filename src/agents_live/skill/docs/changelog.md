@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.4.1 - 2026-08-17
+
 - fix: publish the exact artifacts that passed installed-candidate acceptance.
   GitHub Actions still verifies the tagged source on Windows and Linux, then
   checks and publishes the release-attached wheel and source distribution
