@@ -59,19 +59,9 @@ metadata:
   agents-live.post-processor: "scripts/apply.py"
 ```
 
-What the invocation passes is appended to it, so the program receives ordinary
-arguments and nothing declares them in advance:
-
-```text
-agents-live run email-audit -o account=team-inbox -o dry-run
-```
-
-```text
-uv run scripts/email_audit.py --account team-inbox --dry-run
-```
-
-That is the whole of stage one, and the last line is also how you run it by
-hand:
+Agents Live adds no arguments of its own, so a strict argument parser never
+meets a flag it does not know. That is the whole of stage one, and the same
+program still runs by hand:
 
 ```text
 uv run scripts/email_audit.py --account team-inbox
@@ -122,14 +112,61 @@ options = json.loads(os.environ.get("AGENTS_LIVE_OPTIONS", "{}"))
 account=$(jq -r .account <<< "$AGENTS_LIVE_OPTIONS")
 ```
 
-Values in `AGENTS_LIVE_OPTIONS` carry the same distinction the command line
-makes: an option supplied as a bare `-o dry-run` is `true`, one supplied as
-`-o account=team-inbox` is the string, and one not supplied at all is absent
-rather than null.
+Values in `AGENTS_LIVE_OPTIONS` record how each option was supplied: a bare
+`-o dry-run` is `true`, `-o account=team-inbox` is the string, and an option
+not supplied at all is absent rather than null. See
+[Taking options from the invocation](#taking-options-from-the-invocation).
 
 Two of these can grow without bound, so `AGENTS_LIVE_INSTRUCTIONS` and
 `AGENTS_LIVE_CHANGED_FILES` are capped before the program is spawned, against
 the same host limit that bounds the command line.
+
+### Taking options from the invocation
+
+An invocation can pass values without anyone editing the definition:
+
+```text
+agents-live run email-audit -o account=team-inbox -o dry-run
+```
+
+Nothing declares these in advance. The presence of `=` is the whole
+distinction, and it is the only thing Agents Live needs to know:
+
+| Supplied as | `AGENTS_LIVE_OPTIONS` holds |
+|---|---|
+| `-o dry-run` | `true` |
+| `-o account=team-inbox` | `"team-inbox"` |
+| `-o account=` | `""` |
+| Not supplied | The key is absent |
+
+Names are used verbatim, so write the option the way the program spells it.
+
+They arrive in the environment and nowhere else, which is what lets both
+processors receive the same set without either of them having to tolerate the
+other's flags. Merge them into your own arguments and a program takes exactly
+the options it already knows about:
+
+```python
+def option_argv():
+    argv = []
+    for name, value in json.loads(os.environ.get("AGENTS_LIVE_OPTIONS", "{}")).items():
+        argv.append(f"--{name}")
+        if value is not True:
+            argv.append(value)
+    return argv
+
+args, unrecognized = parser.parse_known_args(sys.argv[1:] + option_argv())
+```
+
+The program now behaves the same under Agents Live as it does by hand, and an
+option it does not implement is simply not its business.
+
+**Whether an unrecognized option is fatal is your call, and worth making
+deliberately.** Agents Live cannot check a name against a program's interface,
+so a misspelled `-o dry-runn` reaches every processor and is recognized by
+none. For an option whose absence is merely a missing convenience, ignoring it
+is right. For one like `--dry-run`, where silently not applying it is the
+expensive outcome, exit non-zero on anything left in `unrecognized`.
 
 ### Structured logs
 
@@ -341,40 +378,22 @@ into the post-processor.
 
 ### The command line
 
-The definition names the program. Agents Live appends the invocation's options,
-in the order they were given, and there is no template and no substitution:
+The definition names the program:
 
-| Supplied as | Appended |
-|---|---|
-| `-o dry-run` | `--dry-run` |
-| `-o account=team-inbox` | `--account` and `team-inbox`, as two arguments |
-| `-o account=` | `--account` and one empty argument |
-| Not supplied | Nothing |
+```yaml
+agents-live.pre-processor: "scripts/email_audit.py"
+```
 
-The presence of `=` is the whole distinction. A bare `-o dry-run` is for a
-program that takes `--dry-run` with no argument; `-o account=team-inbox` is for
-one that takes a value. The name is used verbatim, so `-o dry-run` produces
-`--dry-run` and `-o dry_run` produces `--dry_run`. Spell the option the way the
-program spells it.
-
-An option that is absent is simply not appended, so nothing has to describe how
-a command line collapses around a missing value.
-
-**Both processors receive the same options**, because a run has one invocation.
-So each program has to tolerate every option the agent is invoked with, and a
-misspelled name is rejected by an argument parser rather than vanishing
-quietly. A processor that wants to be selective can ignore its arguments and
-read `AGENTS_LIVE_OPTIONS` instead.
-
-Values become argument list entries directly, never a shell string, and no
-child is spawned through a shell, so a value containing spaces, quotes, or a
-semicolon is one argument and can inject nothing.
+There is no template, no substitution, and nothing appended. Every value a run
+supplies arrives in the environment instead, so the arguments a processor sees
+are exactly the ones its own author wrote, and a strict parser never meets a
+flag it does not know. What an invocation can pass is under
+[Taking options from the invocation](#taking-options-from-the-invocation).
 
 **Defaults belong in the program, not in the definition.** A processor has to
 work when you run it by hand, so `--account` falling back to the team inbox is
 the argument parser's job. The definition says which program to run, not what
-the program means. A scheduled or watched run passes whatever was recorded with
-its trigger.
+the program means.
 
 The interpreter is chosen by extension: `.py` through `uv run`, `.js` and `.ts`
 through `node`, `.ps1` through `pwsh -NoProfile -File`, anything else executed
@@ -521,8 +540,4 @@ also records the reasoning behind everything above.
   when it finds something.
 - Whether a helper library ships to remove the MCP client boilerplate at stage
   three, and if so whether it is a published package or a copy in the skill.
-- Whether both processors should receive every option, as they do above, or
-  whether options should reach the pre-processor only and the post-processor
-  should read `AGENTS_LIVE_OPTIONS`. Sending an unknown flag to a
-  post-processor fails the run after the model call has already been paid for.
 - Whether `agents-live.result-path` should be available outside pipeline mode.

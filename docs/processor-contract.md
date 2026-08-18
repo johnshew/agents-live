@@ -68,37 +68,47 @@ Same reasoning as the section above, opposite conclusion about which channel
 carries what, because a filter's stdout is data while a task's stdout is
 narration.
 
-## The invocation owns the arguments, and there is no template
+## The invocation reaches a processor through the environment, not its argv
 
 **Decision.** The definition names the program and stops:
-`agents-live.pre-processor: "scripts/email_audit.py"`. Agents Live appends
-whatever the invocation supplied, where the presence of `=` decides the shape:
-`-o dry-run` appends `--dry-run`, and `-o account=team-inbox` appends
-`--account team-inbox`. Nothing declares option names, types, or defaults.
+`agents-live.pre-processor: "scripts/email_audit.py"`. Agents Live adds no
+arguments. What an invocation supplies arrives in `AGENTS_LIVE_OPTIONS`, where
+the presence of `=` records the shape: `-o dry-run` is `true`, and
+`-o account=team-inbox` is the string. A processor that wants options merges
+them into its own argument parsing and takes the ones it recognizes.
 
-**Why.** Both halves of the earlier design were machinery bought with someone
-else's money. A typed declaration map asked the author to state an option's
-arity when the person typing `-o` already knew it from the program's `--help`,
-and it bought argument checking Agents Live cannot perform, since it does not
-know the program's interface. A substitution template then asked for a second
-statement of the same thing in a second syntax, and paid for it with a parser,
-a quoting rule, and an absent-value rule.
+**Why.** Three designs were tried against this and each bought its machinery
+with someone else's money.
 
-Appending is the whole feature. An option that is absent is not appended, which
-is what the brackets existed to express, so a rule disappears rather than
-moving.
+A typed declaration map asked the author to state an option's arity when the
+person typing `-o` already knew it from the program's `--help`, and it bought
+argument checking Agents Live cannot perform, since it does not know the
+program's interface.
 
-**Rejected: a typed options map** of the form
-`'{"account": "string", "dry_run": "bool=false"}'`, and with it definition-side
-defaults.
+A `${name}` substitution template then asked for the same information again in
+a second syntax, and charged a parser, a quoting rule, and an absent-value rule
+for it.
 
-**Rejected: `${name}` substitution with bracketed optional fragments.** It is a
-templating language, and templating languages grow. The first extension anyone
-would ask for is `${a:-b}`.
+Appending the options to argv removed both, but broke the property that made
+the contract cheap to adopt: Agents Live appended nothing, so a strict argument
+parser never met a flag it did not know. It also created a routing problem with
+no good answer, because a run has one invocation and two processors, and an
+unknown flag reaching the post-processor fails the run after the model call has
+been paid for.
 
-**Rejected: a sidecar declaration file**, which duplicated knowledge that
-already existed and had to be maintained against a program that could change
-independently. **Rejected: a discovery protocol**, where Agents Live asks the
+The environment breaks nothing. Both processors receive the same set without
+either having to tolerate the other's flags, a processor that ignores options
+is untouched, and options never compete with the prompt for the argv budget.
+The routing question dissolves rather than being answered.
+
+**Consequence: options are a stage 2 feature, not stage 1.** Reading them means
+knowing you are under Agents Live, which is what stage 2 is. Stage 1 goes back
+to being a filter with nothing in it.
+
+**Rejected: a typed options map**, `${name}` substitution with bracketed
+optional fragments, and appending options to argv, for the reasons above. Also
+**rejected: a sidecar declaration file**, which duplicated knowledge that
+already existed, and **a discovery protocol** where Agents Live asks the
 program what it accepts, which makes every processor implement an extra entry
 point, the exact "rewrite your script" tax this design exists to remove.
 
@@ -107,18 +117,18 @@ its argument parser already expresses the default. A second one in the
 definition would be reachable only under Agents Live, which is the split brain
 the filter contract exists to avoid.
 
-**Costs accepted.** Agents Live cannot check that a flag is one the program
-accepts; the program's own parser catches it immediately. And Agents Live now
-appends arguments of its own, where before it appended nothing, so a strict
-parser can see a flag it does not know. That is the price of deleting the
-template, and it converts a silent failure into a loud one: under the template
-a misspelled name dropped its fragment in silence, and now it reaches the
-program and is rejected.
+**Costs accepted.** A processor that wants options writes a few lines to
+consume them, where appending would have given them for free. And a misspelled
+`-o dry-runn` reaches every processor and is recognized by none, which Agents
+Live cannot catch because it does not know any program's interface. The
+strictness decision is therefore documented as the processor's: ignoring an
+unrecognized option is right when its absence is a missing convenience, and
+exiting non-zero is right for one like `--dry-run`, where silently not applying
+it is the expensive outcome. Putting that choice where the knowledge is beats
+guessing centrally.
 
-**Left open**, in processors.md: whether both processors receive every option,
-or only the pre-processor does. Sending an unknown flag to a post-processor
-fails the run after the model call has been paid for, which is the one place
-where a loud failure is expensive.
+**Not accepted as a cost: per-processor option values.** The same option cannot
+be set differently for the pre- and post-processor. Nobody has wanted that.
 
 ## Agents Live does not know what a processor returns
 
