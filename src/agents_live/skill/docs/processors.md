@@ -49,22 +49,28 @@ Agents Live does not parse, validate, or reshape what a processor writes. JSON
 is the usual choice because the next reader is a model or another program, but
 a Markdown table is equally valid if that is what the model should see.
 
-The definition says how to run it, using the command line you already type:
+The definition names the program, and nothing else:
 
 ```yaml
 metadata:
   agents-live.schema-version: "2"
-  agents-live.pre-processor: "scripts/email_audit.py [--account ${account}] [${dry_run}]"
+  agents-live.pre-processor: "scripts/email_audit.py"
   agents-live.post-processor: "scripts/apply.py"
 ```
 
-The values come from the invocation, and nothing declares them in advance:
+What the invocation passes is appended to it, so the program receives ordinary
+arguments and nothing declares them in advance:
 
 ```text
 agents-live run email-audit -o account=team-inbox -o dry-run
 ```
 
-That is the whole of stage one. The same program still runs by hand:
+```text
+uv run scripts/email_audit.py --account team-inbox --dry-run
+```
+
+That is the whole of stage one, and the last line is also how you run it by
+hand:
 
 ```text
 uv run scripts/email_audit.py --account team-inbox
@@ -334,22 +340,15 @@ into the post-processor.
 
 ### The command line
 
-Two rules govern the template, and there are no others:
+The definition names the program. Agents Live appends the invocation's options,
+in the order they were given, and there is no template and no substitution:
 
-| Form | Expands to |
+| Supplied as | Appended |
 |---|---|
-| `${name}` | The option, as exactly one argument |
-| `[ ... ]` | The bracketed fragment, or nothing at all if any `${name}` inside it was not supplied |
-
-What a `${name}` becomes is decided by how the option was supplied, not by
-anything the definition declares:
-
-| Supplied as | `${name}` becomes |
-|---|---|
-| `-o account=team-inbox` | `team-inbox`, whatever spaces it contains |
 | `-o dry-run` | `--dry-run` |
-| `-o account=` | One empty argument |
-| Not supplied | Nothing, and the fragment around it drops |
+| `-o account=team-inbox` | `--account` and `team-inbox`, as two arguments |
+| `-o account=` | `--account` and one empty argument |
+| Not supplied | Nothing |
 
 The presence of `=` is the whole distinction. A bare `-o dry-run` is for a
 program that takes `--dry-run` with no argument; `-o account=team-inbox` is for
@@ -357,28 +356,24 @@ one that takes a value. The name is used verbatim, so `-o dry-run` produces
 `--dry-run` and `-o dry_run` produces `--dry_run`. Spell the option the way the
 program spells it.
 
-Brackets are how a command line stays valid when an option is absent: with
-`account` supplied the program runs with `--account team-inbox`, and without it
-the flag and its value disappear together.
+An option that is absent is simply not appended, so nothing has to describe how
+a command line collapses around a missing value.
 
-Two mistakes are caught before the program is spawned. A `${name}` outside
-brackets that was not supplied is an error rather than a dangling `--account`
-with nothing after it. And an option supplied that the template never mentions
-is reported, because it is almost always a misspelled name that would otherwise
-drop its fragment in silence.
+**Both processors receive the same options**, because a run has one invocation.
+So each program has to tolerate every option the agent is invoked with, and a
+misspelled name is rejected by an argument parser rather than vanishing
+quietly. A processor that wants to be selective can ignore its arguments and
+read `AGENTS_LIVE_OPTIONS` instead.
+
+Values become argument list entries directly, never a shell string, and no
+child is spawned through a shell, so a value containing spaces, quotes, or a
+semicolon is one argument and can inject nothing.
 
 **Defaults belong in the program, not in the definition.** A processor has to
 work when you run it by hand, so `--account` falling back to the team inbox is
-the argument parser's job. The definition says what this agent passes, not what
+the argument parser's job. The definition says which program to run, not what
 the program means. A scheduled or watched run passes whatever was recorded with
 its trigger.
-
-Agents Live appends nothing of its own, so a strict argument parser never sees
-an argument it does not know. The two processors write their own command lines,
-so they may take different flags, or different spellings of the same value.
-Substitution builds an argument list directly and never a shell string, so a
-value containing spaces, quotes, or a semicolon is one argument and can inject
-nothing.
 
 The interpreter is chosen by extension: `.py` through `uv run`, `.js` and `.ts`
 through `node`, `.ps1` through `pwsh -NoProfile -File`, anything else executed
@@ -493,4 +488,8 @@ also records the reasoning behind everything above.
   when it finds something.
 - Whether a helper library ships to remove the MCP client boilerplate at stage
   three, and if so whether it is a published package or a copy in the skill.
+- Whether both processors should receive every option, as they do above, or
+  whether options should reach the pre-processor only and the post-processor
+  should read `AGENTS_LIVE_OPTIONS`. Sending an unknown flag to a
+  post-processor fails the run after the model call has already been paid for.
 - Whether `agents-live.result-path` should be available outside pipeline mode.

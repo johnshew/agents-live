@@ -68,76 +68,57 @@ Same reasoning as the section above, opposite conclusion about which channel
 carries what, because a filter's stdout is data while a task's stdout is
 narration.
 
-## The definition owns the command line
+## The invocation owns the arguments, and there is no template
 
-**Decision.** A processor declares nothing about itself. The definition that
-uses it writes the command line, with `${name}` substitution, boolean flags,
-and bracketed fragments that vanish when a value is absent.
+**Decision.** The definition names the program and stops:
+`agents-live.pre-processor: "scripts/email_audit.py"`. Agents Live appends
+whatever the invocation supplied, where the presence of `=` decides the shape:
+`-o dry-run` appends `--dry-run`, and `-o account=team-inbox` appends
+`--account team-inbox`. Nothing declares option names, types, or defaults.
 
-**Why.** Whoever wires an agent to a script wrote both, so a separate interface
-file exists only to be kept in sync. Makefiles, systemd units, and crontab
-entries all work this way and nobody finds them mysterious.
+**Why.** Both halves of the earlier design were machinery bought with someone
+else's money. A typed declaration map asked the author to state an option's
+arity when the person typing `-o` already knew it from the program's `--help`,
+and it bought argument checking Agents Live cannot perform, since it does not
+know the program's interface. A substitution template then asked for a second
+statement of the same thing in a second syntax, and paid for it with a parser,
+a quoting rule, and an absent-value rule.
 
-**Rejected: a sidecar declaration file.** It duplicated knowledge that already
-existed, added a file format, and had to be maintained against a program that
-could change independently.
-
-**Rejected: a discovery protocol**, where Agents Live runs the program with a
-flag to ask what it accepts. It makes every processor implement an extra entry
-point, which is exactly the "rewrite your script" tax the design exists to
-remove.
-
-**Cost accepted.** Agents Live cannot check that a flag name is one the program
-accepts. The program's own argument parser catches it immediately, and for a
-pre-processor that happens before any model call, so the failure is cheap and
-clear.
-
-## Optional values are a property of the command line, not the program
-
-**Decision.** `[--account ${account}]` disappears entirely when `account` has
-no value.
-
-**Why.** An optional flag is normal, and a substitution that leaves a dangling
-`--account` with nothing after it is worse than useless. The bracket keeps the
-flag and its value together, which is the unit that is actually optional.
-
-**Rejected: requiring every referenced option to have a default.** It works
-only when a default exists, and for a genuinely optional flag the meaningful
-state is absence. An audit that sweeps every account when none is named cannot
-express that with a default.
-
-**Rejected: shell-style `${account:+--account $account}`.** It is a templating
-language, and templating languages grow.
-
-## An option's arity comes from the invocation, not from a declaration
-
-**Decision.** `-o dry-run` expands `${dry_run}` to `--dry-run`, and
-`-o account=team-inbox` expands `${account}` to the value. The presence of `=`
-is the entire distinction. Nothing declares option names, types, or defaults.
-
-**Why.** The only thing Agents Live needs to know is whether a value follows
-the flag, and the person typing the option already knows that, because they
-read the program's `--help`. Asking them to also write a type map is asking
-them to say the same thing twice. The template already enumerates every option
-name, so names stay discoverable without a declaration; only arity was missing,
-and this supplies it at the point of use.
+Appending is the whole feature. An option that is absent is not appended, which
+is what the brackets existed to express, so a rule disappears rather than
+moving.
 
 **Rejected: a typed options map** of the form
-`'{"account": "string", "dry_run": "bool=false"}'`. It bought argument checking
-Agents Live cannot perform anyway, since it does not know the program's
-interface, and it introduced a type vocabulary that would have grown.
+`'{"account": "string", "dry_run": "bool=false"}'`, and with it definition-side
+defaults.
 
-**Defaults were dropped with it, and belong in the program.** A processor is a
-program that must work when run by hand, so its argument parser is where a
-default is already expressed. A default in the definition would be a second
-place to state it, reachable only under Agents Live, which is exactly the split
-brain the filter contract exists to avoid.
+**Rejected: `${name}` substitution with bracketed optional fragments.** It is a
+templating language, and templating languages grow. The first extension anyone
+would ask for is `${a:-b}`.
 
-**Cost accepted.** A misspelled name inside a bracketed fragment drops it in
-silence, and no declaration exists to catch it. Reporting a supplied option
-that the template never mentions recovers most of that at the point where the
-mistake is actually made, which is the ad hoc invocation rather than the
-reviewed definition.
+**Rejected: a sidecar declaration file**, which duplicated knowledge that
+already existed and had to be maintained against a program that could change
+independently. **Rejected: a discovery protocol**, where Agents Live asks the
+program what it accepts, which makes every processor implement an extra entry
+point, the exact "rewrite your script" tax this design exists to remove.
+
+**Defaults belong in the program.** A processor must work when run by hand, so
+its argument parser already expresses the default. A second one in the
+definition would be reachable only under Agents Live, which is the split brain
+the filter contract exists to avoid.
+
+**Costs accepted.** Agents Live cannot check that a flag is one the program
+accepts; the program's own parser catches it immediately. And Agents Live now
+appends arguments of its own, where before it appended nothing, so a strict
+parser can see a flag it does not know. That is the price of deleting the
+template, and it converts a silent failure into a loud one: under the template
+a misspelled name dropped its fragment in silence, and now it reaches the
+program and is rejected.
+
+**Left open**, in processors.md: whether both processors receive every option,
+or only the pre-processor does. Sending an unknown flag to a post-processor
+fails the run after the model call has been paid for, which is the one place
+where a loud failure is expensive.
 
 ## Agents Live does not know what a processor returns
 
