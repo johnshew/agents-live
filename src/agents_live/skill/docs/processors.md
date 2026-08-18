@@ -176,29 +176,32 @@ expensive outcome, exit non-zero on anything left in `unrecognized`.
 
 ### Structured logs
 
-`AGENTS_LIVE_LOG` names a JSONL file that only this step writes. The host
-validates it, stamps identity onto every row, caps it, and merges it into the
-agent log when the step exits.
+`AGENTS_LIVE_LOG` names a file for this step's structured records, and only
+this step writes it. Append one JSON object per line. Agents Live does not
+validate it, stamp it, or rewrite it, so the records are exactly as good as the
+program that wrote them.
 
 ```json
 {"ts": "2026-08-18T09:12:04.331Z", "level": "info", "message": "swept 42 threads", "phase": "collect", "duration_s": 4.1}
 ```
 
-- **Yours to write**: `ts`, `level`, `message`, `phase`, `duration_s`, the cost
-  columns `cost_usd`, `credits`, and `premium_requests`, and any field of your
-  own. A processor that calls a paid API has a real reason to report spend.
-- **Stamped by the host**, and not yours to set: `run_id`, `agent_name`,
-  `agent_id`, `step`, and span identity.
-- **Reserved**: never write `phase: "done"` nor a run-outcome status. Those
-  decide whether an agent is healthy. A log row is an observation; the verdict
-  is the exit code.
-- **Correlation** arrives as `TRACEPARENT`. Ignore it and rows are still
-  correlated, because the host stamps the step span.
-- **Sensitivity defaults closed.** Rows are local-only unless explicitly marked
-  as exportable operational metadata.
-- **A malformed row is quarantined, never fatal.** Overflowing the cap
-  truncates and records a marker.
-- With no sink named, write the same records to stderr.
+Conventional field names, worth using so a later reader recognizes them: `ts`,
+`level`, `message`, `phase`, `duration_s`, and the cost columns `cost_usd`,
+`credits`, and `premium_requests`. A processor that calls a paid API has a real
+reason to report spend. Add fields of your own freely.
+
+To correlate a row, copy `AGENTS_LIVE_RUN_ID` and `AGENTS_LIVE_AGENT_ID` into
+it. Nothing stamps them for you.
+
+Two things not to write. **Never `phase: "done"`, and never a run-outcome
+status**, because those are how an agent's health is judged: a log row is an
+observation, and the verdict is the exit code. And nothing secret, because the
+file is as readable as anything else in the state directory.
+
+With no sink named, write the same records to stderr.
+
+How these records surface in `agents-live logs` is settled separately, in
+[#105](https://github.com/johnshew/agents-live/issues/105).
 
 ### Ending the run early
 
@@ -461,7 +464,6 @@ Run context is listed under class 1 above. The rest of what Agents Live sets:
 | `AGENTS_LIVE_OUTPUT` | Under Agents Live | Where to write a result too large for stdout |
 | `AGENTS_LIVE_CONTROL` | Under Agents Live | Where to write `skip` |
 | `AGENTS_LIVE_LOG` | Under Agents Live | The JSONL sink for this step |
-| `TRACEPARENT` | Under Agents Live | The step span, as a parent |
 | `PIPELINE_MCP_URL`, `PIPELINE_MCP_TOKEN` | `mode: pipeline` | The run-scoped pipeline MCP |
 
 Anything in `agents-live.env` is added as well, and the `AGENTS_LIVE_`
@@ -521,10 +523,11 @@ worth searching for before you raise the version.
 
 **`AGENTS_LIVE_LOG_FILE` became `AGENTS_LIVE_LOG`**, and it names a different
 file. Version 1 pointed at the agent's own log, which every step appended to
-directly. Version 2 gives each step a private sink that the host validates,
-stamps, caps, and merges when the step exits. Drop any identity fields you were
-stamping yourself, and stop writing `phase: "done"` or a run status, which are
-now reserved.
+directly, so concurrent writers could splice each other's records. Version 2
+gives each step a file of its own. Nothing else changes: you still write the
+rows, and nothing validates or stamps them. Stop writing `phase: "done"` or a
+run status, which are reserved, and copy `AGENTS_LIVE_RUN_ID` into any row you
+want correlated.
 
 Two more differences are unlikely to matter but are real.
 `AGENTS_LIVE_CHANGED_FILES` is always set, as `[]` when nothing changed, where

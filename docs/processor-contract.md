@@ -326,48 +326,56 @@ current contract, where a post-processor silently reads an empty stdin after a
 mode change. Once the store is uniform and the envelope is uniform, mode has
 nothing left to say about processors, which is the correct amount.
 
-## Logging: a per-step sink the host stamps
+## Logging: a named file, and the host does not touch it
 
-**Decision.** Each step writes its own JSONL file. The host validates, stamps
-identity, caps, and merges on exit. A processor may not write `phase: "done"`
-nor a run-outcome status.
+**Decision.** `AGENTS_LIVE_LOG` names a file per step. That is the whole
+mechanism. Agents Live does not validate rows, stamp identity, cap the file, or
+merge it anywhere. A processor writes correct records or it does not.
 
-**Why**, in three pieces of evidence rather than principle:
+**Why per step**, since that part is not free-form: buffered appends to the
+shared agent log spliced 11,577 records into each other in a live deployment
+(#290). One writer per file cannot have that failure, and it costs a path
+rather than a subsystem. The path is derivable from the run id and step so that
+tailing in flight is possible.
 
-- Buffered appends to the shared log spliced 11,577 records into each other in
-  a live deployment (#290). One writer per file cannot have that failure.
-- `obs.query.consecutive_failures` counts a health streak from any record with
-  `phase == "done"` and `status == "error"`, so today a log line can degrade an
-  agent's health as though the run had failed. An observation must not be able
-  to cast a verdict.
-- Identity is currently self-asserted, so a processor can author a record
-  claiming to be another agent. Stamping on ingest makes that impossible rather
-  than discouraged.
+**Rejected: a validating sink.** An earlier draft had the host validate every
+row, stamp identity, cap the file, quarantine malformed rows, and merge on
+exit. Each is defensible; together they are a subsystem, bought before anything
+reads the output. It also had to fix a record format, which collides with #105.
+Naming a file and stopping defers all of it at no cost, because a processor
+writing bad records would have needed fixing under a validating sink too.
 
-A fourth defect belongs to the readers rather than the writers: `status` is
-rewritten from `success` to `ok` by the query view but not by the health path,
-so one written value means two things depending on who reads it. It should be
-closed in the same work.
+**Rejected: `TRACEPARENT`.** With no host-side correlation it promised
+something nothing would consume.
 
-**Cost accepted.** In-flight tailing needs the sink path to be derivable from
-the run id and step, rather than random.
+**Costs accepted, and they are real.** Identity stays self-asserted, so a
+processor can author a record claiming to be another agent. Nothing prevents a
+row carrying `phase: "done"` with an error status, which
+`obs.query.consecutive_failures` would read as a health verdict cast by an
+observation. Both are stated as rules for the processor to honor rather than
+enforced. Both become enforceable whenever something ingests these files, and
+that is #105's call, not this contract's.
 
-## The log record belongs to #105, the channel belongs here
+## The log record belongs to #105
 
-**Decision.** This contract specifies which file, who writes it, who stamps
-identity, what vocabulary is reserved, and what happens to malformed rows.
-[#105](https://github.com/johnshew/agents-live/issues/105) specifies the record:
-span fields, start and end pairing, sensitivity classification, and the query
-projection.
+**Decision.** This contract specifies the channel: which file, and who writes
+it. [#105](https://github.com/johnshew/agents-live/issues/105) specifies the
+record, and whatever ingestion it wants.
 
 **Why.** #105 is a clean schema change across all canonical writers, and this
-contract adds a new canonical writer. Specifying field names in both places
-guarantees a collision. Splitting on channel versus record lets either land
-first.
+contract adds a new one. Specifying field names in both places guarantees a
+collision. Splitting on channel versus record lets either land first, and this
+one is not waiting.
 
 One consequence for #105: its writers now include programs in five languages,
-which argues for a small required field set and for the host stamping
-everything it can.
+which argues for a small required field set.
+
+Two reader-side defects surfaced while working this out and belong there rather
+than here. `consecutive_failures` lets any record with `phase == "done"` and
+`status == "error"` degrade an agent's health, so an observation can cast a
+verdict. And `status` is rewritten from `success` to `ok` by the query view but
+not by the health path, so one written value means two things depending on who
+reads it.
 
 ## A clean break, gated by schema version
 
