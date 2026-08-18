@@ -22,9 +22,18 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Generator
 
 from .server import PipelineMcp
+
+
+class PipelineSession(dict[str, str]):
+    def __init__(self, environment: dict[str, str], mcp: PipelineMcp) -> None:
+        super().__init__(environment)
+        self._mcp = mcp
+
+    def snapshot(self, path: str) -> tuple[bool, object]:
+        return self._mcp.snapshot(path)
 
 
 def _bridge_path() -> Path:
@@ -36,7 +45,7 @@ def pipeline_runtime(
     agent_log: Path | None,
     seed_puts: list[tuple[str, object]] | None = None,
     run_id: str | None = None,
-) -> Iterator[dict[str, str]]:
+) -> Generator[PipelineSession, None, None]:
     mcp = PipelineMcp(agent_log=agent_log, run_id=run_id)
     tmp = Path(tempfile.mkdtemp(prefix="pipeline-mcp-"))
     claude_cfg = tmp / "claude-mcp-config.json"
@@ -85,12 +94,12 @@ def pipeline_runtime(
         )
         claude_cfg.chmod(0o600)
         copilot_cfg.chmod(0o600)
-        yield {
+        yield PipelineSession({
             "PIPELINE_MCP_URL": mcp.url,
             "PIPELINE_MCP_TOKEN": mcp.token,
             "PIPELINE_MCP_CLAUDE_CONFIG": str(claude_cfg),
             "PIPELINE_MCP_COPILOT_CONFIG": str(copilot_cfg),
-        }
+        }, mcp)
     finally:
         mcp.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)

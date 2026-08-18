@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         changed,
     ))
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
-        print(json.dumps({
+        payload = {
             "ok": result.ok,
             "operation": "run",
             "agent": args.name,
@@ -55,7 +55,10 @@ def main(argv: list[str] | None = None) -> int:
             "transcript": result.transcript,
             "usage": dict(result.usage),
             "run_id": result.run_id,
-        }))
+        }
+        if result.result_status is not None:
+            payload["result_status"] = result.result_status
+        print(json.dumps(payload))
     elif not args.quiet:
         if result.ok and result.text:
             print(result.text)

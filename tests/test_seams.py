@@ -18,7 +18,7 @@ import threading
 import time
 import unittest
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from unittest import mock
 
@@ -145,6 +145,25 @@ class TestDefinitionLoader(TempRepository):
         rows = status._rows(self.root)
         self.assertEqual(
             ["agents-live.sandbox"], rows[0]["unknown_metadata"])
+
+    def test_status_reports_consecutive_terminal_failures(self) -> None:
+        self.skill("failing", ['agents-live.selector: "fake"'])
+        identifier = agent.load("failing", root=self.root).identifier
+        log = paths.repo_state_dir(self.root) / "logs" / f"{identifier}.jsonl"
+        for index in range(3):
+            obs.record(log, obs.Event(
+                timestamp=f"2026-08-17T00:00:0{index}+00:00",
+                event="run",
+                status="failed",
+                repository=str(self.root),
+                agent=identifier,
+                run_id=str(index),
+                origin="clock",
+            ))
+
+        rows = status._rows(self.root)
+
+        self.assertEqual(3, rows[0]["consecutive_failures"])
 
     def test_rejects_unquoted_metadata_duplicate_keys_and_aliases(self) -> None:
         bad = (
@@ -387,6 +406,20 @@ class TestDefinitionLoader(TempRepository):
 
 
 class TestDoctor(unittest.TestCase):
+    def test_doctor_reports_a_refused_claude_shim_with_native_remediation(self) -> None:
+        refused = runtime.hosts.system.ExecutableNotFound(
+            "only shims answer to 'claude' on this host's PATH; "
+            "claude.cmd is a batch shim")
+        with mock.patch.object(
+                doctor.hostruntime, "pin_executable", side_effect=refused):
+            checks = doctor._provider_cli_checks({"claude"})
+
+        self.assertEqual(1, len(checks))
+        self.assertFalse(checks[0]["ok"])
+        self.assertIn("only shims", checks[0]["detail"])
+        self.assertIn("winget install Anthropic.ClaudeCode", checks[0]["detail"])
+        self.assertNotIn("npm", checks[0]["detail"])
+
     def test_package_index_rejects_a_resolved_downgrade(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -561,37 +594,66 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual("refreshed", json.loads(
             stdout.getvalue())["checks"][0]["source"])
 
-    def test_quick_refreshes_fresh_degraded_smoketest_health(self) -> None:
+    def test_quick_explains_fresh_degraded_smoketest_health(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             beacon = Path(temporary) / "health.ok"
             beacon.write_text(json.dumps({
-                "status": "healthy",
+                "status": "degraded",
                 "smoketest": {"status": "fail", "reason": "old failure"},
             }), encoding="utf-8")
-
-            def refresh(_argv):
-                beacon.write_text(json.dumps({
-                    "status": "healthy",
-                    "smoketest": {"status": "pass"},
-                }), encoding="utf-8")
-                return 0
-
             stdout = io.StringIO()
             with (
                 mock.patch.object(
                     doctor.paths, "health_beacon_path", return_value=beacon),
-                mock.patch.object(
-                    doctor.internal, "main", side_effect=refresh) as maintain,
+                mock.patch.object(doctor.internal, "main") as maintain,
                 contextlib.redirect_stdout(stdout),
             ):
                 code = doctor.main(["--quick"])
 
-        self.assertEqual(0, code)
-        maintain.assert_called_once_with(["maintain", "--quiet"])
-        self.assertEqual("refreshed", json.loads(
-            stdout.getvalue())["checks"][0]["source"])
+        self.assertEqual(1, code)
+        maintain.assert_not_called()
+        self.assertEqual({
+            "ok": False,
+            "checks": [{
+                "check": "automatic maintenance",
+                "ok": False,
+                "category": "smoketest_failed",
+                "detail": "current framework smoketest verdict is failed",
+                "remedy": "agents-live smoketest",
+                "source": "cached",
+            }],
+        }, json.loads(stdout.getvalue()))
 
-    def test_quick_refreshes_unknown_smoketest_status(self) -> None:
+    def test_quick_explains_cached_consecutive_agent_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text(json.dumps({
+                "status": "degraded",
+                "smoketest": {"status": "pass"},
+                "agent_failures": [{
+                    "repository": "C:/repo",
+                    "agent": "sample-123",
+                    "consecutive_failures": 3,
+                }],
+            }), encoding="utf-8")
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    doctor.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(doctor.internal, "main") as maintain,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--quick"])
+
+        self.assertEqual(1, code)
+        maintain.assert_not_called()
+        check = json.loads(stdout.getvalue())["checks"][0]
+        self.assertEqual("agent_repeated_failures", check["category"])
+        self.assertIn("sample-123 has 3 consecutive failures", check["detail"])
+        self.assertEqual(
+            "agents-live logs --agent sample-123 --errors", check["remedy"])
+
+    def test_quick_explains_unknown_smoketest_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             beacon = Path(temporary) / "health.ok"
             beacon.write_text(json.dumps({
@@ -599,24 +661,20 @@ class TestDoctor(unittest.TestCase):
                 "smoketest": {"status": "error"},
             }), encoding="utf-8")
 
-            def refresh(_argv):
-                beacon.write_text(json.dumps({
-                    "status": "healthy",
-                    "smoketest": {"status": "pass"},
-                }), encoding="utf-8")
-                return 0
-
+            stdout = io.StringIO()
             with (
                 mock.patch.object(
                     doctor.paths, "health_beacon_path", return_value=beacon),
-                mock.patch.object(
-                    doctor.internal, "main", side_effect=refresh) as maintain,
-                contextlib.redirect_stdout(io.StringIO()),
+                mock.patch.object(doctor.internal, "main") as maintain,
+                contextlib.redirect_stdout(stdout),
             ):
                 code = doctor.main(["--quick"])
 
-        self.assertEqual(0, code)
-        maintain.assert_called_once_with(["maintain", "--quiet"])
+        self.assertEqual(1, code)
+        maintain.assert_not_called()
+        check = json.loads(stdout.getvalue())["checks"][0]
+        self.assertEqual("smoketest_unknown", check["category"])
+        self.assertEqual("agents-live smoketest", check["remedy"])
 
     def test_quick_fails_when_maintenance_does_not_write_health(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -638,8 +696,10 @@ class TestDoctor(unittest.TestCase):
             "checks": [{
                 "check": "automatic maintenance",
                 "ok": False,
-                "detail": "health record remained stale",
+                "detail": "automatic maintenance wrote no fresh valid health record",
                 "source": "refresh-failed",
+                "category": "health_record_missing",
+                "remedy": "agents-live doctor",
             }],
         }, json.loads(stdout.getvalue()))
 
@@ -661,9 +721,11 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
         self.assertEqual(
-            "health refresh failed",
+            "automatic maintenance could not refresh health",
             payload["checks"][0]["detail"],
         )
+        self.assertEqual(
+            "maintenance_failed", payload["checks"][0]["category"])
 
     def test_quick_cli_is_host_local_and_suppresses_maintenance_output(self) -> None:
         cli_main = importlib.import_module("agents_live.cli.main")
@@ -1553,6 +1615,76 @@ class TestRuntimeCore(unittest.TestCase):
             self.assertEqual("degraded", payload["status"])
             self.assertEqual("fail", payload["smoketest"]["status"])
             self.assertEqual("current failure", payload["smoketest"]["reason"])
+
+    def test_consecutive_failures_ignore_skips_and_reset_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "agent.jsonl"
+            outcomes = (
+                ("first", "success"),
+                ("second", "failed"),
+                ("second", "skipped"),
+                ("first", "failed"),
+                ("second", "failed"),
+                ("first", "failed"),
+            )
+            for index, (identifier, status_value) in enumerate(outcomes):
+                event_name = "firing" if status_value == "skipped" else "run"
+                obs.record(log, obs.Event(
+                    timestamp=f"2026-08-17T00:00:0{index}+00:00",
+                    event=event_name,
+                    status=status_value,
+                    repository=str(temporary),
+                    agent=identifier,
+                    run_id=str(index),
+                    origin="clock",
+                ))
+
+            streaks = obs.consecutive_failures((log,))
+
+        self.assertEqual({"first": 2, "second": 2}, streaks)
+
+    def test_maintenance_degrades_for_active_consecutive_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_dir = root / "state"
+            beacon = state_dir / "health.ok"
+            log = state_dir / "logs" / "scheduled-id.jsonl"
+            for index in range(3):
+                obs.record(log, obs.Event(
+                    timestamp=f"2026-08-17T00:00:0{index}+00:00",
+                    event="run",
+                    status="failed",
+                    repository=str(root),
+                    agent="scheduled-id",
+                    run_id=str(index),
+                    origin="clock",
+                ))
+            subscriptions = (
+                Subscription.create(
+                    scope=f"repo:{root}", target="scheduled-id",
+                    kind="schedule", trigger="0 8 * * *"),
+            )
+            result = mock.Mock(failed=(), health=Health(True, "not-required"))
+            collected = mock.Mock(subscriptions=subscriptions)
+            with (
+                mock.patch.object(internal.lifecycle, "converge", return_value=result),
+                mock.patch.object(internal.lifecycle, "collect", return_value=collected),
+                mock.patch.object(
+                    internal.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    internal.paths, "repo_state_dir", return_value=state_dir),
+                mock.patch.object(internal.paths, "resolve_root", return_value=root),
+            ):
+                self.assertEqual(0, internal.main(["maintain", "--quiet"]))
+
+            payload = json.loads(beacon.read_text(encoding="utf-8"))
+
+        self.assertEqual("degraded", payload["status"])
+        self.assertEqual([{
+            "repository": str(root),
+            "agent": "scheduled-id",
+            "consecutive_failures": 3,
+        }], payload["agent_failures"])
 
     def test_uninstall_clears_structured_triggers_and_watchers(self) -> None:
         host = MemoryHost()
@@ -2501,6 +2633,37 @@ class TestStartedState(TempRepository):
         self.assertIsNone(after["default_repo"])
         self.assertFalse((project / paths.CONFIG_DOTFILE).exists())
 
+    def test_windows_init_reports_powershell_completion_profile_line(self) -> None:
+        project = self.root / "candidate"
+        global_root = self.root / "global"
+        completion = self.root / "data" / "powershell" / \
+            "agents-live-completion.ps1"
+        convergence = mock.Mock(failed=())
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["agents-live init"]),
+            mock.patch.dict(
+                os.environ, {"AGENTS_LIVE_INIT_REPO": str(project)}),
+            mock.patch.object(init.paths, "global_root", return_value=global_root),
+            mock.patch.object(init.plugins, "converge", return_value=False),
+            mock.patch.object(init, "initialize", return_value=True),
+            mock.patch.object(init.repos, "ensure_default"),
+            mock.patch.object(init, "install_skill", return_value=None),
+            mock.patch.object(
+                init.completions, "update_best_effort",
+                return_value=(completion,)),
+            mock.patch.object(init.lifecycle, "converge", return_value=convergence),
+            mock.patch.object(init.adminlog, "record"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = init.main()
+
+        self.assertEqual(0, code)
+        output = stdout.getvalue()
+        self.assertIn(str(completion), output)
+        self.assertIn(f". '{completion}'", output)
+        self.assertIn("$PROFILE", output)
+
 
 class TestRuntimeProcessPolicy(unittest.TestCase):
     def test_watcher_enumeration_is_exact_and_installation_scoped(self) -> None:
@@ -2986,6 +3149,100 @@ class TestAgentPipeline(TempRepository):
         ]
         self.assertEqual(1, len(seeded))
 
+    def test_pipeline_declared_result_is_returned_before_resource_shutdown(self) -> None:
+        self.skill(
+            "result-pipeline",
+            [
+                'agents-live.selector: "fake"',
+                'agents-live.mode: "pipeline"',
+                'agents-live.result-path: "/output/result"',
+            ],
+            body=(
+                "Publish a result.\n\n"
+                "```put /output/result\n"
+                '{"summary":"done"}\n'
+                "```"
+            ),
+        )
+        runner = RecordingRunner([
+            ChildResult(
+                ("fake",), 0,
+                json.dumps({
+                    "text": "narration",
+                    "structured": {"ignored": True},
+                }),
+                "",
+            ),
+        ])
+
+        result = dispatch(
+            Firing("result-pipeline", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"summary": "done"}, result.structured)
+        self.assertEqual("published", result.result_status)
+
+    def test_pipeline_declared_result_distinguishes_missing_and_null(self) -> None:
+        cases = (
+            ("missing-result", "Publish nothing.", None, "not_published"),
+            (
+                "null-result",
+                "Publish null.\n\n```put /output/result\nnull\n```",
+                None,
+                "published",
+            ),
+        )
+        for name, body, expected, status in cases:
+            with self.subTest(name=name):
+                self.skill(
+                    name,
+                    [
+                        'agents-live.selector: "fake"',
+                        'agents-live.mode: "pipeline"',
+                        'agents-live.result-path: "/output/result"',
+                    ],
+                    body=body,
+                )
+                runner = RecordingRunner([ChildResult(
+                    ("fake",), 0,
+                    json.dumps({
+                        "text": "narration",
+                        "structured": {"ignored": True},
+                    }),
+                    "",
+                )])
+
+                result = dispatch(
+                    Firing(name, str(self.root), "manual"), runner=runner)
+
+                self.assertTrue(result.ok, result)
+                self.assertEqual(expected, result.structured)
+                self.assertEqual(status, result.result_status)
+
+    def test_result_path_requires_an_absolute_pipeline_path(self) -> None:
+        cases = (
+            (
+                "non-pipeline-result",
+                ['agents-live.selector: "fake"',
+                 'agents-live.result-path: "/output/result"'],
+                "only available in pipeline mode",
+            ),
+            (
+                "relative-result",
+                ['agents-live.selector: "fake"',
+                 'agents-live.mode: "pipeline"',
+                 'agents-live.result-path: "output/result"'],
+                "must start with '/'",
+            ),
+        )
+        for name, metadata, message in cases:
+            with self.subTest(name=name):
+                self.skill(name, metadata)
+                with self.assertRaisesRegex(agent.DefinitionError, message):
+                    agent.load(name, root=self.root)
+
     def test_transcript_records_the_argv_the_child_was_launched_with(self) -> None:
         """The transcript is the only place the launched command survives.
 
@@ -3280,6 +3537,38 @@ class TestAgentPipeline(TempRepository):
         self.assertEqual("failed", payload["status"])
         self.assertEqual("agent_invalid", payload["category"])
         self.assertTrue(payload["message"])
+        self.assertNotIn("result_status", payload)
+
+    def test_run_json_serializes_declared_pipeline_result_states(self) -> None:
+        cases = (
+            ({"summary": "done"}, "published"),
+            (None, "not_published"),
+            (None, "published"),
+        )
+        for structured, result_status in cases:
+            with self.subTest(
+                    structured=structured, result_status=result_status):
+                outcome = agent.Outcome(
+                    True,
+                    "success",
+                    text="done",
+                    structured=structured,
+                    run_id="run-123",
+                    result_status=result_status,
+                )
+                stdout = io.StringIO()
+                with (
+                    mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+                    mock.patch.object(
+                        run.paths, "resolve_root", return_value=self.root),
+                    mock.patch.object(run, "dispatch", return_value=outcome),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    code = run.main(["--name", "pipeline"])
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(0, code)
+                self.assertEqual(structured, payload["structured"])
+                self.assertEqual(result_status, payload["result_status"])
 
     def test_stop_withdraws_a_definition_whose_file_is_gone(self) -> None:
         directory = self.skill("departed", [
@@ -3558,6 +3847,103 @@ class TestArchitectureFitness(unittest.TestCase):
             message="plugins already converged",
         )
 
+    def test_plugin_convergence_refuses_the_active_tool_environment(self) -> None:
+        declaration = plugins.Plugin(
+            name="example", path=Path("example.whl"),
+            sha256=None, version="1.0")
+        environment = Path("C:/uv/tools/agents-live")
+        with (
+            mock.patch.object(plugins, "union", return_value={
+                "example": declaration}),
+            mock.patch.object(
+                plugins, "_installed_state", return_value=(False, "missing")),
+            mock.patch.object(plugins, "validation_errors", return_value=[]),
+            mock.patch.object(
+                plugins.hostruntime, "locks_running_image", return_value=True),
+            mock.patch.object(
+                plugins, "tool_environment", return_value=environment),
+            mock.patch.object(
+                plugins.sys, "executable",
+                str(environment / "Scripts" / "python.exe")),
+            mock.patch.object(plugins, "_receipt_requirements") as receipt,
+            mock.patch.object(plugins.subprocess, "run") as run,
+        ):
+            with self.assertRaisesRegex(
+                    plugins.PluginError, "active tool environment"):
+                plugins.converge([Path("C:/repo")], trigger="init")
+        receipt.assert_not_called()
+        run.assert_not_called()
+
+    def test_plugin_convergence_refuses_an_environment_held_by_another_process(
+            self) -> None:
+        declaration = plugins.Plugin(
+            name="example", path=Path("example.whl"),
+            sha256=None, version="1.0")
+        environment = Path("C:/uv/tools/agents-live")
+        held_executable = environment / "Scripts" / "python.exe"
+        with (
+            mock.patch.object(plugins, "union", return_value={
+                "example": declaration}),
+            mock.patch.object(
+                plugins, "_installed_state", return_value=(False, "missing")),
+            mock.patch.object(plugins, "validation_errors", return_value=[]),
+            mock.patch.object(
+                plugins.hostruntime, "locks_running_image", return_value=True),
+            mock.patch.object(
+                plugins, "tool_environment", return_value=environment),
+            mock.patch.object(
+                plugins.sys, "executable", "C:/uv/cache/python.exe"),
+            mock.patch.object(
+                plugins.hostruntime, "process_command_lines",
+                return_value=[(42, "held command")]),
+            mock.patch.object(
+                plugins.hostruntime, "split_command_line",
+                return_value=[str(held_executable), "internal", "watch-loop"]),
+            mock.patch.object(plugins, "_receipt_requirements") as receipt,
+            mock.patch.object(plugins.subprocess, "run") as run,
+        ):
+            with self.assertRaisesRegex(
+                    plugins.PluginError, "active tool environment"):
+                plugins.converge([Path("C:/repo")], trigger="init")
+        receipt.assert_not_called()
+        run.assert_not_called()
+
+    def test_plugin_convergence_refuses_unverifiable_windows_idleness(self) -> None:
+        declaration = plugins.Plugin(
+            name="example", path=Path("example.whl"),
+            sha256=None, version="1.0")
+        environment = Path("C:/uv/tools/agents-live")
+        for target, processes, message in (
+            (None, [(1, "external helper")], "cannot identify"),
+            (environment, [], "cannot verify"),
+        ):
+            with self.subTest(message=message):
+                with (
+                    mock.patch.object(plugins, "union", return_value={
+                        "example": declaration}),
+                    mock.patch.object(
+                        plugins, "_installed_state",
+                        return_value=(False, "missing")),
+                    mock.patch.object(
+                        plugins, "validation_errors", return_value=[]),
+                    mock.patch.object(
+                        plugins.hostruntime, "locks_running_image",
+                        return_value=True),
+                    mock.patch.object(
+                        plugins, "tool_environment", return_value=target),
+                    mock.patch.object(
+                        plugins.sys, "executable", "C:/uv/cache/python.exe"),
+                    mock.patch.object(
+                        plugins.hostruntime, "process_command_lines",
+                        return_value=processes),
+                    mock.patch.object(plugins, "_receipt_requirements") as receipt,
+                    mock.patch.object(plugins.subprocess, "run") as run,
+                ):
+                    with self.assertRaisesRegex(plugins.PluginError, message):
+                        plugins.converge([Path("C:/repo")], trigger="init")
+                receipt.assert_not_called()
+                run.assert_not_called()
+
     def test_upgrade_correlates_pending_plugin_convergence(self) -> None:
         declaration = plugins.Plugin(
             name="example", path=Path("example.whl"),
@@ -3571,6 +3957,8 @@ class TestArchitectureFitness(unittest.TestCase):
             mock.patch.object(
                 plugins, "_installed_state", return_value=(False, "missing")),
             mock.patch.object(plugins, "validation_errors", return_value=[]),
+            mock.patch.object(
+                plugins.hostruntime, "locks_running_image", return_value=False),
             mock.patch.object(
                 plugins, "_receipt_requirements", return_value=(primary, {})),
             mock.patch.object(plugins, "find_uv", return_value="uv"),
@@ -4002,6 +4390,45 @@ class TestArchitectureFitness(unittest.TestCase):
                     runpy.run_path(
                         dashboard.__file__, run_name="__mp_main__")
                 self.assertEqual(0, stopped.exception.code)
+
+    def test_dashboard_abbreviates_windows_timezones_and_timestamps_refresh(self) -> None:
+        class MountainTime(tzinfo):
+            def utcoffset(self, moment):
+                return self.dst(moment) + timedelta(hours=-7)
+
+            def dst(self, moment):
+                return timedelta(hours=1 if 3 <= moment.month <= 10 else 0)
+
+            def tzname(self, moment):
+                return (
+                    "Mountain Daylight Time"
+                    if self.dst(moment) else "Mountain Standard Time"
+                )
+
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+
+        summer = datetime(2026, 7, 1, 12, 0, tzinfo=MountainTime())
+        winter = datetime(2026, 1, 1, 12, 0, tzinfo=MountainTime())
+        self.assertEqual("12:00:00 MDT", dashboard._local_time(summer))
+        self.assertEqual("12:00:00 MST", dashboard._local_time(winter))
+
+        output = mock.Mock()
+        with (
+            mock.patch.object(dashboard, "output_log", output, create=True),
+            mock.patch.object(dashboard, "_refresh_summary", return_value="summary"),
+            mock.patch.object(dashboard.agent_grid, "refresh", create=True),
+            mock.patch.object(dashboard.header_actions, "refresh", create=True),
+            mock.patch.object(
+                dashboard.hostruntime, "enumeration_pass",
+                return_value=contextlib.nullcontext()),
+        ):
+            dashboard._refresh_views()
+        rendered = output.push.call_args.args[0]
+        self.assertRegex(rendered, r"^\[\d{2}:\d{2}:\d{2} [A-Z]+\] summary$")
 
     def test_ports_do_not_import_each_other_and_cli_stays_on_ports(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

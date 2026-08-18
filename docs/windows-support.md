@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: Current native Windows host architecture, security model, and operational boundaries
-ms.date: 2026-08-09
+ms.date: 2026-08-17
 ms.topic: concept
 ---
 
@@ -140,18 +140,5 @@ uvx --from .\dist\agents_live-<version>-py3-none-any.whl agents-live smoketest
 Use temporary repositories for mutating tests. A passing source invocation
 does not prove the wheel or installed uv tool works.
 
-## Current limitations
-
-- Installation and first-run guidance still need validation against the
-  supported native toolchain
-  ([#243](https://github.com/johnshew/agents-live/issues/243)).
-- PowerShell completion requires a profile step that setup must surface
-  ([#244](https://github.com/johnshew/agents-live/issues/244)).
-- Doctor can report an installed Claude shim that runtime pinning correctly
-  refuses ([#246](https://github.com/johnshew/agents-live/issues/246)).
-- Ctrl+C on a foreground dashboard can print a traceback
-  ([#249](https://github.com/johnshew/agents-live/issues/249)).
-
-These are tracked work items, not alternate architecture. Platform defects
-should be fixed in the Windows host adapter or shared protocol that owns the
-behavior, not as call-site branches in common code.
+Platform defects should be fixed in the Windows host adapter or shared protocol
+that owns the behavior, not as call-site branches in common code.

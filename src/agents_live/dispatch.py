@@ -104,16 +104,30 @@ def dispatch(
 
 def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Path) -> Outcome:
     shape = agent.shape(spec)
+    config = spec.execution
+    if config is None:
+        raise agent.DefinitionError(
+            f"skill '{spec.name}' has no Agents Live execution metadata")
     results = {}
     request = Request(changed_files=firing.changed_files)
-    with _resource(spec, shape.needs_mcp, run_id) as resource_env:
+    with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
+        def finish() -> Outcome:
+            pipeline_result = (
+                session.snapshot(config.result_path)
+                if session is not None and config.result_path is not None
+                else None
+            )
+            return _finish(
+                spec, results, firing, run_id, events,
+                pipeline_result=pipeline_result)
+
         if shape.has_pre:
             launch = agent.prepare(
                 spec, Step.PRE, StepContext(request, resource_env=resource_env))
             results[Step.PRE] = _run(
                 spec, Step.PRE, launch, runner, run_id=run_id)
             if not results[Step.PRE].ok or results[Step.PRE].skip:
-                return _finish(spec, results, firing, run_id, events)
+                return finish()
 
         if shape.has_agent:
             launch = agent.prepare(
@@ -141,7 +155,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                     continue
                 break
             if not results[Step.AGENT].ok:
-                return _finish(spec, results, firing, run_id, events)
+                return finish()
 
         if shape.has_post:
             launch = agent.prepare(
@@ -156,7 +170,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
             )
             results[Step.POST] = _run(
                 spec, Step.POST, launch, runner, run_id=run_id)
-    return _finish(spec, results, firing, run_id, events)
+        return finish()
 
 
 def _run(
@@ -240,8 +254,23 @@ def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):
     return destination
 
 
-def _finish(spec, results, firing: Firing, run_id: str, events: Path) -> Outcome:
+def _finish(
+    spec,
+    results,
+    firing: Firing,
+    run_id: str,
+    events: Path,
+    *,
+    pipeline_result: tuple[bool, object] | None = None,
+) -> Outcome:
     result = replace(agent.outcome(spec, results), run_id=run_id)
+    if pipeline_result is not None:
+        present, value = pipeline_result
+        result = replace(
+            result,
+            structured=value if present else None,
+            result_status="published" if present else "not_published",
+        )
     obs.record(events, obs.create(
         "run",
         result.status,
@@ -299,6 +328,7 @@ def _resource(spec, needed: bool, run_id: str):
     from .agent.mcp import mcp_config_runtime, resolve_mcp_servers
 
     environment: dict[str, str] = {}
+    pipeline_session = None
     config = spec.execution
     with contextlib.ExitStack() as stack:
         if config is not None and config.mcps and config.mode != "pipeline":
@@ -315,14 +345,13 @@ def _resource(spec, needed: bool, run_id: str):
                 / spec.name
                 / f"{run_id}-pipeline.jsonl"
             )
-            environment.update(
-                stack.enter_context(pipeline_runtime(
-                    log,
-                    seed_puts=list(spec.pipeline_puts),
-                    run_id=run_id,
-                ))
-            )
-        yield tuple(sorted(environment.items()))
+            pipeline_session = stack.enter_context(pipeline_runtime(
+                log,
+                seed_puts=list(spec.pipeline_puts),
+                run_id=run_id,
+            ))
+            environment.update(pipeline_session)
+        yield tuple(sorted(environment.items())), pipeline_session
 
 
 def _event_path(root: Path, agent_id: str) -> Path:

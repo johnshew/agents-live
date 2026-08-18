@@ -85,13 +85,9 @@ same correction task through validated, deterministic write boundaries.
 
 ## Installation
 
-Install Claude Code, GitHub Copilot CLI, or both:
-
-```bash
-npm i -g @anthropic-ai/claude-code
-npm i -g @github/copilot
-```
-
+Install at least one supported provider CLI using its current official
+installer: [Claude Code](https://code.claude.com/docs/en/setup) or
+[GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started).
 Then install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 and Agents Live.
 
@@ -112,13 +108,24 @@ existing task, so scheduled runs do not require an open session.
 On Windows:
 
 ```powershell
+winget install Anthropic.ClaudeCode
+# Or: winget install GitHub.Copilot
 winget install --id=astral-sh.uv -e
+```
+
+Open a new PowerShell session, then install the tool and update future shells:
+
+```powershell
 uv tool install agents-live
-agents-live init
+uv tool update-shell
+$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+& $agentsLive --repo C:\path\to\repository init
 ```
 
 Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
-install.
+install. Using the absolute path from `uv tool dir --bin` avoids mistaking the
+current shell's stale `PATH` for an installation failure. `init` prints the
+PowerShell completion script path and the exact line to add to `$PROFILE`.
 
 The installed `.claude/skills/agents-live/` payload is tool-managed and carries
 a directory-local `.gitignore`; project-authored sibling skills are unaffected.

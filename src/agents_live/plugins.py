@@ -17,6 +17,7 @@ from . import __version__, paths
 from .agent import providers as provider_plugins
 from .obs import admin as adminlog
 from .runtime.hosts import system as hostruntime
+from .runtime.hosts.processes import within
 from .runtime.spawn import find_uv
 from .state import ownership
 
@@ -487,6 +488,40 @@ def tool_environment() -> Path | None:
     return environment if environment.is_dir() else None
 
 
+def _refuse_active_environment(environment: Path | None) -> None:
+    if not hostruntime.locks_running_image():
+        return
+    if environment is None:
+        raise PluginError(
+            "plugin convergence cannot identify the Windows tool environment; "
+            "nothing was changed")
+    active = within(sys.executable, environment)
+    if not active:
+        try:
+            processes = hostruntime.process_command_lines()
+            if not processes:
+                raise PluginError(
+                    "plugin convergence cannot verify that the Windows tool "
+                    "environment is idle; nothing was changed")
+            active = any(
+                any(within(argument, environment) for argument in
+                    hostruntime.split_command_line(command))
+                for _, command in processes
+            )
+        except PluginError:
+            raise
+        except OSError as exc:
+            raise PluginError(
+                "plugin convergence cannot verify that the Windows tool "
+                f"environment is idle: {exc}; nothing was changed") from exc
+    if active:
+        raise PluginError(
+            "plugin convergence refused to rewrite the active tool environment; "
+            "nothing was changed. Stop Agents Live watchers and dashboards, then "
+            f"retry from an external runtime (`uv tool run --from "
+            f"agents-live=={__version__} agents-live --repo <path> init`)")
+
+
 def converge(roots: list[Path], *, trigger: str = "unspecified",
              pin_primary: bool = True,
              receipt_environment: Path | None = None,
@@ -523,6 +558,9 @@ def converge(roots: list[Path], *, trigger: str = "unspecified",
     validation = validation_errors(roots)
     if validation:
         raise PluginError(validation[0])
+    if receipt_environment is None and hostruntime.locks_running_image():
+        receipt_environment = tool_environment()
+    _refuse_active_environment(receipt_environment)
     primary, requirements = _receipt_requirements(
         pin_primary=pin_primary, environment=receipt_environment)
     requirements.update({

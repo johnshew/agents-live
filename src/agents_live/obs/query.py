@@ -114,6 +114,38 @@ def load(
     return tuple(records)
 
 
+def consecutive_failures(paths: Iterable[Path]) -> dict[str, int]:
+    """Newest consecutive terminal failures for each canonical agent ID."""
+    terminal: dict[str, list[tuple[datetime, str]]] = {}
+    for record in load(paths):
+        if record.get("phase") != "done":
+            continue
+        identifier = record.get("agent_name")
+        timestamp = record.get("ts")
+        if not isinstance(identifier, str) or not isinstance(timestamp, str):
+            continue
+        try:
+            moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if moment.tzinfo is None:
+            continue
+        terminal.setdefault(identifier, []).append(
+            (moment, str(record.get("status", "")).lower()))
+    streaks: dict[str, int] = {}
+    for identifier, outcomes in terminal.items():
+        count = 0
+        for _, status in sorted(outcomes, reverse=True):
+            if status == "skipped":
+                continue
+            if status != "error":
+                break
+            count += 1
+        if count:
+            streaks[identifier] = count
+    return streaks
+
+
 def damaged(paths: Iterable[Path]) -> int:
     """How many lines no reader can decode.
 

@@ -9,12 +9,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ... import __version__, agent, paths, runtime
+from ... import __version__, agent, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
 from .. import lifecycle, upgrade_handoff
+
+
+_AGENT_FAILURE_THRESHOLD = 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,6 +82,28 @@ def _maintain(*, dry_run: bool) -> int:
         "cron": len(clocks),
         "repos": {root: {"status": "ok"} for root in sorted(repositories)},
     }
+    active_by_repository: dict[str, set[str]] = {}
+    for item in collected.subscriptions:
+        if item.target == "runtime" or not item.scope.startswith("repo:"):
+            continue
+        active_by_repository.setdefault(
+            item.scope.removeprefix("repo:"), set()).add(item.target)
+    agent_failures = []
+    for root, identifiers in sorted(active_by_repository.items()):
+        logs = paths.repo_state_dir(Path(root)) / "logs"
+        streaks = obs.consecutive_failures(obs.files(logs))
+        agent_failures.extend(
+            {
+                "repository": root,
+                "agent": identifier,
+                "consecutive_failures": streaks[identifier],
+            }
+            for identifier in sorted(identifiers)
+            if streaks.get(identifier, 0) >= _AGENT_FAILURE_THRESHOLD
+        )
+    if agent_failures:
+        payload["status"] = "degraded"
+        payload["agent_failures"] = agent_failures
     previous = _health_beacon()
     smoketest = _smoketest_verdict(previous)
     if smoketest:

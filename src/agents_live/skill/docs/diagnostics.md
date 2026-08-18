@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-14
+ms.date: 2026-08-17
 ms.topic: troubleshooting
 ---
 
@@ -22,6 +22,34 @@ never executed a second time.
 
 Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
 and `agents-live doctor --repair` to apply it.
+
+## Native Windows first run
+
+Install one provider CLI and uv through WinGet. Native provider packages avoid
+the `.cmd` and `.ps1` shims that unattended dispatch intentionally refuses:
+
+```powershell
+winget install Anthropic.ClaudeCode
+# Or: winget install GitHub.Copilot
+winget install --id=astral-sh.uv -e
+```
+
+Open a new PowerShell session after WinGet changes PATH. Install Agents Live,
+update PATH for future shells, and invoke the installed executable by its
+absolute uv bin path in the current shell:
+
+```powershell
+uv tool install agents-live
+uv tool update-shell
+$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+& $agentsLive --repo C:\path\to\repository init
+& $agentsLive --repo C:\path\to\repository doctor
+```
+
+Follow the `$PROFILE` completion line printed by `init`, then open another
+PowerShell session. Agents Live never edits PowerShell profiles automatically.
+If `doctor` reports that only shims answer for a declared provider, install the
+native CLI shown in its remediation and rerun doctor.
 
 ## Microsoft-managed package source
 

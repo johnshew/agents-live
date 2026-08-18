@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from ... import agent, state
+from ... import agent, obs, paths, state
 from ...state import registry as repos
 
 
@@ -33,6 +33,8 @@ def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
 
 
 def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
+    logs = paths.repo_state_dir(root) / "logs"
+    failure_streaks = obs.consecutive_failures(obs.files(logs))
     try:
         started = state.load(root)
         started_names = started.agents if started.initialized else frozenset()
@@ -80,6 +82,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "path": prompt_path,
             "execution": policy,
             "unknown_metadata": unknown_metadata,
+            "consecutive_failures": failure_streaks.get(identifier, 0),
             "error": load_error,
         })
     for item in unloadable:
@@ -95,6 +98,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "path": str(item.path),
             "execution": None,
             "unknown_metadata": [],
+            "consecutive_failures": 0,
             "error": item.message,
         })
     return rows
@@ -122,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for row in rows:
             suffix = f" ({row['error']})" if row["error"] else ""
+            raw_failures = row["consecutive_failures"]
+            failures = raw_failures if isinstance(raw_failures, int) else 0
+            if failures:
+                suffix += f"; {failures} consecutive failure(s)"
             label = row["identifier"] or "unreadable"
             print(f"{row['name']} ({label}): {row['state']}{suffix}")
     return 0

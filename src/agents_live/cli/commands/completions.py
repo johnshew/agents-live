@@ -266,18 +266,17 @@ def remove() -> tuple[Path, ...]:
     return tuple(removed)
 
 
-def update_best_effort(operation: str) -> bool:
+def update_best_effort(operation: str) -> tuple[Path, ...]:
     """Update completions without failing a larger lifecycle operation."""
     try:
-        update()
+        return update()
     except OSError as exc:
         print(
             f"warning: could not update shell completions during "
             f"{operation}: {exc}",
             file=sys.stderr,
         )
-        return False
-    return True
+        return ()
 
 
 def main() -> int:

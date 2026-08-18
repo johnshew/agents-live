@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-08-14
+ms.date: 2026-08-17
 ms.topic: reference
 ---
 
@@ -43,6 +43,7 @@ metadata:
 | `agents-live.schedule` | schedule or JSON string array | Optional. Five-field cron, including month and weekday names, or one of the eight documented `@` names. |
 | `agents-live.watch` | watch expression | Optional. Includes, `!` excludes, then optional `debounce <duration>`. |
 | `agents-live.mode` | enum | `plan` by default; `plan`, `write`, or `pipeline`. |
+| `agents-live.result-path` | absolute PipelineMcp path | Optional in `pipeline` mode only. The declared value becomes `structured` in `run --json`; absence is nonfatal. |
 | `agents-live.allow-tools` | JSON string array | Empty by default. Narrows unattended authority; it is not standard `allowed-tools`. |
 | `agents-live.mcps` | JSON string array | Empty by default. |
 | `agents-live.env` | JSON string map | Empty by default. Do not store secrets. |
