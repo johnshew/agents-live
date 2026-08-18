@@ -8,7 +8,8 @@ ms.topic: reference
 # Writing a processor
 
 Selected by `agents-live.schema-version: "2"`. Definitions still on schema
-version 1 use the earlier contract, which is removed in 7.0.
+version 1 use the earlier contract, which is removed in 7.0; see
+[Moving from version 1](#moving-from-version-1).
 
 A processor is a filter. The run is a pipeline:
 
@@ -477,6 +478,38 @@ Both are tool policy and deterministic mediation, not an operating system
 sandbox. Processors run with the local account's permissions, and what else a
 provider may load from the repository during a run is being settled in
 [#375](https://github.com/johnshew/agents-live/issues/375).
+
+### Moving from version 1
+
+Most of a version 1 processor is already a version 2 processor. Streams, exit
+codes, the working directory, the timeout, and the pipeline MCP are unchanged,
+a definition still names its processors the same way, and a processor invoked
+with no options still receives no arguments.
+
+Two things need editing.
+
+**Skip moved off stdout.** Under version 1 a pre-processor ended the run by
+printing `{"skip": true}`. Under version 2 stdout is never parsed, so that line
+becomes prompt text and the run continues instead. Write `AGENTS_LIVE_CONTROL`
+instead. This is the one change that fails quietly rather than loudly, so it is
+worth searching for before you raise the version.
+
+**`AGENTS_LIVE_LOG_FILE` became `AGENTS_LIVE_LOG`**, and it names a different
+file. Version 1 pointed at the agent's own log, which every step appended to
+directly. Version 2 gives each step a private sink that the host validates,
+stamps, caps, and merges when the step exits. Drop any identity fields you were
+stamping yourself, and stop writing `phase: "done"` or a run status, which are
+now reserved.
+
+Two more differences are unlikely to matter but are real.
+`AGENTS_LIVE_CHANGED_FILES` is always set, as `[]` when nothing changed, where
+version 1 omitted it; reading it with a default works under both, but testing
+for its presence to detect a watch run does not, and `AGENTS_LIVE_ORIGIN` says
+it properly. And in pipeline mode a post-processor now receives the
+`result-path` snapshot on stdin where version 1 gave it nothing, which changes
+nothing for a program that ignores stdin.
+
+Nothing runs both contracts. `agents-live.schema-version` selects one.
 
 ## Open decisions
 
