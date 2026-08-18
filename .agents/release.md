@@ -200,11 +200,13 @@ the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
 which resolves the release tag to one commit, runs the Test workflow against
-that exact commit on Ubuntu and Windows, uploads the verified Ubuntu wheel and
-sdist for the publish job, attaches them to the GitHub release, and publishes
-those artifacts to PyPI through trusted publishing. A release-attached
-`SHA256SUMS` manifest from the accepted local candidate must match the CI-built
-bytes before either artifact is uploaded. Publication cannot start
+that exact commit on Ubuntu and Windows, then verifies and publishes the exact
+wheel and source distribution that passed installed-candidate acceptance. The
+release tool attaches those artifacts and their `SHA256SUMS` manifest while the
+GitHub release is still a draft; the publish job downloads them only after both
+test jobs pass and refuses any checksum mismatch before PyPI. Independent
+Windows and Linux builds are not expected to be byte-identical because archive
+line endings, executable modes, and build-backend metadata differ. Publication cannot start
 unless both test jobs pass. Wait
 for the workflow to succeed, verify both artifacts are attached, then follow
 the two-stage PyPI and installed-tool checks in [testing.md](testing.md). In

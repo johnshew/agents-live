@@ -1945,13 +1945,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertIn(f"tests/{name}", gates)
                 self.assertIn(f"tests/{name}", workflow)
 
-    def test_publish_reuses_artifacts_from_exact_sha_verification(self) -> None:
+    def test_publish_uses_release_attached_accepted_artifacts(self) -> None:
         publish = self._workflow_text("publish.yml")
-        workflow = self._workflow_text("test.yml")
-        self.assertIn("artifact-name: verified-release-dist", publish)
-        self.assertIn("actions/download-artifact@v4", publish)
-        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertIn("gh release download", publish)
+        self.assertIn("--pattern '*.whl'", publish)
+        self.assertIn("--pattern '*.tar.gz'", publish)
         self.assertIn("sha256sum --check", publish)
+        self.assertNotIn("verified-release-dist", publish)
+        self.assertNotIn("actions/download-artifact@v4", publish)
+        self.assertNotIn("gh release upload", publish)
         self.assertNotIn("tools/release.py --gates", publish)
         self.assertNotIn("tests/test_", publish)
 
@@ -2261,6 +2263,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "prepared": True,
             "commit": "candidate-commit",
             "tag_object": "annotated-tag-object",
+            "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
+            "sdist": "dist/agents_live-1.2.3.tar.gz",
         })
         acceptance = mock.Mock(return_value={"accepted": True})
         release_notes = mock.Mock()
@@ -2292,10 +2296,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
         )
         release_notes.assert_called_once_with(
             "v1.2.3", "notes", create=True,
-            assets=(Path("SHA256SUMS-1.2.3"),),
+            assets=(
+                Path("SHA256SUMS-1.2.3"),
+                Path("dist/agents_live-1.2.3-py3-none-any.whl"),
+                Path("dist/agents_live-1.2.3.tar.gz"),
+            ),
             resume_draft=False)
 
-    def test_release_manifest_is_uploaded_before_draft_publication(self) -> None:
+    def test_release_artifacts_are_uploaded_before_draft_publication(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         write_notes = release["_write_release_notes"]
         scope = write_notes.__globals__
@@ -2305,13 +2313,19 @@ class TestCrossModuleAgreements(unittest.TestCase):
         }):
             write_notes(
                 "v1.2.3", "notes", create=True,
-                assets=(Path("SHA256SUMS-1.2.3"),))
+                assets=(
+                    Path("SHA256SUMS-1.2.3"),
+                    Path("dist/agents_live-1.2.3-py3-none-any.whl"),
+                    Path("dist/agents_live-1.2.3.tar.gz"),
+                ))
         self.assertEqual("create", commands[0][2])
         self.assertIn("--draft", commands[0])
         self.assertNotIn("SHA256SUMS-1.2.3", commands[0])
         self.assertEqual([
             "gh", "release", "upload", "v1.2.3",
-            "SHA256SUMS-1.2.3", "--clobber",
+            "SHA256SUMS-1.2.3",
+            str(Path("dist/agents_live-1.2.3-py3-none-any.whl")),
+            str(Path("dist/agents_live-1.2.3.tar.gz")), "--clobber",
         ], commands[1])
         self.assertEqual([
             "gh", "release", "edit", "v1.2.3", "--draft=false",
