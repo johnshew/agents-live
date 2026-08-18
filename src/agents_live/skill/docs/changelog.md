@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: run deferred Windows upgrades from an isolated helper environment.
+  The continuation interpreter now lives outside the uv tool directory it
+  replaces instead of allowing uv to reuse the active installed environment.
 - fix: prevent plugin convergence from rewriting an active Windows tool environment. (#354)
   Validation remains read-only, while any mutating convergence refuses before
   receipt parsing or uv execution and names the external-runtime recovery path.
