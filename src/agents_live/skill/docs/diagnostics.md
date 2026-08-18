@@ -254,7 +254,7 @@ invoke the placeholder provider.
 name: wheel-check
 description: Verify the locally built Agents Live wheel.
 metadata:
-	agents-live.schema-version: "1"
+	agents-live.schema-version: "2"
 	agents-live.selector: "fake/echo"
 	agents-live.schedule: "0 8 * * *"
 ---

@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from ... import paths
 from ...dispatch import Firing, dispatch
@@ -14,6 +15,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
     parser.add_argument("--changed-files")
+    parser.add_argument("-p", "--prompt")
+    parser.add_argument("--prompt-file")
+    parser.add_argument("-o", "--option", action="append", default=[])
     parser.add_argument("--scheduled", action="store_true")
     parser.add_argument("--boot", action="store_true")
     parser.add_argument("--quiet", action="store_true")
@@ -26,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
         changed = tuple(json.loads(args.changed_files)) if args.changed_files else ()
         if not all(isinstance(item, str) for item in changed):
             raise ValueError("--changed-files must be a JSON string array")
+        instructions = _instructions(args)
+        options = _options(args.option)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -41,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         origin,
         args.subscription_key,
         changed,
+        instructions,
+        options,
     ))
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         payload = {
@@ -65,6 +73,50 @@ def main(argv: list[str] | None = None) -> int:
         elif not result.ok:
             print(result.message, file=sys.stderr)
     return 0 if result.ok else 1
+
+
+def _instructions(args) -> str:
+    """Additional instructions for the model, from exactly one source."""
+    if args.prompt is not None and args.prompt_file is not None:
+        raise ValueError("--prompt and --prompt-file are mutually exclusive")
+    if args.prompt is not None:
+        if not args.prompt.strip():
+            raise ValueError("--prompt must not be empty")
+        return args.prompt
+    if args.prompt_file is None:
+        return ""
+    if args.prompt_file == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(args.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"--prompt-file is unreadable: {exc}") from None
+        except UnicodeError:
+            raise ValueError("--prompt-file is not valid UTF-8") from None
+    if not text.strip():
+        raise ValueError("--prompt-file must not be empty")
+    return text
+
+
+def _options(supplied: list[str]) -> tuple[tuple[str, str | bool], ...]:
+    """``-o name`` is a flag, ``-o name=value`` carries one.
+
+    Nothing is declared, so the presence of ``=`` is the whole grammar.
+    A repeat is refused rather than resolved: a silently discarded option
+    is the failure mode that wastes an agent run.
+    """
+    options: list[tuple[str, str | bool]] = []
+    seen: set[str] = set()
+    for item in supplied:
+        name, separator, value = item.partition("=")
+        if not name:
+            raise ValueError(f"option name is missing: {item!r}")
+        if name in seen:
+            raise ValueError(f"option supplied more than once: {name}")
+        seen.add(name)
+        options.append((name, value if separator else True))
+    return tuple(options)
 
 
 if __name__ == "__main__":

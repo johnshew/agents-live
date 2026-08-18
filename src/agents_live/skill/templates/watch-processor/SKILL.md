@@ -2,7 +2,7 @@
 name: watch-processor
 description: Processes repository files after matching changes settle. Use when creating file-watch automation.
 metadata:
-  agents-live.schema-version: "1"
+  agents-live.schema-version: "2"
   agents-live.selector: "claude"
   agents-live.mode: "plan"
   agents-live.watch: "path/to/watch/** !**/*.tmp debounce 30s"

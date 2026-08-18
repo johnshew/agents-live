@@ -34,8 +34,10 @@ _RETIRED_FIELDS = {
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # The definition format this release understands. A definition declaring a
-# higher version is not malformed, it is from the future.
-SCHEMA_VERSION = 1
+# higher version is not malformed, it is from the future. Version 1 is the
+# earlier processor contract and leaves in 7.0.
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = ("1", "2")
 _EXECUTION_FIELDS = {
     "agents-live.schema-version", "agents-live.selector", "agents-live.mode",
     "agents-live.result-path",
@@ -348,16 +350,16 @@ def _supported(version: str | None) -> str:
     """Reject a definition this release cannot honour, saying which way to fix it."""
     if version is None:
         raise DefinitionError(
-            'agents-live.schema-version is required and must be quoted "1"')
+            'agents-live.schema-version is required and must be quoted "2"')
     if version.isdigit() and int(version) > SCHEMA_VERSION:
         raise UnsupportedSchemaVersion(
             f"definition declares schema version {version}, but the installed "
             f"agents-live {__version__} implements version {SCHEMA_VERSION}; "
             "upgrade with `uv tool upgrade agents-live`")
-    if version != str(SCHEMA_VERSION):
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise DefinitionError(
-            f'agents-live.schema-version must be quoted "{SCHEMA_VERSION}" '
-            "for this release")
+            'agents-live.schema-version must be quoted "2", or "1" for the '
+            "earlier processor contract")
     return version
 
 

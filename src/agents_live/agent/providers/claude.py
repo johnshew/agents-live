@@ -30,7 +30,7 @@ class ClaudeProvider:
         else:
             mode = ["--dangerously-skip-permissions"]
         argv = [
-            "claude", "-p", spec.prompt, "--output-format", "json",
+            "claude", "-p", "--output-format", "json",
             "--append-system-prompt", "Follow the loaded Agent Skill exactly.",
             *mode,
         ]
@@ -47,6 +47,10 @@ class ClaudeProvider:
         return Launch(
             tuple(argv),
             spec.env,
+            # On stdin, not in argv: Windows caps a command line at 32767
+            # characters, so a prompt passed as an argument is the one
+            # handoff with a hard limit. `-p` with no text reads stdin.
+            input_text=spec.prompt,
             timeout=None,
             provider=self.name,
         )

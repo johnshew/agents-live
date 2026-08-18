@@ -429,8 +429,11 @@ The ceiling is real but it belongs to process spawning, not to this contract.
 Windows caps a command line at 32767 characters, roughly 64 times smaller than
 a typical Linux `ARG_MAX`, so a prompt passed as an argument is the one handoff
 with a hard limit. Agents Live delivers the prompt by whatever route the
-provider supports for large input, which for Claude Code is stdin, capped at
-10 MB, and for Copilot CLI is stdin when `-p` is omitted.
+provider supports for large input. Claude Code takes it on stdin, capped at
+10 MB, which is what a run uses. Copilot CLI accepts a piped prompt only when
+`-p` is omitted, and offers no `--prompt-file`, so its prompt is still an
+argument and still bounded by the host: that gap is
+[#374](https://github.com/johnshew/agents-live/issues/374).
 
 Everything else already streams: stdin, stdout, and the log sink are pipes or
 files with no practical ceiling. Environment values are bounded, so
@@ -451,9 +454,6 @@ fails rather than prompts.
 The model's own output is bounded separately by
 `agents-live.output-max-bytes`, 10 MB by default, and what lands in the run
 record is truncated because a log line is not the artifact.
-
-Moving prompt delivery off the command line is tracked in
-[#374](https://github.com/johnshew/agents-live/issues/374).
 
 ### Environment
 

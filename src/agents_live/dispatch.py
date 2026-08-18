@@ -30,6 +30,8 @@ class Firing:
     origin: str
     subscription_key: str = ""
     changed_files: tuple[str, ...] = ()
+    instructions: str = ""
+    options: tuple[tuple[str, str | bool], ...] = ()
 
     def __post_init__(self) -> None:
         if self.origin not in {"clock", "boot", "watch", "manual"}:
@@ -109,68 +111,126 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
         raise agent.DefinitionError(
             f"skill '{spec.name}' has no Agents Live execution metadata")
     results = {}
-    request = Request(changed_files=firing.changed_files)
-    with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
-        def finish() -> Outcome:
-            pipeline_result = (
-                session.snapshot(config.result_path)
-                if session is not None and config.result_path is not None
-                else None
-            )
-            return _finish(
-                spec, results, firing, run_id, events,
-                pipeline_result=pipeline_result)
-
-        if shape.has_pre:
-            launch = agent.prepare(
-                spec, Step.PRE, StepContext(request, resource_env=resource_env))
-            results[Step.PRE] = _run(
-                spec, Step.PRE, launch, runner, run_id=run_id)
-            if not results[Step.PRE].ok or results[Step.PRE].skip:
-                return finish()
-
-        if shape.has_agent:
-            launch = agent.prepare(
-                spec,
-                Step.AGENT,
-                StepContext(request, pre=results.get(Step.PRE), resource_env=resource_env),
-            )
-            timeout_retries = 1
-            empty_retries = 2
-            attempt = 0
-            while True:
-                attempt += 1
-                result = _run(
-                    spec, Step.AGENT, launch, runner,
-                    run_id=run_id, attempt=attempt)
-                results[Step.AGENT] = result
-                if not result.retryable:
-                    break
-                if result.category == "timeout" and timeout_retries:
-                    timeout_retries -= 1
-                    continue
-                if result.category == "empty_output" and empty_retries:
-                    empty_retries -= 1
-                    time.sleep(2)
-                    continue
-                break
-            if not results[Step.AGENT].ok:
-                return finish()
-
-        if shape.has_post:
-            launch = agent.prepare(
-                spec,
-                Step.POST,
-                StepContext(
+    request = Request(
+        text=firing.instructions,
+        changed_files=firing.changed_files,
+        options=firing.options,
+    )
+    scratch = _scratch(spec, run_id)
+    try:
+        with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
+            def context(step: Step, **extra) -> StepContext:
+                return StepContext(
                     request,
-                    pre=results.get(Step.PRE),
-                    agent=results.get(Step.AGENT),
                     resource_env=resource_env,
-                ),
-            )
-            results[Step.POST] = _run(
-                spec, Step.POST, launch, runner, run_id=run_id)
-        return finish()
+                    run_id=run_id,
+                    origin=firing.origin,
+                    scratch=scratch,
+                    **extra,
+                )
+
+            def snapshot():
+                return (
+                    session.snapshot(config.result_path)
+                    if session is not None and config.result_path is not None
+                    else None
+                )
+
+            def finish(pipeline_result=None) -> Outcome:
+                return _finish(
+                    spec, results, firing, run_id, events,
+                    pipeline_result=pipeline_result)
+
+            if shape.has_pre:
+                launch = agent.prepare(spec, Step.PRE, context(Step.PRE))
+                results[Step.PRE] = _run(
+                    spec, Step.PRE, launch, runner, run_id=run_id,
+                    scratch=scratch)
+                if not results[Step.PRE].ok or results[Step.PRE].skip:
+                    return finish(snapshot())
+
+            if shape.has_agent:
+                timeout_retries = 1
+                empty_retries = 2
+                attempt = 0
+                while True:
+                    attempt += 1
+                    launch = agent.prepare(
+                        spec,
+                        Step.AGENT,
+                        context(
+                            Step.AGENT,
+                            pre=results.get(Step.PRE),
+                            attempt=attempt,
+                        ),
+                    )
+                    result = _run(
+                        spec, Step.AGENT, launch, runner,
+                        run_id=run_id, attempt=attempt, scratch=scratch)
+                    results[Step.AGENT] = result
+                    if not result.retryable:
+                        break
+                    if result.category == "timeout" and timeout_retries:
+                        timeout_retries -= 1
+                        continue
+                    if result.category == "empty_output" and empty_retries:
+                        empty_retries -= 1
+                        time.sleep(2)
+                        continue
+                    break
+                if not results[Step.AGENT].ok:
+                    return finish(snapshot())
+
+            # Taken before the post-processor runs, because that is what it
+            # is handed on stdin.
+            published = snapshot()
+            if shape.has_post:
+                launch = agent.prepare(
+                    spec,
+                    Step.POST,
+                    context(
+                        Step.POST,
+                        pre=results.get(Step.PRE),
+                        agent=results.get(Step.AGENT),
+                        result_snapshot=(
+                            _snapshot_text(published)
+                            if config.mode == "pipeline" else None
+                        ),
+                    ),
+                )
+                results[Step.POST] = _run(
+                    spec, Step.POST, launch, runner, run_id=run_id,
+                    scratch=scratch)
+            return finish(published)
+    finally:
+        _discard_if_empty(scratch)
+
+
+def _scratch(spec, run_id: str) -> Path:
+    """Where this run's children may write control, logs, and results."""
+    from .paths import repo_state_dir
+    directory = repo_state_dir(spec.root) / "runs" / spec.name / run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _discard_if_empty(scratch: Path) -> None:
+    """Leave nothing behind for a run whose children wrote nothing.
+
+    Nothing prunes the run directory yet (#259), so an unused channel must
+    not cost a file.
+    """
+    with contextlib.suppress(OSError):
+        scratch.rmdir()
+
+
+def _snapshot_text(published) -> str | None:
+    if published is None:
+        return None
+    present, value = published
+    if not present:
+        return None
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 def _run(
@@ -181,6 +241,7 @@ def _run(
     *,
     run_id: str,
     attempt: int = 1,
+    scratch: Path | None = None,
 ):
     environment = os.environ.copy()
     environment.update(launch.env)
@@ -197,6 +258,7 @@ def _run(
         step,
         launch,
         RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out),
+        _signals(spec, step, scratch),
     )
     if (
         not interpreted.ok
@@ -226,6 +288,32 @@ def _run(
             spec, run_id, attempt, raw, interpreted.transcript)
         interpreted = replace(interpreted, transcript=str(transcript))
     return interpreted
+
+
+def _signals(spec, step: Step, scratch: Path | None) -> agent.StepSignals:
+    """What the step wrote to a channel other than its streams.
+
+    A malformed control file is ignored rather than fatal: it is an
+    instruction the step failed to give, and the exit code already said
+    whether the step succeeded.
+    """
+    if scratch is None or step not in {Step.PRE, Step.POST}:
+        return agent.StepSignals()
+    if spec.execution is not None and spec.execution.schema_version == "1":
+        return agent.StepSignals()
+    files = agent.step_files(scratch, step)
+    control = None
+    try:
+        parsed = json.loads(files.control.read_text(encoding="utf-8"))
+        control = parsed if isinstance(parsed, dict) else None
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        control = None
+    output = None
+    try:
+        output = files.output.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        output = None
+    return agent.StepSignals(control, output)
 
 
 def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):

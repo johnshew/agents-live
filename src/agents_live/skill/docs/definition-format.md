@@ -26,7 +26,7 @@ the `agents-live.` prefix.
 name: link-check
 description: Checks documentation links. Use when reviewing documentation health.
 metadata:
-  agents-live.schema-version: "1"
+  agents-live.schema-version: "2"
   agents-live.selector: "claude/sonnet:high"
   agents-live.schedule: "0 7 * * 1"
   agents-live.watch: "docs/** !node_modules/** debounce 5s"
@@ -34,11 +34,11 @@ metadata:
 ---
 ```
 
-## Schema version 1
+## Schema version 2
 
 | Key | Encoding | Default and constraint |
 |---|---|---|
-| `agents-live.schema-version` | string | Required when any `agents-live.` key exists. Must be `"1"`. |
+| `agents-live.schema-version` | string | Required when any `agents-live.` key exists. `"2"` for the current processor contract, or `"1"` for the earlier one, which is removed in 7.0. |
 | `agents-live.selector` | selector | Required. `provider[/model][:effort]`; `none` requires a processor. |
 | `agents-live.schedule` | schedule or JSON string array | Optional. Five-field cron, including month and weekday names, or one of the eight documented `@` names. |
 | `agents-live.watch` | watch expression | Optional. Includes, `!` excludes, then optional `debounce <duration>`. |

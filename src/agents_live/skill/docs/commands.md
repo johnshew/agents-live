@@ -30,7 +30,19 @@ post-processor pipeline. A manual run does not change started state.
 ```bash
 agents-live run link-check
 agents-live run link-check --changed-files '["docs/index.md"]'
+agents-live run link-check -p "Focus on the authentication pages"
+agents-live run link-check -o dry-run -o account=team-inbox
 ```
+
+`-p/--prompt` and `--prompt-file` add instructions for this run only, without
+editing the definition. `--prompt-file -` reads them from stdin, and the two
+sources are mutually exclusive.
+
+`-o/--option` passes values to the processors. The presence of `=` is the whole
+grammar: `-o dry-run` is a flag and `-o account=team-inbox` carries a value.
+Both reach every processor as `AGENTS_LIVE_OPTIONS`, described in
+[processors.md](processors.md). Neither instructions nor options are recorded
+into an installed trigger, so an ad hoc run cannot change what a schedule does.
 
 `run --json` returns the outcome text, structured value, transcript, usage,
 and run ID. A pipeline definition may declare one canonical MCP result with
@@ -145,7 +157,7 @@ help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | 
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
 command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | completions | dashboard
-run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ "--scheduled" ] [ "--boot" ] [ "--quiet" ]
+run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] { ( "-o" | "--option" ) VALUE } [ "--scheduled" ] [ "--boot" ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
@@ -169,7 +181,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
-| run | in-process | required |  | yes |  | yes | --name, --changed-files, --scheduled, --boot, --quiet | Execute an agent once. |
+| run | in-process | required |  | yes |  | yes | --name, --changed-files, -p, --prompt, --prompt-file, -o, --option, --scheduled, --boot, --quiet | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --transfer-here, --transfer-to | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
 | status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |

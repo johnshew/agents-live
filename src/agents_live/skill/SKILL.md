@@ -141,14 +141,15 @@ pre-processor -> agent -> post-processor
 - Pre-processor output is appended to the agent prompt under a
   `Pre-processor context:` heading.
 - Write `{"skip": true}` to the file at `AGENTS_LIVE_CONTROL` to skip the agent
-  call (status `skipped`).
+  call (status `skipped`). Under `schema-version: "1"` a pre-processor did this
+  by printing the same object to stdout; version 2 never parses stdout.
 - With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
   outside the project tree, so log writes cannot re-trigger watchers.
 - Execution mode changes what the model may do, never what a processor
   receives. In `mode: pipeline` the model reaches the run store through
-  PipelineMcp (see below); processors read and write that store as files in
-  every mode.
+  PipelineMcp (see below), and a declared `agents-live.result-path` is
+  snapshotted onto the post-processor's stdin.
 - The full child process contract is in [docs/processors.md](docs/processors.md).
 
 ## Pipeline mode (`mode: pipeline`)
