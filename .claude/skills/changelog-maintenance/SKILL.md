@@ -143,6 +143,9 @@ The backlog is `gh issue list`. When updating the changelog:
   fix a bounded defect and rerun its checks, or ask the developer to approve
   deferral with the issue number, impact, workaround, and rationale. Do not
   silently defer an issue because its label says `enhancement`.
+  GitHub date qualifiers are UTC: query `updated:>=<release-date>` without a
+  local-calendar upper bound, or use exact timestamps. A late local-date issue
+  can already be dated tomorrow by GitHub and disappear behind `..<today>`.
 2. **Close out resolved issues.** For each recent commit or PR, check
    whether it resolves an open issue. Commits should carry `Fixes #N`
    so the merge closes the issue; if one merged without it, close the
