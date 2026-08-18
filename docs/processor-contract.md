@@ -34,13 +34,14 @@ a report. Domain work has a natural command-line shape and should keep it.
 
 ## Design principles
 
-**1. A processor is an ordinary program.** It has flags, a `--help`, and an
-exit code. It prints progress to stdout like any other program. It is useful
-and testable without Agents Live.
+**1. A processor is a filter.** Input in, value out on stdout, diagnostics on
+stderr, verdict in the exit code. That is what `jq`, `sort`, and every other
+Unix filter does, and a processor is one. It is useful and testable without
+Agents Live.
 
-**2. One channel, one purpose.** Nothing is multiplexed. Payload, control,
-observation, shared state, and human narration each have their own route, so no
-content can impersonate a control word.
+**2. Nothing that is not the payload travels on the payload channel.** Control
+and structured observation get their own routes, so no content a processor
+emits can impersonate an instruction.
 
 **3. The definition owns the command line.** A processor declares nothing about
 itself. The definition that uses it says how to invoke it, the way a Makefile,
@@ -58,24 +59,42 @@ do.
 **6. Nothing has to be imported.** The contract is files, streams, and
 environment names, so `.py`, `.js`, `.ts`, `.ps1`, and `.sh` are equal.
 
-## The five channels
+## The channels
 
 | Channel | Direction | Carried by |
 |---|---|---|
 | Input | in | Stdin, and the same bytes at `AGENTS_LIVE_INPUT` |
-| Result | out | The file at `AGENTS_LIVE_OUTPUT` |
+| Result | out | Stdout, or the file at `AGENTS_LIVE_OUTPUT` when the program prefers one |
+| Diagnostics | out | Stderr |
 | Control | out | The file at `AGENTS_LIVE_CONTROL` |
 | Observation | out | The JSONL sink at `AGENTS_LIVE_LOG` |
 | Shared state | both | The directory at `AGENTS_LIVE_STORE` |
 
-Stdout and stderr are left to the program. Stdout is human narration, captured
-and bounded by the host and shown in `agents-live logs timeline`. Stderr is
-diagnostics, and on failure it becomes the recorded message.
+Stdin and stdout carry the value, because that is what they carry in every
+other filter. A program that already writes its JSON to stdout is already a
+processor and needs no change at all.
 
-This is the GitHub Actions lesson applied deliberately. Actions began with
-stdout control commands and migrated to environment file handles, and the
-`stop-commands` escape hatch it still carries is the evidence for why. The risk
-is sharper here, because a post-processor's input is literal model output.
+`AGENTS_LIVE_OUTPUT` is an override, not the rule. It exists for output too
+large or too binary to want on a pipe, and for a program whose stdout is
+already spoken for. When the program writes that file, its stdout is treated as
+diagnostics instead.
+
+### Why control and logging are not on stdout
+
+GitHub Actions began with stdout control commands and migrated to
+environment-named file handles, and the `stop-commands` escape hatch it still
+carries is the evidence for why: content flowing through stdout can impersonate
+control syntax. That risk is sharper here, because a post-processor's stdin is
+literal model output.
+
+But the lesson applies to control and structured records, not to the payload.
+An Actions step is a task whose stdout is logs, so it needed a side channel for
+its outputs. A processor is a filter whose stdout is the value, so it needs a
+side channel for everything that is not the value. Same reasoning, opposite
+conclusion about which channel carries what.
+
+So `skip` is a file, log records are a file, and no reserved word ever appears
+in a payload.
 
 ## Invocation
 
@@ -195,32 +214,31 @@ processor, which is impossible under contract 1.
 
 ## Output: result and control
 
-The result is whatever the program writes to the file at
-`AGENTS_LIVE_OUTPUT`. **Agents Live does not parse it, validate it, or require
-it to be JSON.** It carries it.
+The result is whatever the program writes to stdout. **Agents Live does not
+parse it, validate it, or require it to be JSON.** It carries it.
 
 For a pre-processor it is handed to the model verbatim, under a label, the way
 an attachment is. For a post-processor it becomes the run's result. Neither
 case needs Agents Live to know the shape, so nothing declares one.
 
 ```python
-Path(os.environ["AGENTS_LIVE_OUTPUT"]).write_text(json.dumps({"threads": 42}))
+print(json.dumps({"threads": 42}))
 ```
 
 A JSON document is the usual choice because the next reader is a model or
 another program, but a Markdown table is equally valid if that is what the
 model should see.
 
+A program with output too large or too binary for a pipe, or one whose stdout
+is already spoken for, may write to the file at `AGENTS_LIVE_OUTPUT` instead.
+When it does, its stdout is treated as diagnostics. Most programs will never
+need this.
+
 There are exactly two places where a shape is checked, and both predate this
 contract: `agents-live.output-schema` validates what the **model** returns,
 and a bound `$schema` validates what the **model** writes into the store in
 pipeline mode. Both guard the untrusted participant. A processor is trusted
 repository code, so its output is not a validation boundary.
-
-When `AGENTS_LIVE_OUTPUT` is absent, which is the standalone case, the result
-goes to stdout, because that is what a person running the program by hand
-wants. Under dispatch the variable is always set, so stdout is never a payload
-and a stray `print()` cannot corrupt anything.
 
 Control is a separate file at `AGENTS_LIVE_CONTROL`:
 
@@ -338,7 +356,7 @@ becomes the failure message.
 |---|---|---|
 | `AGENTS_LIVE_CONTRACT` | Running under Agents Live | Assume the rest of this table |
 | `AGENTS_LIVE_INPUT` | Always, under Agents Live | Read the envelope from a file rather than stdin |
-| `AGENTS_LIVE_OUTPUT` | Always, under Agents Live | Write the result where stdout cannot corrupt it |
+| `AGENTS_LIVE_OUTPUT` | Always, under Agents Live | Return a result too large or too binary for stdout |
 | `AGENTS_LIVE_CONTROL` | Always, under Agents Live | Skip the run |
 | `AGENTS_LIVE_LOG` | Always, under Agents Live | Emit structured records |
 | `AGENTS_LIVE_STORE` | Always, under Agents Live | Share values with other steps |
@@ -358,12 +376,17 @@ uv run sweep_email.py --dry-run --account team-inbox
 ```
 
 Adoption is one line in the definition, holding the command line you already
-type. The program does not change, and neither does anything it already does
-with stdout, because stdout is still just printing.
+type. The program does not change at all: it reads its flags, does its work,
+and writes its JSON to stdout exactly as it does now.
 
 ```yaml
 agents-live.pre-processor: "scripts/sweep_email.py --account ${account} ${dry_run}"
 ```
+
+The one habit that has to already be right is the filter habit: the value on
+stdout, progress and diagnostics on stderr. A program that interleaves progress
+chatter with its payload is a program you could not pipe into `jq` either, so
+this asks nothing new of it.
 
 It gains four things when it wants them, and nothing breaks if it never does:
 the envelope, the log sink, the store, and the ability to skip the run.
@@ -399,7 +422,7 @@ if not ctx.options.dry_run:
 
 ctx.log("swept", threads=42)           # sink under dispatch, stderr standalone
 ctx.store.put("/out/summary", data)
-ctx.emit({"threads": 42})              # result file, or stdout standalone
+ctx.emit({"threads": 42})              # stdout, or the result file if set
 ```
 
 Publishing it as its own small package, rather than vendoring a copy into each
@@ -420,9 +443,9 @@ one. The raw contract is small enough to implement inline in any of them.
 |---|---|---|
 | Arguments | None, ever | The command line the definition wrote |
 | Input | Closed for pre, mode-dependent for post | The envelope, identically everywhere |
-| Result | Whole stdout | The result file |
+| Result | Whole stdout | Stdout, unchanged, and never parsed |
 | Control | Top-level `skip` key in the payload | Its own file |
-| Stdout | Payload, log, and control at once | Human narration |
+| Stdout | Payload, log, and control at once | The payload, and only that |
 | Log sink | Shared file, forgeable identity | Per-step file, host-stamped |
 | Changed files | `AGENTS_LIVE_CHANGED_FILES` | `repository.changed_files` |
 | Invocation instructions | Unavailable to a processor | `instructions` |
@@ -440,9 +463,8 @@ as `legacy/`.
 
 `agents-live definition migrate` raises the version and adds an empty options
 map. It cannot rewrite a processor's expectations, so the migration note names
-what needs human review: a post-processor that reads a bare value from stdin, a
-pre-processor that emits a bare `{"skip": true}`, and any processor that prints
-its payload rather than writing it.
+what needs human review: a post-processor that reads a bare value from stdin,
+and a pre-processor that emits a bare `{"skip": true}`.
 
 ## Sequencing against #105
 
@@ -474,7 +496,5 @@ whichever lands first:
 - Whether a non-zero exit always means failure. A program whose job is to
   report findings, such as an audit or a linter, conventionally exits non-zero
   when it finds something, and that is data rather than a fault.
-- Whether a program that never writes the result file, but prints one JSON
-  value to stdout, should have that taken as its result. It would make
-  adoption require no code change at all, at the cost of making stdout
-  half-payload again.
+- Whether stdout should be captured and shown in `logs timeline` when the
+  program used `AGENTS_LIVE_OUTPUT` and its stdout is therefore diagnostics.
