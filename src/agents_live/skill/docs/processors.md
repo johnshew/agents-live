@@ -20,16 +20,19 @@ pre-processor | model | post-processor
 Any of the three may be absent. A definition with no selector and both
 processors is a deterministic pipeline with no model in it.
 
-The contract has three stages, and each one is optional. A program written for
-stage one keeps working unchanged when the agent moves to stage three.
+Processors come in three classes. They are kinds, not steps: most programs stay
+class 0 forever, and nothing has to pass through class 1 to reach class 2. The
+number is how much Agents Live is in the program.
 
-| Stage | The program | What it uses |
+| Class | The program | What it uses |
 |---|---|---|
-| 1 | A plain filter | stdin, stdout, stderr, exit code |
-| 2 | Knows when Agents Live invoked it | Run context in the environment, the log sink, control |
-| 3 | Takes part in a validated pipeline | The pipeline MCP and its schemas |
+| 0 | Knows nothing about Agents Live | stdin, stdout, stderr, exit code |
+| 1 | Agents Live aware | Run context and options in the environment, the log sink, control |
+| 2 | Pipeline aware | The pipeline MCP and its schemas |
 
-## Stage 1: a plain filter
+A class 0 program keeps working unchanged when the agent moves to class 2.
+
+## Class 0: a plain filter
 
 Nothing here is specific to Agents Live. Read stdin, do the work, write the
 value to stdout, put diagnostics on stderr, and exit non-zero if it went wrong.
@@ -60,19 +63,22 @@ metadata:
 ```
 
 Agents Live adds no arguments of its own, so a strict argument parser never
-meets a flag it does not know. That is the whole of stage one, and the same
-program still runs by hand:
+meets a flag it does not know. The other half of that bargain is that a class 0
+processor runs with no arguments at all, so anything it needs has to be its
+default. That is the whole of class 0, and the same program still runs by hand:
 
 ```text
 uv run scripts/email_audit.py --account team-inbox
 uv run scripts/email_audit.py --account team-inbox | uv run scripts/apply.py
 ```
 
-## Stage 2: knowing you are under Agents Live
+## Class 1: Agents Live aware
 
-Sooner or later the program wants the things only the run knows: which files
-changed, what the invocation asked for, where to put structured log records,
-and how to say there is nothing to do.
+A class 0 program is configured entirely by its own defaults, because it
+receives no arguments. Class 1 is where that stops being enough, and the
+program wants what only this run knows: which files changed, what the
+invocation asked for or passed as an option, where to put structured log
+records, and how to say there is nothing to do.
 
 Every one of these is announced by an environment variable, and every one is
 absent when the program runs by hand. `AGENTS_LIVE_CONTRACT` is the single
@@ -214,9 +220,9 @@ stdin is literal model output.
 For a scheduled audit that usually finds nothing, skipping is also most of the
 cost.
 
-## Stage 3: taking part in the pipeline
+## Class 2: pipeline aware
 
-Stage 3 is where you stop trusting the model with anything a program could
+Class 2 is where you stop trusting the model with anything a program could
 check instead.
 
 In `mode: pipeline` the model loses every tool except `get` and `put` against a
@@ -247,7 +253,7 @@ checked value, sandwiched between two deterministic programs. That is what
 makes an unattended agent that edits real files reviewable, testable without a
 model, and safe to leave running.
 
-That is the only reason to be here. In particular, do not move to stage 3
+That is the only reason to be here. In particular, do not become class 2
 because your material got large: see [Size](#size), which is the host's problem
 rather than yours.
 
@@ -354,14 +360,14 @@ agents-live.result-path: "/output/judgment"
 ```
 
 Agents Live snapshots that path when the model finishes and pipes it to the
-post-processor's stdin. **A stage 1 post-processor therefore keeps working
+post-processor's stdin. **A class 0 post-processor therefore keeps working
 after the move to pipeline mode**, because it still reads its input from stdin.
 A post-processor that wants more than the result can `get` any other path
 itself.
 
 ### Keeping the command line
 
-Stage 3 does not cost you stage 1. Publish to the MCP when it is there and to
+Class 2 does not cost you class 0. Publish to the MCP when it is there and to
 stdout when it is not:
 
 ```python
@@ -448,7 +454,7 @@ Moving prompt delivery off the command line is tracked in
 
 ### Environment
 
-Run context is listed under stage 2 above. The rest of what Agents Live sets:
+Run context is listed under class 1 above. The rest of what Agents Live sets:
 
 | Variable | Present when | Holds |
 |---|---|---|
@@ -538,6 +544,6 @@ also records the reasoning behind everything above.
 - Whether a non-zero exit always means failure. A program whose job is to
   report findings, such as an audit or a linter, conventionally exits non-zero
   when it finds something.
-- Whether a helper library ships to remove the MCP client boilerplate at stage
-  three, and if so whether it is a published package or a copy in the skill.
+- Whether a helper library ships to remove the MCP client boilerplate at class
+  2, and if so whether it is a published package or a copy in the skill.
 - Whether `agents-live.result-path` should be available outside pipeline mode.

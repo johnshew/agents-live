@@ -22,11 +22,14 @@ history is retained in the source repository.
   Agent guidance uses lower-bounded GitHub issue searches and treats dashboard
   API availability, not server-process exit, as the readiness signal.
 - docs: specify the processor contract as a filter. `processors.md` states
-  what a pre- or post-processor receives and returns: the definition writes its
-  command line, an envelope arrives on stdin, the value leaves on stdout
-  unparsed, and control, structured logs, and shared state each have their own
-  handle. Execution mode now constrains only the model, so a processor receives
-  the same thing everywhere. Selected by `agents-live.schema-version: "2"`.
+  what a pre- or post-processor receives and returns: the definition names the
+  program and Agents Live adds no arguments, stdin carries data and nothing
+  else, the value leaves on stdout unparsed, and control, structured logs, and
+  invocation options each have their own handle in the environment. Processors
+  come in three classes, from one that knows nothing about Agents Live to one
+  that speaks to the pipeline MCP. Execution mode now constrains only the
+  model, so a processor receives the same thing everywhere. Selected by
+  `agents-live.schema-version: "2"`.
 
 ## 6.4.1 - 2026-08-17
 

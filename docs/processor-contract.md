@@ -101,8 +101,8 @@ either having to tolerate the other's flags, a processor that ignores options
 is untouched, and options never compete with the prompt for the argv budget.
 The routing question dissolves rather than being answered.
 
-**Consequence: options are a stage 2 feature, not stage 1.** Reading them means
-knowing you are under Agents Live, which is what stage 2 is. Stage 1 goes back
+**Consequence: options are a class 1 feature, not class 0.** Reading them means
+knowing you are under Agents Live, which is what class 1 is. Class 0 goes back
 to being a filter with nothing in it.
 
 **Rejected: a typed options map**, `${name}` substitution with bracketed
@@ -163,20 +163,21 @@ read tool would silently bypass schema validation and the seeded-path freeze.
 A safety property that holds by construction is worth more than one that holds
 by policy.
 
-**Cost accepted.** Stage three still costs a processor an MCP client. In
+**Cost accepted.** Class 2 still costs a processor an MCP client. In
 `exercise-judgment` that is `dependencies = ["mcp<2"]`, an `asyncio.run`, a
 `sys.path.insert` into a shared `Agents/lib`, and a session helper, to write
 JSON values. That is real, and it is the reason a helper library is an open
 question rather than an obvious no.
 
 What the contract does instead is make sure nobody pays that cost before they
-need to, which is what the staged shape below is for.
+need to, which is what the classes below are for.
 
-## Adoption is staged, and each stage is optional
+## Three classes, and most processors are class 0
 
-**Decision.** Three stages. A plain filter; then a program that notices Agents
-Live invoked it; then a participant in the validated pipeline. A program
-written for stage one keeps working unchanged at stage three.
+**Decision.** A processor is class 0, 1, or 2: one that knows nothing about
+Agents Live; one that is Agents Live aware and reads run context, options,
+control, and the log sink; and one that is pipeline aware and speaks to the
+MCP. A class 0 program keeps working unchanged when the agent moves to class 2.
 
 **Why.** This is the actual life of a useful script. It starts as something
 run by hand, becomes worth automating, and eventually matters enough to want
@@ -184,22 +185,35 @@ rigor around what the model may see and say. If each of those transitions
 demands a rewrite, the rigor gets skipped, which is the worst outcome
 available.
 
-Two design consequences follow, and both are load-bearing:
+**Classes, not stages, and numbered from zero.** An earlier draft called these
+stages 1 through 3, which read as a maturity ladder every processor ought to
+climb. They are kinds. Most processors are class 0 permanently, and nothing has
+to pass through class 1 to reach class 2. Zero is the honest number for the
+base case, because a class 0 program contains no Agents Live at all, and the
+number then measures how much of it is in the program.
+
+Three design consequences follow, and all are load-bearing:
 
 **Stdin carries data, not metadata.** An envelope on stdin would break the
-filter shape at stage one, because a filter's stdin is its input. So the run is
+filter shape at class 0, because a filter's stdin is its input. So the run is
 literally `pre | model | post`, and a developer can test it with a pipe.
+
+**Nothing is appended to argv.** A class 0 processor therefore receives no
+arguments at all and must be complete in its own defaults. That is the price of
+letting it keep a strict argument parser, and it is also the honest motivation
+for class 1: you become Agents Live aware exactly when defaults stop being
+enough.
 
 **The result path is snapshotted onto the post-processor's stdin.** In pipeline
 mode the model publishes to `agents-live.result-path` rather than returning
-text, and Agents Live pipes that snapshot to the post-processor. A stage one
+text, and Agents Live pipes that snapshot to the post-processor. A class 0
 post-processor therefore survives the move to pipeline mode without knowing it
-happened. Without this, moving to stage three would force every post-processor
-to be rewritten as an MCP client, which is exactly the cliff the staging exists
-to remove.
+happened. Without this, class 2 would force every post-processor to be
+rewritten as an MCP client, which is exactly the cliff the classes exist to
+remove.
 
-**Size is never a reason to move a stage.** An earlier draft offered size as a
-second motivation for stage three, on the grounds that a prompt is a
+**Size is never a reason to change class.** An earlier draft offered size as a
+second motivation for the pipeline, on the grounds that a prompt is a
 command-line argument and a published value is not. That was a mistake. It
 asked a developer to accept a security model because of a transport limit, and
 the transport limit is the host's to fix. See the next section.

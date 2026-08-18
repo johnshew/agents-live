@@ -135,8 +135,9 @@ for the complete schema.
 pre-processor -> agent -> post-processor
 ```
 
-- A processor is a filter: envelope in on stdin, value out on stdout,
-  diagnostics on stderr, verdict in the exit code.
+- A processor is a filter: data in on stdin, value out on stdout,
+  diagnostics on stderr, verdict in the exit code. Agents Live adds no
+  arguments, so a class 0 processor runs with none.
 - Pre-processor output is appended to the agent prompt under a
   `Pre-processor context:` heading.
 - Write `{"skip": true}` to the file at `AGENTS_LIVE_CONTROL` to skip the agent
