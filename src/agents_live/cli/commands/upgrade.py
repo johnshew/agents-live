@@ -211,8 +211,9 @@ def _handoff_windows_upgrade(
     uv removes the tool environment before rebuilding it. A process running
     from that environment holds its interpreter open on Windows, so a direct
     upgrade can remove the packages and then fail to remove ``Scripts``. The
-    deferred process runs this same command through ``uv tool run``; its
-    interpreter lives outside the environment uv rewrites.
+    deferred process runs this same command through isolated ``uv tool run``;
+    without ``--isolated``, uv can reuse the installed tool environment and
+    place the helper inside the directory it must rewrite.
     """
     if hostruntime.id() != hostruntime.WINDOWS:
         return None
@@ -234,7 +235,7 @@ def _handoff_windows_upgrade(
             "upgrade", f"a Windows upgrade is already queued ({existing}); "
             "run `agents-live logs admin` for its outcome")
         return 1
-    command = [uv, "tool", "run", "--refresh", "--from", package,
+    command = [uv, "tool", "run", "--isolated", "--refresh", "--from", package,
                "agents-live", "upgrade", "--continuation-environment",
                str(environment), "--upgrade-id", claim.operation_id]
     if source is not None:
