@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.4.0 - 2026-08-17
+
 - fix: run deferred Windows upgrades from an isolated helper environment.
   The continuation interpreter now lives outside the uv tool directory it
   replaces instead of allowing uv to reuse the active installed environment.
