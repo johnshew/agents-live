@@ -39,6 +39,7 @@ authentication, or reasoning.
 | `smoketest` | [docs/commands.md](docs/commands.md) section "smoketest" |
 | Editing any script | [docs/approach.md](docs/approach.md) (architecture) |
 | Understanding services available to agents and handlers (env, MCPs, `Agents/lib/` helpers, pipeline side-channel) | [docs/approach.md](docs/approach.md) |
+| Writing or changing a pre-processor or post-processor | [docs/processors.md](docs/processors.md) |
 | Debugging log issues | [docs/diagnostics.md](docs/diagnostics.md) (log inventory, procedures, patterns, query recipes) |
 | Debugging cron/watcher lifecycle | [docs/key-learnings.md](docs/key-learnings.md) |
 | Debugging WSL/9P issues | [docs/diagnostics.md](docs/diagnostics.md) section "WSL liveness" |
@@ -134,12 +135,14 @@ for the complete schema.
 pre-processor -> agent -> post-processor
 ```
 
-- Pre-processor stdout is appended to the agent prompt as `pre-processor="<output>"`.
+- Pre-processor stdout is appended to the agent prompt under a
+  `Pre-processor context:` heading.
 - Output `{"skip": true}` to skip the agent call (status `skipped`).
 - With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
   outside the project tree, so log writes cannot re-trigger watchers.
-- In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below).
+- In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below), and the post-processor receives no stdin.
+- The full child process contract is in [docs/processors.md](docs/processors.md).
 
 ## Pipeline mode (`mode: pipeline`)
 

@@ -107,8 +107,13 @@ provider runs. Seeded paths are read-only to the agent, so an output schema or
 referenced schema document cannot be replaced by the value it validates.
 
 Use a pre-processor for values that depend on files, changed paths, or current
-host state. Pre-processors and post-processors receive `PIPELINE_MCP_URL` and
-`PIPELINE_MCP_TOKEN` and can use the MCP SDK to call `put` and `get`.
+host state. In `mode: pipeline`, pre-processors and post-processors receive
+`PIPELINE_MCP_URL` and `PIPELINE_MCP_TOKEN` and can use the MCP SDK to call
+`put` and `get`. Outside pipeline mode those variables are not set.
+
+[processors.md](processors.md) documents the whole processor contract: how each
+file is launched, what arrives in the environment and on stdin, and what
+changes with execution mode.
 
 ## Migrating from 5.x
 

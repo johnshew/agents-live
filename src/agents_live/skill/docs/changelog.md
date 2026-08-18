@@ -21,6 +21,12 @@ history is retained in the source repository.
 - docs: clarify UTC issue windows and foreground dashboard readiness.
   Agent guidance uses lower-bounded GitHub issue searches and treats dashboard
   API availability, not server-process exit, as the readiness signal.
+- docs: state the processor child-process contract in one page. `processors.md`
+  records what a pre- or post-processor receives through argv, stdin, the
+  environment, and the working directory, and what execution mode changes,
+  including the closed post-processor stdin in pipeline mode. Corrects the
+  stale pre-processor prompt heading in the skill and the unconditional claim
+  that processors receive the pipeline MCP variables.
 
 ## 6.4.1 - 2026-08-17
 
