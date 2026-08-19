@@ -2934,11 +2934,45 @@ class TestProcessorContractVersion2(TempRepository):
 
         result = dispatch(Firing(
             "long-brief", str(self.root), "manual",
-            instructions="x" * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1)))
+            instructions="x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1)))
 
         self.assertFalse(result.ok)
         self.assertEqual("invocation_input_overflow", result.category)
-        self.assertIn("instructions are", result.message)
+        self.assertIn("instructions need", result.message)
+
+    def test_multibyte_instructions_are_bounded_by_encoded_size(self) -> None:
+        directory = self.skill("wide-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "wide-brief", str(self.root), "manual",
+            instructions="\U0001f642" * (32 * 1024 // 4 + 1)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("bytes", result.message)
+
+    def test_direct_dispatch_options_share_the_environment_bound(self) -> None:
+        directory = self.skill("many-options", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "many-options", str(self.root), "manual",
+            options=(("brief", "x" * (32 * 1024)),)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("options need", result.message)
 
     def test_options_reach_the_post_processor_and_keep_an_empty_value(self) -> None:
         """An empty value is a value; not supplying one is not."""
@@ -3157,6 +3191,28 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertEqual("skipped", result.status)
         self.assertEqual("nothing to do", result.message)
 
+    def test_only_a_boolean_true_control_value_skips_the_run(self) -> None:
+        directory = self.skill("not-skipped", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "import json, os, pathlib\n"
+            "pathlib.Path(os.environ['AGENTS_LIVE_CONTROL']).write_text(\n"
+            "    json.dumps({'skip': 'false'}))\n",
+            encoding="utf-8",
+        )
+        (directory / "scripts" / "process.py").write_text(
+            "print('post-processor ran')\n", encoding="utf-8")
+
+        result = dispatch(Firing("not-skipped", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("success", result.status)
+        self.assertEqual("post-processor ran", result.text)
+
     def test_version_2_ignores_a_skip_object_on_stdout(self) -> None:
         directory = self.skill("noisy", [
             'agents-live.selector: "none"',
@@ -3326,21 +3382,58 @@ class TestInvocationInput(TempRepository):
                 self.assertEqual(1, code)
                 self.assertIn(expected, errors.getvalue())
 
-    def test_an_oversized_option_set_is_refused(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            run._options([f"payload={'x' * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1)}"])
-        self.assertIn("over the", str(caught.exception))
+    def test_schema_1_does_not_apply_the_processor_environment_bound(self) -> None:
+        directory = self.skill("legacy-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "print('ran')\n", encoding="utf-8")
 
-    def test_oversized_instructions_are_refused_at_the_command_line(self) -> None:
+        code = run.main([
+            "--name", "legacy-brief",
+            "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1),
+            "--quiet",
+        ])
+
+        self.assertEqual(0, code)
+
+    def test_schema_2_instruction_overflow_keeps_its_dispatch_category(self) -> None:
         self._echo_agent("picky-brief")
-        errors = io.StringIO()
-        with contextlib.redirect_stderr(errors):
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
             code = run.main([
                 "--name", "picky-brief",
-                "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1),
+                "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1),
             ])
+
         self.assertEqual(1, code)
-        self.assertIn("instructions are", errors.getvalue())
+        self.assertEqual(
+            "invocation_input_overflow",
+            json.loads(output.getvalue())["category"],
+        )
+
+    def test_schema_2_option_overflow_keeps_its_dispatch_category(self) -> None:
+        self._echo_agent("picky-options")
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            code = run.main([
+                "--name", "picky-options",
+                "-o", f"payload={'x' * port.ENVIRONMENT_VALUE_MAX_BYTES}",
+            ])
+
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "invocation_input_overflow",
+            json.loads(output.getvalue())["category"],
+        )
 
     def test_instructions_follow_the_definition_body_in_the_prompt(self) -> None:
         self.skill("composed", [

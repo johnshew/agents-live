@@ -122,6 +122,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
         overflow = (
             agent.changed_files_overflow(firing.changed_files)
             or agent.instructions_overflow(firing.instructions)
+            or agent.options_overflow(firing.options)
         )
         if overflow is not None:
             return _failure(

@@ -31,7 +31,7 @@ DEFAULT_OUTPUT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120
 # Environment values are bounded, so a processor never has to ask whether
 # what it reads is whole.
-ENVIRONMENT_VALUE_MAX_CHARS = 32 * 1024
+ENVIRONMENT_VALUE_MAX_BYTES = 32 * 1024
 
 
 def load(agent_id: str, *, root: Path) -> AgentSpec:
@@ -193,12 +193,12 @@ def changed_files_overflow(items: tuple[str, ...]) -> str | None:
     processor that loops over the list would skip work it was never told
     about, and nothing downstream could tell that it had.
     """
-    encoded = len(json.dumps(list(items)))
-    if encoded <= ENVIRONMENT_VALUE_MAX_CHARS:
+    encoded = _environment_value_bytes(json.dumps(list(items)))
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
         return None
     return (
-        f"{len(items)} changed files need {encoded} characters, over the "
-        f"{ENVIRONMENT_VALUE_MAX_CHARS}-character limit for one environment "
+        f"{len(items)} changed files need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment "
         "value. Narrow agents-live.watch, or have the processor scan the "
         "repository itself instead of taking a list."
     )
@@ -210,13 +210,30 @@ def instructions_overflow(text: str) -> str | None:
     Truncating instead would leave the model reading the whole thing and a
     processor reading part of it, with neither able to tell.
     """
-    if len(text) <= ENVIRONMENT_VALUE_MAX_CHARS:
+    encoded = _environment_value_bytes(text)
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
         return None
     return (
-        f"instructions are {len(text)} characters, over the "
-        f"{ENVIRONMENT_VALUE_MAX_CHARS}-character limit for one environment "
+        f"instructions need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment "
         "value. Shorten them, or move the standing part into the definition."
     )
+
+
+def options_overflow(items: tuple[tuple[str, str | bool], ...]) -> str | None:
+    """Why these invocation options cannot be handed to a processor."""
+    encoded = _environment_value_bytes(json.dumps(dict(items)))
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
+        return None
+    return (
+        f"options need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment value"
+    )
+
+
+def _environment_value_bytes(value: str) -> int:
+    """The portable size of one processor environment value."""
+    return len(value.encode("utf-8"))
 
 
 def interpret(
@@ -250,7 +267,7 @@ def interpret(
         if _config(spec).schema_version == "1":
             skip = step is Step.PRE and _skip_on_stdout(text)
         elif signals.control is not None:
-            skip = bool(signals.control.get("skip"))
+            skip = signals.control.get("skip") is True
             note = signals.control.get("message")
             if skip and isinstance(note, str) and note:
                 message = note
