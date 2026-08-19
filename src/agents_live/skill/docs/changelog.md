@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-17
+ms.date: 2026-08-18
 ms.topic: reference
 ---
 
@@ -11,6 +11,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: query every repository log when no specific file is named. (#377)
+  Bare, `--agent`, and positional `agents-live logs` queries now read the
+  per-agent records the runtime writes instead of targeting a nonexistent
+  repository-wide filename.
+- fix: allow `doctor --repair --dry-run` to preview convergence.
+  The CLI accepts the documented repair-preview combination while keeping
+  quick health checks exclusive with full diagnostics and repair modes.
 - fix: preserve prepared release artifacts outside the mutable build directory.
   Preparation copies the receipt-bound wheel and source distribution into
   Git-local release storage, so later diagnostic builds cannot overwrite the
