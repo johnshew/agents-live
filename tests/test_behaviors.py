@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 import zipfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -45,6 +46,7 @@ from agents_live.runtime import ChildResult, ProcessRef, Subscription
 from agents_live.runtime import artifacts
 from agents_live.runtime.hosts import crontab as crontasks
 from agents_live.runtime.hosts import system as hostruntime
+from agents_live.runtime.hosts import windows as windowshost
 from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts.posix import PosixHost, PosixTriggerStore
 from agents_live.runtime.hosts.windows import WindowsProcesses
@@ -946,6 +948,64 @@ class TestPendingUpgradeIdentity(TempRepository):
         self.assertIsNotNone(started)
         self.assertLess(abs(time.time() - started), 3600)
         self.assertIsNone(hostruntime.process_start_time(999_999_999))
+
+
+class TestWindowsDetachedProcess(unittest.TestCase):
+    """Detached watchers outlive maintenance without opening a terminal."""
+
+    def test_a_detached_watcher_has_a_hidden_console(self) -> None:
+        process = mock.Mock(pid=42)
+        with (
+            mock.patch.multiple(
+                windowshost.subprocess,
+                CREATE_NEW_PROCESS_GROUP=0x00000200,
+                CREATE_NO_WINDOW=0x08000000,
+                DETACHED_PROCESS=0x00000008,
+                create=True,
+            ),
+            mock.patch.object(
+                windowshost.subprocess, "Popen", return_value=process) as popen,
+        ):
+            WindowsProcesses().spawn_detached(
+                ["agents-live.exe", "internal", "watch-loop", "sample"],
+                role="watcher",
+                key="subscription",
+                fingerprint="fingerprint",
+            )
+
+        self.assertEqual(
+            0x08000200,
+            popen.call_args.kwargs["creationflags"],
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows console behavior")
+    def test_a_detached_watcher_owns_a_console_nobody_can_see(self) -> None:
+        source = (
+            "import ctypes, pathlib, sys\n"
+            "kernel32 = ctypes.windll.kernel32\n"
+            "pathlib.Path(sys.argv[1]).write_text("
+            "f'{kernel32.GetConsoleCP()} {kernel32.GetConsoleWindow()}', "
+            "encoding='utf-8')\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            result = Path(temporary) / "console.txt"
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                WindowsProcesses().spawn_detached(
+                    [sys.executable, "-c", source, str(result)],
+                    role="watcher",
+                    key="subscription",
+                    fingerprint="fingerprint",
+                )
+            deadline = time.monotonic() + 10
+            while not result.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(result.exists(), "detached child produced no result")
+            code_page, console_window = result.read_text(
+                encoding="utf-8").split()
+
+        self.assertNotEqual("0", code_page)
+        self.assertEqual("0", console_window)
 
 
 class TestConcurrentAppendersKeepRecordsWhole(TempRepository):
