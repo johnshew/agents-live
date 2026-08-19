@@ -122,7 +122,7 @@ class WindowsProcesses:
             stderr=stderr if stderr is not None else subprocess.DEVNULL,
             creationflags=(
                 subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NO_WINDOW
             ),
         )
         return ProcessRef(
