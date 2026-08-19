@@ -2810,11 +2810,15 @@ class TestObservability(unittest.TestCase):
         Naming one meant a bare query answered from a file nothing
         creates, which reports emptiness rather than absence.
         """
-        from agents_live.obs import qlog
-
         with tempfile.TemporaryDirectory() as temporary:
-            logs = Path(temporary) / "logs"
-            logs.mkdir()
+            root = Path(temporary).resolve()
+            (root / "Agents").mkdir()
+            (root / ".agents-live.toml").write_text("", encoding="utf-8")
+            logs = (
+                root / "state" / "agents-live" / "repos"
+                / paths.repo_state_key(root) / "logs"
+            )
+            logs.mkdir(parents=True)
             (logs / "note-index-b53040b14b.jsonl").write_text(
                 '{"log_schema":5,"ts":"2026-08-11T22:00:00Z",'
                 '"agent_name":"note-index-b53040b14b","phase":"done",'
@@ -2822,21 +2826,41 @@ class TestObservability(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertFalse((logs / "agents-live.log").exists())
-
-            with mock.patch.object(qlog, "logs_dir", return_value=logs):
-                patterns = qlog.all_log_globs()
-
-            matched = [
-                path for pattern in patterns
-                for path in Path(pattern).parent.glob(Path(pattern).name)
-            ]
-
-        self.assertIn("note-index-b53040b14b.jsonl", [p.name for p in matched])
-        self.assertFalse(
-            any("agents-live.log" in pattern for pattern in patterns),
-            "the default must not name a file nothing writes",
-        )
-        self.assertFalse(hasattr(qlog, "default_log"))
+            environment = {
+                **os.environ,
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            for arguments in ((), ("--agent", "note-index"), ("note-index",)):
+                with self.subTest(arguments=arguments):
+                    completed = subprocess.run(
+                        [
+                            sys.executable, "-m", "agents_live.cli", "--repo",
+                            str(root), "logs", *arguments, "--limit", "5",
+                            "--format", "jsonl",
+                        ],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    self.assertEqual(
+                        0, completed.returncode,
+                        completed.stdout + completed.stderr,
+                    )
+                    records = [
+                        json.loads(line)
+                        for line in completed.stdout.splitlines()
+                        if line.strip()
+                    ]
+                    self.assertEqual(
+                        ["note-index-b53040b14b"],
+                        [record["agent_name"] for record in records],
+                    )
 
     def test_every_reader_agrees_on_a_written_run_status(self) -> None:
         """One written value must not come to mean two things by entry point.
@@ -3663,6 +3687,36 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_doctor_repair_can_be_previewed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "Agents").mkdir()
+            (root / ".agents-live.toml").write_text("", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "AGENTS_LIVE_REPO": str(root),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "agents_live.cli", "--repo",
+                    str(root), "doctor", "--repair", "--dry-run",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(2, completed.returncode, output)
+        self.assertIn("repair:", output)
+        self.assertNotIn("mutually exclusive", output)
+
     def test_current_code_cannot_add_an_untracked_legacy_dependency(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         allowed = {

@@ -216,7 +216,9 @@ COMMANDS = (
         all_repos=True, update_notice=False,
         mutually_exclusive=(
             ("--all-repos", "--repair"),
-            ("--quick", "--all-repos", "--repair", "--dry-run"),
+            ("--quick", "--all-repos"),
+            ("--quick", "--repair"),
+            ("--quick", "--dry-run"),
         ),
         args=(
             Arg(("--all-repos",), "Check every registered repository."),
