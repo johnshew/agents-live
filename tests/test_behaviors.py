@@ -700,13 +700,15 @@ class TestFailuresAreVisible(TempRepository):
 
     def test_asking_for_errors_spans_the_repository_not_one_file(self) -> None:
         """`--errors` with no name is a question about the repository.
-        Scoping it to agents-live.log answered "none" while failed runs
-        sat in per-agent logs."""
-        source = (Path(qlog.__file__).read_text(encoding="utf-8")
-                  .split("patterns = ", 1)[1].split("\n", 1)[0])
-        self.assertIn("span_everything", source)
-        self.assertIn("args.errors and args.name is None",
-                      Path(qlog.__file__).read_text(encoding="utf-8"))
+        Scoping it to one file answered "none" while failed runs sat in
+        per-agent logs. Agents write one file each and nothing writes a
+        per-repository log, so any query that names no file now spans
+        them all, and the filename that never existed must not return."""
+        source = Path(qlog.__file__).read_text(encoding="utf-8")
+        decision = source.split("patterns = ", 1)[1].split("\n", 1)[0]
+        self.assertIn("span_everything", decision)
+        self.assertIn("args.log is None", source)
+        self.assertNotIn("agents-live.log", source)
 
 
     def test_a_relative_window_narrows_monotonically(self) -> None:

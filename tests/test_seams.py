@@ -2804,6 +2804,96 @@ class RecordingRunner:
 
 
 class TestObservability(unittest.TestCase):
+    def test_logs_read_what_the_repository_wrote(self) -> None:
+        """Agents write one file each, so there is no single log to default to.
+
+        Naming one meant a bare query answered from a file nothing
+        creates, which reports emptiness rather than absence.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "Agents").mkdir()
+            (root / ".agents-live.toml").write_text("", encoding="utf-8")
+            logs = (
+                root / "state" / "agents-live" / "repos"
+                / paths.repo_state_key(root) / "logs"
+            )
+            logs.mkdir(parents=True)
+            (logs / "note-index-b53040b14b.jsonl").write_text(
+                '{"log_schema":5,"ts":"2026-08-11T22:00:00Z",'
+                '"agent_name":"note-index-b53040b14b","phase":"done",'
+                '"status":"ok"}\n',
+                encoding="utf-8",
+            )
+            self.assertFalse((logs / "agents-live.log").exists())
+            environment = {
+                **os.environ,
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            for arguments in ((), ("--agent", "note-index"), ("note-index",)):
+                with self.subTest(arguments=arguments):
+                    completed = subprocess.run(
+                        [
+                            sys.executable, "-m", "agents_live.cli", "--repo",
+                            str(root), "logs", *arguments, "--limit", "5",
+                            "--format", "jsonl",
+                        ],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    self.assertEqual(
+                        0, completed.returncode,
+                        completed.stdout + completed.stderr,
+                    )
+                    records = [
+                        json.loads(line)
+                        for line in completed.stdout.splitlines()
+                        if line.strip()
+                    ]
+                    self.assertEqual(
+                        ["note-index-b53040b14b"],
+                        [record["agent_name"] for record in records],
+                    )
+
+    def test_every_reader_agrees_on_a_written_run_status(self) -> None:
+        """One written value must not come to mean two things by entry point.
+
+        `qlog.build_view` rewrites `success` in SQL and `query.normalize`
+        rewrites it in Python. They are separate code paths that have to
+        stay in step, so the Python half is pinned here. A schema-5
+        record is a processor's own row and passes through untouched,
+        which is why the contract reserves run-outcome statuses.
+        """
+        run_record = obs.query.normalize({
+            "spec": 1,
+            "timestamp": "2026-08-11T22:00:00Z",
+            "event": "run",
+            "status": "success",
+            "agent": "sample",
+            "run_id": "abc",
+            "origin": "manual",
+        })
+        processor_record = obs.query.normalize({
+            "log_schema": 5,
+            "ts": "2026-08-11T22:00:00Z",
+            "agent_name": "sample",
+            "phase": "collect",
+            "status": "swept",
+        })
+
+        self.assertIsNotNone(run_record)
+        self.assertEqual("ok", run_record["status"])
+        self.assertEqual("done", run_record["phase"])
+        self.assertIsNotNone(processor_record)
+        self.assertEqual("swept", processor_record["status"])
+
     def test_upgrade_watcher_fields_survive_admin_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "admin.log"
@@ -3597,6 +3687,36 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_doctor_repair_can_be_previewed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "Agents").mkdir()
+            (root / ".agents-live.toml").write_text("", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "AGENTS_LIVE_REPO": str(root),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "agents_live.cli", "--repo",
+                    str(root), "doctor", "--repair", "--dry-run",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(2, completed.returncode, output)
+        self.assertIn("repair:", output)
+        self.assertNotIn("mutually exclusive", output)
+
     def test_current_code_cannot_add_an_untracked_legacy_dependency(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         allowed = {

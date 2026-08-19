@@ -94,10 +94,6 @@ def logs_dir() -> Path:
     return repo_state_dir(resolve_root(allow_sole_registered=True)) / "logs"
 
 
-def default_log() -> Path:
-    return logs_dir() / "agents-live.log"
-
-
 def archive_dir() -> Path:
     return logs_dir() / "archive"
 
@@ -408,8 +404,8 @@ def main() -> int:
                          "log directory if that file exists, otherwise used "
                          "as --agent substring filter")
     ap.add_argument("--log", default=None,
-                    help="log file or glob (default: this repo's "
-                         "agents-live.log)")
+                    help="log file or glob (default: every log this "
+                         "repository has written)")
     ap.add_argument("--all", action="store_true",
                     help="union this repo's logs with the host-level logs")
     ap.add_argument("--agent", help="filter by agent name (substring match)")
@@ -458,7 +454,6 @@ def main() -> int:
     # directory, point --log at it; otherwise fall through to an --agent
     # substring filter. With --all there is no single file to prefer, so
     # the name always narrows the union as an agent filter (#89).
-    _explicit_log = args.log
     try:
         if args.name and args.log is None:
             if args.all:
@@ -475,14 +470,11 @@ def main() -> int:
                     args.log = str(candidate)
                 elif not args.agent:
                     args.agent = args.name
-        if args.log is None:
-            args.log = str(default_log())
-        # "Are there errors?" is a question about the repository, not
-        # about one file. Defaulting it to agents-live.log answered
-        # "none" while four failed runs sat in per-agent logs, which is
-        # the one wrong answer this query must never give.
-        span_everything = args.all or (
-            args.errors and args.name is None and _explicit_log is None)
+        # A question with no file named is a question about the
+        # repository, not about one file. There is no single log to fall
+        # back to: agents write one file each, so defaulting to a name
+        # answered "nothing matched" while the records sat next to it.
+        span_everything = args.all or args.log is None
         patterns = all_log_globs() if span_everything else [args.log]
         archives = archive_dir()
     except ValueError as exc:
