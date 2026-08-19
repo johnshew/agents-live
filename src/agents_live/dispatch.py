@@ -117,10 +117,15 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
         options=firing.options,
     )
     if config.schema_version != "1":
-        overflow = agent.changed_files_overflow(firing.changed_files)
+        # Every ingress lands here, so the bound holds for adapters and
+        # APIs as much as for a typed command line.
+        overflow = (
+            agent.changed_files_overflow(firing.changed_files)
+            or agent.instructions_overflow(firing.instructions)
+        )
         if overflow is not None:
             return _failure(
-                events, firing, run_id, "changed_files_overflow", overflow)
+                events, firing, run_id, "invocation_input_overflow", overflow)
     scratch = _scratch(spec, run_id)
     try:
         with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):

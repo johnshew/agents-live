@@ -123,17 +123,16 @@ Values in `AGENTS_LIVE_OPTIONS` record how each option was supplied: a bare
 not supplied at all is absent rather than null. See
 [Taking options from the invocation](#taking-options-from-the-invocation).
 
-`AGENTS_LIVE_INSTRUCTIONS` is capped before the program is spawned, against the
-same host limit that bounds the command line. `AGENTS_LIVE_OPTIONS` is bounded
-where it is supplied, so an oversized set of options fails the invocation
-rather than arriving trimmed.
+`AGENTS_LIVE_INSTRUCTIONS` and `AGENTS_LIVE_OPTIONS` are bounded where they are
+supplied, so an oversized invocation fails rather than arriving trimmed. What a
+processor reads is therefore exactly what the model was given, never a shorter
+version of it.
 
 **A change set too large to pass fails the run** before anything is spawned,
-naming the count and the limit. What you read is therefore every path that
-changed, never a sample: trimming the list would let a processor loop over it
-and skip work it was never told about, with nothing downstream able to tell.
-If an agent hits this, the watch pattern is usually wider than the work, and
-the alternative is a processor that scans the repository itself rather than
+naming the count and the limit. Trimming the list would let a processor loop
+over it and skip work it was never told about, with nothing downstream able to
+tell. If an agent hits this, the watch pattern is usually wider than the work,
+and the alternative is a processor that scans the repository itself rather than
 taking a list.
 
 ### Taking options from the invocation
@@ -446,9 +445,10 @@ argument and still bounded by the host: that gap is
 [#374](https://github.com/johnshew/agents-live/issues/374).
 
 Everything else already streams: stdin, stdout, and the log sink are pipes or
-files with no practical ceiling. Environment values are bounded, so
-`AGENTS_LIVE_INSTRUCTIONS` is capped before spawn and a change set too large to
-pass fails the run rather than arriving incomplete.
+files with no practical ceiling. Environment values are bounded, so an
+invocation carrying more instructions, options, or changed paths than one
+environment value holds fails before anything is spawned rather than arriving
+incomplete.
 
 **If you do hand the model a path**, which is reasonable when the material is
 already a file on disk, two things have to be true. Write it outside the

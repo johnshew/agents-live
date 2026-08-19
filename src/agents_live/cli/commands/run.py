@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from ... import paths
+from ...agent import port
 from ...agent.port import ENVIRONMENT_VALUE_MAX_CHARS as OPTIONS_MAX_CHARS
 from ...dispatch import Firing, dispatch
 
@@ -83,7 +84,7 @@ def _instructions(args) -> str:
     if args.prompt is not None:
         if not args.prompt.strip():
             raise ValueError("--prompt must not be empty")
-        return args.prompt
+        return _bounded(args.prompt)
     if args.prompt_file is None:
         return ""
     if args.prompt_file == "-":
@@ -97,6 +98,13 @@ def _instructions(args) -> str:
             raise ValueError("--prompt-file is not valid UTF-8") from None
     if not text.strip():
         raise ValueError("--prompt-file must not be empty")
+    return _bounded(text)
+
+
+def _bounded(text: str) -> str:
+    overflow = port.instructions_overflow(text)
+    if overflow is not None:
+        raise ValueError(overflow)
     return text
 
 

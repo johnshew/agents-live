@@ -41,7 +41,9 @@ history is retained in the source repository.
   that receives changed paths sees a differently ordered prompt.
 - change: a change set too large to pass to a processor now fails the run
   before anything is spawned, naming the count and the limit. Trimming the
-  list would let a processor skip work it was never told about.
+  list would let a processor skip work it was never told about. Instructions
+  and options are bounded the same way, where they are supplied, so nothing
+  an invocation carries ever arrives silently shortened.
 - fix: send the Claude prompt on stdin instead of the command line. A prompt
   passed as an argument was the one handoff bounded by the host's 32767
   character command line on Windows.

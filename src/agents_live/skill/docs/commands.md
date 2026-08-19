@@ -38,6 +38,24 @@ agents-live run link-check -o dry-run -o account=team-inbox
 editing the definition. `--prompt-file -` reads them from stdin, and the two
 sources are mutually exclusive.
 
+Quoting differs by shell, and getting it wrong is the usual first problem:
+
+```bash
+agents-live run link-check -p "Focus on the auth pages; ignore drafts"
+agents-live run link-check -p 'Leave $HOME and `backticks` literal'
+```
+
+```powershell
+agents-live run link-check -p "Focus on the auth pages; ignore drafts"
+agents-live run link-check -p 'Leave $HOME and `backticks` literal'
+```
+
+In PowerShell a double-quoted string expands `$name` and treats a backtick as
+an escape, so single quotes are the safe default for anything containing them.
+In Bash the equivalent trap is `$` and backticks inside double quotes. Either
+way, `--prompt-file` avoids the question entirely and is the better choice for
+more than a sentence.
+
 `-o/--option` passes values to the processors. The presence of `=` is the whole
 grammar: `-o dry-run` is a flag and `-o account=team-inbox` carries a value.
 Both reach every processor as `AGENTS_LIVE_OPTIONS`, described in

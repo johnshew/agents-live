@@ -8,6 +8,7 @@ from .definition import (
 from .port import (
     changed_files_overflow,
     discover,
+    instructions_overflow,
     interpret,
     load,
     outcome,
@@ -62,6 +63,7 @@ __all__ = [
     "UnsupportedSchemaVersion",
     "changed_files_overflow",
     "discover",
+    "instructions_overflow",
     "interpret",
     "load",
     "outcome",

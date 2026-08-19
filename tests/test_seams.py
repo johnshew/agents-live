@@ -2918,9 +2918,47 @@ class TestProcessorContractVersion2(TempRepository):
             "many-files", str(self.root), "manual", changed_files=crowd))
 
         self.assertFalse(result.ok)
-        self.assertEqual("changed_files_overflow", result.category)
+        self.assertEqual("invocation_input_overflow", result.category)
         self.assertIn("4000 changed files", result.message)
         self.assertIn("agents-live.watch", result.message)
+
+    def test_unpassable_instructions_fail_before_anything_spawns(self) -> None:
+        """The model and the processors must not see different text."""
+        directory = self.skill("long-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "long-brief", str(self.root), "manual",
+            instructions="x" * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("instructions are", result.message)
+
+    def test_options_reach_the_post_processor_and_keep_an_empty_value(self) -> None:
+        """An empty value is a value; not supplying one is not."""
+        directory = self.skill("post-options", [
+            'agents-live.selector: "none"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+
+        result = dispatch(Firing(
+            "post-options", str(self.root), "manual",
+            options=(("account", ""), ("dry-run", True))))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual("post", environment["AGENTS_LIVE_ROLE"])
+        options = json.loads(environment["AGENTS_LIVE_OPTIONS"])
+        self.assertEqual({"account": "", "dry-run": True}, options)
+        self.assertIn("account", options)
+        self.assertNotIn("never-supplied", options)
 
     def test_a_change_set_that_fits_arrives_whole(self) -> None:
         directory = self.skill("some-files", [
@@ -3292,6 +3330,17 @@ class TestInvocationInput(TempRepository):
         with self.assertRaises(ValueError) as caught:
             run._options([f"payload={'x' * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1)}"])
         self.assertIn("over the", str(caught.exception))
+
+    def test_oversized_instructions_are_refused_at_the_command_line(self) -> None:
+        self._echo_agent("picky-brief")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            code = run.main([
+                "--name", "picky-brief",
+                "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1),
+            ])
+        self.assertEqual(1, code)
+        self.assertIn("instructions are", errors.getvalue())
 
     def test_instructions_follow_the_definition_body_in_the_prompt(self) -> None:
         self.skill("composed", [

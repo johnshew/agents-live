@@ -172,7 +172,7 @@ def _run_context(
         "AGENTS_LIVE_ORIGIN": ctx.origin,
         "AGENTS_LIVE_ATTEMPT": str(ctx.attempt),
         "AGENTS_LIVE_REPO_ROOT": str(spec.root),
-        "AGENTS_LIVE_INSTRUCTIONS": _capped(ctx.request.text),
+        "AGENTS_LIVE_INSTRUCTIONS": ctx.request.text,
         "AGENTS_LIVE_CHANGED_FILES": json.dumps(list(ctx.request.changed_files)),
         "AGENTS_LIVE_OPTIONS": json.dumps(dict(ctx.request.options)),
     })
@@ -204,11 +204,19 @@ def changed_files_overflow(items: tuple[str, ...]) -> str | None:
     )
 
 
-def _capped(value: str) -> str:
-    """Environment values are bounded, so the caller never has to ask."""
-    if len(value) <= ENVIRONMENT_VALUE_MAX_CHARS:
-        return value
-    return value[:ENVIRONMENT_VALUE_MAX_CHARS]
+def instructions_overflow(text: str) -> str | None:
+    """Why these instructions cannot be handed to a processor, if they cannot.
+
+    Truncating instead would leave the model reading the whole thing and a
+    processor reading part of it, with neither able to tell.
+    """
+    if len(text) <= ENVIRONMENT_VALUE_MAX_CHARS:
+        return None
+    return (
+        f"instructions are {len(text)} characters, over the "
+        f"{ENVIRONMENT_VALUE_MAX_CHARS}-character limit for one environment "
+        "value. Shorten them, or move the standing part into the definition."
+    )
 
 
 def interpret(
