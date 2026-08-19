@@ -39,6 +39,7 @@ authentication, or reasoning.
 | `smoketest` | [docs/commands.md](docs/commands.md) section "smoketest" |
 | Editing any script | [docs/approach.md](docs/approach.md) (architecture) |
 | Understanding services available to agents and handlers (env, MCPs, `Agents/lib/` helpers, pipeline side-channel) | [docs/approach.md](docs/approach.md) |
+| Writing or changing a pre-processor or post-processor | [docs/processors.md](docs/processors.md) |
 | Debugging log issues | [docs/diagnostics.md](docs/diagnostics.md) (log inventory, procedures, patterns, query recipes) |
 | Debugging cron/watcher lifecycle | [docs/key-learnings.md](docs/key-learnings.md) |
 | Debugging WSL/9P issues | [docs/diagnostics.md](docs/diagnostics.md) section "WSL liveness" |
@@ -134,12 +135,22 @@ for the complete schema.
 pre-processor -> agent -> post-processor
 ```
 
-- Pre-processor stdout is appended to the agent prompt as `pre-processor="<output>"`.
-- Output `{"skip": true}` to skip the agent call (status `skipped`).
+- A processor is a filter: data in on stdin, value out on stdout,
+  diagnostics on stderr, verdict in the exit code. Agents Live adds no
+  arguments, so a class 0 processor runs with none.
+- Pre-processor output is appended to the agent prompt under a
+  `Pre-processor context:` heading.
+- Write `{"skip": true}` to the file at `AGENTS_LIVE_CONTROL` to skip the agent
+  call (status `skipped`). Under `schema-version: "1"` a pre-processor did this
+  by printing the same object to stdout; version 2 never parses stdout.
 - With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live
   outside the project tree, so log writes cannot re-trigger watchers.
-- In `mode: pipeline`, the pre-processor, agent, and post-processor can `put` and `get` against the PipelineMcp side-channel (see below).
+- Execution mode changes what the model may do, never what a processor
+  receives. In `mode: pipeline` the model reaches the run store through
+  PipelineMcp (see below), and a declared `agents-live.result-path` is
+  snapshotted onto the post-processor's stdin.
+- The full child process contract is in [docs/processors.md](docs/processors.md).
 
 ## Pipeline mode (`mode: pipeline`)
 

@@ -53,7 +53,7 @@ Use this `Agents/markdown-polisher-plan/SKILL.md`:
 name: markdown-polisher-plan
 description: Polish changed Markdown through a validated post-processor.
 metadata:
-  agents-live.schema-version: "1"
+  agents-live.schema-version: "2"
   agents-live.selector: "claude"
   agents-live.mode: "plan"
   agents-live.watch: "docs/** debounce 1s"
@@ -179,7 +179,7 @@ Use this `Agents/markdown-polisher-pipeline/SKILL.md`:
 name: markdown-polisher-pipeline
 description: Polish changed Markdown through the pipeline side channel.
 metadata:
-  agents-live.schema-version: "1"
+  agents-live.schema-version: "2"
   agents-live.selector: "claude"
   agents-live.mode: "pipeline"
   agents-live.watch: "docs/** debounce 1s"
@@ -296,7 +296,10 @@ def main() -> int:
             manifest.append({"path": relative, "chunks": paths})
             values.update(zip(paths, chunks, strict=True))
     if not manifest:
-        print('{"skip": true}')
+        Path(os.environ["AGENTS_LIVE_CONTROL"]).write_text(
+            json.dumps({"skip": True, "message": "no Markdown changed"}),
+            encoding="utf-8",
+        )
         return 0
     asyncio.run(publish(manifest, values))
     print(json.dumps({"published": [item["path"] for item in manifest]}))

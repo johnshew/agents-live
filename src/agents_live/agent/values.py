@@ -122,6 +122,29 @@ class Request:
     text: str = ""
     changed_files: tuple[str, ...] = ()
     env: tuple[tuple[str, str], ...] = ()
+    options: tuple[tuple[str, str | bool], ...] = ()
+
+
+@dataclass(frozen=True)
+class StepFiles:
+    """Where a step may write control, logs, and an oversized result.
+
+    Named, never created: a processor that writes none of them leaves
+    nothing behind, which matters because nothing prunes the run
+    directory yet (#259).
+    """
+
+    control: Path
+    log: Path
+    output: Path
+
+
+@dataclass(frozen=True)
+class StepSignals:
+    """What a step said through a channel other than its streams."""
+
+    control: dict | None = None
+    output: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +153,11 @@ class StepContext:
     pre: "StepResult | None" = None
     agent: "StepResult | None" = None
     resource_env: tuple[tuple[str, str], ...] = ()
+    run_id: str = ""
+    origin: str = ""
+    attempt: int = 1
+    scratch: Path | None = None
+    result_snapshot: str | None = None
 
 
 @dataclass(frozen=True)

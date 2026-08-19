@@ -69,6 +69,12 @@ COMMANDS = (
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
+            Arg(("-p", "--prompt"), "Additional instructions for the model.",
+                kind="value"),
+            Arg(("--prompt-file",), "Read additional instructions from a file, "
+                "or '-' for stdin.", kind="value"),
+            Arg(("-o", "--option"), "NAME for a flag, or NAME=VALUE. Repeatable.",
+                kind="value"),
             Arg(("--scheduled",), "This run came from an installed schedule."),
             Arg(("--boot",), "This run came from a startup trigger."),
             Arg(("--quiet",), "Suppress progress output."),

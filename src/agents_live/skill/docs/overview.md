@@ -26,7 +26,7 @@ not conforming Agent Skills.
 name: markdown-polisher
 description: Polishes Markdown documents after they change.
 metadata:
-  agents-live.schema-version: "1"
+  agents-live.schema-version: "2"
   agents-live.selector: "claude"
   agents-live.mode: "write"
   agents-live.watch: "docs/** debounce 1s"

@@ -28,6 +28,40 @@ history is retained in the source repository.
 - docs: clarify UTC issue windows and foreground dashboard readiness.
   Agent guidance uses lower-bounded GitHub issue searches and treats dashboard
   API availability, not server-process exit, as the readiness signal.
+- feat: implement the schema-2 processor contract. A definition declaring
+  `agents-live.schema-version: "2"` selects it. Run context, invocation
+  options, and the control, log, and output channels reach a processor in the
+  environment; `AGENTS_LIVE_CONTROL` replaces the version 1 convention of
+  ending a run by printing `{"skip": true}`, which version 2 no longer reads.
+  A pipeline post-processor now receives the `agents-live.result-path`
+  snapshot on stdin. Version 1 definitions keep their existing behavior
+  unchanged until it is removed in 7.0.
+- feat: pass invocation instructions and options to a single run.
+  `agents-live run <name> -p TEXT` and `--prompt-file PATH` add instructions
+  for the model without editing the definition, and `-o NAME` or
+  `-o NAME=VALUE` reaches every processor as `AGENTS_LIVE_OPTIONS`. Neither is
+  recorded into an installed trigger, so an ad hoc run cannot change what a
+  schedule does.
+- change: the agent prompt now leads with the definition body. A watch run's
+  `Files changed:` listing previously preceded it and now follows it, ahead of
+  the labeled invocation instructions and pre-processor context. Every agent
+  that receives changed paths sees a differently ordered prompt.
+- change: a change set too large to pass to a processor now fails the run
+  before anything is spawned, naming the count and the limit. Trimming the
+  list would let a processor skip work it was never told about. Instructions
+  and options are bounded the same way, where they are supplied, so nothing
+  an invocation carries ever arrives silently shortened.
+- fix: send the Claude prompt on stdin instead of the command line. A prompt
+  passed as an argument was the one handoff bounded by the host's 32767
+  character command line on Windows.
+- docs: specify the processor contract as a filter. `processors.md` states
+  what a pre- or post-processor receives and returns: the definition names the
+  program and Agents Live adds no arguments, stdin carries data and nothing
+  else, the value leaves on stdout unparsed, and control, structured logs, and
+  invocation options each have their own handle in the environment. Processors
+  come in three classes, from one that knows nothing about Agents Live to one
+  that speaks to the pipeline MCP. Execution mode now constrains only the
+  model, so a processor receives the same thing everywhere.
 
 ## 6.4.1 - 2026-08-17
 

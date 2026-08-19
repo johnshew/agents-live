@@ -1,6 +1,22 @@
 """Pure runnable-unit port."""
-from .definition import SCHEMA_VERSION, DefinitionError, UnsupportedSchemaVersion
-from .port import discover, interpret, load, outcome, prepare, shape
+from .definition import (
+    SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    DefinitionError,
+    UnsupportedSchemaVersion,
+)
+from .port import (
+    changed_files_overflow,
+    discover,
+    instructions_overflow,
+    interpret,
+    load,
+    options_overflow,
+    outcome,
+    prepare,
+    shape,
+    step_files,
+)
 from .selector import parse_selector
 from .values import (
     AgentSpec,
@@ -18,7 +34,9 @@ from .values import (
     SkillProperties,
     Step,
     StepContext,
+    StepFiles,
     StepResult,
+    StepSignals,
 )
 
 __all__ = [
@@ -36,16 +54,23 @@ __all__ = [
     "ResolvedSpec",
     "RunShape",
     "SCHEMA_VERSION",
+    "SUPPORTED_SCHEMA_VERSIONS",
     "SkillProperties",
     "Step",
     "StepContext",
+    "StepFiles",
     "StepResult",
+    "StepSignals",
     "UnsupportedSchemaVersion",
+    "changed_files_overflow",
     "discover",
+    "instructions_overflow",
     "interpret",
     "load",
+    "options_overflow",
     "outcome",
     "parse_selector",
     "prepare",
     "shape",
+    "step_files",
 ]

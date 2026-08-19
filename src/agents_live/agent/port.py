@@ -22,11 +22,16 @@ from .values import (
     RunShape,
     Step,
     StepContext,
+    StepFiles,
     StepResult,
+    StepSignals,
 )
 
 DEFAULT_OUTPUT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 120
+# Environment values are bounded, so a processor never has to ask whether
+# what it reads is whole.
+ENVIRONMENT_VALUE_MAX_BYTES = 32 * 1024
 
 
 def load(agent_id: str, *, root: Path) -> AgentSpec:
@@ -47,18 +52,21 @@ def shape(spec: AgentSpec) -> RunShape:
     )
 
 
+def step_files(scratch: Path, step: Step) -> StepFiles:
+    """The channels a step may use, named but never created."""
+    return StepFiles(
+        scratch / f"{step.value}-control.json",
+        scratch / f"{step.value}-log.jsonl",
+        scratch / f"{step.value}-output",
+    )
+
+
 def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     config = _config(spec)
     environment = dict(config.env)
     environment.update(ctx.request.env)
     environment.update(ctx.resource_env)
-    environment["AGENTS_LIVE_AGENT_NAME"] = spec.name
-    environment["AGENTS_LIVE_AGENT_ID"] = spec.identifier
-    environment["AGENTS_LIVE_LOG_FILE"] = str(
-        repo_state_dir(spec.root) / "logs" / f"{spec.identifier}.jsonl"
-    )
-    if ctx.request.changed_files:
-        environment["AGENTS_LIVE_CHANGED_FILES"] = json.dumps(ctx.request.changed_files)
+    environment.update(_run_context(spec, step, ctx))
     if step in {Step.PRE, Step.POST}:
         reference = config.pre_processor if step is Step.PRE else config.post_processor
         if reference is None:
@@ -68,15 +76,21 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
             raise DefinitionError(f"{step.value} processor not found: {reference}")
         input_text = None
         if step is Step.POST:
-            source = None if config.mode == "pipeline" else (ctx.agent or ctx.pre)
-            if source is not None and source.structured is not None:
-                # The extracted value, not the text it came out of: a
-                # provider wraps its answer in prose and a session
-                # footer, and the processor is the reason the value was
-                # extracted at all.
-                input_text = json.dumps(source.structured)
-            elif source is not None:
-                input_text = source.text
+            if config.mode == "pipeline":
+                # The declared result, so a class 0 post-processor keeps
+                # reading its input from stdin after the move to pipeline
+                # mode without knowing it happened.
+                input_text = ctx.result_snapshot
+            else:
+                source = ctx.agent or ctx.pre
+                if source is not None and source.structured is not None:
+                    # The extracted value, not the text it came out of: a
+                    # provider wraps its answer in prose and a session
+                    # footer, and the processor is the reason the value was
+                    # extracted at all.
+                    input_text = json.dumps(source.structured)
+                elif source is not None:
+                    input_text = source.text
         return Launch(
             _processor_argv(path),
             tuple(sorted(environment.items())),
@@ -85,14 +99,7 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
             config.timeout or DEFAULT_TIMEOUT_SECONDS,
         )
 
-    prompt = spec.body
-    if ctx.request.changed_files:
-        listing = "\n".join(f"  - {item}" for item in ctx.request.changed_files)
-        prompt = f"Files changed:\n{listing}\n\n{prompt}"
-    if ctx.request.text:
-        prompt = f"{ctx.request.text}\n\n{prompt}"
-    if ctx.pre and ctx.pre.text:
-        prompt = f"{prompt}\n\nPre-processor context:\n{ctx.pre.text}"
+    prompt = _prompt(spec, ctx)
     selector = config.selector
     provider = get_provider(selector.provider)
     if selector.model and provider.models is not None and selector.model not in provider.models:
@@ -131,11 +138,110 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     )
 
 
+def _prompt(spec: AgentSpec, ctx: StepContext) -> str:
+    """The definition first, then anything this run added, each labelled."""
+    sections = [spec.body]
+    if ctx.request.changed_files:
+        listing = "\n".join(f"  - {item}" for item in ctx.request.changed_files)
+        sections.append(f"Files changed:\n{listing}")
+    if ctx.request.text:
+        sections.append(f"Invocation instructions:\n{ctx.request.text}")
+    if ctx.pre and ctx.pre.text:
+        sections.append(f"Pre-processor context:\n{ctx.pre.text}")
+    return "\n\n".join(sections)
+
+
+def _run_context(
+    spec: AgentSpec, step: Step, ctx: StepContext) -> dict[str, str]:
+    """What the run tells its children, in the shape that version asks for."""
+    config = _config(spec)
+    environment = {
+        "AGENTS_LIVE_AGENT_NAME": spec.name,
+        "AGENTS_LIVE_AGENT_ID": spec.identifier,
+    }
+    if config.schema_version == "1":
+        environment["AGENTS_LIVE_LOG_FILE"] = str(
+            repo_state_dir(spec.root) / "logs" / f"{spec.identifier}.jsonl")
+        if ctx.request.changed_files:
+            environment["AGENTS_LIVE_CHANGED_FILES"] = json.dumps(
+                list(ctx.request.changed_files))
+        return environment
+    environment.update({
+        "AGENTS_LIVE_CONTRACT": "2",
+        "AGENTS_LIVE_RUN_ID": ctx.run_id,
+        "AGENTS_LIVE_ORIGIN": ctx.origin,
+        "AGENTS_LIVE_ATTEMPT": str(ctx.attempt),
+        "AGENTS_LIVE_REPO_ROOT": str(spec.root),
+        "AGENTS_LIVE_INSTRUCTIONS": ctx.request.text,
+        "AGENTS_LIVE_CHANGED_FILES": json.dumps(list(ctx.request.changed_files)),
+        "AGENTS_LIVE_OPTIONS": json.dumps(dict(ctx.request.options)),
+    })
+    if step in {Step.PRE, Step.POST}:
+        environment["AGENTS_LIVE_ROLE"] = step.value
+    if ctx.scratch is not None:
+        files = step_files(ctx.scratch, step)
+        environment["AGENTS_LIVE_CONTROL"] = str(files.control)
+        environment["AGENTS_LIVE_LOG"] = str(files.log)
+        environment["AGENTS_LIVE_OUTPUT"] = str(files.output)
+    return environment
+
+
+def changed_files_overflow(items: tuple[str, ...]) -> str | None:
+    """Why this change set cannot be handed to a processor, if it cannot.
+
+    Dropping paths to make it fit would be worse than refusing: a
+    processor that loops over the list would skip work it was never told
+    about, and nothing downstream could tell that it had.
+    """
+    encoded = _environment_value_bytes(json.dumps(list(items)))
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
+        return None
+    return (
+        f"{len(items)} changed files need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment "
+        "value. Narrow agents-live.watch, or have the processor scan the "
+        "repository itself instead of taking a list."
+    )
+
+
+def instructions_overflow(text: str) -> str | None:
+    """Why these instructions cannot be handed to a processor, if they cannot.
+
+    Truncating instead would leave the model reading the whole thing and a
+    processor reading part of it, with neither able to tell.
+    """
+    encoded = _environment_value_bytes(text)
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
+        return None
+    return (
+        f"instructions need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment "
+        "value. Shorten them, or move the standing part into the definition."
+    )
+
+
+def options_overflow(items: tuple[tuple[str, str | bool], ...]) -> str | None:
+    """Why these invocation options cannot be handed to a processor."""
+    encoded = _environment_value_bytes(json.dumps(dict(items)))
+    if encoded <= ENVIRONMENT_VALUE_MAX_BYTES:
+        return None
+    return (
+        f"options need {encoded} bytes, over the "
+        f"{ENVIRONMENT_VALUE_MAX_BYTES}-byte limit for one environment value"
+    )
+
+
+def _environment_value_bytes(value: str) -> int:
+    """The portable size of one processor environment value."""
+    return len(value.encode("utf-8"))
+
+
 def interpret(
     spec: AgentSpec,
     step: Step,
     launch: Launch,
     raw: RawOutput,
+    signals: StepSignals = StepSignals(),
 ) -> StepResult:
     if raw.timed_out:
         return StepResult(
@@ -151,17 +257,21 @@ def interpret(
             step, False, category=category,
             message=raw.stderr.strip() or f"child exited with status {raw.returncode}")
     text = raw.stdout.rstrip("\n")
-    if step is Step.PRE:
+    message = raw.stderr.strip()
+    if step in {Step.PRE, Step.POST}:
+        if signals.output is not None:
+            # The result moved to a file, so stdout was diagnostics.
+            message = "\n".join(part for part in (message, text) if part)
+            text = signals.output.rstrip("\n")
         skip = False
-        try:
-            parsed = json.loads(text)
-            skip = isinstance(parsed, dict) and bool(parsed.get("skip"))
-        except json.JSONDecodeError:
-            pass
-        return StepResult(
-            step, True, skip=skip, text=text, message=raw.stderr.strip())
-    if step is Step.POST:
-        return StepResult(step, True, text=text, message=raw.stderr.strip())
+        if _config(spec).schema_version == "1":
+            skip = step is Step.PRE and _skip_on_stdout(text)
+        elif signals.control is not None:
+            skip = signals.control.get("skip") is True
+            note = signals.control.get("message")
+            if skip and isinstance(note, str) and note:
+                message = note
+        return StepResult(step, True, skip=skip, text=text, message=message)
     provider = get_provider(launch.provider or _config(spec).selector.provider)
     completion = provider.parse(raw)
     if not completion.text and completion.structured is None:
@@ -169,6 +279,15 @@ def interpret(
             step, False, retryable=True, category="empty_output",
             message="provider returned no output")
     return _validate_completion(spec, completion, raw.stdout)
+
+
+def _skip_on_stdout(text: str) -> bool:
+    """Version 1 ended a run by printing a skip object; version 2 does not."""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("skip"))
 
 
 def _agent_failure_category(raw: RawOutput) -> str:
@@ -202,7 +321,7 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
             )
     pre = results.get(Step.PRE)
     if pre is not None and pre.skip:
-        return Outcome(True, "skipped", pre.text)
+        return Outcome(True, "skipped", pre.text, message=pre.message)
     final = results.get(Step.POST) or results.get(Step.AGENT) or pre
     telemetry = results.get(Step.AGENT) or final
     return Outcome(

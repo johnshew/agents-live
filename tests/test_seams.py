@@ -31,6 +31,7 @@ from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import migrate, triggers
 from agents_live.agent import providers
+from agents_live.agent import port
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
 from agents_live.cli.commands import definition_migrate
@@ -48,6 +49,7 @@ from agents_live.runtime import (
     parse_watch,
 )
 from agents_live.runtime.budget import claim as claim_budget
+from agents_live.runtime import spawn
 from agents_live.runtime.hosts import processes
 from agents_live.runtime.hosts.processes import LocalChildRunner
 from agents_live.runtime.watchloop import run as run_watchloop
@@ -96,7 +98,13 @@ class TempRepository(unittest.TestCase):
                 os.environ[name] = value
         self.temporary.cleanup()
 
-    def skill(self, name: str, metadata: list[str], body: str = "Do the work.") -> Path:
+    def skill(
+        self,
+        name: str,
+        metadata: list[str],
+        body: str = "Do the work.",
+        version: str = "1",
+    ) -> Path:
         directory = self.root / "Agents" / name
         directory.mkdir(parents=True)
         text = "\n".join([
@@ -104,7 +112,7 @@ class TempRepository(unittest.TestCase):
             f"name: {name}",
             "description: A portable test definition.",
             "metadata:",
-            '  agents-live.schema-version: "1"',
+            f'  agents-live.schema-version: "{version}"',
             *[f"  {line}" for line in metadata],
             "---",
             body,
@@ -2936,6 +2944,654 @@ class TestObservability(unittest.TestCase):
         for records in (all_records, filtered_records):
             self.assertEqual(1, len(records))
             self.assertEqual("valid", records[0]["agent_name"])
+
+
+class TestProcessorContractVersion2(TempRepository):
+    """The schema-2 child contract, and what version 1 still does instead."""
+
+    def _echo_environment(self, directory: Path, name: str = "process.py") -> Path:
+        (directory / "scripts").mkdir(exist_ok=True)
+        script = directory / "scripts" / name
+        script.write_text(
+            "import json, os\n"
+            "print(json.dumps({key: value for key, value in os.environ.items()\n"
+            "                  if key.startswith('AGENTS_LIVE_')}))\n",
+            encoding="utf-8",
+        )
+        return script
+
+    def test_a_pipeline_post_processor_reads_the_result_from_stdin(self) -> None:
+        """A class 0 post-processor survives the move to pipeline mode.
+
+        Version 1 handed it nothing here, so this also proves the change is
+        additive for a program that ignores stdin.
+        """
+        directory = self.skill("published", [
+            'agents-live.selector: "fake/echo"',
+            'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/verdict"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], body=(
+            "Publish the verdict.\n\n"
+            "```put /output/verdict\n"
+            '{"action": "update"}\n'
+            "```\n"
+        ), version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "import sys\nprint('received:' + sys.stdin.read().strip())\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("published", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertIn('"action": "update"', result.text)
+        self.assertTrue(result.text.startswith("received:"), result.text)
+
+    def test_an_unpassable_change_set_fails_before_anything_spawns(self) -> None:
+        """Trimming the list would let a processor skip work silently.
+
+        Refusing is louder and keeps the promise that what a processor
+        reads is every path that changed.
+        """
+        directory = self.skill("many-files", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+        crowd = tuple(f"docs/{index:06d}-{'p' * 60}.md" for index in range(4000))
+
+        result = dispatch(Firing(
+            "many-files", str(self.root), "manual", changed_files=crowd))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("4000 changed files", result.message)
+        self.assertIn("agents-live.watch", result.message)
+
+    def test_unpassable_instructions_fail_before_anything_spawns(self) -> None:
+        """The model and the processors must not see different text."""
+        directory = self.skill("long-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "long-brief", str(self.root), "manual",
+            instructions="x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("instructions need", result.message)
+
+    def test_multibyte_instructions_are_bounded_by_encoded_size(self) -> None:
+        directory = self.skill("wide-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "wide-brief", str(self.root), "manual",
+            instructions="\U0001f642" * (32 * 1024 // 4 + 1)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("bytes", result.message)
+
+    def test_direct_dispatch_options_share_the_environment_bound(self) -> None:
+        directory = self.skill("many-options", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "many-options", str(self.root), "manual",
+            options=(("brief", "x" * (32 * 1024)),)))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invocation_input_overflow", result.category)
+        self.assertIn("options need", result.message)
+
+    def test_options_reach_the_post_processor_and_keep_an_empty_value(self) -> None:
+        """An empty value is a value; not supplying one is not."""
+        directory = self.skill("post-options", [
+            'agents-live.selector: "none"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+
+        result = dispatch(Firing(
+            "post-options", str(self.root), "manual",
+            options=(("account", ""), ("dry-run", True))))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual("post", environment["AGENTS_LIVE_ROLE"])
+        options = json.loads(environment["AGENTS_LIVE_OPTIONS"])
+        self.assertEqual({"account": "", "dry-run": True}, options)
+        self.assertIn("account", options)
+        self.assertNotIn("never-supplied", options)
+
+    def test_a_change_set_that_fits_arrives_whole(self) -> None:
+        directory = self.skill("some-files", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+        crowd = tuple(f"docs/{index:04d}.md" for index in range(300))
+
+        result = dispatch(Firing(
+            "some-files", str(self.root), "manual", changed_files=crowd))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual(
+            list(crowd), json.loads(environment["AGENTS_LIVE_CHANGED_FILES"]))
+
+    def test_an_option_value_survives_spaces_quotes_and_semicolons(self) -> None:
+        directory = self.skill("hostile", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+        awkward = 'a b "c" ; rm -rf / && echo $HOME \'x\''
+
+        result = dispatch(Firing(
+            "hostile", str(self.root), "manual",
+            options=(("account", awkward),)))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual(
+            awkward, json.loads(environment["AGENTS_LIVE_OPTIONS"])["account"])
+
+    def test_a_processor_receives_no_argument_it_was_not_given(self) -> None:
+        """Agents Live appends nothing, which is what lets a class 0
+        processor keep a strict argument parser."""
+        directory = self.skill("bare-argv", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/argv.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        script = directory / "scripts" / "argv.py"
+        script.write_text(
+            "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing(
+            "bare-argv", str(self.root), "manual",
+            instructions="do the thing",
+            options=(("dry-run", True), ("account", "team-inbox")),
+        ))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual([], json.loads(result.text))
+
+    def test_instructions_and_option_values_stay_out_of_the_event_log(self) -> None:
+        directory = self.skill("discreet", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "print('done')\n", encoding="utf-8")
+        spec = agent.load("discreet", root=self.root)
+
+        result = dispatch(Firing(
+            "discreet", str(self.root), "manual",
+            instructions="SECRETINSTRUCTION",
+            options=(("token", "SECRETOPTIONVALUE"),),
+        ))
+
+        self.assertTrue(result.ok, result)
+        log = paths.repo_state_dir(self.root) / "logs" / f"{spec.identifier}.jsonl"
+        recorded = log.read_text(encoding="utf-8")
+        self.assertNotIn("SECRETINSTRUCTION", recorded)
+        self.assertNotIn("SECRETOPTIONVALUE", recorded)
+
+    @unittest.skipIf(shutil.which("pwsh") is None, "PowerShell not installed")
+    def test_the_contract_is_language_neutral(self) -> None:
+        """A .ps1 processor reads the same run context a .py one does."""
+        directory = self.skill("powershell", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.ps1"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.ps1").write_text(
+            "Write-Output $env:AGENTS_LIVE_OPTIONS\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "powershell", str(self.root), "manual",
+            options=(("account", "team-inbox"),)))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"account": "team-inbox"}, json.loads(result.text))
+
+    def test_run_context_reaches_a_processor_in_the_environment(self) -> None:
+        directory = self.skill("context", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+        spec = agent.load("context", root=self.root)
+
+        result = dispatch(Firing(
+            "context", str(self.root), "manual",
+            changed_files=("docs/a.md",),
+            instructions="Focus on authentication",
+            options=(("dry-run", True), ("account", "team-inbox")),
+        ))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual("2", environment["AGENTS_LIVE_CONTRACT"])
+        self.assertEqual("pre", environment["AGENTS_LIVE_ROLE"])
+        self.assertEqual("manual", environment["AGENTS_LIVE_ORIGIN"])
+        self.assertEqual("1", environment["AGENTS_LIVE_ATTEMPT"])
+        self.assertEqual(spec.identifier, environment["AGENTS_LIVE_AGENT_ID"])
+        self.assertEqual(str(self.root), environment["AGENTS_LIVE_REPO_ROOT"])
+        self.assertEqual(
+            "Focus on authentication", environment["AGENTS_LIVE_INSTRUCTIONS"])
+        self.assertEqual(
+            ["docs/a.md"], json.loads(environment["AGENTS_LIVE_CHANGED_FILES"]))
+        self.assertEqual(
+            {"dry-run": True, "account": "team-inbox"},
+            json.loads(environment["AGENTS_LIVE_OPTIONS"]),
+        )
+        self.assertEqual(result.run_id, environment["AGENTS_LIVE_RUN_ID"])
+        # The version 1 name is gone, so a processor cannot read the shared
+        # agent log by accident.
+        self.assertNotIn("AGENTS_LIVE_LOG_FILE", environment)
+
+    def test_version_1_keeps_its_own_environment(self) -> None:
+        directory = self.skill("legacy-context", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ])
+        self._echo_environment(directory)
+        spec = agent.load("legacy-context", root=self.root)
+
+        result = dispatch(Firing(
+            "legacy-context", str(self.root), "manual",
+            options=(("dry-run", True),)))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual(
+            str(paths.repo_state_dir(self.root) / "logs"
+                / f"{spec.identifier}.jsonl"),
+            environment["AGENTS_LIVE_LOG_FILE"],
+        )
+        for name in (
+            "AGENTS_LIVE_CONTRACT", "AGENTS_LIVE_OPTIONS", "AGENTS_LIVE_LOG",
+            "AGENTS_LIVE_CONTROL", "AGENTS_LIVE_OUTPUT",
+        ):
+            self.assertNotIn(name, environment)
+
+    def test_empty_changed_files_and_options_are_still_present(self) -> None:
+        directory = self.skill("defaults", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+
+        result = dispatch(Firing("defaults", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual([], json.loads(environment["AGENTS_LIVE_CHANGED_FILES"]))
+        self.assertEqual({}, json.loads(environment["AGENTS_LIVE_OPTIONS"]))
+        self.assertEqual("", environment["AGENTS_LIVE_INSTRUCTIONS"])
+
+    def test_control_file_skips_the_run_and_version_1_uses_stdout(self) -> None:
+        directory = self.skill("skipper", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "import json, os, pathlib\n"
+            "pathlib.Path(os.environ['AGENTS_LIVE_CONTROL']).write_text(\n"
+            "    json.dumps({'skip': True, 'message': 'nothing to do'}))\n"
+            "print('{\"skip\": false}')\n",
+            encoding="utf-8",
+        )
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('the post-processor must not run')\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("skipper", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("skipped", result.status)
+        self.assertEqual("nothing to do", result.message)
+
+    def test_only_a_boolean_true_control_value_skips_the_run(self) -> None:
+        directory = self.skill("not-skipped", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "import json, os, pathlib\n"
+            "pathlib.Path(os.environ['AGENTS_LIVE_CONTROL']).write_text(\n"
+            "    json.dumps({'skip': 'false'}))\n",
+            encoding="utf-8",
+        )
+        (directory / "scripts" / "process.py").write_text(
+            "print('post-processor ran')\n", encoding="utf-8")
+
+        result = dispatch(Firing("not-skipped", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("success", result.status)
+        self.assertEqual("post-processor ran", result.text)
+
+    def test_version_2_ignores_a_skip_object_on_stdout(self) -> None:
+        directory = self.skill("noisy", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "print('{\"skip\": true}')\n", encoding="utf-8")
+        (directory / "scripts" / "process.py").write_text(
+            "import sys\nprint('ran:' + sys.stdin.read().strip())\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("noisy", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("success", result.status)
+        self.assertEqual('ran:{"skip": true}', result.text)
+
+    def test_version_1_still_skips_on_a_stdout_object(self) -> None:
+        directory = self.skill("legacy-skipper", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "print('{\"skip\": true}')\n", encoding="utf-8")
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('the post-processor must not run')\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("legacy-skipper", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("skipped", result.status)
+
+    def test_an_oversized_result_may_travel_by_file(self) -> None:
+        directory = self.skill("by-file", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "import os, pathlib\n"
+            "pathlib.Path(os.environ['AGENTS_LIVE_OUTPUT']).write_text('the value')\n"
+            "print('diagnostics, not the result')\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("by-file", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("the value", result.text)
+        self.assertIn("diagnostics, not the result", result.message)
+
+    def test_unused_channels_leave_no_files_behind(self) -> None:
+        directory = self.skill("tidy", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "print('done')\n", encoding="utf-8")
+
+        result = dispatch(Firing("tidy", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        runs = paths.repo_state_dir(self.root) / "runs" / "tidy"
+        self.assertEqual([], sorted(runs.glob("*")) if runs.exists() else [])
+
+    def test_a_log_sink_is_named_per_step_and_left_alone(self) -> None:
+        directory = self.skill("logger", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+            'agents-live.post-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.py").write_text(
+            "import json, os, pathlib\n"
+            "path = pathlib.Path(os.environ['AGENTS_LIVE_LOG'])\n"
+            "path.write_text(json.dumps({'message': 'pre wrote this'}) + '\\n')\n"
+            "print(str(path))\n",
+            encoding="utf-8",
+        )
+        (directory / "scripts" / "process.py").write_text(
+            "import os, sys\n"
+            "print(os.environ['AGENTS_LIVE_LOG'])\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing("logger", str(self.root), "manual"))
+
+        self.assertTrue(result.ok, result)
+        post_sink = Path(result.text)
+        self.assertTrue(post_sink.name.startswith("post-"))
+        # The post-processor never wrote, so its sink does not exist, and
+        # the pre-processor's survives untouched.
+        self.assertFalse(post_sink.exists())
+        pre_sink = post_sink.parent / "pre-log.jsonl"
+        self.assertEqual(
+            {"message": "pre wrote this"},
+            json.loads(pre_sink.read_text(encoding="utf-8").strip()),
+        )
+
+
+class TestInvocationInput(TempRepository):
+    def _instructions_seen_by(self, name: str, argv: list[str]) -> dict:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = run.main(["--name", name, *argv])
+        self.assertEqual(0, code, buffer.getvalue())
+        return json.loads(buffer.getvalue())
+
+    def _echo_agent(self, name: str) -> None:
+        directory = self.skill(name, [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "import json, os\n"
+            "print(json.dumps({key: value for key, value in os.environ.items()\n"
+            "                  if key.startswith('AGENTS_LIVE_')}))\n",
+            encoding="utf-8",
+        )
+
+    def test_prompt_file_and_prompt_agree_including_unicode(self) -> None:
+        self._echo_agent("from-file")
+        text = "Focus on café, naïve, and 日本語 encoding"
+        source = self.root / "instructions.md"
+        source.write_text(text, encoding="utf-8")
+
+        from_flag = self._instructions_seen_by("from-file", ["-p", text])
+        from_file = self._instructions_seen_by(
+            "from-file", ["--prompt-file", str(source)])
+
+        self.assertEqual(text, from_flag["AGENTS_LIVE_INSTRUCTIONS"])
+        self.assertEqual(text, from_file["AGENTS_LIVE_INSTRUCTIONS"])
+
+    def test_prompt_file_dash_reads_stdin(self) -> None:
+        self._echo_agent("from-stdin")
+        text = "Instructions from a pipe, with é"
+
+        with mock.patch.object(sys, "stdin", io.StringIO(text)):
+            seen = self._instructions_seen_by("from-stdin", ["--prompt-file", "-"])
+
+        self.assertEqual(text, seen["AGENTS_LIVE_INSTRUCTIONS"])
+
+    def test_bad_invocation_input_fails_before_dispatch(self) -> None:
+        self._echo_agent("picky")
+        source = self.root / "empty.md"
+        source.write_text("   \n", encoding="utf-8")
+        cases = {
+            "mutually exclusive": ["-p", "a", "--prompt-file", str(source)],
+            "must not be empty": ["-p", "   "],
+            "unreadable": ["--prompt-file", str(self.root / "absent.md")],
+            "more than once": ["-o", "a=1", "-o", "a=2"],
+        }
+        for expected, argv in cases.items():
+            with self.subTest(expected):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    code = run.main(["--name", "picky", *argv])
+                self.assertEqual(1, code)
+                self.assertIn(expected, errors.getvalue())
+
+    def test_schema_1_does_not_apply_the_processor_environment_bound(self) -> None:
+        directory = self.skill("legacy-brief", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ])
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "print('ran')\n", encoding="utf-8")
+
+        code = run.main([
+            "--name", "legacy-brief",
+            "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1),
+            "--quiet",
+        ])
+
+        self.assertEqual(0, code)
+
+    def test_schema_2_instruction_overflow_keeps_its_dispatch_category(self) -> None:
+        self._echo_agent("picky-brief")
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            code = run.main([
+                "--name", "picky-brief",
+                "-p", "x" * (port.ENVIRONMENT_VALUE_MAX_BYTES + 1),
+            ])
+
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "invocation_input_overflow",
+            json.loads(output.getvalue())["category"],
+        )
+
+    def test_schema_2_option_overflow_keeps_its_dispatch_category(self) -> None:
+        self._echo_agent("picky-options")
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            code = run.main([
+                "--name", "picky-options",
+                "-o", f"payload={'x' * port.ENVIRONMENT_VALUE_MAX_BYTES}",
+            ])
+
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "invocation_input_overflow",
+            json.loads(output.getvalue())["category"],
+        )
+
+    def test_instructions_follow_the_definition_body_in_the_prompt(self) -> None:
+        self.skill("composed", [
+            'agents-live.selector: "fake/echo"',
+        ], body="Authoritative body.", version="2")
+        spec = agent.load("composed", root=self.root)
+        launch = agent.prepare(
+            spec,
+            agent.Step.AGENT,
+            agent.StepContext(
+                agent.Request(
+                    text="Focus on authentication",
+                    changed_files=("docs/a.md",),
+                ),
+                pre=agent.StepResult(agent.Step.PRE, True, text="gathered"),
+            ),
+        )
+
+        prompt = launch.argv[-1]
+        self.assertLess(prompt.index("Authoritative body."), prompt.index("Files changed:"))
+        self.assertLess(
+            prompt.index("Files changed:"), prompt.index("Invocation instructions:"))
+        self.assertLess(
+            prompt.index("Invocation instructions:"),
+            prompt.index("Pre-processor context:"),
+        )
+
+    def test_option_grammar_splits_on_the_first_equals(self) -> None:
+        self.assertEqual(
+            (("dry-run", True), ("account", "a=b"), ("empty", "")),
+            run._options(["dry-run", "account=a=b", "empty="]),
+        )
+
+    def test_a_repeated_option_is_refused(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            run._options(["account=one", "account=two"])
+        self.assertIn("more than once", str(caught.exception))
+
+    def test_installed_triggers_carry_no_invocation_input(self) -> None:
+        """An ad hoc option or prompt must not replay on every later firing.
+
+        A trigger's argv is built from the agent name alone, so capture is
+        impossible by construction rather than by discipline. Proven here so
+        that stops being an accident.
+        """
+        argv = spawn._run_invocation(self.root, "agent-name")
+        self.assertIsNotNone(argv)
+        self.assertNotIn("-o", argv)
+        self.assertNotIn("--option", argv)
+        self.assertNotIn("-p", argv)
+        self.assertNotIn("--prompt", argv)
+        self.assertIn("--name", argv)
+
+
+class TestProviderPromptDelivery(TempRepository):
+    def test_claude_sends_the_prompt_on_stdin_not_the_command_line(self) -> None:
+        self.skill("large-prompt", [
+            'agents-live.selector: "claude"',
+        ], body="x" * 50000, version="2")
+        spec = agent.load("large-prompt", root=self.root)
+
+        launch = agent.prepare(
+            spec, agent.Step.AGENT, agent.StepContext(agent.Request()))
+
+        self.assertNotIn("x" * 50000, launch.argv)
+        self.assertIn("x" * 50000, launch.input_text)
+        self.assertEqual(("claude", "-p", "--output-format", "json"), launch.argv[:4])
+        self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
 
 
 class TestAgentPipeline(TempRepository):
