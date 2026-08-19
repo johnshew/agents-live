@@ -2804,6 +2804,72 @@ class RecordingRunner:
 
 
 class TestObservability(unittest.TestCase):
+    def test_logs_read_what_the_repository_wrote(self) -> None:
+        """Agents write one file each, so there is no single log to default to.
+
+        Naming one meant a bare query answered from a file nothing
+        creates, which reports emptiness rather than absence.
+        """
+        from agents_live.obs import qlog
+
+        with tempfile.TemporaryDirectory() as temporary:
+            logs = Path(temporary) / "logs"
+            logs.mkdir()
+            (logs / "note-index-b53040b14b.jsonl").write_text(
+                '{"log_schema":5,"ts":"2026-08-11T22:00:00Z",'
+                '"agent_name":"note-index-b53040b14b","phase":"done",'
+                '"status":"ok"}\n',
+                encoding="utf-8",
+            )
+            self.assertFalse((logs / "agents-live.log").exists())
+
+            with mock.patch.object(qlog, "logs_dir", return_value=logs):
+                patterns = qlog.all_log_globs()
+
+            matched = [
+                path for pattern in patterns
+                for path in Path(pattern).parent.glob(Path(pattern).name)
+            ]
+
+        self.assertIn("note-index-b53040b14b.jsonl", [p.name for p in matched])
+        self.assertFalse(
+            any("agents-live.log" in pattern for pattern in patterns),
+            "the default must not name a file nothing writes",
+        )
+        self.assertFalse(hasattr(qlog, "default_log"))
+
+    def test_every_reader_agrees_on_a_written_run_status(self) -> None:
+        """One written value must not come to mean two things by entry point.
+
+        `qlog.build_view` rewrites `success` in SQL and `query.normalize`
+        rewrites it in Python. They are separate code paths that have to
+        stay in step, so the Python half is pinned here. A schema-5
+        record is a processor's own row and passes through untouched,
+        which is why the contract reserves run-outcome statuses.
+        """
+        run_record = obs.query.normalize({
+            "spec": 1,
+            "timestamp": "2026-08-11T22:00:00Z",
+            "event": "run",
+            "status": "success",
+            "agent": "sample",
+            "run_id": "abc",
+            "origin": "manual",
+        })
+        processor_record = obs.query.normalize({
+            "log_schema": 5,
+            "ts": "2026-08-11T22:00:00Z",
+            "agent_name": "sample",
+            "phase": "collect",
+            "status": "swept",
+        })
+
+        self.assertIsNotNone(run_record)
+        self.assertEqual("ok", run_record["status"])
+        self.assertEqual("done", run_record["phase"])
+        self.assertIsNotNone(processor_record)
+        self.assertEqual("swept", processor_record["status"])
+
     def test_upgrade_watcher_fields_survive_admin_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "admin.log"
