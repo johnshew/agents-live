@@ -479,9 +479,8 @@ Anything in `agents-live.env` is added as well, and the `AGENTS_LIVE_`
 variables are written last, so a definition cannot override them.
 
 Everything a program needs is therefore either an argument or an environment
-variable, which is what makes a step reproducible by hand: `agents-live context
-<agent> --role pre` prints the assignments and the command line for one step,
-ready to paste into a shell.
+variable, which is what keeps a step reproducible by hand: set the few
+variables it reads and run the program.
 
 ### Failure
 

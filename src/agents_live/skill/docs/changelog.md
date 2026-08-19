@@ -35,6 +35,13 @@ history is retained in the source repository.
   `-o NAME=VALUE` reaches every processor as `AGENTS_LIVE_OPTIONS`. Neither is
   recorded into an installed trigger, so an ad hoc run cannot change what a
   schedule does.
+- change: the agent prompt now leads with the definition body. A watch run's
+  `Files changed:` listing previously preceded it and now follows it, ahead of
+  the labeled invocation instructions and pre-processor context. Every agent
+  that receives changed paths sees a differently ordered prompt.
+- change: a change set too large to pass to a processor now fails the run
+  before anything is spawned, naming the count and the limit. Trimming the
+  list would let a processor skip work it was never told about.
 - fix: send the Claude prompt on stdin instead of the command line. A prompt
   passed as an argument was the one handoff bounded by the host's 32767
   character command line on Windows.

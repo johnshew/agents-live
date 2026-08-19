@@ -9,5 +9,5 @@ metadata:
   agents-live.post-processor: "scripts/process.py"
 ---
 
-Describe what to do when watched files change. Changed paths are prepended to
-this prompt as a Files changed list.
+Describe what to do when watched files change. Changed paths follow this
+description as a `Files changed:` list.
