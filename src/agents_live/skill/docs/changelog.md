@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-18
+ms.date: 2026-08-19
 ms.topic: reference
 ---
 
@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: detached Windows watchers no longer open a visible terminal.
+  Watchers now receive a private hidden console that their descendants can
+  inherit, instead of asking Windows for a detached process that the default
+  console host may draw on the desktop.
 - fix: query every repository log when no specific file is named. (#377)
   Bare, `--agent`, and positional `agents-live logs` queries now read the
   per-agent records the runtime writes instead of targeting a nonexistent
