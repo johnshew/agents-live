@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from ... import paths
+from ...agent.port import ENVIRONMENT_VALUE_MAX_CHARS as OPTIONS_MAX_CHARS
 from ...dispatch import Firing, dispatch
 
 
@@ -116,6 +117,11 @@ def _options(supplied: list[str]) -> tuple[tuple[str, str | bool], ...]:
             raise ValueError(f"option supplied more than once: {name}")
         seen.add(name)
         options.append((name, value if separator else True))
+    encoded = len(json.dumps(dict(options)))
+    if encoded > OPTIONS_MAX_CHARS:
+        raise ValueError(
+            f"options are {encoded} characters, over the "
+            f"{OPTIONS_MAX_CHARS}-character limit for one environment value")
     return tuple(options)
 
 

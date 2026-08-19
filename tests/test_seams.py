@@ -31,6 +31,7 @@ from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import migrate, triggers
 from agents_live.agent import providers
+from agents_live.agent import port
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
 from agents_live.cli.commands import definition_migrate
@@ -2898,6 +2899,125 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertIn('"action": "update"', result.text)
         self.assertTrue(result.text.startswith("received:"), result.text)
 
+    def test_an_unpassable_change_set_fails_before_anything_spawns(self) -> None:
+        """Trimming the list would let a processor skip work silently.
+
+        Refusing is louder and keeps the promise that what a processor
+        reads is every path that changed.
+        """
+        directory = self.skill("many-files", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('nothing should spawn')\n", encoding="utf-8")
+        crowd = tuple(f"docs/{index:06d}-{'p' * 60}.md" for index in range(4000))
+
+        result = dispatch(Firing(
+            "many-files", str(self.root), "manual", changed_files=crowd))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("changed_files_overflow", result.category)
+        self.assertIn("4000 changed files", result.message)
+        self.assertIn("agents-live.watch", result.message)
+
+    def test_a_change_set_that_fits_arrives_whole(self) -> None:
+        directory = self.skill("some-files", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+        crowd = tuple(f"docs/{index:04d}.md" for index in range(300))
+
+        result = dispatch(Firing(
+            "some-files", str(self.root), "manual", changed_files=crowd))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual(
+            list(crowd), json.loads(environment["AGENTS_LIVE_CHANGED_FILES"]))
+
+    def test_an_option_value_survives_spaces_quotes_and_semicolons(self) -> None:
+        directory = self.skill("hostile", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        self._echo_environment(directory)
+        awkward = 'a b "c" ; rm -rf / && echo $HOME \'x\''
+
+        result = dispatch(Firing(
+            "hostile", str(self.root), "manual",
+            options=(("account", awkward),)))
+
+        self.assertTrue(result.ok, result)
+        environment = json.loads(result.text)
+        self.assertEqual(
+            awkward, json.loads(environment["AGENTS_LIVE_OPTIONS"])["account"])
+
+    def test_a_processor_receives_no_argument_it_was_not_given(self) -> None:
+        """Agents Live appends nothing, which is what lets a class 0
+        processor keep a strict argument parser."""
+        directory = self.skill("bare-argv", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/argv.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        script = directory / "scripts" / "argv.py"
+        script.write_text(
+            "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+
+        result = dispatch(Firing(
+            "bare-argv", str(self.root), "manual",
+            instructions="do the thing",
+            options=(("dry-run", True), ("account", "team-inbox")),
+        ))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual([], json.loads(result.text))
+
+    def test_instructions_and_option_values_stay_out_of_the_event_log(self) -> None:
+        directory = self.skill("discreet", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "print('done')\n", encoding="utf-8")
+        spec = agent.load("discreet", root=self.root)
+
+        result = dispatch(Firing(
+            "discreet", str(self.root), "manual",
+            instructions="SECRETINSTRUCTION",
+            options=(("token", "SECRETOPTIONVALUE"),),
+        ))
+
+        self.assertTrue(result.ok, result)
+        log = paths.repo_state_dir(self.root) / "logs" / f"{spec.identifier}.jsonl"
+        recorded = log.read_text(encoding="utf-8")
+        self.assertNotIn("SECRETINSTRUCTION", recorded)
+        self.assertNotIn("SECRETOPTIONVALUE", recorded)
+
+    @unittest.skipIf(shutil.which("pwsh") is None, "PowerShell not installed")
+    def test_the_contract_is_language_neutral(self) -> None:
+        """A .ps1 processor reads the same run context a .py one does."""
+        directory = self.skill("powershell", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.ps1"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "prepare.ps1").write_text(
+            "Write-Output $env:AGENTS_LIVE_OPTIONS\n", encoding="utf-8")
+
+        result = dispatch(Firing(
+            "powershell", str(self.root), "manual",
+            options=(("account", "team-inbox"),)))
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"account": "team-inbox"}, json.loads(result.text))
+
     def test_run_context_reaches_a_processor_in_the_environment(self) -> None:
         directory = self.skill("context", [
             'agents-live.selector: "none"',
@@ -3108,6 +3228,71 @@ class TestProcessorContractVersion2(TempRepository):
 
 
 class TestInvocationInput(TempRepository):
+    def _instructions_seen_by(self, name: str, argv: list[str]) -> dict:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = run.main(["--name", name, *argv])
+        self.assertEqual(0, code, buffer.getvalue())
+        return json.loads(buffer.getvalue())
+
+    def _echo_agent(self, name: str) -> None:
+        directory = self.skill(name, [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "import json, os\n"
+            "print(json.dumps({key: value for key, value in os.environ.items()\n"
+            "                  if key.startswith('AGENTS_LIVE_')}))\n",
+            encoding="utf-8",
+        )
+
+    def test_prompt_file_and_prompt_agree_including_unicode(self) -> None:
+        self._echo_agent("from-file")
+        text = "Focus on café, naïve, and 日本語 encoding"
+        source = self.root / "instructions.md"
+        source.write_text(text, encoding="utf-8")
+
+        from_flag = self._instructions_seen_by("from-file", ["-p", text])
+        from_file = self._instructions_seen_by(
+            "from-file", ["--prompt-file", str(source)])
+
+        self.assertEqual(text, from_flag["AGENTS_LIVE_INSTRUCTIONS"])
+        self.assertEqual(text, from_file["AGENTS_LIVE_INSTRUCTIONS"])
+
+    def test_prompt_file_dash_reads_stdin(self) -> None:
+        self._echo_agent("from-stdin")
+        text = "Instructions from a pipe, with é"
+
+        with mock.patch.object(sys, "stdin", io.StringIO(text)):
+            seen = self._instructions_seen_by("from-stdin", ["--prompt-file", "-"])
+
+        self.assertEqual(text, seen["AGENTS_LIVE_INSTRUCTIONS"])
+
+    def test_bad_invocation_input_fails_before_dispatch(self) -> None:
+        self._echo_agent("picky")
+        source = self.root / "empty.md"
+        source.write_text("   \n", encoding="utf-8")
+        cases = {
+            "mutually exclusive": ["-p", "a", "--prompt-file", str(source)],
+            "must not be empty": ["-p", "   "],
+            "unreadable": ["--prompt-file", str(self.root / "absent.md")],
+            "more than once": ["-o", "a=1", "-o", "a=2"],
+        }
+        for expected, argv in cases.items():
+            with self.subTest(expected):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    code = run.main(["--name", "picky", *argv])
+                self.assertEqual(1, code)
+                self.assertIn(expected, errors.getvalue())
+
+    def test_an_oversized_option_set_is_refused(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            run._options([f"payload={'x' * (port.ENVIRONMENT_VALUE_MAX_CHARS + 1)}"])
+        self.assertIn("over the", str(caught.exception))
+
     def test_instructions_follow_the_definition_body_in_the_prompt(self) -> None:
         self.skill("composed", [
             'agents-live.selector: "fake/echo"',

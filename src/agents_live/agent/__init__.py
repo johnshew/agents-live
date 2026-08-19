@@ -6,6 +6,7 @@ from .definition import (
     UnsupportedSchemaVersion,
 )
 from .port import (
+    changed_files_overflow,
     discover,
     interpret,
     load,
@@ -59,6 +60,7 @@ __all__ = [
     "StepResult",
     "StepSignals",
     "UnsupportedSchemaVersion",
+    "changed_files_overflow",
     "discover",
     "interpret",
     "load",

@@ -123,9 +123,18 @@ Values in `AGENTS_LIVE_OPTIONS` record how each option was supplied: a bare
 not supplied at all is absent rather than null. See
 [Taking options from the invocation](#taking-options-from-the-invocation).
 
-Two of these can grow without bound, so `AGENTS_LIVE_INSTRUCTIONS` and
-`AGENTS_LIVE_CHANGED_FILES` are capped before the program is spawned, against
-the same host limit that bounds the command line.
+`AGENTS_LIVE_INSTRUCTIONS` is capped before the program is spawned, against the
+same host limit that bounds the command line. `AGENTS_LIVE_OPTIONS` is bounded
+where it is supplied, so an oversized set of options fails the invocation
+rather than arriving trimmed.
+
+**A change set too large to pass fails the run** before anything is spawned,
+naming the count and the limit. What you read is therefore every path that
+changed, never a sample: trimming the list would let a processor loop over it
+and skip work it was never told about, with nothing downstream able to tell.
+If an agent hits this, the watch pattern is usually wider than the work, and
+the alternative is a processor that scans the repository itself rather than
+taking a list.
 
 ### Taking options from the invocation
 
@@ -416,9 +425,10 @@ directly. The working directory is the repository root.
 | stdout | Given to the model verbatim | Becomes the run's result |
 | stderr | Diagnostics; the recorded message on failure | Same |
 
-A program with output too large or too binary for a pipe may write the file at
+A program with output too large or too awkward for a pipe may write the file at
 `AGENTS_LIVE_OUTPUT` instead, in which case its stdout is treated as
-diagnostics. Most programs never need this.
+diagnostics. It is read as UTF-8, so it is a value rather than a blob. Most
+programs never need this.
 
 ### Size
 
@@ -437,9 +447,8 @@ argument and still bounded by the host: that gap is
 
 Everything else already streams: stdin, stdout, and the log sink are pipes or
 files with no practical ceiling. Environment values are bounded, so
-`AGENTS_LIVE_INSTRUCTIONS` and `AGENTS_LIVE_CHANGED_FILES` are capped before
-spawn, and anything that outgrows the environment is handed over as a file path
-instead.
+`AGENTS_LIVE_INSTRUCTIONS` is capped before spawn and a change set too large to
+pass fails the run rather than arriving incomplete.
 
 **If you do hand the model a path**, which is reasonable when the material is
 already a file on disk, two things have to be true. Write it outside the

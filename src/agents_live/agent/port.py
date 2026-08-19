@@ -173,8 +173,7 @@ def _run_context(
         "AGENTS_LIVE_ATTEMPT": str(ctx.attempt),
         "AGENTS_LIVE_REPO_ROOT": str(spec.root),
         "AGENTS_LIVE_INSTRUCTIONS": _capped(ctx.request.text),
-        "AGENTS_LIVE_CHANGED_FILES": _capped(
-            json.dumps(list(ctx.request.changed_files))),
+        "AGENTS_LIVE_CHANGED_FILES": json.dumps(list(ctx.request.changed_files)),
         "AGENTS_LIVE_OPTIONS": json.dumps(dict(ctx.request.options)),
     })
     if step in {Step.PRE, Step.POST}:
@@ -185,6 +184,24 @@ def _run_context(
         environment["AGENTS_LIVE_LOG"] = str(files.log)
         environment["AGENTS_LIVE_OUTPUT"] = str(files.output)
     return environment
+
+
+def changed_files_overflow(items: tuple[str, ...]) -> str | None:
+    """Why this change set cannot be handed to a processor, if it cannot.
+
+    Dropping paths to make it fit would be worse than refusing: a
+    processor that loops over the list would skip work it was never told
+    about, and nothing downstream could tell that it had.
+    """
+    encoded = len(json.dumps(list(items)))
+    if encoded <= ENVIRONMENT_VALUE_MAX_CHARS:
+        return None
+    return (
+        f"{len(items)} changed files need {encoded} characters, over the "
+        f"{ENVIRONMENT_VALUE_MAX_CHARS}-character limit for one environment "
+        "value. Narrow agents-live.watch, or have the processor scan the "
+        "repository itself instead of taking a list."
+    )
 
 
 def _capped(value: str) -> str:

@@ -184,9 +184,9 @@ class LocalChildRunner:
                 f"characters, putting this host's command line {overflow} "
                 "characters over its limit. Windows caps a command line at "
                 "32767 characters and reports the overflow as 'the filename "
-                "or extension is too long'. Shorten the definition, or have "
-                "the pre-processor pass less of its material through the "
-                "prompt.",
+                "or extension is too long'. Shorten the definition, the "
+                "instructions passed with --prompt, or what the pre-processor "
+                "passes through the prompt.",
             )
         if use_pty and os.name != "nt":
             return self._run_pty(

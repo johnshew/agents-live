@@ -116,6 +116,11 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
         changed_files=firing.changed_files,
         options=firing.options,
     )
+    if config.schema_version != "1":
+        overflow = agent.changed_files_overflow(firing.changed_files)
+        if overflow is not None:
+            return _failure(
+                events, firing, run_id, "changed_files_overflow", overflow)
     scratch = _scratch(spec, run_id)
     try:
         with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
