@@ -13,6 +13,10 @@ history is retained in the source repository.
 
 ## 6.5.0 - 2026-08-20
 
+- fix: keep ownership registries scoped to their repositories.
+  Multi-repository doctor, status, transfer, and dashboard operations now read
+  and write each registry through its selected project instead of reusing
+  another repository's ownership state.
 - fix: keep Windows process management behind the hidden host launch policy.
   Watcher discovery and termination no longer start visible utility consoles,
   and detached children on every host now use the shared process-creation seam.
