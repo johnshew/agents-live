@@ -13,6 +13,10 @@ history is retained in the source repository.
 
 ## 6.5.0 - 2026-08-20
 
+- fix: keep repository-scoped doctor checks within the selected project.
+  Plain `doctor` and scoped repair no longer inspect unrelated registered
+  repositories or wait on their ownership backends; `--all-repos` retains the
+  aggregate behavior.
 - fix: recognize v2 watcher metadata during candidate acceptance.
   The live acceptance preflight now resolves resident watcher identities from
   canonical metadata targets, while preserving markerless legacy discovery.
@@ -60,6 +64,10 @@ history is retained in the source repository.
   `-o NAME=VALUE` reaches every processor as `AGENTS_LIVE_OPTIONS`. Neither is
   recorded into an installed trigger, so an ad hoc run cannot change what a
   schedule does.
+- feat: show clickable dashboard URLs and select the next available port. (#367)
+  `agents-live dashboard list` includes a loopback URL for every recorded
+  dashboard, startup announces the selected URL, and `--port next` scans from
+  8231 without changing fixed-port conflict behavior.
 - change: make the definition body lead the agent prompt.
   A watch run's `Files changed:` listing previously preceded it and now follows it, ahead of
   the labeled invocation instructions and pre-processor context. Every agent
