@@ -1581,6 +1581,10 @@ class TestRuntimeCore(unittest.TestCase):
         with (
             mock.patch.object(internal.lifecycle, "converge", return_value=result),
             mock.patch.object(internal.lifecycle, "collect", return_value=collected),
+            mock.patch(
+                "agents_live.cli.main.state.resolve_root",
+                side_effect=ValueError("no project root"),
+            ),
         ):
             self.assertEqual(0, cli_main([*argv[1:], "--dry-run"]))
 

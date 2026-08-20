@@ -112,7 +112,7 @@ COMMANDS = (
             ),
             Cmd(
                 "maintain", "Run automatic host maintenance.", "cli.commands.internal",
-                "in-process", hidden=True,
+                "in-process", root="none", hidden=True,
                 args=(
                     Arg(("--quiet",), "Suppress progress output."),
                     Arg(("--dry-run",), "Preview without mutating.", hidden=True),
