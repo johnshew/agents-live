@@ -7,7 +7,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .. import agent, paths, preflight
+from .. import agent, paths, preflight, runtime
 from ..cli import lifecycle
 from ..obs import admin as adminlog
 from ..runtime.hosts import crontab, system as hostruntime, task_scheduler
@@ -71,7 +71,7 @@ def _legacy_watchers(root: Path) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = []
     for pid, command in hostruntime.process_command_lines():
         args = hostruntime.split_command_line(command)
-        if "--runtime-role" in args:
+        if runtime.artifacts.from_argv(args) is not None:
             continue
         if not any(
             argument in {"watch-loop", "--watch-loop"}

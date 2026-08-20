@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: make scheduled automation self-identifying and maintenance runs observable.
+  Native schedules and watchers now carry one strictly validated metadata envelope,
+  so the five-minute maintenance pass reaches the CLI instead of failing on drifted
+  hidden flags. Correlated maintenance events record every outcome, and dashboard
+  and quick-doctor health become stale after one hour without a refresh.
 - fix: detached Windows watchers no longer open a visible terminal.
   Watchers now receive a private hidden console that their descendants can
   inherit, instead of asking Windows for a detached process that the default
@@ -55,6 +60,11 @@ history is retained in the source repository.
   list would let a processor skip work it was never told about. Instructions
   and options are bounded the same way, where they are supplied, so nothing
   an invocation carries ever arrives silently shortened.
+- change: keep upgrade help focused on complete upgrades and local candidates.
+  `agents-live upgrade` remains the normal runtime-and-payload workflow and
+  `--from` remains available for an accepted local artifact. Phase controls used
+  by the replacement continuation remain accepted but are no longer presented
+  as operator modes.
 - fix: send the Claude prompt on stdin instead of the command line.
   A prompt passed as an argument was the one handoff bounded by the host's 32767
   character command line on Windows.

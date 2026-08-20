@@ -97,6 +97,7 @@ def record(name: str, **fields: Any) -> None:
 @contextmanager
 def operation(name: str, **fields: Any) -> Iterator[dict[str, Any]]:
     """Record ``name`` as a start/end pair around the wrapped work."""
+    fields.setdefault("correlation_id", uuid.uuid4().hex)
     record(name, status="start", **fields)
     started = time.time()
     end_fields: dict[str, Any] = {}

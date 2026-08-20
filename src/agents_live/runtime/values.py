@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 
+SUBSCRIPTION_CONTRACT = "2"
+
 
 @dataclass(frozen=True)
 class Subscription:
@@ -15,7 +17,8 @@ class Subscription:
 
     @classmethod
     def create(cls, *, scope: str, target: str, kind: str, trigger: str) -> "Subscription":
-        material = "\0".join((scope, target, kind, trigger)).encode()
+        material = "\0".join(
+            (SUBSCRIPTION_CONTRACT, scope, target, kind, trigger)).encode()
         key = sha256(material).hexdigest()[:24]
         return cls(key=key, scope=scope, target=target, kind=kind, trigger=trigger)
 

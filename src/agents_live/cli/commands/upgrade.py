@@ -630,34 +630,30 @@ def main() -> int:
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)
 
-    # Converge the built-in automatic maintenance subscription: a runtime
-    # upgrade can re-home the executable path it carries. This branch runs
-    # in the freshly installed CLI, so the rendered artifact is current.
+    # This branch runs in the freshly installed CLI. Converge every desired
+    # subscription before refreshing payloads so persisted commands and live
+    # watchers move to the current runtime metadata contract immediately.
+    convergence_failed = False
     try:
-        host = runtime.current()
-        host.prepare()
-        rendered = host.render(lifecycle.maintenance_subscription())
-        installed = next(
-            (item for item in host.trigger_store.list()
-             if item.key == rendered.key),
-            None,
-        )
-        if (
-            installed is None
-            or installed.fingerprint != rendered.fingerprint
-            or installed.rendered != rendered.rendered
-        ):
-            host.trigger_store.install(rendered)
-            print("Converged the automatic maintenance schedule")
+        result = lifecycle.converge()
+        if result.failed or not result.health.healthy:
+            detail = "; ".join(
+                f"{operation.key}: {error}"
+                for operation, error in result.failed
+            ) or "; ".join(result.health.detail) or "runtime health is degraded"
+            raise RuntimeError(detail)
+        if result.done:
+            print(f"Converged {len(result.done)} runtime subscription change(s)")
     except Exception as exc:
-        print(f"warning: could not converge automatic maintenance: "
-              f"{exc}", file=sys.stderr)
+        convergence_failed = True
+        print(f"warning: could not converge runtime subscriptions: {exc}",
+              file=sys.stderr)
 
     if not targets:
         print("No initialized or registered projects to refresh")
-        return 1 if errors else 0
+        return 1 if errors or convergence_failed else 0
 
-    failed = bool(errors)
+    failed = bool(errors) or convergence_failed
     for label, root in targets:
         print(f"Refreshing {label}: {root}")
         try:

@@ -203,11 +203,11 @@ agents-live --repo ~/repos/<target-project> doctor
 `upgrade` reinstalls the latest stable uv-managed runtime, then refreshes
 managed skill payloads in the current initialized project and every available
 registered repository. An explicit `--repo` limits refresh to one project;
-`--runtime-only` and `--skills-only` isolate either phase. `init` retains its
-payload refresh behavior for first-time setup and compatibility. `doctor`
-reports a package and payload version mismatch. GitHub repository notifications
-can provide proactive release notices: select **Watch**, **Custom**, then
-**Releases**.
+internal continuation controls isolate phases while replacing a running tool.
+`init` retains its payload refresh behavior for first-time setup and
+compatibility. `doctor` reports a package and payload version mismatch. GitHub
+repository notifications can provide proactive release notices: select
+**Watch**, **Custom**, then **Releases**.
 
 If bare `agents-live` was installed editable from this checkout, restore the
 normal PyPI tool before testing consumer behavior:

@@ -48,6 +48,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from .. import state
+from ..runtime import artifacts
 from ..runtime.hosts import system
 from . import update_check
 from .spec import (
@@ -211,6 +212,30 @@ def main(argv: list[str] | None = None) -> int:
     upgrade_handoff.reconcile()
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
+    metadata: artifacts.InvocationMetadata | None = None
+
+    metadata_indexes = [
+        index for index, token in enumerate(args) if token == "--metadata"
+    ]
+    if len(metadata_indexes) > 1:
+        _emit_failure(
+            "usage_error", "--metadata", "--metadata may be specified only once",
+            json_mode="--json" in args)
+        return 2
+    if metadata_indexes:
+        index = metadata_indexes[0]
+        if index + 1 >= len(args):
+            _emit_failure(
+                "usage_error", "--metadata", "--metadata requires a value",
+                json_mode="--json" in args)
+            return 2
+        metadata = artifacts.decode(args[index + 1])
+        if metadata is None:
+            _emit_failure(
+                "usage_error", "--metadata", "--metadata is invalid",
+                json_mode="--json" in args)
+            return 2
+        del args[index:index + 2]
 
     repo_indexes = [
         index for index, token in enumerate(args) if token == "--repo"
@@ -298,6 +323,34 @@ def main(argv: list[str] | None = None) -> int:
     if command is None:
         _emit_failure(
             "unknown_command", cmd, f"unknown command '{cmd}'",
+            json_mode=json_mode)
+        return 2
+    metadata_route = (
+        "run" if cmd == "run" else
+        f"internal {rest[0]}" if cmd == "internal" and rest else
+        ""
+    )
+    supported_metadata_routes = {
+        "run", "internal watch-loop", "internal maintain",
+    }
+    if metadata is not None and metadata_route not in supported_metadata_routes:
+        _emit_failure(
+            "usage_error", "--metadata",
+            f"--metadata is not valid for {metadata_route or cmd}",
+            json_mode=json_mode)
+        return 2
+    if metadata_route == "run" and metadata is not None \
+            and metadata.origin not in {"clock", "boot"}:
+        _emit_failure(
+            "usage_error", "--metadata",
+            "automated run metadata requires a clock or boot origin",
+            json_mode=json_mode)
+        return 2
+    if metadata_route in {"internal watch-loop", "internal maintain"} \
+            and metadata is not None and metadata.origin is not None:
+        _emit_failure(
+            "usage_error", "--metadata",
+            f"{metadata_route} metadata must not include an origin",
             json_mode=json_mode)
         return 2
     if "--json" in rest:
@@ -472,7 +525,11 @@ def main(argv: list[str] | None = None) -> int:
                     contextlib.redirect_stdout(stdout),
                     contextlib.redirect_stderr(stderr),
                 ):
-                    code = module.main()
+                    code = (
+                        module.main(metadata=metadata)
+                        if metadata_route in supported_metadata_routes
+                        else module.main()
+                    )
             except SystemExit as exc:
                 # A subcommand's own argparse exits inside the redirect;
                 # surface its captured message as an envelope instead of
@@ -488,7 +545,11 @@ def main(argv: list[str] | None = None) -> int:
             return _captured_result(
                 code, cmd, stdout.getvalue(), stderr.getvalue(),
                 shape=command.json_shape)
-        code = module.main()
+        code = (
+            module.main(metadata=metadata)
+            if metadata_route in supported_metadata_routes
+            else module.main()
+        )
         return _finish(code, command, rest, json_mode=json_mode)
     except Exception as exc:
         # Layer-2 safety net: a typed error that escapes a subcommand's

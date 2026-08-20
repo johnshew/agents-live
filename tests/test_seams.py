@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import contextlib
 import hashlib
 import importlib
@@ -26,6 +27,7 @@ from agents_live import (
     agent, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
+from agents_live.cli.main import main as cli_main
 from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
@@ -551,6 +553,8 @@ class TestDoctor(unittest.TestCase):
                 "status": "healthy",
                 "smoketest": {"status": "pass"},
             }), encoding="utf-8")
+            fresh = time.time() - 59 * 60
+            os.utime(beacon, (fresh, fresh))
             stdout = io.StringIO()
             with (
                 mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": ""}),
@@ -577,7 +581,7 @@ class TestDoctor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             beacon = Path(temporary) / "health.ok"
             beacon.write_text("stale\n", encoding="utf-8")
-            stale = time.time() - doctor.HEALTH_STALE_SECONDS - 60
+            stale = time.time() - 61 * 60
             os.utime(beacon, (stale, stale))
 
             def refresh(_argv):
@@ -1444,6 +1448,20 @@ class TestRuntimeCore(unittest.TestCase):
             self.assertEqual([], pending)
             self.assertIn("nothing was changed", stderr.getvalue())
 
+    def test_upgrade_continuation_fails_when_convergence_has_no_targets(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(upgrade, "_targets", return_value=([], [])),
+            mock.patch.object(
+                upgrade.lifecycle, "converge",
+                side_effect=RuntimeError("metadata convergence failed")),
+            mock.patch.object(
+                sys, "argv", ["agents-live", "--skills-only"]),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(1, upgrade.main())
+        self.assertIn("metadata convergence failed", stderr.getvalue())
+
     def test_windows_uninstall_uses_the_supervisor_handoff(self) -> None:
         helper = ProcessRef(
             42, 1000.0, "powershell.exe", "upgrade", "operation-1")
@@ -1518,13 +1536,20 @@ class TestRuntimeCore(unittest.TestCase):
             trigger="'src/**' debounce 1s",
         )
         rendered = PosixHost().render(subscription)
-        self.assertIn("--runtime-role watcher", rendered.rendered)
-        self.assertIn(
-            f"--subscription-key {subscription.key}", rendered.rendered)
+        metadata = runtime.artifacts.from_rendered(rendered.rendered)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(subscription.key, metadata.id)
+        self.assertEqual("repo:/tmp/example", metadata.scope)
+        self.assertEqual("agent:sample", metadata.target)
+        self.assertIsNone(metadata.origin)
         self.assertNotIn("--watch-expression", rendered.rendered)
-        self.assertNotIn("--artifact-marker", rendered.rendered)
         self.assertIn("--watch-expression", rendered.watcher_argv)
-        self.assertNotIn("--runtime-role", rendered.watcher_argv)
+        for obsolete in (
+            "--artifact-marker", "--runtime-role", "--subscription-key",
+            "--subscription-fingerprint",
+        ):
+            self.assertNotIn(obsolete, rendered.rendered)
+            self.assertNotIn(obsolete, rendered.watcher_argv)
 
     def test_long_watcher_renders_a_bounded_crontab_line(self) -> None:
         expression = " ".join(
@@ -1542,6 +1567,135 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertLess(len(rendered.rendered), 1000)
         self.assertGreater(len(" ".join(rendered.watcher_argv)), 1000)
         self.assertIsNotNone(runtime.artifacts.from_rendered(rendered.rendered))
+
+    def test_windows_maintenance_artifact_reaches_the_real_cli(self) -> None:
+        with mock.patch(
+            "agents_live.runtime.hosts.windows.shutil.which",
+            return_value="C:/tools/agents-live.exe",
+        ):
+            rendered = WindowsHost().render(
+                lifecycle.maintenance_subscription())
+        argv = json.loads(rendered.rendered)["argv"]
+        result = mock.Mock(done=(), failed=(), health=Health(True))
+        collected = mock.Mock(subscriptions=())
+        with (
+            mock.patch.object(internal.lifecycle, "converge", return_value=result),
+            mock.patch.object(internal.lifecycle, "collect", return_value=collected),
+            mock.patch(
+                "agents_live.cli.main.state.resolve_root",
+                side_effect=ValueError("no project root"),
+            ),
+        ):
+            self.assertEqual(0, cli_main([*argv[1:], "--dry-run"]))
+
+    def test_runtime_metadata_accepts_only_its_canonical_encoding(self) -> None:
+        metadata = runtime.artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", "runtime:test", "runtime")
+        canonical = runtime.artifacts.encode(metadata)
+        self.assertEqual(metadata, runtime.artifacts.decode(canonical))
+
+        payload = canonical.removeprefix(runtime.artifacts.PREFIX)
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        parsed = json.loads(raw)
+        variants = (
+            f" {canonical}",
+            canonical + "=",
+            runtime.artifacts.PREFIX + base64.urlsafe_b64encode(
+                json.dumps(parsed).encode()).decode().rstrip("="),
+            runtime.artifacts.PREFIX + base64.urlsafe_b64encode(
+                b'{"target":"runtime","scope":"runtime:test",'
+                b'"id":"0123456789abcdef01234567"}').decode().rstrip("="),
+            runtime.artifacts.PREFIX + payload[:-1] + "+",
+        )
+        for value in variants:
+            with self.subTest(value=value):
+                self.assertIsNone(runtime.artifacts.decode(value))
+
+    def test_scheduled_maintenance_records_its_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            beacon = root / "health.ok"
+            log = root / "admin.log"
+            result = mock.Mock(done=(), failed=(), health=Health(True))
+            collected = mock.Mock(subscriptions=())
+            metadata = runtime.artifacts.InvocationMetadata(
+                "0123456789abcdef01234567", "runtime:test", "runtime")
+            with (
+                mock.patch.object(
+                    internal.lifecycle, "converge", return_value=result),
+                mock.patch.object(
+                    internal.lifecycle, "collect", return_value=collected),
+                mock.patch.object(
+                    internal.paths, "health_beacon_path", return_value=beacon),
+                mock.patch.object(
+                    internal.paths, "resolve_root", side_effect=ValueError),
+                mock.patch.object(obs.admin, "log_path", return_value=log),
+            ):
+                self.assertEqual(
+                    0,
+                    internal.main(["maintain", "--quiet"], metadata=metadata),
+                )
+
+            records = [
+                item for item in obs.load((log,))
+                if item.get("operation") == "maintenance"
+            ]
+            self.assertEqual(
+                ["start", "ok"], [item["status"] for item in records])
+            self.assertEqual(records[0]["run_id"], records[1]["run_id"])
+            self.assertEqual(0, records[1]["exit_code"])
+            self.assertEqual("scheduler", records[1]["source"])
+            self.assertEqual(metadata.id, records[1]["subscription_id"])
+            self.assertEqual("healthy", records[1]["health"])
+            self.assertEqual(0, records[1]["watchers"])
+            self.assertEqual(0, records[1]["cron"])
+
+    def test_failed_maintenance_records_a_complete_terminal_event(self) -> None:
+        scenarios = (
+            (
+                "collection unavailable",
+                mock.Mock(done=(), failed=(), health=Health(True)),
+                lifecycle.CollectionUnavailable("registry unavailable"),
+                "unknown",
+            ),
+            (
+                "unhealthy convergence",
+                mock.Mock(
+                    done=(), failed=(),
+                    health=Health(False, "stale", detail=("beacon stale",))),
+                mock.Mock(subscriptions=()),
+                "unhealthy",
+            ),
+        )
+        required = {
+            "exit_code", "convergence_changes", "convergence_failures",
+            "health", "watchers", "cron", "repositories", "smoketest",
+            "message",
+        }
+        for label, result, collected, expected_health in scenarios:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                log = Path(temporary) / "admin.log"
+                with (
+                    mock.patch.object(
+                        internal.lifecycle, "converge", return_value=result),
+                    mock.patch.object(
+                        internal.lifecycle, "collect",
+                        side_effect=(collected if isinstance(
+                            collected, Exception) else None),
+                        return_value=(None if isinstance(
+                            collected, Exception) else collected)),
+                    mock.patch.object(obs.admin, "log_path", return_value=log),
+                ):
+                    self.assertEqual(1, internal.main(["maintain", "--quiet"]))
+                records = [
+                    item for item in obs.load((log,))
+                    if item.get("operation") == "maintenance"
+                ]
+                self.assertEqual(["start", "error"], [
+                    item["status"] for item in records])
+                self.assertEqual(records[0]["run_id"], records[1]["run_id"])
+                self.assertTrue(required.issubset(records[1]))
+                self.assertEqual(expected_health, records[1]["health"])
 
     def test_internal_maintain_refreshes_the_host_health_beacon(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2196,18 +2350,23 @@ class TestStartedState(TempRepository):
         )
         rendered = json.loads(installed.rendered)
         self.assertEqual("0 8 * * *", rendered["schedule"])
+        metadata = runtime.artifacts.from_argv(rendered["argv"])
+        self.assertIsNotNone(metadata)
+        self.assertEqual(installed.key, metadata.id)
+        self.assertEqual("clock", metadata.origin)
         self.assertEqual(
             [
                 "C:/tools/agents-live.exe",
                 "--repo",
                 str(self.root),
                 "run",
+            "--metadata",
+            runtime.artifacts.encode(metadata),
                 "--name",
                 spec.identifier,
-                "--scheduled",
                 "--quiet",
             ],
-            rendered["argv"][:-2],
+            rendered["argv"],
         )
         self.assertEqual(set(), host.legacy[str(self.root)])
 
@@ -4379,7 +4538,9 @@ class TestArchitectureFitness(unittest.TestCase):
             ("cli/commands/uninstall.py", "agents_live.legacy.migrate"),
             ("cli/commands/upgrade.py", "agents_live.legacy.migrate"),
             ("runtime/hosts/crontab.py", "agents_live.legacy.triggers"),
+            ("runtime/hosts/posix.py", "agents_live.legacy.artifacts"),
             ("runtime/hosts/task_scheduler.py", "agents_live.legacy.triggers"),
+            ("runtime/hosts/windows.py", "agents_live.legacy.artifacts"),
         }
         found: set[tuple[str, str]] = set()
         for path in package.rglob("*.py"):

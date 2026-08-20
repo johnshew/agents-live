@@ -56,7 +56,7 @@ Public API (see ``__all__``):
   mutations via the backend; raise ``OwnershipUnavailableError`` when
   no backend is installed.
 * ``registry_file_exists()`` - bootstrap check for the first
-  ``--transfer-to`` (False when no backend is installed).
+    ``--transfer-to`` (False when no backend is installed).
 
 See ``.claude/skills/agents-live/docs/commands.md`` for the operator
 contract.

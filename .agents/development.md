@@ -80,9 +80,9 @@ PyPI installation after experimenting with `uv tool install --editable .`, run:
 uv tool install --force agents-live
 ```
 
-Use `agents-live --repo <project> upgrade --skills-only` to refresh only one
-installed skill payload. `agents-live --repo <project> doctor` reports any
-package and skill payload version mismatch.
+Use `agents-live --repo <project> upgrade` to upgrade the runtime and refresh
+that project's installed skill payload. `agents-live --repo <project> doctor`
+reports any package and skill payload version mismatch.
 
 ## Conventions
 

@@ -14,6 +14,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from ...legacy import artifacts as legacy_artifacts
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import (
@@ -41,7 +42,7 @@ class WindowsTriggerStore:
             arguments=arguments,
             working_dir=data["root"],
             schedules=[data["schedule"]],
-            description=f"Agents Live subscription {data['marker']}",
+            description=f"Agents Live subscription {rendered.key}",
             uri=path,
             user_id=wintasks.current_user_id(),
         )
@@ -72,21 +73,31 @@ class WindowsTriggerStore:
                 argv = wintasks.parse_command_line(task["arguments"])
             except wintasks.ArgumentQuotingError:
                 continue
-            marker = None
+            metadata = artifacts.from_argv(argv)
+            if metadata is not None:
+                found.append(InstalledTrigger(
+                    metadata.id,
+                    metadata.scope,
+                    "watch" if "watch-loop" in argv else "schedule",
+                    artifacts.PREFIX + metadata.id,
+                    json.dumps(task, sort_keys=True, default=str),
+                    metadata.target,
+                ))
+                continue
+            legacy = None
             for index, token in enumerate(argv[:-1]):
                 if token == "--artifact-marker":
-                    marker = artifacts.decode(argv[index + 1])
+                    legacy = legacy_artifacts.decode(argv[index + 1])
                     break
-            if marker is None:
-                continue
-            found.append(InstalledTrigger(
-                marker["key"],
-                marker["scope"],
-                marker["kind"],
-                marker["fingerprint"],
-                json.dumps(task, sort_keys=True, default=str),
-                marker.get("target", ""),
-            ))
+            if legacy is not None:
+                found.append(InstalledTrigger(
+                    legacy["key"],
+                    legacy["scope"],
+                    legacy["kind"],
+                    legacy_artifacts.PREFIX + legacy["fingerprint"],
+                    json.dumps(task, sort_keys=True, default=str),
+                    legacy.get("target", ""),
+                ))
         return found
 
     def clear(self) -> int:
@@ -108,14 +119,8 @@ class WindowsProcesses:
         stdout=None,
         stderr=None,
     ) -> ProcessRef:
-        marked = [
-            *argv,
-            "--runtime-role", role,
-            "--subscription-key", key,
-            "--subscription-fingerprint", fingerprint,
-        ]
         process = subprocess.Popen(
-            marked,
+            argv,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=stdout if stdout is not None else subprocess.DEVNULL,
@@ -223,50 +228,49 @@ class WindowsHost:
         pass
 
     def render(self, subscription: Subscription) -> RenderedSubscription:
-        import hashlib
-
         if subscription.target == "runtime":
             root = str(Path.home())
             target = ""
         else:
             root, target = _address(subscription)
-        fingerprint = hashlib.sha256(
-            f"{subscription.scope}\0{subscription.target}\0{subscription.kind}\0"
-            f"{subscription.trigger}".encode()).hexdigest()
-        marker = artifacts.encode({
-            "fingerprint": fingerprint,
-            "key": subscription.key,
-            "kind": subscription.kind,
-            "scope": subscription.scope,
-            "target": subscription.target,
-        })
+        fingerprint = artifacts.PREFIX + subscription.key
+        origin = None
+        if subscription.kind == "schedule" and subscription.target != "runtime":
+            origin = "boot" if parse_schedule(
+                subscription.trigger).canonical == "@reboot" else "clock"
+        marker = artifacts.encode(artifacts.InvocationMetadata(
+            subscription.key,
+            subscription.scope,
+            subscription.target,
+            origin,
+        ))
         executable = shutil.which("agents-live")
         if executable is None:
             raise RuntimeError("agents-live executable is not available")
         if subscription.kind == "schedule":
             schedule = parse_schedule(subscription.trigger).canonical
             if subscription.target == "runtime":
-                argv = [executable, "internal", "maintain", "--quiet"]
+                argv = [
+                    executable, "internal", "maintain",
+                    "--metadata", marker, "--quiet",
+                ]
             else:
-                argv = [executable, "--repo", root, "run", "--name", target]
-                argv.extend(("--boot", "--quiet") if schedule == "@reboot" else ("--scheduled", "--quiet"))
+                argv = [
+                    executable, "--repo", root, "run",
+                    "--metadata", marker, "--name", target, "--quiet",
+                ]
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
             schedule = "@reboot"
             watcher_argv = (
-                executable, "--repo", root, "internal", "watch-loop", target,
+                executable, "--repo", root, "internal", "watch-loop",
+                "--metadata", marker, target,
                 "--watch-expression", watch.canonical,
             )
-            argv = [
-                *watcher_argv,
-                "--runtime-role", "watcher",
-                "--subscription-key", subscription.key,
-                "--subscription-fingerprint", fingerprint,
-            ]
-        argv.extend(("--artifact-marker", marker))
+            argv = list(watcher_argv[:-2])
         rendered = json.dumps(
-            {"argv": argv, "marker": marker, "root": root, "schedule": schedule},
+            {"argv": argv, "root": root, "schedule": schedule},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -296,16 +300,14 @@ class WindowsHost:
 
 
 def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
-    fields = {
-        "--runtime-role": "role",
-        "--subscription-key": "key",
-        "--subscription-fingerprint": "fingerprint",
+    metadata = artifacts.from_argv(argv)
+    if metadata is None or "watch-loop" not in argv:
+        return None
+    return {
+        "role": "watcher",
+        "key": metadata.id,
+        "fingerprint": artifacts.PREFIX + metadata.id,
     }
-    values = {}
-    for index, token in enumerate(argv[:-1]):
-        if token in fields:
-            values[fields[token]] = argv[index + 1]
-    return values if set(fields.values()) <= values.keys() else None
 
 
 def _windows_timestamp(value: object) -> float:

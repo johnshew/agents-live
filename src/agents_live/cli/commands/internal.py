@@ -20,16 +20,16 @@ from .. import lifecycle, upgrade_handoff
 _AGENT_FAILURE_THRESHOLD = 3
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    metadata: runtime.artifacts.InvocationMetadata | None = None,
+) -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     watch = commands.add_parser("watch-loop")
     watch.add_argument("name")
     watch.add_argument("--watch-expression")
-    watch.add_argument("--runtime-role")
-    watch.add_argument("--subscription-key", default="")
-    watch.add_argument("--subscription-fingerprint")
-    watch.add_argument("--artifact-marker")
     maintain = commands.add_parser("maintain")
     maintain.add_argument("--quiet", action="store_true")
     maintain.add_argument("--dry-run", action="store_true")
@@ -45,23 +45,58 @@ def main(argv: list[str] | None = None) -> int:
         install(args.distro)
         return 0
     if args.command == "maintain":
-        return _maintain(dry_run=args.dry_run)
-    return _watch(args)
+        return _maintain(dry_run=args.dry_run, metadata=metadata)
+    return _watch(args, metadata)
 
 
-def _maintain(*, dry_run: bool) -> int:
+def _maintain(
+    *,
+    dry_run: bool,
+    metadata: runtime.artifacts.InvocationMetadata | None = None,
+) -> int:
+    if dry_run:
+        return _maintain_once(dry_run=True)
+    fields = {
+        "source": "scheduler" if metadata is not None else "cli",
+        "subscription_id": metadata.id if metadata is not None else "",
+        "scope": metadata.scope if metadata is not None else "",
+        "target": metadata.target if metadata is not None else "runtime",
+    }
+    with adminlog.operation("maintenance", **fields) as end:
+        end.update(
+            convergence_changes=0,
+            convergence_failures=0,
+            health="unknown",
+            watchers=0,
+            cron=0,
+            repositories=0,
+            smoketest="unknown",
+            message="maintenance did not complete",
+        )
+        code = _maintain_once(dry_run=False, outcome=end)
+        end["exit_code"] = code
+        if code != 0:
+            end.update(
+                status="error",
+                level="error",
+                error_category="maintenance_failed",
+            )
+        return code
+
+
+def _maintain_once(*, dry_run: bool, outcome: dict | None = None) -> int:
+    outcome = outcome if outcome is not None else {}
     try:
         result = lifecycle.converge(dry_run=dry_run)
         collected = lifecycle.collect(persist=False)
     except lifecycle.CollectionUnavailable as exc:
+        outcome["message"] = str(exc)
         print(str(exc), file=sys.stderr)
         return 1
-    if result.failed or not result.health.healthy:
-        for operation, detail in result.failed:
-            print(f"{operation.key}: {detail}", file=sys.stderr)
-        return 1
-    if dry_run:
-        return 0
+    done = result.done if isinstance(result.done, (list, tuple)) else ()
+    failed = result.failed if isinstance(result.failed, (list, tuple)) else ()
+    outcome["convergence_changes"] = len(done)
+    outcome["convergence_failures"] = len(failed)
     watchers = {
         item.target for item in collected.subscriptions
         if item.kind == "watch" and item.target != "runtime"
@@ -75,6 +110,22 @@ def _maintain(*, dry_run: bool) -> int:
         for item in collected.subscriptions
         if item.scope.startswith("repo:")
     }
+    outcome.update(
+        watchers=len(watchers),
+        cron=len(clocks),
+        repositories=len(repositories),
+    )
+    if result.failed or not result.health.healthy:
+        outcome["health"] = "unhealthy"
+        outcome["message"] = "; ".join(
+            f"{operation.key}: {detail}"
+            for operation, detail in result.failed
+        ) or "; ".join(result.health.detail) or "runtime health is degraded"
+        for operation, detail in result.failed:
+            print(f"{operation.key}: {detail}", file=sys.stderr)
+        return 1
+    if dry_run:
+        return 0
     payload = {
         "status": "healthy",
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -110,6 +161,17 @@ def _maintain(*, dry_run: bool) -> int:
         payload["smoketest"] = smoketest
         if smoketest.get("status") == "fail":
             payload["status"] = "degraded"
+    outcome.update(
+        health=payload["status"],
+        watchers=len(watchers),
+        cron=len(clocks),
+        repositories=len(repositories),
+        smoketest=(
+            str(smoketest.get("status", "unknown"))
+            if smoketest else "unknown"
+        ),
+        message=f"maintenance completed: {payload['status']}",
+    )
     paths.atomic_write_text(
         paths.health_beacon_path(), json.dumps(payload, indent=2) + "\n")
     return 0
@@ -146,7 +208,10 @@ def _smoketest_verdict(previous: dict) -> dict:
     return result
 
 
-def _watch(args) -> int:
+def _watch(
+    args,
+    metadata: runtime.artifacts.InvocationMetadata | None = None,
+) -> int:
     root = paths.resolve_root()
     retirement: dict[str, str | None] = {"reason": None, "operation": None}
 
@@ -162,7 +227,7 @@ def _watch(args) -> int:
 
     def on_retire(expression: str) -> None:
         if retirement["reason"] == "replacement":
-            _restart_watcher(args, root, expression)
+            _restart_watcher(args, root, expression, metadata)
             return
         if retirement["reason"] == "quiesce":
             adminlog.record(
@@ -194,7 +259,7 @@ def _watch(args) -> int:
                 args.name,
                 str(root),
                 "watch",
-                args.subscription_key,
+                metadata.id if metadata is not None else "",
                 changed,
             )),
             should_continue=should_continue,
@@ -214,7 +279,12 @@ def _runtime_is_current() -> bool:
         return True
 
 
-def _restart_watcher(args, root: Path, expression: str) -> None:
+def _restart_watcher(
+    args,
+    root: Path,
+    expression: str,
+    metadata: runtime.artifacts.InvocationMetadata | None,
+) -> None:
     """Start the replacement after the old change source has stopped."""
     executable = shutil.which("agents-live") or sys.argv[0]
     runtime.current().supervisor.spawn_detached(
@@ -224,13 +294,20 @@ def _restart_watcher(args, root: Path, expression: str) -> None:
             str(root),
             "internal",
             "watch-loop",
+            *(
+                ("--metadata", runtime.artifacts.encode(metadata))
+                if metadata is not None else ()
+            ),
             args.name,
             "--watch-expression",
             expression,
         ],
         role="watcher",
-        key=args.subscription_key,
-        fingerprint=args.subscription_fingerprint,
+        key=metadata.id if metadata is not None else "",
+        fingerprint=(
+            runtime.artifacts.PREFIX + metadata.id
+            if metadata is not None else ""
+        ),
         cwd=str(root),
     )
 

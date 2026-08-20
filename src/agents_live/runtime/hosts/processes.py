@@ -86,14 +86,8 @@ class LocalProcesses:
         stdout: IO[bytes] | int | None = None,
         stderr: IO[bytes] | int | None = None,
     ) -> ProcessRef:
-        marked = [
-            *argv,
-            "--runtime-role", role,
-            "--subscription-key", key,
-            "--subscription-fingerprint", fingerprint,
-        ]
         process = subprocess.Popen(
-            marked,
+            argv,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=stdout if stdout is not None else subprocess.DEVNULL,
@@ -285,13 +279,12 @@ def _shell_processor_argv(argv: Sequence[str]) -> tuple[str, ...]:
 
 
 def _markers(argv: Sequence[str]) -> dict[str, str] | None:
-    values: dict[str, str] = {}
-    names = {
-        "--runtime-role": "role",
-        "--subscription-key": "key",
-        "--subscription-fingerprint": "fingerprint",
+    from .. import artifacts
+    metadata = artifacts.from_argv(argv)
+    if metadata is None or "watch-loop" not in argv:
+        return None
+    return {
+        "role": "watcher",
+        "key": metadata.id,
+        "fingerprint": artifacts.PREFIX + metadata.id,
     }
-    for index, token in enumerate(argv[:-1]):
-        if token in names:
-            values[names[token]] = argv[index + 1]
-    return values if {"role", "key", "fingerprint"} <= values.keys() else None

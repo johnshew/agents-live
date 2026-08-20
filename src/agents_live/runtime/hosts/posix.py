@@ -1,12 +1,12 @@
 """POSIX host adapter backed by the user's crontab and process table."""
 from __future__ import annotations
 
-import hashlib
 import os
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
+from ...legacy import artifacts as legacy_artifacts
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
 from ..values import Health, InstalledTrigger, RenderedSubscription, Subscription
@@ -37,17 +37,27 @@ class PosixTriggerStore:
             raise RuntimeError("crontab is unreadable")
         found: list[InstalledTrigger] = []
         for line in lines:
-            marker = artifacts.from_rendered(line)
-            if marker is None:
+            metadata = artifacts.from_rendered(line)
+            if metadata is not None:
+                found.append(InstalledTrigger(
+                    metadata.id,
+                    metadata.scope,
+                    _kind(line),
+                    artifacts.PREFIX + metadata.id,
+                    line,
+                    metadata.target,
+                ))
                 continue
-            found.append(InstalledTrigger(
-                marker["key"],
-                marker["scope"],
-                marker["kind"],
-                marker["fingerprint"],
-                line,
-                marker.get("target", ""),
-            ))
+            legacy = legacy_artifacts.from_rendered(line)
+            if legacy is not None:
+                found.append(InstalledTrigger(
+                    legacy["key"],
+                    legacy["scope"],
+                    legacy["kind"],
+                    legacy_artifacts.PREFIX + legacy["fingerprint"],
+                    line,
+                    legacy.get("target", ""),
+                ))
         return found
 
     def clear(self) -> int:
@@ -55,7 +65,11 @@ class PosixTriggerStore:
             lines = crontasks.lines()
             if lines is None:
                 raise RuntimeError("crontab is unreadable")
-            kept = [line for line in lines if artifacts.from_rendered(line) is None]
+            kept = [
+                line for line in lines
+                if artifacts.from_rendered(line) is None
+                and legacy_artifacts.from_rendered(line) is None
+            ]
             crontasks.write(kept)
             return len(lines) - len(kept)
 
@@ -75,43 +89,45 @@ class PosixHost:
             target = ""
         else:
             root, target = _address(subscription)
-        fingerprint = hashlib.sha256(
-            f"{subscription.scope}\0{subscription.target}\0{subscription.kind}\0"
-            f"{subscription.trigger}".encode()).hexdigest()
-        marker = artifacts.encode({
-            "fingerprint": fingerprint,
-            "key": subscription.key,
-            "kind": subscription.kind,
-            "scope": subscription.scope,
-            "target": subscription.target,
-        })
+        fingerprint = artifacts.PREFIX + subscription.key
+        origin = None
+        if subscription.kind == "schedule" and subscription.target != "runtime":
+            origin = "boot" if parse_schedule(
+                subscription.trigger).canonical == "@reboot" else "clock"
+        marker = artifacts.encode(artifacts.InvocationMetadata(
+            subscription.key,
+            subscription.scope,
+            subscription.target,
+            origin,
+        ))
         if subscription.kind == "schedule":
             trigger = parse_schedule(subscription.trigger).canonical
             if subscription.target == "runtime":
-                argv = ["agents-live", "internal", "maintain", "--quiet"]
+                argv = [
+                    "agents-live", "internal", "maintain",
+                    "--metadata", marker, "--quiet",
+                ]
             else:
-                argv = ["agents-live", "--repo", root, "run", "--name", target]
-                argv.extend(("--boot", "--quiet") if trigger == "@reboot" else ("--scheduled", "--quiet"))
+                argv = [
+                    "agents-live", "--repo", root, "run",
+                    "--metadata", marker, "--name", target, "--quiet",
+                ]
             watcher_argv: tuple[str, ...] = ()
         else:
             watch = parse_watch(subscription.trigger)
             trigger = "@reboot"
             watcher_base = (
-                "agents-live", "--repo", root, "internal", "watch-loop", target,
+                "agents-live", "--repo", root, "internal", "watch-loop",
+                "--metadata", marker, target,
             )
             watcher_argv = (*watcher_base, "--watch-expression", watch.canonical)
-            argv = [
-                *watcher_base,
-                "--runtime-role", "watcher",
-                "--subscription-key", subscription.key,
-                "--subscription-fingerprint", fingerprint,
-            ]
+            argv = list(watcher_base)
         if subscription.target == "runtime":
-            rendered = f"{trigger} {shlex.join(argv)} 2>&1 # {marker}"
+            rendered = f"{trigger} {shlex.join(argv)} 2>&1"
         else:
             rendered = (
                 f"{trigger} cd {shlex.quote(root)} && {shlex.join(argv)} "
-                f"2>&1 # {marker}"
+                "2>&1"
             )
         return RenderedSubscription(
             subscription.key,
@@ -148,5 +164,16 @@ def _address(subscription: Subscription) -> tuple[str, str]:
 
 
 def _key(line: str) -> str | None:
-    marker = artifacts.from_rendered(line)
-    return marker["key"] if marker else None
+    metadata = artifacts.from_rendered(line)
+    if metadata is not None:
+        return metadata.id
+    legacy = legacy_artifacts.from_rendered(line)
+    return legacy["key"] if legacy else None
+
+
+def _kind(line: str) -> str:
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+    return "watch" if "watch-loop" in tokens else "schedule"
