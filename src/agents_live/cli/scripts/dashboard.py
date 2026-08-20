@@ -73,9 +73,9 @@ NO_PROJECT_HINT = (
 # The health beacon is host-scoped (written by `agents-live
 # health-check`), so the panel works with or without a selected repo.
 HEALTH_OK_PATH = paths.health_beacon_path()
-# The health-check worker is scheduled hourly; allow a little slack before
-# treating the beacon as stale (a missed run shouldn't flap the header).
-HEALTH_STALE_MINUTES = 70
+# Maintenance runs every five minutes; one hour without a beacon refresh means
+# the host has missed enough passes to report the infrastructure as unhealthy.
+HEALTH_STALE_MINUTES = 60
 # Cap the on-demand health-check worker run from the dashboard. The worker's
 # framework smoketest has its own 360s internal timeout; this is a hard outer
 # bound so the spinner can never hang forever.
@@ -918,8 +918,8 @@ def system_health() -> dict:
     `health.ok` beacon (under the user-level state home) only after
     confirming every intended watcher is alive (self-healing any that
     died), so a *fresh* beacon means the infrastructure is genuinely up.
-    A missing or stale beacon means the loop has not confirmed health
-    within the hour. The nested smoketest verdict is surfaced as a
+    A missing or stale beacon means the five-minute loop has not confirmed
+    health within the hour. The nested smoketest verdict is surfaced as a
     distinct *degraded* state: the framework end-to-end test is failing
     even though watcher/cron infrastructure is healthy.
 
@@ -943,9 +943,10 @@ def system_health() -> dict:
         data = {}
     if age_min > HEALTH_STALE_MINUTES:
         return {"level": "down", "text": f"unhealthy: beacon stale {ago}",
-                "tip": f"health.ok last written {ago} (expected hourly). The "
-                       "health-check worker is not confirming infrastructure "
-                       "health - run the health check or check its logs."}
+              "tip": f"health.ok last written {ago} (expected every five "
+                  "minutes; unhealthy after one hour). Automatic "
+                  "maintenance is not confirming infrastructure health - "
+                  "run the health check or query maintenance logs."}
     watchers = data.get("watchers")
     cron = data.get("cron")
     counts = (f"{watchers} watchers / {cron} cron"

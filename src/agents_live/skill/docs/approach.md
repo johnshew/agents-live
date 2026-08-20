@@ -36,6 +36,22 @@ record triggers that same maintenance operation once, followed by one more
 content and freshness check. The command answers only for the runtime where it
 runs; it neither discovers nor probes another runtime.
 
+Persisted subscriptions and resident watchers carry one opaque
+`agents-live:v2:` metadata envelope. Its payload contains only the deterministic
+subscription ID, scope, target, and an optional clock-or-boot origin. The ID is
+derived from the artifact contract version plus the scope, target, trigger kind,
+and canonical trigger; it replaces separate identity and drift fingerprints.
+The command route supplies the watcher and maintenance roles. Trigger stores and
+process supervisors decode the same envelope, so native artifacts remain
+self-describing without a second registry. Version 1 marker decoding lives only
+under `legacy/` and exists to replace old artifacts during convergence.
+
+Every non-preview maintenance pass records correlated start and terminal admin
+events. The terminal event includes its source, subscription ID when scheduled,
+exit code, convergence counts, watcher and schedule counts, smoketest verdict,
+and resulting health status. The health beacon remains the current-state record;
+events are the durable account of how it got there.
+
 Long-lived watchers compare their loaded package version with the installed
 distribution at a bounded idle check. A mismatch is handled only between
 dispatches: the old loop stops its change source, launches the same marked

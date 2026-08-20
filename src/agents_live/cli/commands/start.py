@@ -60,13 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if result.failed or unloadable else 0
 
 def _transfer(root, spec, args) -> int:
-    """Move one agent's ownership, then converge what that implies.
-
-    Claiming and assigning are the same operation from opposite ends, and
-    both existed as flags in 5.x. Their absence left the dashboard's
-    Claim button as the only way to move an agent, and it can only pull
-    ownership toward the host it is running on (#289).
-    """
+    """Move one agent's ownership, then converge what that implies."""
     owner = (ownership.current_owner_id() if args.transfer_here
              else args.transfer_to)
     mine = args.transfer_here or ownership.owns(owner)

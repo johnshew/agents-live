@@ -17,7 +17,7 @@ from .. import lifecycle, update_check
 from . import internal
 
 
-HEALTH_STALE_SECONDS = 70 * 60
+HEALTH_STALE_SECONDS = 60 * 60
 
 
 def main(argv: list[str] | None = None) -> int:

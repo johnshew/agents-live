@@ -355,10 +355,13 @@ class TestCrontabTriggerStore(TempRepository):
                 rendered = PosixHost().render(subscription)
                 decoded = artifacts.from_rendered(rendered.rendered)
                 self.assertIsNotNone(decoded)
-                self.assertEqual(rendered.key, decoded["key"])
-                self.assertEqual(kind, decoded["kind"])
-                self.assertEqual("agent:sample", decoded["target"])
-                self.assertEqual(rendered.fingerprint, decoded["fingerprint"])
+                self.assertEqual(rendered.key, decoded.id)
+                self.assertEqual(f"repo:{self.root}", decoded.scope)
+                self.assertEqual("agent:sample", decoded.target)
+                self.assertEqual(
+                    "clock" if kind == "schedule" else None,
+                    decoded.origin,
+                )
 
 
 class TestHostMaintenanceEntries(TempRepository):
@@ -368,10 +371,12 @@ class TestHostMaintenanceEntries(TempRepository):
         rendered = PosixHost().render(lifecycle.maintenance_subscription())
         self.assertNotIn(" cd ", rendered.rendered)
         self.assertNotIn("--repo", rendered.rendered)
-        self.assertIn("internal maintain --quiet", rendered.rendered)
+        self.assertIn("internal maintain --metadata", rendered.rendered)
+        self.assertIn(" --quiet", rendered.rendered)
         marker = artifacts.from_rendered(rendered.rendered)
         self.assertIsNotNone(marker)
-        self.assertEqual("runtime", marker["target"])
+        self.assertEqual("runtime", marker.target)
+        self.assertIsNone(marker.origin)
 
     def test_the_loop_is_reachable_only_through_the_internal_command(self) -> None:
         """`health-check` was a public verb in 5.x. Its absence is the
@@ -1390,6 +1395,31 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         return dashboard
 
 
+class TestDashboardHealthPolicy(unittest.TestCase):
+    def test_beacon_is_stale_after_one_hour_of_missed_five_minute_passes(
+        self,
+    ) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        with tempfile.TemporaryDirectory() as temporary:
+            beacon = Path(temporary) / "health.ok"
+            beacon.write_text('{"watchers":0,"cron":1}', encoding="utf-8")
+            with mock.patch.object(dashboard, "HEALTH_OK_PATH", beacon):
+                fresh = time.time() - 59 * 60
+                os.utime(beacon, (fresh, fresh))
+                self.assertEqual("ok", dashboard.system_health()["level"])
+
+                stale = time.time() - 61 * 60
+                os.utime(beacon, (stale, stale))
+                health = dashboard.system_health()
+        self.assertEqual("down", health["level"])
+        self.assertIn("expected every five minutes", health["tip"])
+        self.assertIn("unhealthy after one hour", health["tip"])
+
+
 class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
     async def test_health_check_finishes_with_modern_maintenance(self) -> None:
         nicegui = mock.MagicMock()
@@ -1627,13 +1657,7 @@ class TestDashboardProcessIdentity(unittest.TestCase):
 
 
 class TestOwnershipMovesInBothDirections(TempRepository):
-    """An agent has to be assignable, not only claimable.
-
-    `set_owner` had one caller: the dashboard Claim button, which always
-    writes this runtime's identity. So ownership could only be pulled
-    toward the host you were looking at, while the docs and the guidance
-    inside `owns()` still named flags that had been removed (#289).
-    """
+    """An agent can be claimed here or assigned to another runtime."""
 
     def _spec(self):
         self.skill("movable", [
@@ -1696,8 +1720,6 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         self.assertIn(spec.identifier, state.load(self.root).agents)
 
     def test_assigning_elsewhere_withdraws_it_from_this_host(self) -> None:
-        """The point of the verb: an agent that now belongs to another
-        runtime must stop being automated here."""
         spec = self._spec()
         state.replace(self.root, {spec.identifier})
         other = f"otherhost/wsl/{'b' * 32}"

@@ -113,6 +113,16 @@ It installs missing artifacts, repairs drift, restarts changed watchers, and
 removes owned artifacts absent from the desired set, except in protected
 scopes. Preview uses the same diff without applying it.
 
+Persisted subscriptions and resident watchers carry one opaque
+`agents-live:v2:` metadata envelope. Its payload contains only the deterministic
+subscription ID, scope, target, and an optional clock-or-boot origin. The ID is
+derived from the artifact contract version plus the scope, target, trigger kind,
+and canonical trigger; it replaces separate identity and drift fingerprints.
+The command route supplies the watcher and maintenance roles. Trigger stores and
+process supervisors decode the same envelope, so native artifacts remain
+self-describing without a second registry. Version 1 marker decoding lives only
+under `legacy/` and exists to replace old artifacts during convergence.
+
 ### Firing and dispatch
 
 Schedules and watchers produce a `Firing` record containing primitive context:
@@ -169,6 +179,12 @@ reported rather than guessed away.
 records. Agent runs and host administration use the same event writer.
 `logs`, `logs timeline`, and the dashboard consume the query layer rather than
 hand-parsing files.
+
+Every non-preview maintenance pass records correlated start and terminal admin
+events. The terminal event includes its source, subscription ID when scheduled,
+exit code, convergence counts, watcher and schedule counts, smoketest verdict,
+and resulting health status. The health beacon remains the current-state record;
+events are the durable account of how it got there.
 
 Observability is local. Off-host export remains out of scope until a consumer
 requires it. Local span correlation and sensitivity metadata are tracked by

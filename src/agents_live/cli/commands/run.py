@@ -7,24 +7,22 @@ import os
 import sys
 from pathlib import Path
 
-from ... import paths
+from ... import paths, runtime
 from ...dispatch import Firing, dispatch
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    metadata: runtime.artifacts.InvocationMetadata | None = None,
+) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True)
     parser.add_argument("--changed-files")
     parser.add_argument("-p", "--prompt")
     parser.add_argument("--prompt-file")
     parser.add_argument("-o", "--option", action="append", default=[])
-    parser.add_argument("--scheduled", action="store_true")
-    parser.add_argument("--boot", action="store_true")
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--artifact-marker")
-    parser.add_argument("--runtime-role")
-    parser.add_argument("--subscription-key", default="")
-    parser.add_argument("--subscription-fingerprint")
     args = parser.parse_args(argv)
     try:
         changed = tuple(json.loads(args.changed_files)) if args.changed_files else ()
@@ -35,17 +33,13 @@ def main(argv: list[str] | None = None) -> int:
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    origin = (
-        "boot" if args.boot else
-        "clock" if args.scheduled else
-        "watch" if changed else
-        "manual"
-    )
+    origin = metadata.origin if metadata is not None else (
+        "watch" if changed else "manual")
     result = dispatch(Firing(
         args.name,
         str(paths.resolve_root()),
         origin,
-        args.subscription_key,
+        metadata.id if metadata is not None else "",
         changed,
         instructions,
         options,
