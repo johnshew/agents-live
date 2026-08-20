@@ -1602,6 +1602,30 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDashboardProcessIdentity(unittest.TestCase):
+    def test_dashboard_list_includes_clickable_url(self) -> None:
+        from agents_live.cli.scripts import dashboards
+
+        entry = {
+            "port": 8232,
+            "pid": 42,
+            "start_token": 100,
+            "repo": "C:/repo",
+            "started": "2026-08-20T19:02:20+00:00",
+        }
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(dashboards, "running", return_value=[entry]),
+            mock.patch.object(dashboards, "port_answers", return_value=True),
+            mock.patch.object(sys, "argv", ["dashboards.py", "list"]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = dashboards.main()
+
+        self.assertEqual(0, code)
+        lines = stdout.getvalue().splitlines()
+        self.assertIn("URL", lines[0])
+        self.assertIn("http://127.0.0.1:8232", lines[1])
+
     def test_dashboard_stop_rejects_pid_reuse(self) -> None:
         from agents_live.cli.scripts import dashboards
 

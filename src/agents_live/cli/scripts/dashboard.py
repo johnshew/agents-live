@@ -18,9 +18,10 @@ process access):
 
     uv run .claude/skills/agents-live/scripts/dashboard.py --dev
 
-It binds to 127.0.0.1 only. Pass --native for a desktop window instead
-of a browser tab. `--dev` auto-restarts when dashboard.py changes so it
-stays current while you iterate.
+It binds to 127.0.0.1 only. Pass --port next to use the first available
+port at or above 8231, or --native for a desktop window instead of a
+browser tab. `--dev` auto-restarts when dashboard.py changes so it stays
+current while you iterate.
 """
 from __future__ import annotations
 
@@ -80,6 +81,9 @@ HEALTH_STALE_MINUTES = 60
 # framework smoketest has its own 360s internal timeout; this is a hard outer
 # bound so the spinner can never hang forever.
 WORKER_TIMEOUT = 480
+DEFAULT_PORT = 8231
+MAX_PORT = 65535
+SELECTED_PORT_ENV = "AGENTS_LIVE_DASHBOARD_SELECTED_PORT"
 
 STATE: dict = {
     "last_refresh": datetime.now(timezone.utc),
@@ -1389,6 +1393,27 @@ def _port_conflict_message(conflict: str, port: int) -> str:
     )
 
 
+def _port(value: str) -> int | str:
+    if value == "next":
+        return value
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer or 'next'") from exc
+    if not 1 <= port <= MAX_PORT:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_PORT}")
+    return port
+
+
+def _select_port(requested: int | str) -> tuple[int | None, str | None]:
+    if isinstance(requested, int):
+        return requested, port_conflict(DASHBOARD_HOST, requested)
+    for port in range(DEFAULT_PORT, MAX_PORT + 1):
+        if port_conflict(DASHBOARD_HOST, port) is None:
+            return port, None
+    return None, f"no available port from {DEFAULT_PORT} through {MAX_PORT}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -1403,11 +1428,19 @@ def main() -> None:
         action="store_true",
         help="Auto-restart when dashboard.py changes",
     )
-    parser.add_argument("--port", type=int, default=8231)
+    parser.add_argument(
+        "--port", type=_port, default=DEFAULT_PORT,
+        help="Port number, or 'next' for the first available port from 8231",
+    )
     parser.add_argument(
         "--all-repos", action="store_true",
         help="Show a read-only view of all registered repositories")
     args = parser.parse_args()
+
+    if args.port == "next" and __name__ != "__main__":
+        inherited_port = os.environ.get(SELECTED_PORT_ENV, "")
+        if inherited_port.isdigit():
+            args.port = int(inherited_port)
 
     # Asked before anything is announced or built, and only by the
     # process that is going to start a server. NiceGUI re-executes this
@@ -1416,13 +1449,18 @@ def main() -> None:
     # Under --dev the reloader imports this module as __mp_main__, and
     # the test harness uses a name of its own. Neither starts this server.
     if __name__ == "__main__" and not app.is_started:
-        conflict = port_conflict(DASHBOARD_HOST, args.port)
+        selected_port, conflict = _select_port(args.port)
         if conflict is not None:
             preflight.emit_failure(
                 "dashboard",
-                _port_conflict_message(conflict, args.port),
+                _port_conflict_message(conflict, args.port)
+                if isinstance(args.port, int) else conflict,
                 code="port_unavailable")
             raise SystemExit(1)
+        assert selected_port is not None
+        args.port = selected_port
+        os.environ[SELECTED_PORT_ENV] = str(args.port)
+        print(f"Dashboard URL: http://{DASHBOARD_HOST}:{args.port}")
         # Recorded by the launching process, not the server: under --dev
         # the reloader child holds the socket but comes and goes, while
         # this process owns the port for the whole run. Stopping it takes

@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-17
+ms.date: 2026-08-20
 ms.topic: reference
 ---
 
@@ -110,8 +110,10 @@ agents-live stop link-check --dry-run
 
 - `status [name] [--all-repos]` reports definitions and their started or
   stopped state.
-- `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health.
-  `--repair` invokes the same convergence path as lifecycle changes.
+- `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health. A
+  normal invocation checks and repairs only the selected repository; pass
+  `--all-repos` to inspect every registered repository. `--repair` invokes the
+  same convergence path as lifecycle changes within that scope.
 - `doctor --quick` is the fast agent-facing automatic-maintenance check. It
   always emits JSON. A cached host health record younger than 70 minutes
   returns immediately, including an actionable category and remedy when the
@@ -141,7 +143,11 @@ agents-live stop link-check --dry-run
   processes exit; `uv tool list` can show the tool briefly afterward.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.
-- `dashboard` opens the local operational UI.
+- `dashboard` opens the local operational UI and prints its clickable loopback
+  URL before serving. The default remains port 8231 and reports a conflict
+  rather than silently moving. Pass `--port next` to select the first available
+  port at or above 8231. `dashboard list` includes each recorded dashboard's
+  URL; an explicit numeric `--port` keeps selecting that exact port.
 
 `init` and skill upgrades install a directory-local `.gitignore` under
 `.claude/skills/agents-live/`. The managed payload stays out of repository
