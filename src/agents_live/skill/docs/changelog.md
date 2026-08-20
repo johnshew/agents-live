@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-19
+ms.date: 2026-08-20
 ms.topic: reference
 ---
 
@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: recognize v2 watcher metadata during candidate acceptance.
+  The live acceptance preflight now resolves resident watcher identities from
+  canonical metadata targets, while preserving markerless legacy discovery.
 - fix: recognize resident watchers after route-scoped metadata is added.
   Upgrade acceptance, stop/start recovery, and host health now identify the
   watcher by the canonical target in its v2 envelope instead of mistaking the
