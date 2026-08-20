@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.5.0 - 2026-08-20
+
 - fix: recognize v2 watcher metadata during candidate acceptance.
   The live acceptance preflight now resolves resident watcher identities from
   canonical metadata targets, while preserving markerless legacy discovery.
