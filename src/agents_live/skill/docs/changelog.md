@@ -13,6 +13,9 @@ history is retained in the source repository.
 
 ## 6.5.0 - 2026-08-20
 
+- fix: keep Windows process management behind the hidden host launch policy.
+  Watcher discovery and termination no longer start visible utility consoles,
+  and detached children on every host now use the shared process-creation seam.
 - fix: keep repository-scoped doctor checks within the selected project.
   Plain `doctor` and scoped repair no longer inspect unrelated registered
   repositories or wait on their ownership backends; `--all-repos` retains the
