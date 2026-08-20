@@ -1766,12 +1766,14 @@ class TestOwnershipMovesInBothDirections(TempRepository):
             mock.patch.object(start.ownership, "local_only",
                               return_value=False),
             mock.patch.object(start.ownership, "set_owner",
-                              side_effect=lambda n, o: assigned.append((n, o))),
+                              side_effect=lambda n, o, **_kwargs: assigned.append((n, o))) as set_owner,
             mock.patch.object(ownership, "load_owners", return_value={}),
         ):
             code, out, _ = self._run(["--name", "movable", "--transfer-here"])
         self.assertEqual(0, code)
         self.assertEqual([("movable", ownership.current_owner_id())], assigned)
+        set_owner.assert_called_once_with(
+            "movable", ownership.current_owner_id(), root=self.root)
         self.assertIn("Assigned 'movable'", out)
         self.assertIn(spec.identifier, state.load(self.root).agents)
 
