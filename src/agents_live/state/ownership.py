@@ -52,10 +52,10 @@ Public API (see ``__all__``):
     pulled, strictly validated ``{agent_name: owner}`` mapping; local
   mode: ``{}`` (nothing is owned elsewhere by definition; no file read,
   no network).
-* ``set_owner(name, owner)`` / ``remove_owner(name)`` - registry
+* ``set_owner(name, owner, root=None)`` / ``remove_owner(name, root=None)`` - registry
   mutations via the backend; raise ``OwnershipUnavailableError`` when
   no backend is installed.
-* ``registry_file_exists()`` - bootstrap check for the first
+* ``registry_file_exists(root=None)`` - bootstrap check for the first
     ``--transfer-to`` (False when no backend is installed).
 
 See ``.claude/skills/agents-live/docs/commands.md`` for the operator
@@ -211,12 +211,13 @@ def registry_available() -> bool:
     return _backend() is not None
 
 
-def registry_file_exists() -> bool:
+def registry_file_exists(root: Path | None = None) -> bool:
     """Whether the owners document exists on disk (bootstrap check for
-    the first --transfer-to; validity is load_owners' job). False when
-    no backend is installed."""
+    the first --transfer-to in ``root``; validity is load_owners' job).
+    False when no backend is installed."""
     backend = _backend()
-    return bool(backend is not None and backend.registry_file_exists())
+    return bool(
+        backend is not None and backend.registry_file_exists(root=root))
 
 
 def resolve_owners(
@@ -422,18 +423,19 @@ def load_owners(*, rate_limit_secs: int = 60,
     not leak policy into an undeclared project).
     """
     if mode(root) == "registry":
-        return _require_backend().load_owners(rate_limit_secs=rate_limit_secs)
+        return _require_backend().load_owners(
+            rate_limit_secs=rate_limit_secs, root=root)
     return {}
 
 
-def set_owner(name: str, owner: str) -> None:
-    """Assign ``name`` to ``owner`` via the registry backend (atomic
+def set_owner(name: str, owner: str, *, root: Path | None = None) -> None:
+    """Assign ``name`` to ``owner`` in ``root`` via the registry backend (atomic
     write + git commit + detached background push; no-op if unchanged).
     Raises :class:`OwnershipUnavailableError` when no backend is
     installed."""
     backend = _require_backend()
-    previous = _recorded_owner(name)
-    backend.set_owner(name, owner)
+    previous = _recorded_owner(name, root=root)
+    backend.set_owner(name, owner, root=root)
     if previous == owner:
         return
     # Transfers move execution between hosts and are the mechanism behind
@@ -445,13 +447,13 @@ def set_owner(name: str, owner: str) -> None:
         runtime=_safely(current_label))
 
 
-def remove_owner(name: str) -> bool:
-    """Remove ``name`` from the registry via the backend (atomic delete
+def remove_owner(name: str, *, root: Path | None = None) -> bool:
+    """Remove ``name`` from ``root`` via the backend (atomic delete
     + git commit + detached background push). Returns True if an entry
     was removed. Raises :class:`OwnershipUnavailableError` when no
     backend is installed."""
-    previous = _recorded_owner(name)
-    removed = _require_backend().remove_owner(name)
+    previous = _recorded_owner(name, root=root)
+    removed = _require_backend().remove_owner(name, root=root)
     if removed:
         adminlog.record("ownership-remove", agent=name, owner_from=previous,
                         runtime=_safely(current_label))
@@ -471,7 +473,7 @@ def _safely(read):
         return None
 
 
-def _recorded_owner(name: str) -> str | None:
+def _recorded_owner(name: str, *, root: Path | None = None) -> str | None:
     """The owner currently recorded for *name*, for the log's ``from``.
 
     Read without a pull: the caller is about to write, so the local
@@ -479,7 +481,8 @@ def _recorded_owner(name: str) -> str | None:
     never add a network round trip to a mutation. Nor may it stop one:
     a read that fails costs the record a field, not the write.
     """
-    return _safely(lambda: load_owners(rate_limit_secs=10**9).get(name))
+    return _safely(
+        lambda: load_owners(rate_limit_secs=10**9, root=root).get(name))
 
 
 __all__ = [

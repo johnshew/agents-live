@@ -990,7 +990,9 @@ async def _pause_row(event) -> None:
 async def _claim_row(event) -> None:
     name = event.args["name"]
     identifier = event.args["identifier"]
-    ownership.set_owner(name, ownership.current_owner_id())
+    ownership.set_owner(
+        name, ownership.current_owner_id(),
+        root=_require_repo_path(REPO_ROOT))
     await do_action("Start", "start", ["--name", identifier],
                     agent_name=identifier)
 

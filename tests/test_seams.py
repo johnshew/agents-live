@@ -994,6 +994,30 @@ class TestReleaseTool(unittest.TestCase):
 
 
 class TestRuntimeCore(unittest.TestCase):
+    def test_ownership_backend_receives_the_repository_root(self) -> None:
+        root = Path("C:/work/selected")
+        backend = mock.Mock()
+        backend.load_owners.return_value = {"sample": "*"}
+        backend.registry_file_exists.return_value = True
+        backend.remove_owner.return_value = True
+        with (
+            mock.patch.object(ownership, "mode", return_value="registry"),
+            mock.patch.object(ownership, "_backend", return_value=backend),
+            mock.patch.object(
+                ownership, "_require_backend", return_value=backend),
+        ):
+            self.assertEqual(
+                {"sample": "*"}, ownership.load_owners(root=root))
+            self.assertTrue(ownership.registry_file_exists(root=root))
+            ownership.set_owner("sample", "*", root=root)
+            ownership.remove_owner("sample", root=root)
+
+        backend.load_owners.assert_any_call(
+            rate_limit_secs=60, root=root)
+        backend.registry_file_exists.assert_called_once_with(root=root)
+        backend.set_owner.assert_called_once_with("sample", "*", root=root)
+        backend.remove_owner.assert_called_once_with("sample", root=root)
+
     def test_missing_ownership_backend_reports_the_required_entry_point(self) -> None:
         with (
             mock.patch.object(ownership, "mode", return_value="registry"),
@@ -2611,6 +2635,62 @@ class TestStartedState(TempRepository):
             targets = {item.target for item in collected.subscriptions}
             self.assertIn(f"agent:{local.identifier}", targets)
             self.assertNotIn(f"agent:{remote.identifier}", targets)
+
+    def test_collection_loads_each_repository_ownership_registry(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as first_temporary,
+            tempfile.TemporaryDirectory() as second_temporary,
+        ):
+            first = Path(first_temporary).resolve()
+            second = Path(second_temporary).resolve()
+            for root, name in ((first, "first-agent"), (second, "second-agent")):
+                (root / ".agents-live.toml").write_text(
+                    'ownership = "registry"\n', encoding="utf-8")
+                skill = root / "Agents" / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(
+                    f"---\nname: {name}\n"
+                    "description: Registry-managed definition.\nmetadata:\n"
+                    '  agents-live.schema-version: "1"\n'
+                    '  agents-live.selector: "fake"\n'
+                    '  agents-live.schedule: "0 9 * * *"\n'
+                    "---\nbody\n",
+                    encoding="utf-8",
+                )
+            first_spec = agent.load("first-agent", root=first)
+            second_spec = agent.load("second-agent", root=second)
+            state.replace(first, {first_spec.identifier})
+            state.replace(second, {second_spec.identifier})
+            host = MemoryHost()
+            previous = runtime.current()
+            runtime.configure(host)
+            loaded: list[Path] = []
+
+            def owners_for(*, root, **_kwargs):
+                loaded.append(root)
+                owner = (
+                    f"other/windows/{'a' * 32}"
+                    if root == first else ownership.WILDCARD
+                )
+                return {"first-agent": owner, "second-agent": owner}
+
+            try:
+                with (
+                    mock.patch.object(lifecycle.repos, "load", return_value={
+                        "repos": {"first": str(first), "second": str(second)},
+                        "default_repo": "first",
+                    }),
+                    mock.patch.object(
+                        ownership, "load_owners", side_effect=owners_for),
+                ):
+                    collected = lifecycle.collect(persist=False)
+            finally:
+                runtime.configure(previous)
+
+            targets = {item.target for item in collected.subscriptions}
+            self.assertEqual({first, second}, set(loaded))
+            self.assertNotIn(f"agent:{first_spec.identifier}", targets)
+            self.assertIn(f"agent:{second_spec.identifier}", targets)
 
     def test_missing_ownership_backend_blocks_only_registry_roots(self) -> None:
         self.skill("local-agent", [
