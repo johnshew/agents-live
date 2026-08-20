@@ -95,13 +95,11 @@ class LocalProcesses:
         stdout: IO[bytes] | int | None = None,
         stderr: IO[bytes] | int | None = None,
     ) -> ProcessRef:
-        process = subprocess.Popen(
+        process = system.spawn_detached(
             argv,
             cwd=cwd,
-            stdin=subprocess.DEVNULL,
             stdout=stdout if stdout is not None else subprocess.DEVNULL,
             stderr=stderr if stderr is not None else subprocess.DEVNULL,
-            start_new_session=True,
         )
         return ProcessRef(
             process.pid,

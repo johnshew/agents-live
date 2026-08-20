@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: Current native Windows host architecture, security model, and operational boundaries
-ms.date: 2026-08-17
+ms.date: 2026-08-20
 ms.topic: concept
 ---
 
@@ -22,9 +22,9 @@ Windows-side liveness task and is documented in
 | Host composition | `runtime/hosts/windows.py` |
 | Task Scheduler store and command-line rules | `runtime/hosts/task_scheduler.py` |
 | Filesystem change source | `runtime/hosts/windows_watch.py` |
-| Process enumeration and tree termination | `runtime/hosts/processes.py` |
+| Process supervision and identity matching | `runtime/hosts/windows.py` |
 | Windowless task child | `runtime/hosts/hidden.py` |
-| Shared host utilities | `runtime/hosts/system.py` |
+| Process creation, enumeration, and tree termination | `runtime/hosts/system.py` |
 
 `runtime/hosts/posix.py` supplies common subscription translation where the
 meaning is platform-independent. Windows overrides the native stores and
@@ -85,6 +85,8 @@ fact that something changed.
 
 Windows has no POSIX process groups or PTYs. The host process layer therefore:
 
+- creates every detached child through one shared launch primitive, which
+  applies `CREATE_NO_WINDOW` and process-group policy on Windows;
 - creates and tracks process trees using Windows process identity;
 - terminates descendants before the parent when a run times out or stops;
 - captures child text explicitly as UTF-8 unless a native tool documents a

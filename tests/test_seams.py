@@ -53,7 +53,7 @@ from agents_live.runtime import (
 from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime import spawn
 from agents_live.runtime.hosts import processes
-from agents_live.runtime.hosts.processes import LocalChildRunner
+from agents_live.runtime.hosts.processes import LocalChildRunner, LocalProcesses
 from agents_live.runtime.watchloop import run as run_watchloop
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
@@ -2928,6 +2928,25 @@ class TestStartedState(TempRepository):
 
 
 class TestRuntimeProcessPolicy(unittest.TestCase):
+    def test_posix_supervisor_uses_host_spawn_policy(self) -> None:
+        process = mock.Mock(pid=42)
+        with mock.patch.object(
+                processes.system, "spawn_detached", return_value=process) as spawn:
+            reference = LocalProcesses().spawn_detached(
+                ["agents-live", "internal", "watch-loop", "sample"],
+                role="watcher",
+                key="subscription",
+                fingerprint="fingerprint",
+            )
+
+        spawn.assert_called_once_with(
+            ["agents-live", "internal", "watch-loop", "sample"],
+            cwd=None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(42, reference.pid)
+
     def test_watcher_enumeration_is_exact_and_installation_scoped(self) -> None:
         environment = Path("C:/tools/agents-live")
         metadata = runtime.artifacts.encode(runtime.artifacts.InvocationMetadata(
@@ -4610,6 +4629,27 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_long_lived_process_creation_stays_with_host_owners(self) -> None:
+        package = Path(__file__).parents[1] / "src" / "agents_live"
+        allowed = {
+            "runtime/hosts/filesystem.py",
+            "runtime/hosts/system.py",
+        }
+        found: set[str] = set()
+        for path in package.rglob("*.py"):
+            relative = path.relative_to(package).as_posix()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "subprocess"
+                    and node.func.attr == "Popen"
+                ):
+                    found.add(relative)
+
+        self.assertEqual(allowed, found)
+
     def test_doctor_repair_can_be_previewed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
