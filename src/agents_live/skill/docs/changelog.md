@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: recognize resident watchers after route-scoped metadata is added.
+  Upgrade acceptance, stop/start recovery, and host health now identify the
+  watcher by the canonical target in its v2 envelope instead of mistaking the
+  intervening `--metadata` option for the agent name.
 - fix: make scheduled automation self-identifying and maintenance runs observable.
   Native schedules and watchers now carry one strictly validated metadata envelope,
   so the five-minute maintenance pass reaches the CLI instead of failing on drifted
