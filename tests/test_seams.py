@@ -2835,6 +2835,11 @@ class TestStartedState(TempRepository):
 class TestRuntimeProcessPolicy(unittest.TestCase):
     def test_watcher_enumeration_is_exact_and_installation_scoped(self) -> None:
         environment = Path("C:/tools/agents-live")
+        metadata = runtime.artifacts.encode(runtime.artifacts.InvocationMetadata(
+            "0123456789abcdef01234567",
+            "repo:C:/work/one",
+            "agent:metadata-sample",
+        ))
         rows = [
             (
                 101,
@@ -2847,11 +2852,19 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
                 "watch-loop other",
             ),
             (103, "python worker.py --name sample"),
+            (
+                104,
+                "C:/tools/agents-live/agents-live.exe --repo C:/work/one "
+                f"internal watch-loop --metadata {metadata} metadata-sample",
+            ),
         ]
         with mock.patch.object(
                 processes.system, "process_command_lines", return_value=rows):
             self.assertEqual(
-                [(101, "sample", "C:/work/one")],
+                [
+                    (101, "sample", "C:/work/one"),
+                    (104, "metadata-sample", "C:/work/one"),
+                ],
                 processes.watchers_on_host(under=environment),
             )
 

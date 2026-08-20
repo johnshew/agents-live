@@ -52,14 +52,7 @@ def watchers_on_host(
         if under is not None and not any(
             within(argument, under) for argument in args):
             continue
-        name = next(
-            (
-                second
-                for first, second in zip(args, args[1:])
-                if first in ("watch-loop", "--watch-loop")
-            ),
-            None,
-        )
+        name = _watcher_name(args)
         if not name:
             continue
         project = next(
@@ -72,6 +65,22 @@ def watchers_on_host(
         )
         found.append((pid, name, project))
     return found
+
+
+def _watcher_name(args: Sequence[str]) -> str | None:
+    from .. import artifacts
+
+    metadata = artifacts.from_argv(args)
+    if metadata is not None and metadata.target.startswith("agent:"):
+        return metadata.target.removeprefix("agent:") or None
+    return next(
+            (
+                second
+                for first, second in zip(args, args[1:])
+                if first in ("watch-loop", "--watch-loop")
+            ),
+            None,
+        )
 
 
 class LocalProcesses:
