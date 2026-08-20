@@ -3347,6 +3347,27 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual({"sample-123"}, resident(repository))
                 self.assertEqual(set(), resident(parent / "repo"))
 
+    def test_resident_watcher_matching_reads_the_v2_metadata_target(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        resident = script["_resident_watcher_ids"]
+        scope = resident.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            metadata = artifacts.encode(artifacts.InvocationMetadata(
+                "0123456789abcdef01234567",
+                f"repo:{repository}",
+                "agent:sample-123",
+            ))
+            command = (
+                f'agents-live --repo "{repository}" internal watch-loop '
+                f'--metadata {metadata} sample-123 --runtime-role watcher'
+            )
+            with mock.patch.dict(scope, {
+                "_process_command_lines": lambda: (command,),
+            }):
+                self.assertEqual({"sample-123"}, resident(repository))
+
     def test_posix_process_query_preserves_nul_delimited_argv(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "candidate-operational.py"))

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import errno
 import json
@@ -205,6 +206,41 @@ def _process_command_lines() -> tuple[str, ...]:
     return tuple(commands)
 
 
+def _metadata_target(value: str) -> str | None:
+    prefix = "agents-live:v2:"
+    if not value.startswith(prefix):
+        return None
+    encoded = value.removeprefix(prefix)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        return None
+    try:
+        payload = json.loads(base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4),
+            altchars=b"-_", validate=True))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) not in (
+            {"id", "scope", "target"},
+            {"id", "scope", "target", "origin"}):
+        return None
+    identifier = payload.get("id")
+    scope = payload.get("scope")
+    target = payload.get("target")
+    origin = payload.get("origin")
+    if not isinstance(identifier, str) or not re.fullmatch(
+            r"[0-9a-f]{24}", identifier):
+        return None
+    if not isinstance(scope, str) or not scope or not isinstance(
+            target, str) or not target:
+        return None
+    if origin not in {None, "clock", "boot"}:
+        return None
+    canonical = base64.urlsafe_b64encode(json.dumps(
+        payload, sort_keys=True, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    return target if encoded == canonical else None
+
+
 def _resident_watcher_ids(repo: Path) -> set[str]:
     repository = repo.resolve()
     found: set[str] = set()
@@ -224,10 +260,22 @@ def _resident_watcher_ids(repo: Path) -> set[str]:
             marker = next(
                 index for index, item in enumerate(argv)
                 if item in {"watch-loop", "--watch-loop"})
-            identifier = argv[marker + 1]
             role = argv[argv.index("--runtime-role") + 1]
         except (ValueError, IndexError, StopIteration):
             continue
+        if "--metadata" in argv:
+            try:
+                target = _metadata_target(argv[argv.index("--metadata") + 1])
+            except IndexError:
+                continue
+            if target is None or not target.startswith("agent:"):
+                continue
+            identifier = target.removeprefix("agent:")
+        else:
+            try:
+                identifier = argv[marker + 1]
+            except IndexError:
+                continue
         owned_launcher = any(
             Path(item).stem.casefold() == "agents-live"
             for item in argv[:marker]
