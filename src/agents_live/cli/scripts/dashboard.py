@@ -1004,12 +1004,27 @@ def system_health() -> dict:
                    f"beacon written {ago}"}
 
 
-def _latest_maintenance_record() -> dict:
+def _latest_maintenance_records() -> tuple[dict, dict]:
     records = [
         record for record in obs.load((paths.host_logs_dir() / "admin.log",))
         if record.get("phase") == "maintenance"
     ]
-    return records[-1] if records else {}
+    if not records:
+        return {}, {}
+    end = next(
+        (record for record in reversed(records)
+         if record.get("status") != "start"),
+        {},
+    )
+    if not end:
+        return records[-1], {}
+    run_id = end.get("run_id")
+    start = next(
+        (record for record in reversed(records)
+         if record.get("run_id") == run_id and record.get("status") == "start"),
+        {},
+    )
+    return start, end
 
 
 def _smoketest_verdict_from_beacon(beacon: dict) -> dict:
@@ -1045,11 +1060,9 @@ def host_service_status() -> dict:
     except Exception:
         installed = False
     beacon = _read_health_beacon()
-    record = _latest_maintenance_record()
+    start_record, end_record = _latest_maintenance_records()
     verdict = _smoketest_verdict_from_beacon(beacon)
     verdict_status = str(verdict.get("status", "")).lower()
-    level = "missing"
-    label = "Missing, idle"
     if active:
         level = "running"
         label = "Running"
@@ -1073,9 +1086,13 @@ def host_service_status() -> dict:
         else:
             level = "degraded"
             label = "Degraded, idle"
-    started_at = record.get("ts")
-    completed_at = record.get("ts") if record.get("status") in {"ok", "error"} else None
-    duration = record.get("duration_s")
+    started_at = start_record.get("ts")
+    completed_at = end_record.get("ts") if end_record else None
+    duration = (
+        verdict.get("duration_s")
+        if level == "failed" and verdict.get("duration_s") is not None
+        else end_record.get("duration_s")
+    )
     if duration is None:
         duration = verdict.get("duration_s")
     reason = str(verdict.get("reason", "")).strip()
