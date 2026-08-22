@@ -504,8 +504,11 @@ def _registered_dashboard_pid(
     cli: Path, repo: Path, port: int,
 ) -> int | None:
     listed = _run(cli, repo, "dashboard", "list")
-    match = re.search(rf"(?m)^\s*{port}\s+(\d+)\b", listed.stdout)
-    return int(match.group(1)) if match is not None else None
+    for line in listed.stdout.splitlines():
+        columns = line.split(maxsplit=3)
+        if len(columns) >= 3 and columns[0] == str(port):
+            return int(columns[2]) if columns[2].isdigit() else None
+    return None
 
 
 def _await_dashboard_cost(
