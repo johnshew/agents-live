@@ -1398,12 +1398,15 @@ class TestRunsRecordWhatTheySpent(TempRepository):
 
     def test_dashboard_agent_collection_never_pulls_ownership(self) -> None:
         dashboard = self._dashboard()
-        with mock.patch.object(
+        with (
+            mock.patch.object(dashboard, "REPO_ROOT", self.root),
+            mock.patch.object(
                 dashboard.agent_view, "repository_agents",
-                return_value=()) as repository_agents:
+                return_value=()) as repository_agents,
+        ):
             self.assertEqual([], dashboard.collect_agents())
         repository_agents.assert_called_once_with(
-            dashboard.REPO_ROOT, ownership_rate_limit_secs=10**9)
+            self.root, ownership_rate_limit_secs=10**9)
 
     def test_dashboard_totals_unrounded_list_cost(self) -> None:
         dashboard = self._dashboard()
