@@ -1051,11 +1051,16 @@ def host_service_status() -> dict:
     """Host-scoped automatic maintenance status for dashboard settings."""
     now = datetime.now(timezone.utc)
     active = bool(STATE.get("health_check_running"))
+    host = None
     try:
-        active = active or bool(runtime.current().supervisor.owned(role="maintenance"))
+        host = runtime.current()
+        active = active or bool(host.supervisor.owned(role="maintenance"))
+    except Exception:
+        pass
+    try:
         installed = any(
             item.target == "runtime"
-            for item in runtime.current().trigger_store.list()
+            for item in (host or runtime.current()).trigger_store.list()
         )
     except Exception:
         installed = False
@@ -1437,8 +1442,9 @@ def repository_settings_panel() -> None:
             ).props("dense unelevated no-caps")
         for row in rows:
             state_label = (
-                "default" if row["default"] else
-                "unavailable" if not row["available"] else "registered")
+                "default, unavailable" if row["default"] and not row["available"] else
+                "unavailable" if not row["available"] else
+                "default" if row["default"] else "registered")
             with ui.row().classes("w-full items-center gap-2 no-wrap"):
                 ui.label(row["name"]).classes("text-sm font-medium")
                 ui.label(state_label).classes("text-xs text-gray-500")
