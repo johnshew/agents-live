@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
-import contextlib
 import json
 import os
 import re
@@ -1756,9 +1755,8 @@ def build_all_repos_page() -> None:
                     if not rows and not group["error"]:
                         ui.label("No agent definitions found.").classes(
                             "text-sm text-gray-500")
-                    with ui.scroll_area().classes(
-                            "w-full agent-table-scroll") if rows else contextlib.nullcontext():
-                        if rows:
+                    if rows:
+                        with ui.scroll_area().classes("w-full agent-table-scroll"):
                             table = ui.table(
                                 columns=_AGGREGATE_COLUMNS, rows=rows,
                                 row_key="identifier",
