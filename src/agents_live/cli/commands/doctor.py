@@ -46,8 +46,22 @@ def main(argv: list[str] | None = None) -> int:
             "check": "host runtime", "ok": False, "detail": str(exc)})
     else:
         checks.append(_host_check(health))
+    selected_roots: tuple[Path, ...] | None = ()
     if registry is not None:
-        for name, value in sorted(registry["repos"].items()):
+        repository_items = sorted(registry["repos"].items())
+        if not args.all_repos:
+            try:
+                selected_root = state.resolve_root(allow_sole_registered=True)
+            except (KeyError, ValueError):
+                repository_items = []
+            else:
+                selected_name = next((
+                    name for name, value in repository_items
+                    if Path(value).resolve() == selected_root
+                ), selected_root.name)
+                repository_items = [(selected_name, str(selected_root))]
+        checked_roots: list[Path] = []
+        for name, value in repository_items:
             root = state.resolve_root(value) if os.path.isdir(value) else None
             if root is None:
                 checks.append({
@@ -55,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                     "detail": "registered but cannot be read; its triggers are preserved",
                 })
                 continue
+            checked_roots.append(root)
             git_index = _git_index_check(root, name)
             if git_index is not None:
                 checks.append(git_index)
@@ -78,8 +93,10 @@ def main(argv: list[str] | None = None) -> int:
                             "record-atomic appends; that history will not "
                             "appear in logs, timeline, or the dashboard"),
                     })
+        selected_roots = None if args.all_repos else tuple(checked_roots)
         try:
-            collected = lifecycle.collect(persist=False)
+            collected = lifecycle.collect(
+                selected_roots=selected_roots, persist=False)
         except lifecycle.CollectionUnavailable as exc:
             checks.append({
                 "check": "definition collection", "ok": False,
@@ -107,13 +124,16 @@ def main(argv: list[str] | None = None) -> int:
                 })
         if hostruntime.id() == hostruntime.WINDOWS:
             checks.extend(_provider_cli_checks(
-                _configured_provider_names(registry)))
+                _configured_provider_names({
+                    "repos": dict(repository_items),
+                })))
         health_payload = _health_payload(paths.health_beacon_path())
         if health_payload is not None:
             checks.extend(_agent_failure_checks(health_payload))
     if args.repair or args.dry_run:
         try:
-            result = lifecycle.converge(dry_run=args.dry_run)
+            result = lifecycle.converge(
+                selected_roots=selected_roots, dry_run=args.dry_run)
         except lifecycle.CollectionUnavailable as exc:
             checks.append({"check": "repair", "ok": False, "detail": str(exc)})
         else:

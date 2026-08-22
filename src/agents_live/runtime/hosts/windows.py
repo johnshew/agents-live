@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 import time
 from collections.abc import Sequence
@@ -119,16 +118,16 @@ class WindowsProcesses:
         stdout=None,
         stderr=None,
     ) -> ProcessRef:
-        process = subprocess.Popen(
+        from . import system as hostruntime
+        streams = {}
+        if stdout is not None:
+            streams["stdout"] = stdout
+        if stderr is not None:
+            streams["stderr"] = stderr
+        process = hostruntime.spawn_detached(
             argv,
             cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout if stdout is not None else subprocess.DEVNULL,
-            stderr=stderr if stderr is not None else subprocess.DEVNULL,
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.CREATE_NO_WINDOW
-            ),
+            **streams,
         )
         return ProcessRef(
             process.pid, time.time(), Path(argv[0]).name,
@@ -168,38 +167,14 @@ class WindowsProcesses:
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
             return
-        subprocess.run(
-            ["taskkill.exe", "/PID", str(ref.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-        )
+        from . import system as hostruntime
+        hostruntime.terminate(ref.pid)
 
     def owned(self, role: str | None = None) -> list[ProcessRef]:
-        command = (
-            "Get-CimInstance Win32_Process | "
-            "Select-Object ProcessId,CreationDate,ExecutablePath,CommandLine | "
-            "ConvertTo-Json -Compress"
-        )
-        completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if completed.returncode != 0 or not completed.stdout.strip():
-            return []
-        try:
-            document = json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            return []
-        rows = document if isinstance(document, list) else [document]
-        found = []
-        for row in rows:
-            command_line = row.get("CommandLine") if isinstance(row, dict) else None
-            if not command_line:
-                continue
+        from . import system as hostruntime
+
+        found: list[ProcessRef] = []
+        for pid, command_line in hostruntime.process_command_lines():
             try:
                 argv = wintasks.parse_command_line(command_line)
             except wintasks.ArgumentQuotingError:
@@ -208,9 +183,9 @@ class WindowsProcesses:
             if markers is None or (role is not None and markers["role"] != role):
                 continue
             found.append(ProcessRef(
-                int(row["ProcessId"]),
-                _windows_timestamp(row.get("CreationDate")),
-                Path(row.get("ExecutablePath") or argv[0]).name,
+                pid,
+                hostruntime.process_start_time(pid) or 0.0,
+                Path(argv[0]).name,
                 markers["role"],
                 markers["key"],
                 markers["fingerprint"],
@@ -308,13 +283,3 @@ def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
         "key": metadata.id,
         "fingerprint": artifacts.PREFIX + metadata.id,
     }
-
-
-def _windows_timestamp(value: object) -> float:
-    if not isinstance(value, str):
-        return 0.0
-    try:
-        from datetime import datetime
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0

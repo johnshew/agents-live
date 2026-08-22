@@ -108,28 +108,27 @@ def collect(
             protected.append(f"repo:{root}")
             blocked_ownership_roots.add(root)
 
-    owners: dict[str, str] | None = None
-    if registry_roots:
+    owners_by_root: dict[Path, dict[str, str]] = {}
+    for root in registry_roots:
         try:
-            owners = ownership.load_owners(root=next(iter(registry_roots)))
+            owners_by_root[root] = ownership.load_owners(root=root)
         except ownership.OwnershipUnavailableError as exc:
-            for root in registry_roots:
-                unavailable.append(f"{root}: {exc}")
-                protected.append(f"repo:{root}")
-            blocked_ownership_roots.update(registry_roots)
+            unavailable.append(f"{root}: {exc}")
+            protected.append(f"repo:{root}")
+            blocked_ownership_roots.add(root)
 
     owner_by_identifier: dict[str, str | None] = {}
-    if owners is not None and not blocked_ownership_roots:
+    for root, owners in owners_by_root.items():
+        if root in blocked_ownership_roots:
+            continue
         try:
-            for root in registry_roots:
-                specs = specs_by_root.get(root, {}).values()
-                owner_by_identifier.update(ownership.resolve_owners(
-                    ((spec.identifier, spec.name) for spec in specs), owners))
+            specs = specs_by_root.get(root, {}).values()
+            owner_by_identifier.update(ownership.resolve_owners(
+                ((spec.identifier, spec.name) for spec in specs), owners))
         except ownership.OwnershipUnavailableError as exc:
-            for root in registry_roots:
-                unavailable.append(f"{root}: {exc}")
-                protected.append(f"repo:{root}")
-            blocked_ownership_roots.update(registry_roots)
+            unavailable.append(f"{root}: {exc}")
+            protected.append(f"repo:{root}")
+            blocked_ownership_roots.add(root)
 
     snapshots: dict[Path, frozenset[str]] = {}
     initialized: dict[Path, bool] = {}

@@ -125,9 +125,10 @@ def forget(port: int, pid: int) -> None:
 
 
 def _table(entries: list[dict]) -> str:
-    rows = [("PORT", "PID", "ANSWERING", "STARTED", "REPOSITORY")]
+    rows = [("PORT", "URL", "PID", "ANSWERING", "STARTED", "REPOSITORY")]
     rows += [
-        (str(entry["port"]), str(entry["pid"]),
+        (str(entry["port"]), f"http://{HOST}:{entry['port']}",
+         str(entry["pid"]),
          "yes" if port_answers(int(entry["port"])) else "no",
          str(entry.get("started", "")), str(entry.get("repo", "")) or "-")
         for entry in sorted(entries, key=lambda item: item["port"])

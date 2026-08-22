@@ -82,7 +82,7 @@ def _transfer(root, spec, args) -> int:
             # Transferring is the declaration of multi-host intent; there
             # is deliberately no init-time flag for it.
             init.declare_ownership(root, "registry")
-        ownership.set_owner(spec.name, owner)
+        ownership.set_owner(spec.name, owner, root=root)
     except (ownership.OwnershipUnavailableError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

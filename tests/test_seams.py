@@ -53,7 +53,7 @@ from agents_live.runtime import (
 from agents_live.runtime.budget import claim as claim_budget
 from agents_live.runtime import spawn
 from agents_live.runtime.hosts import processes
-from agents_live.runtime.hosts.processes import LocalChildRunner
+from agents_live.runtime.hosts.processes import LocalChildRunner, LocalProcesses
 from agents_live.runtime.watchloop import run as run_watchloop
 from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
@@ -416,6 +416,101 @@ class TestDefinitionLoader(TempRepository):
 
 
 class TestDoctor(unittest.TestCase):
+    def test_doctor_scopes_collection_to_selected_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            selected = Path(temporary) / "selected"
+            unrelated = Path(temporary) / "unrelated"
+            selected.mkdir()
+            unrelated.mkdir()
+            registry = {"repos": {
+                "selected": str(selected),
+                "unrelated": str(unrelated),
+            }}
+            collected = mock.Mock(
+                unavailable_repositories=(), broken_definitions=(),
+                unknown_metadata=())
+
+            def resolve_root(value=None, **_kwargs):
+                return Path(value) if value is not None else selected
+
+            with (
+                mock.patch.object(doctor.repos, "load", return_value=registry),
+                mock.patch.object(
+                    doctor.state, "resolve_root", side_effect=resolve_root),
+                mock.patch.object(
+                    doctor.runtime, "health", return_value=Health(True, "fresh")),
+                mock.patch.object(
+                    doctor, "_git_index_check", return_value=None) as git_check,
+                mock.patch.object(doctor.state, "load"),
+                mock.patch.object(doctor, "_damaged_records", return_value=0),
+                mock.patch.object(
+                    doctor.lifecycle, "collect", return_value=collected) as collect,
+                mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+                mock.patch.object(doctor, "_health_payload", return_value=None),
+                mock.patch.object(
+                    doctor.update_check, "interactive", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                doctor.main([])
+
+            self.assertEqual(
+                [mock.call(selected, "selected")], git_check.call_args_list)
+            collect.assert_called_once_with(
+                selected_roots=(selected,), persist=False)
+
+    def test_doctor_all_repos_keeps_global_collection(self) -> None:
+        collected = mock.Mock(
+            unavailable_repositories=(), broken_definitions=(),
+            unknown_metadata=())
+        with (
+            mock.patch.object(
+                doctor.repos, "load", return_value={"repos": {}}),
+            mock.patch.object(
+                doctor.runtime, "health", return_value=Health(True, "fresh")),
+            mock.patch.object(
+                doctor.lifecycle, "collect", return_value=collected) as collect,
+            mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+            mock.patch.object(doctor, "_health_payload", return_value=None),
+            mock.patch.object(
+                doctor.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            doctor.main(["--all-repos"])
+
+        collect.assert_called_once_with(selected_roots=None, persist=False)
+
+    def test_doctor_repair_scopes_convergence_to_selected_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            selected = Path(temporary)
+            collected = mock.Mock(
+                unavailable_repositories=(), broken_definitions=(),
+                unknown_metadata=())
+            converged = mock.Mock(
+                done=(), failed=(), health=Health(True, "fresh"))
+            with (
+                mock.patch.object(
+                    doctor.repos, "load", return_value={"repos": {}}),
+                mock.patch.object(
+                    doctor.state, "resolve_root", return_value=selected),
+                mock.patch.object(
+                    doctor.runtime, "health",
+                    return_value=Health(True, "fresh")),
+                mock.patch.object(
+                    doctor.lifecycle, "collect", return_value=collected),
+                mock.patch.object(
+                    doctor.lifecycle, "converge",
+                    return_value=converged) as converge,
+                mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+                mock.patch.object(doctor, "_health_payload", return_value=None),
+                mock.patch.object(
+                    doctor.update_check, "interactive", return_value=False),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                doctor.main(["--repair"])
+
+            converge.assert_called_once_with(
+                selected_roots=(selected,), dry_run=False)
+
     def test_doctor_reports_a_refused_claude_shim_with_native_remediation(self) -> None:
         refused = runtime.hosts.system.ExecutableNotFound(
             "only shims answer to 'claude' on this host's PATH; "
@@ -899,6 +994,30 @@ class TestReleaseTool(unittest.TestCase):
 
 
 class TestRuntimeCore(unittest.TestCase):
+    def test_ownership_backend_receives_the_repository_root(self) -> None:
+        root = Path("C:/work/selected")
+        backend = mock.Mock()
+        backend.load_owners.return_value = {"sample": "*"}
+        backend.registry_file_exists.return_value = True
+        backend.remove_owner.return_value = True
+        with (
+            mock.patch.object(ownership, "mode", return_value="registry"),
+            mock.patch.object(ownership, "_backend", return_value=backend),
+            mock.patch.object(
+                ownership, "_require_backend", return_value=backend),
+        ):
+            self.assertEqual(
+                {"sample": "*"}, ownership.load_owners(root=root))
+            self.assertTrue(ownership.registry_file_exists(root=root))
+            ownership.set_owner("sample", "*", root=root)
+            ownership.remove_owner("sample", root=root)
+
+        backend.load_owners.assert_any_call(
+            rate_limit_secs=60, root=root)
+        backend.registry_file_exists.assert_called_once_with(root=root)
+        backend.set_owner.assert_called_once_with("sample", "*", root=root)
+        backend.remove_owner.assert_called_once_with("sample", root=root)
+
     def test_missing_ownership_backend_reports_the_required_entry_point(self) -> None:
         with (
             mock.patch.object(ownership, "mode", return_value="registry"),
@@ -2517,6 +2636,62 @@ class TestStartedState(TempRepository):
             self.assertIn(f"agent:{local.identifier}", targets)
             self.assertNotIn(f"agent:{remote.identifier}", targets)
 
+    def test_collection_loads_each_repository_ownership_registry(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as first_temporary,
+            tempfile.TemporaryDirectory() as second_temporary,
+        ):
+            first = Path(first_temporary).resolve()
+            second = Path(second_temporary).resolve()
+            for root, name in ((first, "first-agent"), (second, "second-agent")):
+                (root / ".agents-live.toml").write_text(
+                    'ownership = "registry"\n', encoding="utf-8")
+                skill = root / "Agents" / name
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text(
+                    f"---\nname: {name}\n"
+                    "description: Registry-managed definition.\nmetadata:\n"
+                    '  agents-live.schema-version: "1"\n'
+                    '  agents-live.selector: "fake"\n'
+                    '  agents-live.schedule: "0 9 * * *"\n'
+                    "---\nbody\n",
+                    encoding="utf-8",
+                )
+            first_spec = agent.load("first-agent", root=first)
+            second_spec = agent.load("second-agent", root=second)
+            state.replace(first, {first_spec.identifier})
+            state.replace(second, {second_spec.identifier})
+            host = MemoryHost()
+            previous = runtime.current()
+            runtime.configure(host)
+            loaded: list[Path] = []
+
+            def owners_for(*, root, **_kwargs):
+                loaded.append(root)
+                owner = (
+                    f"other/windows/{'a' * 32}"
+                    if root == first else ownership.WILDCARD
+                )
+                return {"first-agent": owner, "second-agent": owner}
+
+            try:
+                with (
+                    mock.patch.object(lifecycle.repos, "load", return_value={
+                        "repos": {"first": str(first), "second": str(second)},
+                        "default_repo": "first",
+                    }),
+                    mock.patch.object(
+                        ownership, "load_owners", side_effect=owners_for),
+                ):
+                    collected = lifecycle.collect(persist=False)
+            finally:
+                runtime.configure(previous)
+
+            targets = {item.target for item in collected.subscriptions}
+            self.assertEqual({first, second}, set(loaded))
+            self.assertNotIn(f"agent:{first_spec.identifier}", targets)
+            self.assertIn(f"agent:{second_spec.identifier}", targets)
+
     def test_missing_ownership_backend_blocks_only_registry_roots(self) -> None:
         self.skill("local-agent", [
             'agents-live.selector: "fake"',
@@ -2833,6 +3008,25 @@ class TestStartedState(TempRepository):
 
 
 class TestRuntimeProcessPolicy(unittest.TestCase):
+    def test_posix_supervisor_uses_host_spawn_policy(self) -> None:
+        process = mock.Mock(pid=42)
+        with mock.patch.object(
+                processes.system, "spawn_detached", return_value=process) as spawn:
+            reference = LocalProcesses().spawn_detached(
+                ["agents-live", "internal", "watch-loop", "sample"],
+                role="watcher",
+                key="subscription",
+                fingerprint="fingerprint",
+            )
+
+        spawn.assert_called_once_with(
+            ["agents-live", "internal", "watch-loop", "sample"],
+            cwd=None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(42, reference.pid)
+
     def test_watcher_enumeration_is_exact_and_installation_scoped(self) -> None:
         environment = Path("C:/tools/agents-live")
         metadata = runtime.artifacts.encode(runtime.artifacts.InvocationMetadata(
@@ -4515,6 +4709,27 @@ class TestAgentPipeline(TempRepository):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_long_lived_process_creation_stays_with_host_owners(self) -> None:
+        package = Path(__file__).parents[1] / "src" / "agents_live"
+        allowed = {
+            "runtime/hosts/filesystem.py",
+            "runtime/hosts/system.py",
+        }
+        found: set[str] = set()
+        for path in package.rglob("*.py"):
+            relative = path.relative_to(package).as_posix()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "subprocess"
+                    and node.func.attr == "Popen"
+                ):
+                    found.add(relative)
+
+        self.assertEqual(allowed, found)
+
     def test_doctor_repair_can_be_previewed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -4661,6 +4876,88 @@ class TestArchitectureFitness(unittest.TestCase):
                 sys, "argv", ["dashboard.py", "--port", "8231"]),
         ):
             dashboard.main()  # must return rather than propagate
+
+    def test_dashboard_next_port_announces_and_serves_first_available(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(
+                dashboard, "port_conflict",
+                side_effect=["occupied", "occupied", None]),
+            mock.patch.object(dashboard.dashboards, "record") as record,
+            mock.patch.object(dashboard.atexit, "register"),
+            mock.patch.object(dashboard, "build_page"),
+            mock.patch.object(dashboard.ui, "run") as run,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "next"]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            dashboard.main()
+
+        self.assertIn("Dashboard URL: http://127.0.0.1:8233", stdout.getvalue())
+        record.assert_called_once_with(8233, os.getpid(), dashboard.REPO_ROOT)
+        self.assertEqual(8233, run.call_args.kwargs["port"])
+
+    def test_dashboard_next_port_exhaustion_fails_before_recording(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(dashboard, "DEFAULT_PORT", 65534),
+            mock.patch.object(
+                dashboard, "port_conflict", return_value="occupied"),
+            mock.patch.object(dashboard.preflight, "emit_failure") as emit,
+            mock.patch.object(dashboard.dashboards, "record") as record,
+            mock.patch.object(dashboard.ui, "run") as run,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "next"]),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            dashboard.main()
+
+        self.assertEqual(1, raised.exception.code)
+        emit.assert_called_once_with(
+            "dashboard",
+            "no available port from 65534 through 65535",
+            code="port_unavailable",
+        )
+        record.assert_not_called()
+        run.assert_not_called()
+
+    def test_dashboard_next_port_is_reused_by_reload_child(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        with (
+            mock.patch.object(dashboard, "__name__", "__mp_main__"),
+            mock.patch.dict(
+                os.environ, {dashboard.SELECTED_PORT_ENV: "8233"}),
+            mock.patch.object(dashboard.dashboards, "record") as record,
+            mock.patch.object(dashboard, "build_page"),
+            mock.patch.object(dashboard.ui, "run") as run,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "next", "--dev"]),
+        ):
+            dashboard.main()
+
+        record.assert_not_called()
+        self.assertEqual(8233, run.call_args.kwargs["port"])
 
     def test_dashboard_port_conflict_guidance_is_neutral(self) -> None:
         nicegui = mock.MagicMock()

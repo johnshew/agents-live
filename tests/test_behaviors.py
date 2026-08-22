@@ -958,19 +958,51 @@ class TestPendingUpgradeIdentity(TempRepository):
 class TestWindowsDetachedProcess(unittest.TestCase):
     """Detached watchers outlive maintenance without opening a terminal."""
 
-    def test_a_detached_watcher_has_a_hidden_console(self) -> None:
-        process = mock.Mock(pid=42)
+    def test_owned_watchers_use_hidden_process_discovery(self) -> None:
+        metadata = artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567",
+            "repo:C:/work/sample",
+            "agent:sample",
+        ))
+        command = (
+            "C:/tools/agents-live.exe --repo C:/work/sample internal "
+            f"watch-loop --metadata {metadata} sample"
+        )
         with (
-            mock.patch.multiple(
-                windowshost.subprocess,
-                CREATE_NEW_PROCESS_GROUP=0x00000200,
-                CREATE_NO_WINDOW=0x08000000,
-                DETACHED_PROCESS=0x00000008,
-                create=True,
-            ),
             mock.patch.object(
-                windowshost.subprocess, "Popen", return_value=process) as popen,
+                hostruntime, "process_command_lines",
+                return_value=[(42, command)]),
+            mock.patch.object(
+                hostruntime, "process_start_time", return_value=123.5),
         ):
+            found = WindowsProcesses().owned("watcher")
+
+        self.assertEqual([
+            ProcessRef(
+                42,
+                123.5,
+                "agents-live.exe",
+                "watcher",
+                "0123456789abcdef01234567",
+                "agents-live:v2:0123456789abcdef01234567",
+            ),
+        ], found)
+
+    def test_termination_uses_native_process_policy(self) -> None:
+        reference = ProcessRef(
+            42, 123.5, "agents-live.exe", "watcher", "key", "fingerprint")
+        with (
+            mock.patch.object(WindowsProcesses, "alive", return_value=True),
+            mock.patch.object(hostruntime, "terminate") as terminate,
+        ):
+            WindowsProcesses().terminate(reference)
+
+        terminate.assert_called_once_with(42)
+
+    def test_a_detached_watcher_uses_host_spawn_policy(self) -> None:
+        process = mock.Mock(pid=42)
+        with mock.patch.object(
+                hostruntime, "spawn_detached", return_value=process) as spawn:
             WindowsProcesses().spawn_detached(
                 ["agents-live.exe", "internal", "watch-loop", "sample"],
                 role="watcher",
@@ -978,9 +1010,9 @@ class TestWindowsDetachedProcess(unittest.TestCase):
                 fingerprint="fingerprint",
             )
 
-        self.assertEqual(
-            0x08000200,
-            popen.call_args.kwargs["creationflags"],
+        spawn.assert_called_once_with(
+            ["agents-live.exe", "internal", "watch-loop", "sample"],
+            cwd=None,
         )
 
     @unittest.skipUnless(sys.platform == "win32", "Windows console behavior")
@@ -1602,6 +1634,30 @@ class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDashboardProcessIdentity(unittest.TestCase):
+    def test_dashboard_list_includes_clickable_url(self) -> None:
+        from agents_live.cli.scripts import dashboards
+
+        entry = {
+            "port": 8232,
+            "pid": 42,
+            "start_token": 100,
+            "repo": "C:/repo",
+            "started": "2026-08-20T19:02:20+00:00",
+        }
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(dashboards, "running", return_value=[entry]),
+            mock.patch.object(dashboards, "port_answers", return_value=True),
+            mock.patch.object(sys, "argv", ["dashboards.py", "list"]),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = dashboards.main()
+
+        self.assertEqual(0, code)
+        lines = stdout.getvalue().splitlines()
+        self.assertIn("URL", lines[0])
+        self.assertIn("http://127.0.0.1:8232", lines[1])
+
     def test_dashboard_stop_rejects_pid_reuse(self) -> None:
         from agents_live.cli.scripts import dashboards
 
@@ -1710,12 +1766,14 @@ class TestOwnershipMovesInBothDirections(TempRepository):
             mock.patch.object(start.ownership, "local_only",
                               return_value=False),
             mock.patch.object(start.ownership, "set_owner",
-                              side_effect=lambda n, o: assigned.append((n, o))),
+                              side_effect=lambda n, o, **_kwargs: assigned.append((n, o))) as set_owner,
             mock.patch.object(ownership, "load_owners", return_value={}),
         ):
             code, out, _ = self._run(["--name", "movable", "--transfer-here"])
         self.assertEqual(0, code)
         self.assertEqual([("movable", ownership.current_owner_id())], assigned)
+        set_owner.assert_called_once_with(
+            "movable", ownership.current_owner_id(), root=self.root)
         self.assertIn("Assigned 'movable'", out)
         self.assertIn(spec.identifier, state.load(self.root).agents)
 
