@@ -1444,10 +1444,14 @@ def repository_settings_panel() -> None:
                     _repository_mutation({"action": "clear-default"})),
             ).props("dense unelevated no-caps")
         for row in rows:
-            state_label = (
-                "default, unavailable" if row["default"] and not row["available"] else
-                "unavailable" if not row["available"] else
-                "default" if row["default"] else "registered")
+            if row["default"] and not row["available"]:
+                state_label = "default, unavailable"
+            elif not row["available"]:
+                state_label = "unavailable"
+            elif row["default"]:
+                state_label = "default"
+            else:
+                state_label = "registered"
             with ui.row().classes("w-full items-center gap-2 no-wrap"):
                 ui.label(row["name"]).classes("text-sm font-medium")
                 ui.label(state_label).classes("text-xs text-gray-500")

@@ -49,11 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "default":
             if args.clear:
                 if args.repo:
-                    default_parser.error(
+                    parser.error(
                         "--clear cannot be combined with a repository name or path")
                 registry._clear_default()
             elif not args.repo:
-                default_parser.error("default requires a repository or --clear")
+                parser.error("default requires a repository or --clear")
             else:
                 _converge_registered(registry._set_default(args.repo))
         elif args.action == "remove":
