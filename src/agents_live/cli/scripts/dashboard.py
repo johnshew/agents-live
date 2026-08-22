@@ -79,6 +79,7 @@ HEALTH_OK_PATH = paths.health_beacon_path()
 # Maintenance runs every five minutes; one hour without a beacon refresh means
 # the host has missed enough passes to report the infrastructure as unhealthy.
 HEALTH_STALE_MINUTES = 60
+NEXT_MAINTENANCE_DESCRIPTION = "within one maintenance interval"
 # Cap the on-demand health-check worker run from the dashboard. The worker's
 # framework smoketest has its own 360s internal timeout; this is a hard outer
 # bound so the spinner can never hang forever.
@@ -1090,11 +1091,9 @@ def host_service_status() -> dict:
     completed_at = end_record.get("ts") if end_record else None
     duration = (
         verdict.get("duration_s")
-        if level == "failed" and verdict.get("duration_s") is not None
+        if verdict.get("duration_s") is not None
         else end_record.get("duration_s")
     )
-    if duration is None:
-        duration = verdict.get("duration_s")
     reason = str(verdict.get("reason", "")).strip()
     if not reason and level == "failed":
         reason = "framework smoketest failed"
@@ -1107,7 +1106,8 @@ def host_service_status() -> dict:
         "last_start": started_at,
         "last_completion": completed_at,
         "duration_s": duration,
-        "next_run": "within 5 minutes" if installed and not active else None,
+        "next_run": NEXT_MAINTENANCE_DESCRIPTION
+        if installed and not active else None,
         "beacon": beacon,
         "smoketest": {
             "status": verdict_status or "unknown",
