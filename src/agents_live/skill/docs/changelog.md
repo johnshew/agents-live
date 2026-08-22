@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: recognize v2 watcher processes during candidate acceptance.
+  Resident watcher checks now use the canonical metadata envelope without
+  requiring launcher-role arguments removed by the unified runtime contract.
 - fix: keep ownership registries scoped to their repositories.
   Multi-repository doctor, status, transfer, and dashboard operations now read
   and write each registry through its selected project instead of reusing
