@@ -4782,6 +4782,12 @@ class TestDashboardRepositorySurface(TempRepository):
             [column["name"] for column in dashboard._AGGREGATE_COLUMNS],
         )
         self.assertEqual(groups, dashboard.all_repo_groups())
+        dashboard.STATE["all_repos"]["descending"] = True
+        local_group = next(
+            group for group in dashboard.all_repo_groups()
+            if group["name"] == self.root.name)
+        self.assertEqual(["alpha", "zeta"], [
+            row["name"] for row in local_group["rows"]])
 
     def test_dashboard_all_repo_groups_keep_unavailable_paths_visible(self) -> None:
         dashboard = self._dashboard_module()

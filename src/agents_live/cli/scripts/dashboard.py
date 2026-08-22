@@ -47,6 +47,7 @@ if str(PACKAGE_PARENT) not in sys.path:
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
 from agents_live import agent, obs, paths, preflight, runtime, state  # noqa: E402
 from agents_live.cli import agent_view, lifecycle  # noqa: E402
+from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
@@ -742,10 +743,6 @@ async def health_check() -> None:
         return
     STATE["health_check_running"] = True
     try:
-        if REPO_ROOT is None:
-            if await do_action("Health maintenance", "internal", ["maintain"]) == 0:
-                _safe_ui(ui.notify, host_service_status()["label"], type="info")
-            return
         if await do_action("Doctor", "doctor", []) != 0:
             _safe_ui(
                 ui.notify,
@@ -791,7 +788,10 @@ async def health_check() -> None:
 
 
 def _smoketest_result_path() -> Path:
-    return paths.repo_state_dir(_require_repo_path(REPO_ROOT)) / "logs" / \
+    if REPO_ROOT is None:
+        return paths.host_logs_dir() / \
+            "smoketest-framework-result.json"
+    return paths.repo_state_dir(REPO_ROOT) / "logs" / \
         "smoketest-framework-result.json"
 
 
@@ -1399,6 +1399,7 @@ def repository_settings_panel() -> None:
             _safe_ui(ui.notify, result.get("error", "registry update failed"),
                      type="negative", multi_line=True)
         repository_settings_panel.refresh()
+        _safe_ui(ui.run_javascript, "window.location.reload()")
 
     with ui.card().classes("w-full repository-settings-panel"):
         ui.label("Repository settings").classes("text-base font-medium")
@@ -1594,11 +1595,11 @@ def _repository_mutation(payload: dict) -> dict:
     value = str(payload.get("path") or payload.get("repo") or "").strip()
     try:
         if action == "add":
-            repos._add(value)
+            repo_commands._converge_registered(repos._add(value))
         elif action == "remove":
             repos._remove(value)
         elif action == "set-default":
-            repos._set_default(value)
+            repo_commands._converge_registered(repos._set_default(value))
         elif action == "clear-default":
             repos._clear_default()
         else:
@@ -1654,15 +1655,15 @@ def _sort_value(row: dict, field: str) -> tuple[bool, object]:
 def _sorted_agent_rows(rows: list[dict], sort_by: str,
                        descending: bool = False) -> list[dict]:
     """Sort rows with a stable tie-breaker so refreshes do not reshuffle."""
-    return sorted(
+    tied = sorted(
         rows,
         key=lambda row: (
-            _sort_value(row, sort_by),
             str(row.get("name", "")).casefold(),
             str(row.get("identifier", "")),
         ),
-        reverse=descending,
     )
+    return sorted(tied, key=lambda row: _sort_value(row, sort_by),
+                  reverse=descending)
 
 
 def all_repo_groups() -> list[dict]:
