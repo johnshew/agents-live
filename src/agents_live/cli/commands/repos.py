@@ -29,12 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     add = subparsers.add_parser("add", help="Register a repository")
     add.add_argument(
         "path", help="Repository root directory (registered under its directory name)")
-    default = subparsers.add_parser(
+    default_parser = subparsers.add_parser(
         "default", help="Set or clear the fallback repository")
-    default.add_argument(
+    default_parser.add_argument(
         "repo", nargs="?",
         help="Repository path or registered directory name")
-    default.add_argument(
+    default_parser.add_argument(
         "--clear", action="store_true",
         help="Clear the configured default repository")
     remove = subparsers.add_parser("remove", help="Remove a registered repository")
@@ -49,11 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "default":
             if args.clear:
                 if args.repo:
-                    default.error(
+                    default_parser.error(
                         "--clear cannot be combined with a repository name or path")
                 registry._clear_default()
             elif not args.repo:
-                default.error("default requires a repository or --clear")
+                default_parser.error("default requires a repository or --clear")
             else:
                 _converge_registered(registry._set_default(args.repo))
         elif args.action == "remove":
