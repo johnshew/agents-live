@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import contextlib
 import json
 import os
 import re
@@ -44,8 +45,8 @@ PACKAGE_PARENT = SCRIPTS_DIR.parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
-from agents_live import obs, paths, preflight  # noqa: E402
-from agents_live.cli import agent_view  # noqa: E402
+from agents_live import agent, obs, paths, preflight, runtime, state  # noqa: E402
+from agents_live.cli import agent_view, lifecycle  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
@@ -90,6 +91,13 @@ STATE: dict = {
     "models": {},
     "filters": {"name": "", "state": "All", "owner": "All",
                 "runtime": "All", "failing": False},
+    "all_repos": {
+        "repo": "All",
+        "grouped": True,
+        "sort_by": "name",
+        "descending": False,
+    },
+    "health_check_running": False,
 }
 _SCAN_CACHE: tuple[
     tuple[object, ...],
@@ -123,7 +131,12 @@ def collect_agents() -> list[dict]:
     """Return agent details for every configured agent, sorted by name."""
     if REPO_ROOT is None:
         return []
-    return [{
+    return [_agent_view_dict(row) for row in agent_view.repository_agents(
+        REPO_ROOT, ownership_rate_limit_secs=10**9)]
+
+
+def _agent_view_dict(row: agent_view.AgentView) -> dict:
+    return {
         "name": row.name,
         "identifier": row.identifier,
         "description": row.description,
@@ -136,8 +149,7 @@ def collect_agents() -> list[dict]:
         "mode": row.mode,
         "schedule": list(row.schedules),
         "watch": row.watch,
-    } for row in agent_view.repository_agents(
-        REPO_ROOT, ownership_rate_limit_secs=10**9)]
+    }
 
 
 def last_run_index() -> dict[str, tuple[str | None, str | None, str]]:
@@ -244,13 +256,14 @@ def _scan_signature(files: tuple[Path, ...],
     return (tuple(signatures), tuple(sorted(aliases.items())))
 
 
-def _scan(aliases: dict[str, str] | None = None
+def _scan(aliases: dict[str, str] | None = None,
+          logs_dir: Path | None = None,
           ) -> tuple[dict[str, tuple[str | None, str | None, str]],
                      dict[str, tuple[float, float]]]:
     """Return run/cost indexes, reusing them while the log set is unchanged."""
     global _SCAN_CACHE
     aliases = aliases or {}
-    files = obs.files(_require_repo_path(LOGS_DIR))
+    files = obs.files(_require_repo_path(logs_dir or LOGS_DIR))
     signature = _scan_signature(files, aliases)
     if _SCAN_CACHE is not None and _SCAN_CACHE[0] == signature:
         return _SCAN_CACHE[1]
@@ -460,8 +473,9 @@ def trigger_summary(agent: dict) -> str:
 
 # --- Actions ------------------------------------------------------------
 
-DASHBOARD_LOG = LOGS_DIR / "dashboard.jsonl" if LOGS_DIR else None
-DASHBOARD_TRANSCRIPT = LOGS_DIR / "dashboard-transcript.log" if LOGS_DIR else None
+_DASHBOARD_LOG_DIR = LOGS_DIR if LOGS_DIR else paths.host_logs_dir()
+DASHBOARD_LOG = _DASHBOARD_LOG_DIR / "dashboard.jsonl"
+DASHBOARD_TRANSCRIPT = _DASHBOARD_LOG_DIR / "dashboard-transcript.log"
 
 
 def _command_argv(command: str, args: list[str]) -> list[str]:
@@ -483,9 +497,11 @@ def _run_script(command: str, args: list[str],
     timed-out run reports exit 124 with whatever output was captured.
     """
     try:
+        cwd = REPO_ROOT or paths.global_root()
+        cwd.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
             _command_argv(command, args),
-            cwd=_require_repo_path(REPO_ROOT),
+            cwd=cwd,
             capture_output=True,
             **hostruntime.CHILD_TEXT,
             timeout=timeout,
@@ -516,10 +532,10 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     `dashboard-transcript.log` keeps the complete, untruncated stdout+
     stderr so a failed Activate/Run can be reviewed after the fact.
     """
-    obs.record(_require_repo_path(DASHBOARD_LOG), obs.create(
+    obs.record(DASHBOARD_LOG, obs.create(
         "dashboard-action",
         "success" if code == 0 else "failed",
-        repository=str(_require_repo_path(REPO_ROOT)),
+        repository=str(REPO_ROOT) if REPO_ROOT is not None else "",
         agent=agent_name or "dashboard",
         run_id=run_id or str(time.time_ns()),
         origin="dashboard",
@@ -530,7 +546,7 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = " ".join([command, *args])
     header = f"\n===== {ts} {label}: {cmd} (exit {code}) =====\n"
-    transcript = _require_repo_path(DASHBOARD_TRANSCRIPT)
+    transcript = DASHBOARD_TRANSCRIPT
     try:
         transcript.parent.mkdir(parents=True, exist_ok=True)
         with transcript.open("a", encoding="utf-8") as handle:
@@ -721,46 +737,57 @@ async def health_check() -> None:
     user sees the whole picture, not just the lifecycle scripts' exit
     codes.
     """
-    if await do_action("Doctor", "doctor", []) != 0:
-        _safe_ui(
-            ui.notify,
-            "Prerequisites failing - resolve the items above before activating.",
-            type="warning", timeout=8000,
-        )
+    if STATE.get("health_check_running"):
+        _safe_ui(ui.notify, "Maintenance is already running.", type="info")
         return
-
-    smoketest_result = _smoketest_result_path()
+    STATE["health_check_running"] = True
     try:
-        smoketest_result.unlink(missing_ok=True)
-    except OSError:
+        if REPO_ROOT is None:
+            if await do_action("Health maintenance", "internal", ["maintain"]) == 0:
+                _safe_ui(ui.notify, host_service_status()["label"], type="info")
+            return
+        if await do_action("Doctor", "doctor", []) != 0:
+            _safe_ui(
+                ui.notify,
+                "Prerequisites failing - resolve the items above before activating.",
+                type="warning", timeout=8000,
+            )
+            return
+
+        smoketest_result = _smoketest_result_path()
+        try:
+            smoketest_result.unlink(missing_ok=True)
+        except OSError:
+            _safe_ui(
+                ui.notify,
+                "Could not clear the previous smoketest verdict.",
+                type="negative", timeout=8000,
+            )
+            return
+        if await do_action(
+                "Smoketest", "smoketest", [], timeout=WORKER_TIMEOUT) != 0:
+            return
+        if not _current_smoketest_pass(smoketest_result):
+            _safe_ui(
+                ui.notify,
+                "Smoketest did not write a current passing verdict.",
+                type="negative", timeout=8000,
+            )
+            return
+        if await do_action("Health check", "internal", ["maintain"]) != 0:
+            return
+        # Summarise the refreshed beacon so the user sees infra + smoketest,
+        # not just exit codes. system_health reads the host health.ok beacon.
+        h = system_health()
+        severity = {"ok": "positive", "degraded": "warning", "down": "negative"}
         _safe_ui(
-            ui.notify,
-            "Could not clear the previous smoketest verdict.",
-            type="negative", timeout=8000,
+            ui.notify, h["tip"],
+            type=severity.get(h["level"], "negative"),
+            timeout=12000, multi_line=True,
         )
-        return
-    if await do_action(
-            "Smoketest", "smoketest", [], timeout=WORKER_TIMEOUT) != 0:
-        return
-    if not _current_smoketest_pass(smoketest_result):
-        _safe_ui(
-            ui.notify,
-            "Smoketest did not write a current passing verdict.",
-            type="negative", timeout=8000,
-        )
-        return
-    if await do_action("Health check", "internal", ["maintain"]) != 0:
-        return
-    # Summarise the refreshed beacon so the user sees infra + smoketest,
-    # not just exit codes. system_health reads the host health.ok beacon.
-    h = system_health()
-    severity = {"ok": "positive", "degraded": "warning", "down": "negative"}
-    _safe_ui(
-        ui.notify, h["tip"],
-        type=severity.get(h["level"], "negative"),
-        timeout=12000, multi_line=True,
-    )
-    _push_log("Health check dashboard refresh complete")
+        _push_log("Health check dashboard refresh complete")
+    finally:
+        STATE["health_check_running"] = False
 
 
 def _smoketest_result_path() -> Path:
@@ -788,10 +815,17 @@ async def pause_all(names: list[str]) -> None:
 
 def agent_rows() -> list[dict]:
     """Enriched row model shared by the agent table and the health strip."""
+    if REPO_ROOT is None:
+        return []
+    return _agent_rows_for(REPO_ROOT, collect_agents())
+
+
+def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
+    """Shared informational row model for single and aggregate dashboards."""
     rows: list[dict] = []
     host = ownership.current_label()
-    agents = collect_agents()
-    runs, costs = _scan(_history_aliases(agents))
+    logs_dir = paths.repo_state_dir(root) / "logs"
+    runs, costs = _scan(_history_aliases(agents), logs_dir=logs_dir)
     for agent in agents:
         name = agent["name"]
         identifier = agent["identifier"]
@@ -970,6 +1004,108 @@ def system_health() -> dict:
                    f"beacon written {ago}"}
 
 
+def _latest_maintenance_record() -> dict:
+    records = [
+        record for record in obs.load((paths.host_logs_dir() / "admin.log",))
+        if record.get("phase") == "maintenance"
+    ]
+    return records[-1] if records else {}
+
+
+def _smoketest_verdict_from_beacon(beacon: dict) -> dict:
+    value = beacon.get("smoketest")
+    return value if isinstance(value, dict) else {}
+
+
+def _read_health_beacon() -> dict:
+    try:
+        value = json.loads(HEALTH_OK_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _maintenance_trigger() -> str:
+    try:
+        return lifecycle.maintenance_subscription().trigger
+    except Exception:
+        return "*/5 * * * *"
+
+
+def host_service_status() -> dict:
+    """Host-scoped automatic maintenance status for dashboard settings."""
+    now = datetime.now(timezone.utc)
+    active = bool(STATE.get("health_check_running"))
+    try:
+        active = active or bool(runtime.current().supervisor.owned(role="maintenance"))
+        installed = any(
+            item.target == "runtime"
+            for item in runtime.current().trigger_store.list()
+        )
+    except Exception:
+        installed = False
+    beacon = _read_health_beacon()
+    record = _latest_maintenance_record()
+    verdict = _smoketest_verdict_from_beacon(beacon)
+    verdict_status = str(verdict.get("status", "")).lower()
+    level = "missing"
+    label = "Missing, idle"
+    if active:
+        level = "running"
+        label = "Running"
+    elif not installed:
+        level = "missing"
+        label = "Missing, idle"
+    elif not HEALTH_OK_PATH.is_file():
+        level = "never-run"
+        label = "Never run, idle"
+    else:
+        mtime = datetime.fromtimestamp(HEALTH_OK_PATH.stat().st_mtime, timezone.utc)
+        if (now - mtime).total_seconds() / 60 > HEALTH_STALE_MINUTES:
+            level = "stale"
+            label = "Stale, idle"
+        elif verdict_status == "fail":
+            level = "failed"
+            label = "Failed, idle"
+        elif beacon.get("status") == "healthy" and verdict_status == "pass":
+            level = "healthy"
+            label = "Healthy, idle"
+        else:
+            level = "degraded"
+            label = "Degraded, idle"
+    started_at = record.get("ts")
+    completed_at = record.get("ts") if record.get("status") in {"ok", "error"} else None
+    duration = record.get("duration_s")
+    if duration is None:
+        duration = verdict.get("duration_s")
+    reason = str(verdict.get("reason", "")).strip()
+    if not reason and level == "failed":
+        reason = "framework smoketest failed"
+    return {
+        "installed": installed,
+        "schedule": _maintenance_trigger(),
+        "state": level,
+        "label": label,
+        "running": active,
+        "last_start": started_at,
+        "last_completion": completed_at,
+        "duration_s": duration,
+        "next_run": "within 5 minutes" if installed and not active else None,
+        "beacon": beacon,
+        "smoketest": {
+            "status": verdict_status or "unknown",
+            "reason": reason,
+            "duration_s": verdict.get("duration_s"),
+        },
+        "can_run": not active,
+    }
+
+
+@app.get("/api/host-service")
+def api_host_service() -> dict:
+    return {"ok": True, "service": host_service_status()}
+
+
 # Row action handlers: the q-table action slots emit (event, row) pairs.
 
 async def _run_row(event) -> None:
@@ -1015,6 +1151,49 @@ _AGENT_COLUMNS = [
     {"name": "cost_week", "label": "List cost/1w", "field": "cost_week", "align": "right",
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
 ]
+
+_AGGREGATE_COLUMNS = [
+    column for column in _AGENT_COLUMNS if column["name"] != "actions"
+]
+
+
+def _add_agent_information_slots(table) -> None:
+    table.add_slot("body-cell-name", '''
+        <q-td :props="props">
+          <div style="white-space:nowrap"
+               :title="props.row.unhealthy ? props.row.name + ' - last run errored' : props.row.name"
+               :class="props.row.unhealthy ? 'text-red text-weight-medium' : ''">{{ props.row.name }}</div>
+        </q-td>
+    ''')
+    table.add_slot("body-cell-owner", '''
+        <q-td :props="props">
+          <div style="white-space:nowrap"
+               :class="props.row.local ? '' : 'text-grey-6'">{{ props.row.owner }}</div>
+        </q-td>
+    ''')
+    table.add_slot(
+        "body-cell-agent",
+        '<q-td :props="props"><div style="white-space:nowrap">'
+        '{{ props.row.agent }}</div></q-td>',
+    )
+    table.add_slot(
+        "body-cell-model",
+        '<q-td :props="props"><div style="white-space:nowrap">'
+        '{{ props.row.model }}</div></q-td>',
+    )
+    table.add_slot("body-cell-trigger", '''
+        <q-td :props="props">
+          <div class="ellipsis" :title="props.row.trigger">{{ props.row.trigger }}</div>
+        </q-td>
+    ''')
+    table.add_slot("body-cell-state", '''
+        <q-td :props="props">
+          <span :class="props.row.unhealthy ? 'text-red'
+                   : (props.row.state.startsWith('active') ? 'text-green'
+                   : props.row.state === 'partial' ? 'text-orange' : 'text-grey-6')"
+                   >{{ props.row.state }}</span>
+        </q-td>
+    ''')
 
 
 @ui.refreshable
@@ -1161,6 +1340,110 @@ def header_actions() -> None:
         ).style("border-radius:6px;padding:3px 10px").set_enabled(bool(running))
 
 
+async def repair_maintenance() -> None:
+    if await do_action("Repair maintenance", "doctor", ["--repair"]) == 0:
+        _safe_ui(ui.notify, "Maintenance schedule repaired.", type="positive")
+
+
+def open_host_logs() -> None:
+    _push_log(f"Host maintenance log: {paths.host_logs_dir() / 'admin.log'}")
+
+
+@ui.refreshable
+def host_service_panel() -> None:
+    service = host_service_status()
+    color = {
+        "healthy": "text-green-600",
+        "running": "text-blue-500",
+        "failed": "text-red-500",
+        "degraded": "text-orange-500",
+        "stale": "text-orange-500",
+        "missing": "text-red-400",
+    }.get(service["state"], "text-gray-500")
+    with ui.card().classes("w-full host-service-panel"):
+        with ui.row().classes("w-full items-center justify-between gap-3"):
+            with ui.column().classes("gap-1"):
+                ui.label("Host services").classes("text-base font-medium")
+                ui.label(service["label"]).classes("text-sm " + color)
+                smoke = service["smoketest"]
+                detail = f"maintenance {service['schedule']}; smoketest {smoke['status']}"
+                if smoke.get("reason"):
+                    detail += f": {smoke['reason']}"
+                if service.get("duration_s") is not None:
+                    detail += f"; duration {service['duration_s']}s"
+                ui.label(detail).classes("text-xs text-gray-500")
+            with ui.row().classes("items-center gap-2"):
+                ui.button(
+                    "Run again" if service["state"] == "failed" else "Run health maintenance",
+                    icon="health_and_safety",
+                    on_click=health_check,
+                ).props("dense color=primary unelevated no-caps").set_enabled(
+                    bool(service["can_run"]))
+                ui.button("Open logs", on_click=open_host_logs).props(
+                    "dense unelevated no-caps")
+                ui.button("Repair schedule", on_click=repair_maintenance).props(
+                    "dense unelevated no-caps")
+                ui.button("Refresh status", on_click=host_service_panel.refresh).props(
+                    "dense flat no-caps")
+
+
+@ui.refreshable
+def repository_settings_panel() -> None:
+    rows = repository_rows()
+    new_path = {"value": ""}
+
+    def announce(result: dict) -> None:
+        if result.get("ok"):
+            _safe_ui(ui.notify, "Repository registry updated.", type="positive")
+        else:
+            _safe_ui(ui.notify, result.get("error", "registry update failed"),
+                     type="negative", multi_line=True)
+        repository_settings_panel.refresh()
+
+    with ui.card().classes("w-full repository-settings-panel"):
+        ui.label("Repository settings").classes("text-base font-medium")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.input(
+                "Repository path", value="",
+                on_change=lambda event: new_path.update(value=event.value),
+            ).props("dense outlined clearable").classes("grow")
+            ui.button(
+                "Register",
+                on_click=lambda: announce(
+                    _repository_mutation(
+                        {"action": "add", "path": new_path["value"]})),
+            ).props("dense color=primary unelevated no-caps")
+            ui.button(
+                "Clear default",
+                on_click=lambda: announce(
+                    _repository_mutation({"action": "clear-default"})),
+            ).props("dense unelevated no-caps")
+        for row in rows:
+            state_label = (
+                "default" if row["default"] else
+                "unavailable" if not row["available"] else "registered")
+            with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                ui.label(row["name"]).classes("text-sm font-medium")
+                ui.label(state_label).classes("text-xs text-gray-500")
+                ui.label(row["path"]).classes(
+                    "repository-path grow text-xs text-gray-500")
+                ui.button(
+                    "Set default",
+                    on_click=lambda name=row["name"]: announce(
+                        _repository_mutation(
+                            {"action": "set-default", "repo": name})),
+                ).props("dense flat no-caps").set_enabled(
+                    row["available"] and not row["default"])
+                ui.button(
+                    "Remove",
+                    on_click=lambda name=row["name"]: announce(
+                        _repository_mutation(
+                            {"action": "remove", "repo": name})),
+                ).props("dense flat no-caps")
+            if row["error"]:
+                ui.label(row["error"]).classes("text-xs text-red-500")
+
+
 def _refresh_views() -> None:
     # One pass for the whole render: the summary, the table, and the
     # header each ask every agent for its state, and without this they
@@ -1169,6 +1452,9 @@ def _refresh_views() -> None:
         summary = _refresh_summary()
         agent_grid.refresh()
         header_actions.refresh()
+        refresh_host_service = getattr(host_service_panel, "refresh", None)
+        if refresh_host_service is not None:
+            refresh_host_service()
     _push_log(summary)
 
 
@@ -1242,6 +1528,9 @@ def _build_page() -> None:
     ui.timer(1.0, tick_age)
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
+        host_service_panel()
+        with ui.expansion("Repository settings").classes("w-full"):
+            repository_settings_panel()
         with ui.card().classes("agent-panel w-full min-h-0"):
             agent_grid()
 
@@ -1271,71 +1560,265 @@ def _build_no_project_page() -> None:
         ui.label(NO_PROJECT_HINT).classes("text-sm text-gray-500")
         if REPO_ERROR:
             ui.label(REPO_ERROR).classes("text-xs text-gray-500")
+    host_service_panel()
+    repository_settings_panel()
 
 
-def _all_repos_rows() -> list[dict]:
-    payload = repos.collect_status()
-    rows = []
-    for item in payload["repos"]:
-        if "error" in item:
-            rows.append({
-                "identity": f"{item['name']}/error",
-                "repo": item["name"], "name": "-", "state": "error",
-                "runtime": "-", "detail": item["error"],
-            })
-            continue
-        for agent in item["result"].get("agents", []):
-            rows.append({
-                "identity": agent["name"],
-                "repo": item["name"], "name": agent["name"],
-                "state": agent.get("state", "?"),
-                "runtime": agent.get("runtime", "?"), "detail": item["path"],
-            })
-    return rows
+def repository_rows() -> list[dict]:
+    current = repos.load()
+    return [
+        {
+            "name": alias,
+            "path": path,
+            "default": alias == current["default_repo"],
+            "available": error is None,
+            "error": error,
+        }
+        for alias, path, error in repos.entries(current)
+    ]
+
+
+@app.get("/api/repositories")
+def api_repositories() -> dict:
+    return {"ok": True, "repositories": repository_rows()}
+
+
+@app.post("/api/repositories")
+async def api_repository_mutation(payload: dict) -> dict:
+    return _repository_mutation(payload)
+
+
+def _repository_mutation(payload: dict) -> dict:
+    """Apply one registry mutation through the registry port."""
+    action = str(payload.get("action", "")).strip()
+    value = str(payload.get("path") or payload.get("repo") or "").strip()
+    try:
+        if action == "add":
+            repos._add(value)
+        elif action == "remove":
+            repos._remove(value)
+        elif action == "set-default":
+            repos._set_default(value)
+        elif action == "clear-default":
+            repos._clear_default()
+        else:
+            raise ValueError("unknown repository settings action")
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": str(exc),
+                "repositories": repository_rows()}
+    return {"ok": True, "repositories": repository_rows()}
+
+
+def _all_repos_groups() -> list[dict]:
+    groups = []
+    current = repos.load()
+    for alias, path, error in repos.entries(current):
+        group = {
+            "name": alias,
+            "path": path,
+            "default": alias == current["default_repo"],
+            "available": error is None,
+            "error": error,
+            "rows": [],
+        }
+        if error is None:
+            root = Path(path)
+            try:
+                agents = [
+                    _agent_view_dict(row)
+                    for row in agent_view.repository_agents(
+                        root, ownership_rate_limit_secs=10**9)
+                ]
+                group["rows"] = _agent_rows_for(root, agents)
+            except (OSError, ValueError, agent.DefinitionError,
+                    state.StartedStateUnavailable) as exc:
+                group["available"] = False
+                group["error"] = str(exc)
+        groups.append(group)
+    return groups
+
+
+def _sort_value(row: dict, field: str) -> tuple[bool, object]:
+    if field == "cost_day":
+        value = row.get("cost_day_value")
+    elif field == "cost_week":
+        value = row.get("cost_week_value")
+    else:
+        value = row.get(field)
+    if isinstance(value, (int, float)):
+        return False, value
+    text = "" if value is None else str(value)
+    return text == "", text.casefold()
+
+
+def _sorted_agent_rows(rows: list[dict], sort_by: str,
+                       descending: bool = False) -> list[dict]:
+    """Sort rows with a stable tie-breaker so refreshes do not reshuffle."""
+    return sorted(
+        rows,
+        key=lambda row: (
+            _sort_value(row, sort_by),
+            str(row.get("name", "")).casefold(),
+            str(row.get("identifier", "")),
+        ),
+        reverse=descending,
+    )
+
+
+def all_repo_groups() -> list[dict]:
+    settings = STATE["all_repos"]
+    selected = settings.get("repo", "All")
+    groups = [
+        group for group in _all_repos_groups()
+        if selected == "All" or group["name"] == selected
+    ]
+    for group in groups:
+        group["rows"] = _sorted_agent_rows(
+            group["rows"],
+            str(settings.get("sort_by") or "name"),
+            bool(settings.get("descending")),
+        )
+    return groups
+
+
+@app.get("/api/all-repos")
+def api_all_repos() -> dict:
+    groups = all_repo_groups()
+    return {
+        "ok": all(group["available"] for group in groups),
+        "grouped": bool(STATE["all_repos"].get("grouped", True)),
+        "sort": {
+            "by": STATE["all_repos"].get("sort_by"),
+            "descending": STATE["all_repos"].get("descending"),
+        },
+        "repositories": groups,
+    }
 
 
 def build_all_repos_page() -> None:
     """Read-only registered-repository view; no lifecycle actions are exposed."""
     ui.dark_mode().auto()
-    rows = _all_repos_rows()
-    selection = {"value": "All"}
+    state_settings = STATE["all_repos"]
+    groups = all_repo_groups()
+    repo_names = [row["name"] for row in repository_rows()]
+    ui.add_css(
+        ".all-repos-body{display:flex;flex-direction:column;gap:1rem}"
+        ".repository-group{overflow:hidden}"
+        ".repository-heading{min-width:0}"
+        ".repository-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".agent-table-scroll{overflow-x:auto}"
+        ".q-table th:nth-child(1),.q-table td:nth-child(1){text-align:left}"
+    )
 
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
         ui.label(ownership.current_label()).classes("text-sm text-gray-500")
         ui.label("All registered repositories (read only)").classes(
             "text-sm text-gray-500")
-    names = sorted({row["repo"] for row in rows})
-    table = ui.table(
-        columns=[
-            {"name": "repo", "label": "Repository", "field": "repo", "sortable": True},
-            {"name": "name", "label": "Agent", "field": "name", "sortable": True},
-            {"name": "state", "label": "State", "field": "state", "sortable": True},
-            {"name": "runtime", "label": "Runtime", "field": "runtime"},
-            {"name": "detail", "label": "Repository path / error", "field": "detail"},
-        ],
-        rows=rows, row_key="identity",
-    ).classes("w-full")
+    host_service_panel()
+    with ui.expansion("Repository settings").classes("w-full"):
+        repository_settings_panel()
+    tables = []
 
-    def apply_filter() -> None:
-        selected = selection["value"]
-        table.rows = rows if selected == "All" else [
-            row for row in rows if row["repo"] == selected]
-        table.update()
+    def render_groups(current: list[dict]) -> None:
+        tables.clear()
+        with ui.element("div").classes("all-repos-body w-full"):
+            if not current:
+                ui.label("No registered repositories match the selector.").classes(
+                    "text-sm text-gray-500")
+            for group in current:
+                with ui.card().classes("repository-group w-full"):
+                    label = group["name"] + (" (default)" if group["default"] else "")
+                    with ui.row().classes(
+                            "repository-heading w-full items-baseline gap-3 no-wrap"):
+                        ui.label(label).classes("text-base font-medium")
+                        ui.label(group["path"]).classes(
+                            "repository-path text-xs text-gray-500")
+                    if group["error"]:
+                        ui.label(group["error"]).classes("text-sm text-red-500")
+                    rows = group["rows"]
+                    if not rows and not group["error"]:
+                        ui.label("No agent definitions found.").classes(
+                            "text-sm text-gray-500")
+                    with ui.scroll_area().classes(
+                            "w-full agent-table-scroll") if rows else contextlib.nullcontext():
+                        if rows:
+                            table = ui.table(
+                                columns=_AGGREGATE_COLUMNS, rows=rows,
+                                row_key="identifier",
+                                pagination={"rowsPerPage": 0},
+                            ).classes("w-full").props(
+                                "flat dense hide-bottom separator=none")
+                            tables.append(table)
+                            _add_agent_information_slots(table)
+
+    container = ui.element("div").classes("w-full")
+
+    def rebuild() -> None:
+        nonlocal groups
+        groups = all_repo_groups()
+        container.clear()
+        with container:
+            if state_settings.get("grouped", True):
+                render_groups(groups)
+            else:
+                rows = [
+                    {**row, "repository": group["name"]}
+                    for group in groups for row in group["rows"]
+                ]
+                table = ui.table(
+                    columns=[
+                        {"name": "repository", "label": "Repository",
+                         "field": "repository", "sortable": True},
+                        *_AGGREGATE_COLUMNS,
+                    ],
+                    rows=_sorted_agent_rows(
+                        rows, str(state_settings.get("sort_by") or "name"),
+                        bool(state_settings.get("descending"))),
+                    row_key="identifier",
+                    pagination={"rowsPerPage": 0},
+                ).classes("w-full").props("flat dense hide-bottom separator=none")
+                _add_agent_information_slots(table)
 
     def select_repo(event) -> None:
-        selection["value"] = event.value
-        apply_filter()
+        state_settings["repo"] = event.value
+        rebuild()
+
+    def set_grouped(event) -> None:
+        state_settings["grouped"] = bool(event.value)
+        rebuild()
+
+    def set_sort(field: str) -> None:
+        if state_settings.get("sort_by") == field:
+            state_settings["descending"] = not state_settings.get("descending")
+        else:
+            state_settings["sort_by"] = field
+            state_settings["descending"] = False
+        rebuild()
 
     def refresh() -> None:
-        nonlocal rows
-        rows = _all_repos_rows()
-        apply_filter()
+        rebuild()
 
     with ui.row().classes("items-center gap-4"):
-        ui.select(["All", *names], value="All", label="Repository",
+        ui.select(["All", *repo_names], value=state_settings["repo"], label="Repository",
                   on_change=select_repo)
+        ui.checkbox("Group by repository", value=state_settings["grouped"],
+                    on_change=set_grouped)
+        for field, label in (
+            ("name", "Agent"),
+            ("state", "State"),
+            ("owner", "Owner"),
+            ("agent", "Runtime"),
+            ("model", "Model"),
+            ("cost_day", "Cost 24h"),
+            ("cost_week", "Cost 1w"),
+        ):
+            suffix = ""
+            if state_settings.get("sort_by") == field:
+                suffix = " desc" if state_settings.get("descending") else " asc"
+            ui.button(f"Sort {label}{suffix}", on_click=lambda f=field: set_sort(f))
         ui.button("Refresh", on_click=refresh)
+    rebuild()
     # Same cadence as the single-repo page: the view tracks reality
     # instead of freezing at process start.
     ui.timer(600.0, refresh)

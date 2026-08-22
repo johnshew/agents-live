@@ -268,6 +268,17 @@ def _remove(ref: str) -> None:
     _adminlog().record("repo-remove", repo=name, root=root)
 
 
+def _clear_default() -> bool:
+    with _registry_lock():
+        registry = load()
+        if registry["default_repo"] is None:
+            return False
+        registry["default_repo"] = None
+        _write(registry)
+    _adminlog().record("repo-default-clear")
+    return True
+
+
 CLI_ENV_VAR = "AGENTS_LIVE_CLI"
 
 
