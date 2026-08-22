@@ -5804,6 +5804,7 @@ class TestArchitectureFitness(unittest.TestCase):
             mock.patch.object(dashboard, "_refresh_summary", return_value="summary"),
             mock.patch.object(dashboard.agent_grid, "refresh", create=True),
             mock.patch.object(dashboard.header_actions, "refresh", create=True),
+            mock.patch.object(dashboard.host_service_panel, "refresh", create=True),
             mock.patch.object(
                 dashboard.hostruntime, "enumeration_pass",
                 return_value=contextlib.nullcontext()),

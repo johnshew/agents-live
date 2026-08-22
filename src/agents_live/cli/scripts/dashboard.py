@@ -1470,9 +1470,7 @@ def _refresh_views() -> None:
         summary = _refresh_summary()
         agent_grid.refresh()
         header_actions.refresh()
-        refresh_host_service = getattr(host_service_panel, "refresh", None)
-        if refresh_host_service is not None:
-            refresh_host_service()
+        host_service_panel.refresh()
     _push_log(summary)
 
 
