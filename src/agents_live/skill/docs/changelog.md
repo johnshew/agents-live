@@ -11,6 +11,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep ownership registries scoped to their repositories.
+  Multi-repository doctor, status, transfer, and dashboard operations now read
+  and write each registry through its selected project instead of reusing
+  another repository's ownership state.
+- fix: keep Windows process management behind the hidden host launch policy.
+  Watcher discovery and termination no longer start visible utility consoles,
+  and detached children on every host now use the shared process-creation seam.
+- fix: keep repository-scoped doctor checks within the selected project.
+  Plain `doctor` and scoped repair no longer inspect unrelated registered
+  repositories or wait on their ownership backends; `--all-repos` retains the
+  aggregate behavior.
 - fix: recognize v2 watcher metadata during candidate acceptance.
   The live acceptance preflight now resolves resident watcher identities from
   canonical metadata targets, while preserving markerless legacy discovery.
@@ -44,6 +55,10 @@ history is retained in the source repository.
 - docs: clarify UTC issue windows and foreground dashboard readiness.
   Agent guidance uses lower-bounded GitHub issue searches and treats dashboard
   API availability, not server-process exit, as the readiness signal.
+- feat: show clickable dashboard URLs and select the next available port. (#367)
+  `agents-live dashboard list` includes a loopback URL for every recorded
+  dashboard, startup announces the selected URL, and `--port next` scans from
+  8231 without changing fixed-port conflict behavior.
 - feat: implement the schema-2 processor contract.
   A definition declaring `agents-live.schema-version: "2"` selects it. Run context, invocation
   options, and the control, log, and output channels reach a processor in the
