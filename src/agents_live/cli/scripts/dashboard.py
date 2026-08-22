@@ -1093,9 +1093,10 @@ def host_service_status() -> dict:
             label = "Degraded, idle"
     started_at = start_record.get("ts")
     completed_at = end_record.get("ts") if end_record else None
+    verdict_duration = verdict.get("duration_s")
     duration = (
-        verdict.get("duration_s")
-        if verdict.get("duration_s") is not None
+        verdict_duration
+        if verdict_duration is not None
         else end_record.get("duration_s")
     )
     reason = str(verdict.get("reason", "")).strip()
@@ -1110,8 +1111,10 @@ def host_service_status() -> dict:
         "last_start": started_at,
         "last_completion": completed_at,
         "duration_s": duration,
-        "next_run": NEXT_MAINTENANCE_DESCRIPTION
-        if installed and not active else None,
+        "next_run": (
+            NEXT_MAINTENANCE_DESCRIPTION
+            if installed and not active and level != "stale" else None
+        ),
         "beacon": beacon,
         "smoketest": {
             "status": verdict_status or "unknown",
