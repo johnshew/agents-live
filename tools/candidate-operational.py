@@ -260,7 +260,6 @@ def _resident_watcher_ids(repo: Path) -> set[str]:
             marker = next(
                 index for index, item in enumerate(argv)
                 if item in {"watch-loop", "--watch-loop"})
-            role = argv[argv.index("--runtime-role") + 1]
         except (ValueError, IndexError, StopIteration):
             continue
         if "--metadata" in argv:
@@ -271,10 +270,14 @@ def _resident_watcher_ids(repo: Path) -> set[str]:
             if target is None or not target.startswith("agent:"):
                 continue
             identifier = target.removeprefix("agent:")
+            role = "watcher"
         else:
             try:
                 identifier = argv[marker + 1]
+                role = argv[argv.index("--runtime-role") + 1]
             except IndexError:
+                continue
+            except ValueError:
                 continue
         owned_launcher = any(
             Path(item).stem.casefold() == "agents-live"

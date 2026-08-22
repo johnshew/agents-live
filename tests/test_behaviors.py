@@ -3419,7 +3419,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             ))
             command = (
                 f'agents-live --repo "{repository}" internal watch-loop '
-                f'--metadata {metadata} sample-123 --runtime-role watcher'
+                f'--metadata {metadata} sample-123'
             )
             with mock.patch.dict(scope, {
                 "_process_command_lines": lambda: (command,),
