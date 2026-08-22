@@ -1398,12 +1398,15 @@ class TestRunsRecordWhatTheySpent(TempRepository):
 
     def test_dashboard_agent_collection_never_pulls_ownership(self) -> None:
         dashboard = self._dashboard()
-        with mock.patch.object(
+        with (
+            mock.patch.object(dashboard, "REPO_ROOT", self.root),
+            mock.patch.object(
                 dashboard.agent_view, "repository_agents",
-                return_value=()) as repository_agents:
+                return_value=()) as repository_agents,
+        ):
             self.assertEqual([], dashboard.collect_agents())
         repository_agents.assert_called_once_with(
-            dashboard.REPO_ROOT, ownership_rate_limit_secs=10**9)
+            self.root, ownership_rate_limit_secs=10**9)
 
     def test_dashboard_totals_unrounded_list_cost(self) -> None:
         dashboard = self._dashboard()
@@ -4168,6 +4171,29 @@ class TestCrossModuleAgreements(unittest.TestCase):
              "dashboard", "stop", "--port", "8232"],
             cwd=Path("C:/repo"), capture_output=True, text=True,
             encoding="utf-8", errors="replace", check=False)
+
+    def test_candidate_acceptance_parses_dashboard_list_pid(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        registered_pid = script["_registered_dashboard_pid"]
+        scope = registered_pid.__globals__
+        from agents_live.cli.scripts import dashboards
+
+        with (
+            mock.patch.object(dashboards, "port_answers", return_value=True),
+            mock.patch.dict(scope, {
+                "_run": lambda *_args: mock.Mock(stdout=dashboards._table([{
+                    "port": 8232,
+                    "pid": 42,
+                    "started": "2026-08-22T16:00:00+00:00",
+                    "repo": "C:/repo",
+                }])),
+            }),
+        ):
+            self.assertEqual(
+                42,
+                registered_pid(
+                    Path("agents-live.exe"), Path("C:/repo"), 8232))
 
     def test_candidate_acceptance_uses_uv_managed_launcher_not_path(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))

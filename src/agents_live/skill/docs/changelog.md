@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-20
+ms.date: 2026-08-22
 ms.topic: reference
 ---
 
@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain managed dashboard identity during candidate acceptance.
+  The operational gate now reads the PID from the public dashboard list's
+  `PORT URL PID` columns, preserving identity-safe cleanup after browser checks.
 - fix: recognize v2 watcher processes during candidate acceptance.
   Resident watcher checks now use the canonical metadata envelope without
   requiring launcher-role arguments removed by the unified runtime contract.
