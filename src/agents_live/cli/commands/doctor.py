@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.all_repos:
             try:
                 selected_root = state.resolve_root(allow_sole_registered=True)
-            except ValueError:
+            except (KeyError, ValueError):
                 repository_items = []
             else:
                 selected_name = next((
