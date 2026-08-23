@@ -283,10 +283,11 @@ COMMANDS = (
                           kind="positional", required=True),),
             ),
             Cmd(
-                "default", "Set the fallback repository.", "cli.commands.repos",
+                "default", "Set or clear the fallback repository.", "cli.commands.repos",
                 "in-process", root="none",
                 args=(Arg(("repo",), "Repository path or alias.",
-                          kind="positional", required=True),),
+                          kind="positional"),
+                      Arg(("--clear",), "Clear the fallback repository."),),
             ),
             Cmd(
                 "remove", "Remove a registered repository.", "cli.commands.repos",

@@ -19,7 +19,7 @@ import threading
 import time
 import unittest
 import zipfile
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from unittest import mock
 
@@ -4708,6 +4708,158 @@ class TestAgentPipeline(TempRepository):
         self.assertNotIn(identifier, state.load(self.root).agents)
 
 
+class TestDashboardRepositorySurface(TempRepository):
+    def _dashboard_module(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.app.post.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            module = importlib.import_module("agents_live.cli.scripts.dashboard")
+            return importlib.reload(module)
+
+    def test_dashboard_repository_settings_mutate_the_registry(self) -> None:
+        dashboard = self._dashboard_module()
+        other = (self.root / "other").resolve()
+        (other / "Agents").mkdir(parents=True)
+
+        added = dashboard._repository_mutation(
+            {"action": "add", "path": str(other)})
+        self.assertTrue(added["ok"], added)
+        self.assertEqual({"other": str(other)}, repos.load()["repos"])
+
+        selected = dashboard._repository_mutation(
+            {"action": "set-default", "repo": "other"})
+        self.assertTrue(selected["ok"], selected)
+        self.assertEqual("other", repos.load()["default_repo"])
+
+        cleared = dashboard._repository_mutation({"action": "clear-default"})
+        self.assertTrue(cleared["ok"], cleared)
+        self.assertIsNone(repos.load()["default_repo"])
+
+        removed = dashboard._repository_mutation(
+            {"action": "remove", "repo": "other"})
+        self.assertTrue(removed["ok"], removed)
+        self.assertEqual({}, repos.load()["repos"])
+        self.assertTrue(other.is_dir(), "unregistering must not delete files")
+
+    def test_dashboard_all_repo_groups_use_the_shared_informational_rows(self) -> None:
+        dashboard = self._dashboard_module()
+        other = (self.root / "other").resolve()
+        (other / "Agents").mkdir(parents=True)
+        self.skill("zeta", ['agents-live.selector: "fake/echo"'])
+        self.skill("alpha", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/prepare.py"',
+        ])
+        (self.root / "Agents" / "alpha" / "scripts").mkdir()
+        (self.root / "Agents" / "alpha" / "scripts" / "prepare.py").write_text(
+            "print('ok')\n", encoding="utf-8")
+        (other / "Agents" / "beta").mkdir(parents=True)
+        (other / "Agents" / "beta" / "SKILL.md").write_text(
+            "---\nname: beta\ndescription: Other repo.\nmetadata:\n"
+            '  agents-live.schema-version: "1"\n'
+            '  agents-live.selector: "fake/echo"\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        repos._add(str(self.root))
+        repos._add(str(other))
+        dashboard.STATE["all_repos"].update({
+            "repo": "All", "grouped": True,
+            "sort_by": "state", "descending": False,
+        })
+
+        groups = dashboard.all_repo_groups()
+        self.assertEqual(["other", self.root.name], [group["name"] for group in groups])
+        local_group = next(group for group in groups if group["name"] == self.root.name)
+        self.assertEqual(["alpha", "zeta"], [row["name"] for row in local_group["rows"]])
+        self.assertEqual("handler", local_group["rows"][0]["agent"])
+        self.assertEqual("fake", local_group["rows"][1]["agent"])
+        self.assertEqual(
+            [column["name"] for column in dashboard._AGENT_COLUMNS
+             if column["name"] != "actions"],
+            [column["name"] for column in dashboard._AGGREGATE_COLUMNS],
+        )
+        self.assertEqual(groups, dashboard.all_repo_groups())
+        dashboard.STATE["all_repos"]["descending"] = True
+        local_group = next(
+            group for group in dashboard.all_repo_groups()
+            if group["name"] == self.root.name)
+        self.assertEqual(["alpha", "zeta"], [
+            row["name"] for row in local_group["rows"]])
+
+    def test_dashboard_all_repo_groups_keep_unavailable_paths_visible(self) -> None:
+        dashboard = self._dashboard_module()
+        path = repos.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        missing = self.root / "missing"
+        path.write_text(
+            f"[repos]\nmissing = {json.dumps(str(missing))}\n",
+            encoding="utf-8",
+        )
+
+        groups = dashboard.all_repo_groups()
+        self.assertEqual(1, len(groups))
+        self.assertEqual("missing", groups[0]["name"])
+        self.assertFalse(groups[0]["available"])
+        self.assertIn("not an existing directory", groups[0]["error"])
+        self.assertEqual([], groups[0]["rows"])
+
+    def test_dashboard_ungrouped_rows_have_repository_qualified_keys(self) -> None:
+        dashboard = self._dashboard_module()
+        groups = [
+            {"name": "first", "rows": [{"identifier": "daily-123"}]},
+            {"name": "second", "rows": [{"identifier": "daily-123"}]},
+        ]
+
+        rows = dashboard._ungrouped_agent_rows(groups)
+
+        self.assertEqual(["first", "second"], [
+            row["repository"] for row in rows])
+        self.assertEqual(2, len({
+            row["repository_identifier"] for row in rows}))
+
+    def test_dashboard_host_service_shows_failed_idle_and_running_states(self) -> None:
+        dashboard = self._dashboard_module()
+        host = MemoryHost()
+        subscription = lifecycle.maintenance_subscription()
+        host.trigger_store.install(host.render(subscription))
+        previous = runtime.current()
+        runtime.configure(host)
+        try:
+            paths.health_beacon_path().parent.mkdir(parents=True, exist_ok=True)
+            paths.health_beacon_path().write_text(json.dumps({
+                "status": "degraded",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "smoketest": {
+                    "status": "fail",
+                    "reason": "timeout after 360s",
+                    "duration_s": 360,
+                },
+            }), encoding="utf-8")
+            obs.admin.record(
+                "maintenance", status="error", duration_s=361,
+                message="maintenance completed: degraded")
+
+            service = dashboard.host_service_status()
+            self.assertTrue(service["installed"])
+            self.assertEqual("failed", service["state"])
+            self.assertEqual("Failed, idle", service["label"])
+            self.assertEqual("timeout after 360s", service["smoketest"]["reason"])
+            self.assertEqual(360, service["duration_s"])
+            self.assertTrue(service["can_run"])
+
+            dashboard.STATE["health_check_running"] = True
+            running = dashboard.host_service_status()
+            self.assertEqual("running", running["state"])
+            self.assertFalse(running["can_run"])
+        finally:
+            dashboard.STATE["health_check_running"] = False
+            runtime.configure(previous)
+
+
+
 class TestArchitectureFitness(unittest.TestCase):
     def test_long_lived_process_creation_stays_with_host_owners(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
@@ -5669,6 +5821,7 @@ class TestArchitectureFitness(unittest.TestCase):
             mock.patch.object(dashboard, "_refresh_summary", return_value="summary"),
             mock.patch.object(dashboard.agent_grid, "refresh", create=True),
             mock.patch.object(dashboard.header_actions, "refresh", create=True),
+            mock.patch.object(dashboard.host_service_panel, "refresh", create=True),
             mock.patch.object(
                 dashboard.hostruntime, "enumeration_pass",
                 return_value=contextlib.nullcontext()),

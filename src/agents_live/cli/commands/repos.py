@@ -29,9 +29,14 @@ def main(argv: list[str] | None = None) -> int:
     add = subparsers.add_parser("add", help="Register a repository")
     add.add_argument(
         "path", help="Repository root directory (registered under its directory name)")
-    default = subparsers.add_parser(
-        "default", help="Set the fallback repository, registering a path if needed")
-    default.add_argument("repo", help="Repository path or registered directory name")
+    default_parser = subparsers.add_parser(
+        "default", help="Set or clear the fallback repository")
+    default_parser.add_argument(
+        "repo", nargs="?",
+        help="Repository path or registered directory name")
+    default_parser.add_argument(
+        "--clear", action="store_true",
+        help="Clear the configured default repository")
     remove = subparsers.add_parser("remove", help="Remove a registered repository")
     remove.add_argument("repo", help="Registered repository path or name")
     subparsers.add_parser("help", help="Show this help message")
@@ -42,7 +47,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "add":
             _converge_registered(registry._add(args.path))
         elif args.action == "default":
-            _converge_registered(registry._set_default(args.repo))
+            if args.clear:
+                if args.repo:
+                    parser.error(
+                        "--clear cannot be combined with a repository name or path")
+                registry._clear_default()
+            elif not args.repo:
+                parser.error("default requires a repository or --clear")
+            else:
+                _converge_registered(registry._set_default(args.repo))
         elif args.action == "remove":
             registry._remove(args.repo)
         else:
