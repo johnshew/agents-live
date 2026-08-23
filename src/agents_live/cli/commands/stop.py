@@ -16,6 +16,10 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.resolve_root()
     try:
         root, identifier = _select(args.name, root)
+        if not resolve.repository_pinned():
+            warning = resolve.collision_warning(args.name, root=root)
+            if warning:
+                print(warning, file=sys.stderr)
         result = lifecycle.converge(
             removals={root: {identifier}}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,

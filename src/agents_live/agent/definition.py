@@ -32,6 +32,9 @@ _RETIRED_FIELDS = {
     "user-invocable", "disable-model-invocation", "argument-hint",
 }
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_EXECUTION_KEY = re.compile(
+    r'''(?m)^ +(?:agents-live\.[a-z0-9-]+|"agents-live\.[a-z0-9-]+"|'''
+    r"'agents-live\.[a-z0-9-]+') *:")
 
 # The definition format this release understands. A definition declaring a
 # higher version is not malformed, it is from the future. Version 1 is the
@@ -200,9 +203,18 @@ def discover_definitions(root: Path) -> Discovery:
 def _declares_execution_metadata(prompt: Path) -> bool:
     """Whether a definition that failed to load claims to be ours."""
     try:
-        return "agents-live." in prompt.read_text(encoding="utf-8")
+        text = prompt.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False
+    try:
+        frontmatter, _body = _extract(text, prompt)
+    except DefinitionError:
+        return False
+    return _has_execution_metadata(frontmatter)
+
+
+def _has_execution_metadata(frontmatter: str) -> bool:
+    return _EXECUTION_KEY.search(frontmatter) is not None
 
 
 def _discovery_root(spec: AgentSpec) -> Path:
@@ -223,13 +235,11 @@ def _is_flat_definition(prompt: Path) -> bool:
     try:
         frontmatter, _body = _extract(text, prompt)
     except DefinitionError:
-        if "agents-live." in text:
-            raise
         return False
     try:
         candidate = yaml.safe_load(frontmatter)
     except yaml.YAMLError:
-        if "agents-live." in text:
+        if _has_execution_metadata(frontmatter):
             _parse(frontmatter, prompt)
         return False
     has_identity = isinstance(candidate, dict) and isinstance(
@@ -237,7 +247,8 @@ def _is_flat_definition(prompt: Path) -> bool:
         candidate.get("description"), str)
     has_retired_field = isinstance(candidate, dict) and bool(
         candidate.keys() & _RETIRED_FIELDS)
-    if not has_identity and not has_retired_field and "agents-live." not in text:
+    if not has_identity and not has_retired_field and not _has_execution_metadata(
+            frontmatter):
         return False
     _parse(frontmatter, prompt)
     return True

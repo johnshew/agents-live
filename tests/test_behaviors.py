@@ -5385,12 +5385,24 @@ class TestRepositoryDiscoveryRoots(TempRepository):
         skill that never mentions Agents Live is another tool's file, and
         reporting it turns every foreign edit into our error.
         """
-        self.definition(
-            self.root / ".claude" / "skills" / "ours" / "SKILL.md",
-            "ours", declared="mismatched")
+        ours = self.root / ".claude" / "skills" / "ours" / "SKILL.md"
+        ours.parent.mkdir(parents=True)
+        ours.write_text(
+            "---\nname: ours\ndescription: [invalid\nmetadata:\n"
+            '  agents-live.selector: "fake"\n---\nDo the work.\n',
+            encoding="utf-8",
+        )
         self.definition(
             self.root / ".claude" / "skills" / "theirs" / "SKILL.md",
             "theirs", metadata=False, declared="also-mismatched")
+        body_mention = (
+            self.root / ".claude" / "skills" / "body-mention" / "SKILL.md")
+        body_mention.parent.mkdir(parents=True)
+        body_mention.write_text(
+            "---\nname: body-mention\ndescription: [invalid\n---\n"
+            "This guide mentions agents-live.selector in its prose.\n",
+            encoding="utf-8",
+        )
 
         discovery = agent.discover(self.root)
         self.assertEqual((), discovery.specs)
@@ -5570,6 +5582,30 @@ class TestCrossRepositoryResolution(TempRepository):
         self.assertIn("life/git-sync-", error.getvalue())
         self.assertIn("notes/git-sync-", error.getvalue())
         converge.assert_not_called()
+
+    def test_stop_keeps_a_local_answer_and_warns_about_a_registered_one(
+            self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        local = self.definition(notes, "git-sync")
+        self.definition(life, "git-sync")
+        identifier = agent.load(str(local), root=notes).identifier
+        state.replace(notes, {identifier})
+        error = io.StringIO()
+
+        with (
+            self.unpinned(),
+            contextlib.redirect_stderr(error),
+            mock.patch.object(stop.paths, "resolve_root", return_value=notes),
+            mock.patch.object(stop.lifecycle, "converge") as converge,
+        ):
+            converge.return_value.failed = ()
+            code = stop.main(["--name", "git-sync", "--dry-run"])
+
+        self.assertEqual(0, code)
+        self.assertIn("life/git-sync-", error.getvalue())
+        converge.assert_called_once_with(
+            removals={notes: {identifier}}, dry_run=True)
 
     def test_stop_reports_a_missing_name_without_a_traceback(self) -> None:
         error = io.StringIO()
