@@ -125,6 +125,44 @@ gap before the platform is releasable from an installed artifact
 ([#243](https://github.com/johnshew/agents-live/issues/243),
 [#244](https://github.com/johnshew/agents-live/issues/244)).
 
+## Installation and deployment reliability
+
+The first priority cluster is the installation and upgrade path itself. The
+project already accepts the generation-based deployment model as the durable
+shape for the runtime: a versioned installation root, a stable launcher, atomic
+pointer activation, and ownership-aware health checks. The remaining work is to
+move the active install and bootstrap flow onto that model and make the native
+Windows path safe, directly downloadable, and resilient to stale caches and
+configured indexes.
+
+This cluster is currently tracked by [#334](https://github.com/johnshew/agents-live/issues/334)
+and [#395](https://github.com/johnshew/agents-live/issues/395), with follow-on
+work for migration, collector cleanup, and the Windows launcher tramping step
+still attached to the same delivery line.
+
+## Runtime repair and operational safety
+
+The next P1/P2 cluster is runtime health. A watch that silently drops events,
+reports a running agent after the process has died, or leaves the local logs and
+transcripts unbounded is operationally worse than a failing but visible run.
+
+This theme includes [#393](https://github.com/johnshew/agents-live/issues/393),
+[#259](https://github.com/johnshew/agents-live/issues/259), and the local
+observability work in [#105](https://github.com/johnshew/agents-live/issues/105),
+with the same principle: make failures explainable before expanding the runtime
+surface.
+
+## Repository and execution policy
+
+The remaining platform work keeps the repository model explicit and policy-led.
+Registration, init, discovery, ownership opt-in, and the trust boundary for
+provider-controlled hooks do not belong to one command or one directory, and
+keeping them separate is the delivery strategy.
+
+This cluster currently spans the staged repository-registration work in
+[#388](https://github.com/johnshew/agents-live/issues/388), the explicit opt-in
+for the cross-machine ownership backend in [#365](https://github.com/johnshew/agents-live/issues/365), the unattended-run trust decision in [#375](https://github.com/johnshew/agents-live/issues/375), and the provider execution safety work in [#374](https://github.com/johnshew/agents-live/issues/374) and [#376](https://github.com/johnshew/agents-live/issues/376).
+
 ## Maintaining this file
 
 - Add a theme when work spans several issues or needs a stated direction
