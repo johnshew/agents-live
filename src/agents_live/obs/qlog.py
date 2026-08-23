@@ -369,7 +369,7 @@ def check_schema(con: duckdb.DuckDBPyConnection,
         )
         archive_invalid_count = con.sql(
             "SELECT count(*) FROM log "
-            "WHERE _archive AND (ts IS NULL OR agent_name IS NULL "
+            "WHERE _archive AND _jsonl AND (ts IS NULL OR agent_name IS NULL "
             "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
         ).fetchone()[0]
         invalid_count = live_invalid_count + archive_invalid_count

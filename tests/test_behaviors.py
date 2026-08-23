@@ -817,6 +817,8 @@ class TestFailuresAreVisible(TempRepository):
             "log_schema": 5, "ts": "2026-08-01T00:00:00Z",
             "agent_name": "handler",
         }) + "\n", encoding="utf-8")
+        (archive / "heartbeat.log").write_text(
+            "2026-08-01 heartbeat is healthy\n", encoding="utf-8")
         parquet = archive / "2026-08.parquet"
         writer = qlog.duckdb.connect(":memory:")
         writer.sql(
