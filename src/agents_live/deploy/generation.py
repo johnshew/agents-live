@@ -1,0 +1,171 @@
+"""Build complete generations before atomically making one active.
+
+The builder owns filesystem state transitions, while callers provide the
+package installer and smoke check. Keeping those effects behind callables lets
+the same lifecycle install from PyPI or an exact local wheel without teaching
+the deployment layer about a package manager.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .. import paths
+from ..runtime.hosts import system as hostruntime
+from . import layout, ownership, pointer
+
+FORMAT = 1
+
+
+class GenerationError(RuntimeError):
+    """A generation could not reach a complete, validated state."""
+
+
+@dataclass(frozen=True)
+class Generation:
+    """A complete generation carrying a persisted validation record."""
+
+    name: str
+    path: Path
+    validated: str
+    format: int = FORMAT
+
+
+def _discard_staging(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def _record(generation: Generation) -> str:
+    return json.dumps(
+        {
+            "format": generation.format,
+            "generation": generation.name,
+            "validated": generation.validated,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+
+
+def load(name: str, *, root: Path | None = None) -> Generation:
+    """Load a complete, validated generation or refuse incomplete state."""
+    generation_name = layout.generation_name(name)
+    target = layout.generation_dir(generation_name, root)
+    record_path = layout.generation_record_path(generation_name, root)
+    if target.is_symlink() or not target.is_dir():
+        raise GenerationError(f"generation {generation_name} is not installed")
+    try:
+        document = json.loads(record_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise GenerationError(
+            f"generation {generation_name} has no validation record") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GenerationError(
+            f"generation {generation_name} has an unreadable validation "
+            f"record: {exc}") from exc
+    if not isinstance(document, dict):
+        raise GenerationError(
+            f"generation {generation_name} has an invalid validation record")
+    version = document.get("format")
+    if not isinstance(version, int) or version < 1:
+        raise GenerationError(
+            f"generation {generation_name} has an invalid validation format")
+    if version > FORMAT:
+        raise GenerationError(
+            f"generation {generation_name} uses validation format {version}; "
+            f"this runtime understands format {FORMAT}")
+    recorded_name = document.get("generation")
+    validated = document.get("validated")
+    if recorded_name != generation_name or not isinstance(validated, str) or not validated:
+        raise GenerationError(
+            f"generation {generation_name} has a mismatched validation record")
+    return Generation(generation_name, target, validated, version)
+
+
+def build(
+    name: str,
+    *,
+    populate: Callable[[Path], None],
+    validate: Callable[[Path], None],
+    root: Path | None = None,
+) -> Generation:
+    """Populate, validate, and promote an immutable generation.
+
+    A failed populate or validation leaves only the recognizable staging
+    directory. The next attempt discards that directory before starting.
+    Neither path reads or writes the active pointer.
+    """
+    generation_name = layout.generation_name(name)
+    install_root = root or layout.installation_root()
+    staging = layout.staging_dir(generation_name, install_root)
+    target = layout.generation_dir(generation_name, install_root)
+    install_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            if target.exists():
+                raise GenerationError(
+                    f"generation {generation_name} is already installed and "
+                    "will not be rewritten")
+            _discard_staging(staging)
+            try:
+                populate(staging)
+            except Exception as exc:
+                raise GenerationError(
+                    f"could not stage generation {generation_name}: {exc}") from exc
+            if not staging.is_dir() or staging.is_symlink():
+                raise GenerationError(
+                    f"staging generation {generation_name} did not create a "
+                    "generation directory")
+            try:
+                validate(staging)
+            except Exception as exc:
+                raise GenerationError(
+                    f"generation {generation_name} failed validation: {exc}") from exc
+            generation = Generation(
+                generation_name,
+                target,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+            paths.atomic_write_text(
+                staging / layout.GENERATION_RECORD, _record(generation))
+            try:
+                staging.rename(target)
+            except OSError as exc:
+                raise GenerationError(
+                    f"could not complete generation {generation_name}: {exc}") from exc
+            return generation
+    except hostruntime.LockBusy as exc:
+        raise GenerationError(
+            "another generation operation owns the installation lock") from exc
+
+
+def activate(generation: Generation, *, root: Path | None = None) -> pointer.Pointer:
+    """Atomically activate a previously validated generation."""
+    install_root = root or layout.installation_root()
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            installed = load(generation.name, root=install_root)
+            if installed != generation:
+                raise GenerationError(
+                    f"generation {generation.name} changed after validation")
+            _, state, detail = pointer.status(layout.pointer_path(install_root))
+            if state not in (pointer.ACTIVE, pointer.MISSING):
+                raise GenerationError(
+                    f"activation refused because {detail}")
+            return pointer.write(
+                generation.name,
+                owner=ownership.SELF,
+                path=layout.pointer_path(install_root),
+            )
+    except hostruntime.LockBusy as exc:
+        raise GenerationError(
+            "another generation operation owns the installation lock") from exc

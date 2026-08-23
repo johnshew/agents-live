@@ -251,6 +251,20 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "install-generation", "Build a self-managed runtime generation.",
+        "cli.commands.install_generation", "in-process",
+        root="none", hidden=True, update_notice=False,
+        args=(
+            Arg(("version",), "Exact package version.", kind="positional",
+                required=True),
+            Arg(("--from",), "Install from a local project or wheel.",
+                kind="value"),
+            Arg(("--install-root",), "Override the installation root.",
+                kind="value"),
+            Arg(("--activate",), "Activate after validation."),
+        ),
+    ),
+    Cmd(
         "migrate", "Convert 5.x flat definitions.", "cli.commands.definition_migrate",
         "in-process",
         args=(

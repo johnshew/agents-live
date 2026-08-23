@@ -9,11 +9,14 @@ ms.topic: concept
 
 ## Status
 
-Foundation accepted and landed as primitives only. The layout, the pointer,
-the ownership model, and the lifecycle planning exist and are tested; nothing
-uses them to install, upgrade, or uninstall anything. Installation stays
-uv-managed, `agents-live upgrade` still runs `uv tool upgrade`, and the
-Windows deferred-handoff machinery is untouched.
+Foundation accepted. The layout, pointer, ownership model, lifecycle planning,
+and a generation builder now exist and are tested. The builder stages a new
+environment, validates it, promotes it without touching the active generation,
+and can activate it with the single pointer write. A hidden
+`install-generation` seam composes that API with `uv`, but no public install,
+upgrade, or uninstall path calls it. Installation stays uv-managed,
+`agents-live upgrade` still runs `uv tool upgrade`, and the Windows
+deferred-handoff machinery is untouched.
 
 This record supplies the vocabulary, failure semantics, and ownership rules
 that [#369](https://github.com/johnshew/agents-live/issues/369) owes
@@ -178,7 +181,10 @@ launchers.
 
 Landed now: the layout, the pointer format and its refusals, the ownership
 classification, the lifecycle plan with its ordering invariant, the retention
-and collection rule, and a `doctor` check that names the upgrade owner.
+and collection rule, a `doctor` check that names the upgrade owner, and the
+tested staging, validation, promotion, and activation API. The hidden
+`install-generation` command is an integration seam for exact local artifacts
+or published versions; it is not the active installer or upgrader.
 
 Deferred, and each is a breaking step that must land on its own:
 

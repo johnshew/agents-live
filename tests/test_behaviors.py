@@ -1970,6 +1970,44 @@ class TestInstallationGenerations(unittest.TestCase):
             "[tool]\n", encoding="utf-8")
         return environment / "bin" / "agents-live"
 
+    def _package_wheel(self, version: str) -> Path:
+        wheel = (
+            Path(self.temporary.name)
+            / f"agents_live-{version}-py3-none-any.whl"
+        )
+        dist_info = f"agents_live-{version}.dist-info"
+        files = {
+            "agents_live/__init__.py": f'__version__ = "{version}"\n',
+            "agents_live/cli/__init__.py": "",
+            "agents_live/cli/__main__.py": (
+                "from agents_live import __version__\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print(f'agents-live {__version__}')\n"
+                "else:\n"
+                "    print('usage: agents-live [options]')\n"
+            ),
+            f"{dist_info}/METADATA": (
+                "Metadata-Version: 2.1\n"
+                "Name: agents-live\n"
+                f"Version: {version}\n"
+                "Requires-Python: >=3.12\n"
+            ),
+            f"{dist_info}/WHEEL": (
+                "Wheel-Version: 1.0\n"
+                "Generator: agents-live-tests\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        }
+        record = "\n".join(f"{name},," for name in files)
+        record += f"\n{dist_info}/RECORD,,\n"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+            archive.writestr(f"{dist_info}/RECORD", record)
+        return wheel
+
     def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
         """A staged generation writes wherever its name resolves.
 
@@ -2107,6 +2145,113 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertLess(activate, plan.index(deploy.plan.VERIFY))
         self.assertLess(plan.index(deploy.plan.STAGE), activate)
 
+    def test_failed_validation_leaves_the_active_generation_untouched(
+            self) -> None:
+        """A broken candidate stays recognizable and inert beside the active."""
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+
+        def populate(staging: Path) -> None:
+            staging.mkdir(parents=True)
+            (staging / "runtime").write_text("candidate", encoding="utf-8")
+
+        def reject(_staging: Path) -> None:
+            raise RuntimeError("smoke check failed")
+
+        with self.assertRaises(deploy.generation.GenerationError) as failed:
+            deploy.generation.build(
+                "6.6.0", populate=populate, validate=reject)
+        self.assertIn("smoke check failed", str(failed.exception))
+        self.assertTrue(deploy.layout.staging_dir("6.6.0").is_dir())
+        self.assertFalse(deploy.layout.generation_dir("6.6.0").exists())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+
+        def validate(staging: Path) -> None:
+            self.assertFalse((staging / "obsolete").exists())
+            self.assertEqual(
+                "candidate",
+                (staging / "runtime").read_text(encoding="utf-8"),
+            )
+
+        (deploy.layout.staging_dir("6.6.0") / "obsolete").write_text(
+            "from failed attempt", encoding="utf-8")
+        built = deploy.generation.build(
+            "6.6.0", populate=populate, validate=validate)
+        self.assertEqual(
+            deploy.layout.generation_dir("6.6.0"), built.path)
+        self.assertFalse(deploy.layout.staging_dir("6.6.0").exists())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+
+        deploy.generation.activate(built)
+        self.assertEqual("6.6.0", deploy.pointer.read().generation)
+
+    def test_activation_refuses_unvalidated_or_damaged_installation_state(
+            self) -> None:
+        """Activation cannot skip validation or overwrite pointer damage."""
+        incomplete = self._generation("6.6.0")
+        with self.assertRaises(deploy.generation.GenerationError):
+            deploy.generation.load("6.6.0")
+        self.assertFalse(deploy.layout.pointer_path().exists())
+
+        shutil.rmtree(incomplete)
+        built = deploy.generation.build(
+            "6.6.0",
+            populate=lambda staging: staging.mkdir(parents=True),
+            validate=lambda _staging: None,
+        )
+        deploy.layout.pointer_path().write_text("{broken", encoding="utf-8")
+        with self.assertRaises(deploy.generation.GenerationError) as refused:
+            deploy.generation.activate(built)
+        self.assertIn("not readable JSON", str(refused.exception))
+        self.assertEqual(
+            "{broken",
+            deploy.layout.pointer_path().read_text(encoding="utf-8"),
+        )
+
+    def test_hidden_install_seam_builds_and_activates_an_exact_wheel(
+            self) -> None:
+        """The CLI boundary drives real uv staging and staged-CLI validation."""
+        version = "9.9.9"
+        wheel = self._package_wheel(version)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agents_live.cli",
+                "install-generation",
+                version,
+                "--from",
+                str(wheel),
+                "--install-root",
+                str(self.root),
+                "--activate",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(
+            f"built and activated generation {version}", completed.stdout)
+        self.assertEqual(version, deploy.pointer.read().generation)
+        installed = deploy.generation.load(version)
+        interpreter = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename(hostruntime.interpreter_name())
+        )
+        reported = subprocess.run(
+            [
+                str(interpreter),
+                "-I",
+                "-c",
+                "from agents_live import __version__; print(__version__)",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, reported.returncode, reported.stderr)
+        self.assertEqual(version, reported.stdout.strip())
+
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
         """Upgrade stops being refusable, which is the operator payoff.
@@ -2166,14 +2311,13 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertTrue(deploy.plan.recovery("pointer-unsupported").manual)
         self.assertIsNone(deploy.plan.recovery("invented-state"))
 
-    def test_the_generation_layout_is_inert_until_upgrade_writes_it(
+    def test_the_existing_upgrade_path_does_not_activate_generations(
             self) -> None:
-        """This change adds the model; it does not switch to it.
+        """The hidden builder seam does not switch the active upgrade path.
 
-        Installation, upgrade, and uninstall stay uv-managed until #334
-        step 2, so no shipped command may write a pointer, record an
-        owner, or relocate itself. Reading is allowed, and `doctor`
-        does exactly that.
+        Installation, upgrade, and uninstall stay uv-managed until their
+        migration lands. Only the explicit hidden generation command composes
+        the new mutating API.
         """
         self.assertEqual((), deploy.layout.installed_generations())
         self.assertEqual(
@@ -2188,6 +2332,12 @@ class TestInstallationGenerations(unittest.TestCase):
                     for call in ("pointer.write(", "ownership.write_record("))
         }
         self.assertEqual(set(), writers)
+        upgrade_source = (
+            REPOSITORY / "src" / "agents_live" / "cli" / "commands" /
+            "upgrade.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("install_generation", upgrade_source)
+        self.assertNotIn("deploy.generation", upgrade_source)
 
 
 class TestCrossModuleAgreements(unittest.TestCase):

@@ -19,6 +19,8 @@ tested without a host:
 - :mod:`~agents_live.deploy.ownership` decides which channel owns the
   installation a command is running from, so a foreign owner can be
   reported before it can be raced.
+- :mod:`~agents_live.deploy.generation` stages, validates, and promotes a
+  generation before activation performs the single pointer write.
 - :mod:`~agents_live.deploy.plan` is the pure generation lifecycle: the
   ordered steps, what may run before activation, what a partial failure
   recovers to, and which generations a collector may remove.
@@ -28,6 +30,6 @@ recorded in ``docs/decisions/deployment-generations.md``.
 """
 from __future__ import annotations
 
-from . import layout, ownership, plan, pointer
+from . import generation, layout, ownership, plan, pointer
 
-__all__ = ["layout", "ownership", "plan", "pointer"]
+__all__ = ["generation", "layout", "ownership", "plan", "pointer"]
