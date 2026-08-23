@@ -265,6 +265,18 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "install-release", "Install an authenticated official release.",
+        "cli.commands.install_release", "in-process",
+        root="none", hidden=True, update_notice=False,
+        args=(
+            Arg(("version",), "Exact stable version; defaults to latest.",
+                kind="positional"),
+            Arg(("--install-root",), "Override the installation root.",
+                kind="value"),
+            Arg(("--activate",), "Activate after validation."),
+        ),
+    ),
+    Cmd(
         "migrate", "Convert 5.x flat definitions.", "cli.commands.definition_migrate",
         "in-process",
         args=(

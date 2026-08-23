@@ -229,6 +229,13 @@ the workflow. Automation should use noninteractive run-status APIs or
 `GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
 over the terminal's alternate screen.
 
+GitHub also records a SHA-256 digest and byte size for each uploaded asset in
+its release API. The generation bootstrap accepts only the uniquely named wheel
+from the official repository and fails closed when that metadata is absent,
+invalid, or does not match the downloaded bytes. This is separate from the
+manifest check above: the manifest protects publication, while the release API
+metadata is the provenance contract consumed by the installer.
+
 PyPI's versioned JSON endpoint can expose a release before the Simple API used
 by package resolvers. A successful workflow and HTTP 200 from the versioned
 JSON endpoint confirm publication. Exact-version `uvx` resolution separately

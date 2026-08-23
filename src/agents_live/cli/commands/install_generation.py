@@ -78,6 +78,36 @@ def _validate(version: str, staging: Path) -> None:
             "staged CLI help did not identify agents-live")
 
 
+def install(
+    version: str,
+    *,
+    source: Path | None = None,
+    root: Path | None = None,
+    activate: bool = False,
+    provenance: deploy.generation.Provenance | None = None,
+) -> deploy.generation.Generation:
+    """Build an exact generation through the shared uv-backed seam."""
+    uv = find_uv()
+    built = deploy.generation.build(
+        version,
+        root=root,
+        populate=lambda staging: _populate(uv, source, version, staging),
+        validate=lambda staging: _validate(version, staging),
+        provenance=provenance,
+    )
+    if activate:
+        deploy.generation.activate(built, root=root)
+    return built
+
+
+def executable(generation: deploy.generation.Generation) -> Path:
+    """Return the generation-local CLI path an operator can run immediately."""
+    return (
+        hostruntime.executable_dir(generation.path)
+        / hostruntime.executable_filename("agents-live")
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and optionally activate one self-managed generation")
@@ -91,16 +121,12 @@ def main() -> int:
         print(f"no such package source: {source}", file=sys.stderr)
         return 1
     try:
-        uv = find_uv()
-        built = deploy.generation.build(
+        built = install(
             args.version,
+            source=source,
             root=args.install_root,
-            populate=lambda staging: _populate(
-                uv, source, args.version, staging),
-            validate=lambda staging: _validate(args.version, staging),
+            activate=args.activate,
         )
-        if args.activate:
-            deploy.generation.activate(built, root=args.install_root)
     except (FileNotFoundError, OSError, ValueError,
             deploy.generation.GenerationError) as exc:
         print(str(exc), file=sys.stderr)

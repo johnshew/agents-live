@@ -26,6 +26,15 @@ class GenerationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Provenance:
+    """The authenticated artifact from which a generation was built."""
+
+    channel: str
+    artifact: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class Generation:
     """A complete generation carrying a persisted validation record."""
 
@@ -33,6 +42,18 @@ class Generation:
     path: Path
     validated: str
     format: int = FORMAT
+    provenance: Provenance | None = None
+
+
+def _validate_provenance(provenance: Provenance) -> None:
+    if (
+        not provenance.channel
+        or not provenance.artifact
+        or len(provenance.sha256) != 64
+        or any(character not in "0123456789abcdef"
+               for character in provenance.sha256)
+    ):
+        raise GenerationError("artifact provenance is invalid")
 
 
 def _discard_staging(path: Path) -> None:
@@ -43,15 +64,18 @@ def _discard_staging(path: Path) -> None:
 
 
 def _record(generation: Generation) -> str:
-    return json.dumps(
-        {
-            "format": generation.format,
-            "generation": generation.name,
-            "validated": generation.validated,
-        },
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    document: dict[str, object] = {
+        "format": generation.format,
+        "generation": generation.name,
+        "validated": generation.validated,
+    }
+    if generation.provenance is not None:
+        document["provenance"] = {
+            "channel": generation.provenance.channel,
+            "artifact": generation.provenance.artifact,
+            "sha256": generation.provenance.sha256,
+        }
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
 def load(name: str, *, root: Path | None = None) -> Generation:
@@ -86,7 +110,27 @@ def load(name: str, *, root: Path | None = None) -> Generation:
     if recorded_name != generation_name or not isinstance(validated, str) or not validated:
         raise GenerationError(
             f"generation {generation_name} has a mismatched validation record")
-    return Generation(generation_name, target, validated, version)
+    raw_provenance = document.get("provenance")
+    provenance = None
+    if raw_provenance is not None:
+        if not isinstance(raw_provenance, dict):
+            raise GenerationError(
+                f"generation {generation_name} has invalid artifact provenance")
+        channel = raw_provenance.get("channel")
+        artifact = raw_provenance.get("artifact")
+        sha256 = raw_provenance.get("sha256")
+        if not all(isinstance(value, str)
+                   for value in (channel, artifact, sha256)):
+            raise GenerationError(
+                f"generation {generation_name} has invalid artifact provenance")
+        provenance = Provenance(channel, artifact, sha256)
+        try:
+            _validate_provenance(provenance)
+        except GenerationError as exc:
+            raise GenerationError(
+                f"generation {generation_name} has invalid artifact provenance"
+            ) from exc
+    return Generation(generation_name, target, validated, version, provenance)
 
 
 def build(
@@ -95,6 +139,7 @@ def build(
     populate: Callable[[Path], None],
     validate: Callable[[Path], None],
     root: Path | None = None,
+    provenance: Provenance | None = None,
 ) -> Generation:
     """Populate, validate, and promote an immutable generation.
 
@@ -103,6 +148,8 @@ def build(
     Neither path reads or writes the active pointer.
     """
     generation_name = layout.generation_name(name)
+    if provenance is not None:
+        _validate_provenance(provenance)
     install_root = root or layout.installation_root()
     staging = layout.staging_dir(generation_name, install_root)
     target = layout.generation_dir(generation_name, install_root)
@@ -133,6 +180,7 @@ def build(
                 generation_name,
                 target,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                provenance=provenance,
             )
             paths.atomic_write_text(
                 staging / layout.GENERATION_RECORD, _record(generation))

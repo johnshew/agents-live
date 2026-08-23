@@ -37,7 +37,7 @@ from unittest import mock
 from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
-from agents_live.cli.commands import start, stop
+from agents_live.cli.commands import install_release, start, stop
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
@@ -1978,14 +1978,18 @@ class TestInstallationGenerations(unittest.TestCase):
         dist_info = f"agents_live-{version}.dist-info"
         files = {
             "agents_live/__init__.py": f'__version__ = "{version}"\n',
-            "agents_live/cli/__init__.py": "",
-            "agents_live/cli/__main__.py": (
+            "agents_live/cli/__init__.py": (
                 "from agents_live import __version__\n"
-                "import sys\n"
-                "if '--version' in sys.argv:\n"
-                "    print(f'agents-live {__version__}')\n"
-                "else:\n"
-                "    print('usage: agents-live [options]')\n"
+                "def main():\n"
+                "    import sys\n"
+                "    if '--version' in sys.argv:\n"
+                "        print(f'agents-live {__version__}')\n"
+                "    else:\n"
+                "        print('usage: agents-live [options]')\n"
+            ),
+            "agents_live/cli/__main__.py": (
+                "from . import main\n"
+                "main()\n"
             ),
             f"{dist_info}/METADATA": (
                 "Metadata-Version: 2.1\n"
@@ -1998,6 +2002,11 @@ class TestInstallationGenerations(unittest.TestCase):
                 "Generator: agents-live-tests\n"
                 "Root-Is-Purelib: true\n"
                 "Tag: py3-none-any\n"
+            ),
+            f"{dist_info}/entry_points.txt": (
+                "[console_scripts]\n"
+                "agents-live = agents_live.cli:main\n"
+                "al = agents_live.cli:main\n"
             ),
         }
         record = "\n".join(f"{name},," for name in files)
@@ -2251,6 +2260,182 @@ class TestInstallationGenerations(unittest.TestCase):
         )
         self.assertEqual(0, reported.returncode, reported.stderr)
         self.assertEqual(version, reported.stdout.strip())
+
+    def test_official_release_metadata_authenticates_exact_wheel_bytes(
+            self) -> None:
+        """The release API digest, not a configured index, authenticates bytes."""
+        version = "9.8.7"
+        content = b"exact wheel bytes"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_url = (
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/agents_live-{version}-py3-none-any.whl"
+        )
+        metadata = json.dumps({
+            "tag_name": f"v{version}",
+            "draft": False,
+            "prerelease": False,
+            "assets": [{
+                "name": f"agents_live-{version}-py3-none-any.whl",
+                "state": "uploaded",
+                "browser_download_url": artifact_url,
+                "digest": f"sha256:{digest}",
+                "size": len(content),
+            }],
+        }).encode()
+        requested: list[str] = []
+
+        class Response(io.BytesIO):
+            def __init__(self, value: bytes, url: str):
+                super().__init__(value)
+                self.url = url
+
+            def geturl(self) -> str:
+                return self.url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        def opener(request, **_kwargs):
+            requested.append(request.full_url)
+            if request.full_url.startswith(deploy.release_artifact.API_ROOT):
+                return Response(metadata, "https://api.github.com/release")
+            return Response(
+                content,
+                "https://release-assets.githubusercontent.com/artifact",
+            )
+
+        latest = deploy.release_artifact.resolve(opener=opener)
+        artifact = deploy.release_artifact.resolve(version, opener=opener)
+        self.assertEqual(artifact, latest)
+        with deploy.release_artifact.verified_download(
+                artifact, root=self.root, opener=opener) as wheel:
+            self.assertEqual(content, wheel.read_bytes())
+            self.assertEqual(artifact.name, wheel.name)
+        self.assertEqual(
+            [
+                "https://api.github.com/repos/johnshew/agents-live/releases/latest",
+                "https://api.github.com/repos/johnshew/agents-live/releases/"
+                f"tags/v{version}",
+                artifact_url,
+            ],
+            requested,
+        )
+        self.assertEqual([], list(self.root.glob(".artifact-*")))
+
+    def test_release_download_fails_closed_on_a_checksum_mismatch(self) -> None:
+        """Corrupt bytes never reach uv or leave an installable partial artifact."""
+        content = b"tampered"
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            "9.8.7",
+            "agents_live-9.8.7-py3-none-any.whl",
+            "https://github.com/johnshew/agents-live/releases/download/"
+            "v9.8.7/agents_live-9.8.7-py3-none-any.whl",
+            "0" * 64,
+            len(content),
+        )
+
+        class Response(io.BytesIO):
+            def geturl(self) -> str:
+                return "https://release-assets.githubusercontent.com/artifact"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with self.assertRaises(
+                deploy.release_artifact.ReleaseArtifactError) as failed:
+            with deploy.release_artifact.verified_download(
+                    artifact,
+                    root=self.root,
+                    opener=lambda *_args, **_kwargs: Response(content)):
+                self.fail("unverified bytes were yielded")
+        self.assertIn("checksum mismatch", str(failed.exception))
+        self.assertEqual([], list(self.root.glob(".artifact-*")))
+        self.assertFalse(deploy.layout.pointer_path().exists())
+
+    def test_verified_release_cli_builds_the_generation_from_a_local_wheel(
+            self) -> None:
+        """The network seam hands exact bytes to the landed generation builder."""
+        version = "9.7.6"
+        wheel = self._package_wheel(version)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            version,
+            wheel.name,
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/{wheel.name}",
+            digest,
+            wheel.stat().st_size,
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact,
+                "verified_download",
+                return_value=contextlib.nullcontext(wheel),
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"UV_INDEX_URL": "http://127.0.0.1:9/simple"},
+            ),
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = install_release.main()
+        self.assertEqual(0, code)
+        self.assertIn(f"sha256:{digest}", stdout.getvalue())
+        self.assertEqual(version, deploy.pointer.read().generation)
+        installed = deploy.generation.load(version)
+        self.assertEqual(
+            deploy.generation.Provenance("github-release", wheel.name, digest),
+            installed.provenance,
+        )
+        self.assertTrue(
+            (
+                hostruntime.executable_dir(installed.path)
+                / hostruntime.executable_filename("agents-live")
+            ).is_file()
+        )
+
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact, "verified_download") as download,
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = install_release.main()
+        self.assertEqual(0, code)
+        download.assert_not_called()
 
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
