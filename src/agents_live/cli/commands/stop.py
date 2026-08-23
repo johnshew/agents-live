@@ -5,7 +5,7 @@ import argparse
 import sys
 
 from ... import agent, paths, state
-from .. import lifecycle
+from .. import lifecycle, resolve
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,8 +15,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = paths.resolve_root()
     try:
-        snapshot = state.load(root)
-        identifier = _resolve(args.name, snapshot, root)
+        root, identifier = _select(args.name, root)
         result = lifecycle.converge(
             removals={root: {identifier}}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,
@@ -28,6 +27,43 @@ def main(argv: list[str] | None = None) -> int:
     for operation, message in result.failed:
         print(f"{operation.key}: {message}", file=sys.stderr)
     return 1 if result.failed else 0
+
+
+def _select(name: str, root) -> tuple:
+    """The repository and identifier this stop acts on.
+
+    Stopping follows the same resolution as starting: a name the current
+    repository does not answer may be started in another registered one,
+    and refusing to stop it there would leave automation running with no
+    way to withdraw it except by finding the repository by hand (#388).
+    """
+    snapshot = state.load(root)
+    missing = None
+    try:
+        return root, _resolve(name, snapshot, root)
+    except agent.DefinitionNotFound as exc:
+        if resolve.repository_pinned():
+            raise
+        missing = exc
+    matches = []
+    for candidate in resolve.registered_roots(exclude=root):
+        try:
+            identifier = _resolve(name, state.load(candidate), candidate)
+        except (agent.DefinitionNotFound, state.StartedStateUnavailable):
+            continue
+        matches.append((candidate, identifier))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        choices = "\n".join(
+            f"  {item}" for item in resolve.qualified_identifiers(matches))
+        raise resolve.AmbiguousAgent(
+            f"agent '{name}' is ambiguous across registered repositories\n"
+            f"{choices}\n"
+            "use: agents-live --repo <repository> stop <identifier>")
+    if missing is not None:
+        raise missing
+    raise agent.DefinitionNotFound(f"definition not found: {name}")
 
 
 def _resolve(name: str, snapshot: state.StartedSnapshot, root) -> str:

@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-22
+ms.date: 2026-08-23
 ms.topic: reference
 ---
 
@@ -10,6 +10,32 @@ changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
+
+- feat: install `al` as a package-owned shorthand for `agents-live`. The
+  packaged artifact gate runs `--version` and `--help` through both entry
+  points on Windows and POSIX, and verifies that uv refuses to replace an
+  unrelated existing `al` executable. (#368)
+- chore: move checkout and setup-uv workflows to Node.js 24 action releases
+  and key the uv cache from `pyproject.toml`, preserving existing checkout refs,
+  fetch depth, job names, and release-tag resolution. (#364)
+- feat: establish the inert generation-deployment foundation: versioned
+  installation paths, an atomic data pointer, upgrade-owner detection,
+  lifecycle and recovery planning, and `doctor` visibility. Existing uv-managed
+  install, upgrade, and uninstall behavior is unchanged. (#334, #369)
+- feat: search the standard client skill roots for definitions. Discovery now
+  covers `Agents/`, `.claude/skills/`, `.github/skills/`, and `.agents/skills/`
+  in addition to any configured `agent_directories`. A client skill root
+  contributes only definitions carrying `agents-live.` execution metadata, so
+  guidance-only skills stay invisible, and an `Agents/` definition wins a name
+  collision. A repository that names one of those roots in `agent_directories`
+  claims it, and `migrate` never rewrites an unclaimed client skill root. (#388)
+- feat: resolve an agent name across registered repositories. `run`, `start`,
+  `stop`, and `status` search the selected repository first, then the
+  registered repositories in alias order, reporting which repository answered.
+  Several answers stop `run`, `start`, and `stop` with the qualified
+  `<alias>/<identifier>` choices rather than a guess, while `status` lists
+  every match; pinning with `--repo` or running from a persisted trigger keeps
+  the search local. `run --json` gained a `repository` field. (#388)
 
 ## 6.5.0 - 2026-08-22
 

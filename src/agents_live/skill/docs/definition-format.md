@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-08-17
+ms.date: 2026-08-23
 ms.topic: reference
 ---
 
@@ -14,12 +14,23 @@ An Agents Live definition uses one of two layouts:
 - `<discovery-root>/<name>.md` is the Agents Live flat-file extension. `name`
   must match the filename stem.
 
-`Agents/` is always a discovery root. Add repository-relative roots with
-`agent_directories = ["foo"]` in `.agents-live.toml` or the
-`[tool.agents-live]` table in `pyproject.toml`. Discovery is immediate, not
-recursive. Standard Agent Skills fields remain at the top level. Optional
+Four standard discovery roots are searched: `Agents/`, `.claude/skills/`,
+`.github/skills/`, and `.agents/skills/`. Set `agent_directories = ["foo"]` in
+`.agents-live.toml` or the `[tool.agents-live]` table in `pyproject.toml` to
+add your own repository-relative roots to that set. Discovery is immediate,
+not recursive. Standard Agent Skills fields remain at the top level. Optional
 unattended execution policy uses quoted string values under `metadata` with
 the `agents-live.` prefix.
+
+The three client skill roots hold skills written for other tools, so Agents
+Live only claims a definition there when it carries `agents-live.` execution
+metadata. A guidance-only skill in `.claude/skills/` is invisible to
+`agents-live`, and a file there that fails to parse is reported as broken only
+when it mentions `agents-live.`. Naming one of those roots in
+`agent_directories` claims it for the repository, and it is then treated like
+any other root. When a name exists in both `Agents/` and a client skill root,
+the `Agents/` definition wins so a newly visible skill cannot re-route a
+command that already worked.
 
 ```yaml
 ---
@@ -136,8 +147,8 @@ helper referenced by several definitions is copied into each one, so the
 copies can then drift.
 
 Both forms are first-class. A flat `<name>.md` and a `<name>/SKILL.md` bundle
-are discovered in `Agents/` and in every configured `agent_directories` root,
-and both use the same metadata contract. The bundle is the conforming Agent
+are discovered in every effective discovery root, and both use the same
+metadata contract. The bundle is the conforming Agent
 Skill; the flat file is the Agents Live extension.
 
 Migration preserves an exact file watch as an exact pattern. A path ending in
@@ -146,9 +157,11 @@ Migration preserves an exact file watch as an exact pattern. A path ending in
 has no trailing directory separator stays exact rather than being guessed to
 be a directory.
 
-`migrate` scans `Agents/` and every configured `agent_directories` root. A
-file that already carries `agents-live.` metadata is skipped, so a scan
-reports only what is still to do and a converted repository reports nothing.
+`migrate` scans every effective discovery root except unclaimed standard
+client skill roots. A repository can opt a client root into migration by
+naming it in `agent_directories`. A file that already carries `agents-live.`
+metadata is skipped, so a scan reports only what is still to do and a
+converted repository reports nothing.
 
 Three 5.x fields have no portable equivalent, so the conversion stops rather
 than guessing:

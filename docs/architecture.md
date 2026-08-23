@@ -1,7 +1,7 @@
 ---
 title: Agents Live Architecture
 description: Current package ownership, runtime flow, state, and architectural invariants
-ms.date: 2026-08-09
+ms.date: 2026-08-23
 ms.topic: concept
 ---
 
@@ -26,6 +26,8 @@ agents_live/
   state/                 repository registry, ownership, started intent
   obs/                   event schema, administrative events, query, timeline
   pipeline/              run-scoped MCP resources and stdio bridge
+  deploy/                installation root, generation pointer, launcher,
+                         ownership, and lifecycle planning (not yet in use)
   cli/
     commands/            importable command handlers
     scripts/             optional-dependency PEP 723 tools
@@ -47,6 +49,12 @@ Two root resources are temporary physical-path compatibility exceptions:
 
 Both exceptions expire with the 5.x artifact migration support in 7.0.
 
+`deploy/` is present but inert: it computes the installation root, generation
+directories, pointer, and launcher paths, classifies which channel owns an
+installation, and plans the generation lifecycle. Nothing installs, upgrades,
+or uninstalls through it yet - installation remains uv-managed. See
+[decisions/deployment-generations.md](decisions/deployment-generations.md).
+
 ## Definitions
 
 A definition is one of:
@@ -58,8 +66,11 @@ Both forms are discovered in every root, including `Agents/`. Processor and
 schema references are relative to the skill root, which is the bundle
 directory for a bundle and the discovery root for a flat definition.
 
-`Agents/` is always a discovery root. Repositories can add immediate,
-repository-relative roots through `agent_directories`. Execution metadata uses
+`Agents/`, `.claude/skills/`, `.github/skills/`, and `.agents/skills/` are the
+standard discovery roots; `agent_directories` adds further immediate,
+repository-relative roots. A client skill root contributes only definitions
+that carry `agents-live.` execution metadata, unless the repository claims the
+root in `agent_directories`. Execution metadata uses
 quoted `agents-live.*` values under the standard `metadata` map. The complete
 schema is in
 [definition-format.md](../src/agents_live/skill/docs/definition-format.md).

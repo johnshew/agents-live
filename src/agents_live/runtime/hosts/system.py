@@ -121,6 +121,27 @@ def user_state_base() -> Path:
     return Path.home() / ".local" / "state"
 
 
+def user_data_base() -> Path:
+    """Where this host puts per-user application data that must not roam.
+
+    The XDG spelling on POSIX, the local application-data directory on
+    Windows. An installation is machine-local by definition - it holds
+    executables built for this machine - so a roaming profile must not
+    carry it to another one. An explicit ``XDG_DATA_HOME`` still wins on
+    both hosts, which is what lets a test point a whole installation
+    tree somewhere temporary.
+    """
+    explicit = os.environ.get("XDG_DATA_HOME", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    if _IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        if local:
+            return Path(local)
+        return Path.home() / "AppData" / "Local"
+    return Path.home() / ".local" / "share"
+
+
 # ---------------------------------------------------------------------------
 # Enumeration passes
 # ---------------------------------------------------------------------------

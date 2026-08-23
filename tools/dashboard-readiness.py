@@ -108,11 +108,30 @@ def _launcher(
     if editable:
         base = ["uv", "run", "--with-editable", str(ROOT)]
         return ([*base, "agents-live"], [*base, "python"])
+    candidate = _wheel(wheel)
+    collision_root = directory / "collision"
+    collision_tools = collision_root / "tools"
+    collision_bin = collision_root / "bin"
+    collision_bin.mkdir(parents=True)
+    collision_alias = collision_bin / ("al.exe" if os.name == "nt" else "al")
+    marker = b"unrelated executable\n"
+    collision_alias.write_bytes(marker)
+    collision_environment = os.environ.copy()
+    collision_environment.update({
+        "UV_TOOL_DIR": str(collision_tools),
+        "UV_TOOL_BIN_DIR": str(collision_bin),
+    })
+    collision = subprocess.run(
+        ["uv", "tool", "install", str(candidate)],
+        capture_output=True, text=True, env=collision_environment)
+    if collision.returncode == 0 or collision_alias.read_bytes() != marker:
+        raise ReadinessError(
+            "uv silently replaced an unrelated al executable during install")
     environment = directory / "runtime"
     for command in (
         ["uv", "venv", str(environment)],
         ["uv", "pip", "install", "--python", str(environment),
-         str(_wheel(wheel))],
+         str(candidate)],
     ):
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
@@ -122,6 +141,22 @@ def _launcher(
     windows = os.name == "nt"
     binaries = environment / ("Scripts" if windows else "bin")
     suffix = ".exe" if windows else ""
+    primary = binaries / f"agents-live{suffix}"
+    alias = binaries / f"al{suffix}"
+    for arguments in (["--version"], ["--help"]):
+        outputs = []
+        for executable in (primary, alias):
+            completed = subprocess.run(
+                [str(executable), *arguments], capture_output=True, text=True)
+            if completed.returncode != 0:
+                raise ReadinessError(
+                    f"{executable.name} {' '.join(arguments)} failed:\n"
+                    f"{completed.stdout}{completed.stderr}")
+            outputs.append(completed.stdout)
+        if outputs[0] != outputs[1]:
+            raise ReadinessError(
+                f"{primary.name} and {alias.name} disagree for "
+                f"{' '.join(arguments)}")
     return ([str(binaries / f"agents-live{suffix}")],
             [str(binaries / f"python{suffix}")])
 

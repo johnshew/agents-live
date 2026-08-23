@@ -77,6 +77,16 @@ PYPROJECT_TABLE = "agents-live"  # [tool.agents-live]
 # the file).
 MARKERS = (CONFIG_DOTFILE, f"{PYPROJECT} with [tool.{PYPROJECT_TABLE}]")
 
+# The discovery roots searched when a repository declares no
+# ``agent_directories`` (issue #388). ``Agents/`` is the Agents Live
+# root; the other three are the project skill locations that
+# Claude-compatible and GitHub Copilot/VS Code tooling already read.
+# Agents Live consumes those bundles where they are and never copies or
+# moves them.
+CLIENT_SKILL_DIRECTORIES = (
+    ".claude/skills", ".github/skills", ".agents/skills")
+STANDARD_AGENT_DIRECTORIES = ("Agents", *CLIENT_SKILL_DIRECTORIES)
+
 _cached_default_root: Path | None = None
 _cached_default_source: str | None = None
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -506,6 +516,55 @@ def atomic_write_text(path: Path, content: str, *,
         except OSError:
             pass
         raise
+
+
+def effective_agent_directories(
+        root: Path, config: dict | None = None) -> list[Path]:
+    """The repository's discovery roots, resolved (issue #388).
+
+    The standard roots always apply, and ``agent_directories`` adds to
+    them rather than replacing them, so a repository that already
+    configured extra roots keeps discovering exactly what it did before
+    plus the client skill roots. None of the roots has to exist. A root
+    named twice - by the standard set and by configuration - is searched
+    once, in standard-set order.
+    """
+    base = Path(root)
+    values = (load_config(base) if config is None else config).get(
+        "agent_directories")
+    directories = [base / item for item in STANDARD_AGENT_DIRECTORIES]
+    if values is not None:
+        seen = {directory.resolve() for directory in directories}
+        for directory in validated_agent_directories(base, values):
+            if directory.resolve() in seen:
+                continue
+            seen.add(directory.resolve())
+            directories.append(directory)
+    return directories
+
+
+def client_skill_roots(root: Path, config: dict | None = None) -> frozenset[Path]:
+    """The standard client skill roots this repository has not claimed.
+
+    Those roots belong to Claude-compatible and Copilot/VS Code tooling
+    and hold ordinary guidance skills, so Agents Live claims only the
+    ones that opt in with ``agents-live.*`` execution metadata. Naming
+    such a directory in ``agent_directories`` is the repository saying
+    the root is its own, which restores the plain treatment it had before
+    the root became standard.
+    """
+    base = Path(root)
+    values = (load_config(base) if config is None else config).get(
+        "agent_directories")
+    claimed: set[Path] = set()
+    if values is not None:
+        claimed = {
+            directory.resolve()
+            for directory in validated_agent_directories(base, values)
+        }
+    return frozenset(
+        (base / item).resolve() for item in CLIENT_SKILL_DIRECTORIES
+        if (base / item).resolve() not in claimed)
 
 
 def validated_agent_directories(root: Path, values: object) -> list[Path]:

@@ -1,0 +1,190 @@
+"""Where a self-managed installation keeps its generations.
+
+The layout is the one #334 describes:
+
+    <installation root>/
+        versions/<generation>/   a complete environment, never rewritten
+        versions/.staging-<id>/  an incomplete one, safe to delete
+        bin/                     the stable launchers, on PATH
+        current.json             the pointer naming the active generation
+        owner.json               which channel owns this installation
+
+Two properties decide whether the model works, and both live here.
+
+The pointer is data, not an executable. Flipping it rewrites
+``current.json`` and nothing else, so no running image has to be
+replaced and Windows has nothing to lock (#231).
+
+A generation directory is named, never derived from unvalidated input. A
+name that could climb out of ``versions/`` would let a staged generation
+write anywhere the installing user can, so names are validated before
+they reach the filesystem rather than after.
+
+Nothing in this module creates or mutates a directory: it computes paths
+and refuses bad names. The install, upgrade, and collect steps that will
+use it are #334 steps 2 and 3.
+"""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+
+from ..runtime.hosts import system as hostruntime
+
+#: Points the whole installation tree somewhere else. Tests use it; an
+#: operator with a machine that keeps applications off the system drive
+#: is the reason it is not test-only.
+ENV_INSTALL_ROOT = "AGENTS_LIVE_INSTALL_ROOT"
+
+GENERATIONS = "versions"
+LAUNCHERS = "bin"
+POINTER = "current.json"
+OWNERSHIP = "owner.json"
+STAGING_PREFIX = ".staging-"
+
+#: The entry points a stable launcher must answer for. ``al`` is the same
+#: runtime under a shorter name (#368), so it resolves through the same
+#: pointer rather than pinning a generation of its own.
+LAUNCHER_NAMES = ("agents-live", "al")
+
+# A generation name reaches the filesystem, so it is validated against
+# what a version may contain rather than against what a path may not.
+# PEP 440 versions, Git describes, and local build tags all fit.
+_GENERATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
+
+
+class LayoutError(ValueError):
+    """A name that may not become part of the installation root."""
+
+
+def installation_root() -> Path:
+    """The root a self-managed installation owns, entirely.
+
+    ``%LOCALAPPDATA%\\agents-live`` on Windows and
+    ``$XDG_DATA_HOME/agents-live`` on POSIX, unless
+    :data:`ENV_INSTALL_ROOT` names somewhere else. The directory is
+    machine-local on purpose: it holds executables built for this
+    machine, which must not follow a roaming profile to another.
+    """
+    explicit = os.environ.get(ENV_INSTALL_ROOT, "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return hostruntime.user_data_base() / "agents-live"
+
+
+def generations_root(root: Path | None = None) -> Path:
+    """Where every installed generation lives, active or not."""
+    return (root or installation_root()) / GENERATIONS
+
+
+def generation_name(version: str) -> str:
+    """*version* as a directory name, or a refusal.
+
+    Raises :class:`LayoutError` for anything that is not a plain name:
+    empty or blank, a separator, a drive, ``.``/``..``, a leading ``~``,
+    or a character outside the version alphabet. The check runs before
+    the name is joined to a path, because a name that escapes is only
+    observable afterwards, as a write outside the installation root.
+    """
+    candidate = (version or "").strip()
+    if not candidate:
+        raise LayoutError("a generation needs a name")
+    if not _GENERATION.fullmatch(candidate):
+        raise LayoutError(
+            f"'{version}' is not a usable generation name; a generation is "
+            "named with letters, digits, and '.', '_', '+', or '-'")
+    return candidate
+
+
+def generation_dir(version: str, root: Path | None = None) -> Path:
+    """The directory a complete generation occupies."""
+    return generations_root(root) / generation_name(version)
+
+
+def staging_dir(version: str, root: Path | None = None) -> Path:
+    """Where a generation is built before it is complete.
+
+    The prefix marks it as incomplete for anything that lists the
+    generations, so an interrupted stage is recognizable rather than
+    indistinguishable from a generation that merely failed to run.
+    """
+    return generations_root(root) / f"{STAGING_PREFIX}{generation_name(version)}"
+
+
+def is_staging(name: str) -> bool:
+    """Whether a directory name is an incomplete generation."""
+    return name.startswith(STAGING_PREFIX)
+
+
+def pointer_path(root: Path | None = None) -> Path:
+    """The generation pointer: the one file an activation writes."""
+    return (root or installation_root()) / POINTER
+
+
+def ownership_path(root: Path | None = None) -> Path:
+    """Where this installation records which channel owns it.
+
+    Beside the pointer, not in machine-local state: an installation that
+    is deleted, copied, or restored takes the answer with it, and a
+    command can read both facts from the tree it is about to change.
+    """
+    return (root or installation_root()) / OWNERSHIP
+
+
+def launcher_root(root: Path | None = None) -> Path:
+    """The directory an operator puts on PATH, and never has to change."""
+    return (root or installation_root()) / LAUNCHERS
+
+
+def launcher_path(name: str = "agents-live", root: Path | None = None) -> Path:
+    """The stable launcher for *name*.
+
+    Named with the host's own executable suffix. On Windows that
+    excludes a ``.cmd`` or ``.bat`` shim by construction, which matters
+    beyond taste: pinned scheduler and crontab command paths refuse a
+    batch shim (see ``hostruntime.pin_executable``), so a launcher that
+    scheduled work cannot pin is not a launcher. Which native
+    trampoline provides it is still open in #334.
+    """
+    if name not in LAUNCHER_NAMES:
+        raise LayoutError(
+            f"'{name}' is not an Agents Live launcher; expected one of "
+            f"{', '.join(LAUNCHER_NAMES)}")
+    return launcher_root(root) / hostruntime.executable_filename(name)
+
+
+def installed_generations(root: Path | None = None) -> tuple[str, ...]:
+    """Complete generations on disk, sorted, staging directories excluded.
+
+    An unreadable or absent ``versions/`` answers with nothing rather
+    than raising: a host that has never used this model is the normal
+    case, not a fault.
+    """
+    try:
+        entries = sorted(
+            entry.name for entry in generations_root(root).iterdir()
+            if entry.is_dir() and not is_staging(entry.name))
+    except OSError:
+        return ()
+    return tuple(entries)
+
+
+def generation_of(path: Path | str, root: Path | None = None) -> str | None:
+    """The generation *path* runs from, or ``None`` if it is outside one.
+
+    This is how a process answers what it is executing without asking a
+    package manager: the answer is the directory the running image sits
+    in, which stays true for the life of the process even after the
+    pointer moves on.
+    """
+    try:
+        candidate = Path(path).resolve()
+        generations = generations_root(root).resolve()
+    except OSError:
+        return None
+    for parent in (candidate, *candidate.parents):
+        if parent.parent == generations:
+            name = parent.name
+            return None if is_staging(name) else name
+    return None

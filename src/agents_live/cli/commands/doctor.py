@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ... import agent, paths, runtime, state
+from ... import agent, deploy, paths, runtime, state
 from ...runtime.hosts import system as hostruntime
 from ...state import registry as repos
 from .. import lifecycle, update_check
@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             "check": "host runtime", "ok": False, "detail": str(exc)})
     else:
         checks.append(_host_check(health))
+    checks.append(_installation_check())
     selected_roots: tuple[Path, ...] | None = ()
     if registry is not None:
         repository_items = sorted(registry["repos"].items())
@@ -403,6 +404,35 @@ def _host_check(health: runtime.Health) -> dict[str, object]:
         "check": "host runtime",
         "ok": health.healthy,
         "detail": "; ".join(health.detail) or health.liveness,
+    }
+
+
+def _installation_check() -> dict[str, object]:
+    """Report which channel owns this installation (#369).
+
+    An operator should be able to see who may replace the runtime
+    without reading a design document, and should see it before two
+    channels can race to do it. Only two conditions fail: a generation
+    pointer that exists and does not answer, and a host where a
+    generation layout and another channel's installation both claim the
+    name. Everything else - and today that is every real installation,
+    since nothing writes a generation layout yet - is reported and
+    passes.
+    """
+    try:
+        installation = deploy.ownership.describe()
+    except OSError as exc:
+        return {
+            "check": "installation", "ok": False,
+            "detail": f"installation model could not be inspected: {exc}",
+        }
+    damaged = installation.pointer_state in (
+        deploy.pointer.UNREADABLE, deploy.pointer.MALFORMED,
+        deploy.pointer.UNSUPPORTED)
+    return {
+        "check": "installation",
+        "ok": not (damaged or installation.contested),
+        "detail": installation.summary(),
     }
 
 

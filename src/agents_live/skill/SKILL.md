@@ -51,12 +51,17 @@ commit. Stale docs are worse than missing ones.
 
 ## Agent directories
 
-`Agents/` is always searched. Project configuration may add repository-relative
-discovery roots with `agent_directories = ["foo"]` in `.agents-live.toml` or
-the `[tool.agents-live]` table in `pyproject.toml`. Each root is searched one
+`Agents/`, `.claude/skills/`, `.github/skills/`, and `.agents/skills/` are the
+standard discovery roots. Project configuration adds repository-relative
+roots with `agent_directories = ["foo"]` in `.agents-live.toml` or the
+`[tool.agents-live]` table in `pyproject.toml`. Each root is searched one
 level deep for `<name>.md` flat definitions and `<name>/SKILL.md` Agent Skill
 bundles. Flat definitions use the Agent Skills content schema but are an
-Agents Live extension; only the bundle layout conforms to Agent Skills.
+Agents Live extension; only the bundle layout conforms to Agent Skills. In the
+three client skill roots, only definitions carrying `agents-live.` execution
+metadata belong to Agents Live, unless the repository claims the root in
+`agent_directories`; an `Agents/` definition wins a name collision with one of
+them.
 
 Every definition has a canonical `<name>-<path-hash>` identifier derived from
 its repository-relative prompt path. A plain name remains valid when unique.

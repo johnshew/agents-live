@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, and backlog
-ms.date: 2026-08-14
+ms.date: 2026-08-23
 ms.topic: overview
 ---
 
@@ -37,6 +37,9 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [decisions/no-python-api.md](decisions/no-python-api.md) - why processors
   use the JSON CLI and child process contract instead of importing the
   package, and what handlers should call instead.
+- [decisions/deployment-generations.md](decisions/deployment-generations.md) -
+  why an installation owns a generation root, a data pointer, and a stable
+  launcher, and what each partial failure recovers to.
 - [processor-contract.md](processor-contract.md) - why the processor contract
   is shaped the way it is, and which alternatives were rejected. The contract
   itself is specified in the skill payload.

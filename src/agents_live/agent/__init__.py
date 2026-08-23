@@ -3,6 +3,7 @@ from .definition import (
     SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
     DefinitionError,
+    DefinitionNotFound,
     UnsupportedSchemaVersion,
 )
 from .port import (
@@ -45,6 +46,7 @@ __all__ = [
     "BrokenDefinition",
     "Completion",
     "DefinitionError",
+    "DefinitionNotFound",
     "Discovery",
     "Launch",
     "Outcome",

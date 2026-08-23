@@ -34,10 +34,10 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
-from agents_live import agent, obs, paths, plugins, runtime, state
+from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
-from agents_live.cli import lifecycle, upgrade_handoff
-from agents_live.cli.commands import start
+from agents_live.cli import lifecycle, resolve, upgrade_handoff
+from agents_live.cli.commands import start, stop
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
@@ -1934,6 +1934,262 @@ class TestPromptFitsTheHostCommandLine(unittest.TestCase):
         self.assertEqual("42", result.stdout.strip())
 
 
+class TestInstallationGenerations(unittest.TestCase):
+    """Where an installation may write, and what it may never guess.
+
+    #334 replaces the in-place `uv tool upgrade` with side-by-side
+    generations and a pointer, and #369 supplies the ownership rules
+    that decide who may move that pointer. The primitives land before
+    the behavior does, so these hold the decisions the later steps
+    depend on: a generation name that cannot escape the installation
+    root, a pointer that refuses rather than guesses, an owner read from
+    what is executing, a plan that never disturbs the active generation
+    before the pointer moves, and a collector that keeps the rollback.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve() / "install"
+        patched = mock.patch.dict(
+            os.environ,
+            {deploy.layout.ENV_INSTALL_ROOT: str(self.root)},
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def _generation(self, name: str) -> Path:
+        directory = deploy.layout.generation_dir(name)
+        (directory / "bin").mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _uv_environment(self) -> Path:
+        environment = Path(self.temporary.name) / "uv-tools" / "agents-live"
+        (environment / "bin").mkdir(parents=True, exist_ok=True)
+        (environment / deploy.ownership.RECEIPT).write_text(
+            "[tool]\n", encoding="utf-8")
+        return environment / "bin" / "agents-live"
+
+    def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
+        """A staged generation writes wherever its name resolves.
+
+        The name arrives from a version string, a release tag, or an
+        operator's argument, and it is joined to a path. A name that
+        climbs out of `versions/` is only observable afterwards, as a
+        write somewhere the installer never meant to touch.
+        """
+        for name in ("", "   ", "..", "../evil", "a/b", "a\\b", "~",
+                     "C:\\windows", ".hidden", "6.5.0/../..", "v 1"):
+            with self.subTest(name=name):
+                with self.assertRaises(deploy.layout.LayoutError):
+                    deploy.layout.generation_dir(name)
+        for name in ("6.5.0", "6.6.0rc1", "6.5.0+local.1", "2026.08.23-dev"):
+            with self.subTest(name=name):
+                directory = deploy.layout.generation_dir(name)
+                self.assertEqual(
+                    deploy.layout.generations_root(), directory.parent)
+                self.assertIn(self.root, directory.parents)
+
+    def test_activation_is_one_pointer_write_and_rollback_is_the_same_write(
+            self) -> None:
+        """The pointer is data, not an executable.
+
+        That is the property the whole model rests on: Windows locks a
+        running image, so an activation that rewrote `agents-live.exe`
+        would reintroduce #231 in a new place. It also makes rollback
+        free, because the previous generation was never modified.
+        """
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        deploy.pointer.write("6.6.0", owner=deploy.ownership.SELF)
+        self.assertEqual(
+            ["current.json"], sorted(item.name for item in self.root.iterdir()))
+        self.assertEqual("6.6.0", deploy.pointer.read().generation)
+
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+
+    def test_a_pointer_this_runtime_cannot_read_is_refused_not_guessed(
+            self) -> None:
+        """Guessing is how a host runs a generation nobody activated.
+
+        Both damaged pointers stay damaged: with generations on disk,
+        an implementation that "recovered" by picking the newest
+        directory would look healthy and run something unactivated.
+        """
+        self._generation("6.5.0")
+        self._generation("6.6.0")
+        pointer_path = deploy.layout.pointer_path()
+
+        pointer_path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(deploy.pointer.PointerError) as malformed:
+            deploy.pointer.read()
+        self.assertEqual(deploy.pointer.MALFORMED, malformed.exception.reason)
+
+        pointer_path.write_text(
+            json.dumps({"format": deploy.pointer.FORMAT + 1,
+                        "generation": "6.6.0"}), encoding="utf-8")
+        with self.assertRaises(deploy.pointer.PointerError) as unsupported:
+            deploy.pointer.read()
+        self.assertEqual(
+            deploy.pointer.UNSUPPORTED, unsupported.exception.reason)
+        self.assertIn("launcher", str(unsupported.exception))
+
+        found, state, detail = deploy.pointer.status()
+        self.assertIsNone(found)
+        self.assertEqual(deploy.pointer.UNSUPPORTED, state)
+        self.assertNotIn("6.6.0", detail)
+
+    def test_the_running_image_decides_which_channel_owns_the_runtime(
+            self) -> None:
+        """An upgrade replaces an artifact, so the artifact decides.
+
+        A recorded owner is a claim; what is executing is the fact. The
+        uv answer comes from a receipt beside the running image rather
+        than from asking uv, because a command that must report before
+        it acts cannot afford a subprocess that may hang.
+        """
+        generation = self._generation("6.5.0")
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+
+        managed = deploy.ownership.describe(
+            executable=generation / "bin" / "agents-live")
+        self.assertEqual(deploy.ownership.SELF, managed.owner)
+        self.assertEqual("6.5.0", managed.generation)
+        self.assertFalse(managed.stale)
+        self.assertIsNone(deploy.ownership.refusal(managed))
+
+        uv_installed = deploy.ownership.describe(executable=self._uv_environment())
+        self.assertEqual(deploy.ownership.UV, uv_installed.owner)
+        self.assertIsNone(uv_installed.generation)
+
+        elsewhere = deploy.ownership.describe(
+            executable=Path(self.temporary.name) / "checkout" / "bin" / "python")
+        self.assertEqual(deploy.ownership.UNMANAGED, elsewhere.owner)
+
+    def test_a_second_owner_is_reported_before_two_channels_can_race(
+            self) -> None:
+        """Two artifacts can answer to `agents-live` on one PATH.
+
+        If both believe they may replace the runtime, an operator's
+        `uv tool upgrade` rewrites a shim whose generation Agents Live
+        owns, and the partial-replacement failure returns through a
+        different door (#369).
+        """
+        self._generation("6.5.0")
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+
+        contested = deploy.ownership.describe(executable=self._uv_environment())
+        self.assertTrue(contested.contested)
+        self.assertIn("only one", contested.detail)
+        self.assertIsNotNone(deploy.ownership.refusal(contested))
+        plan = deploy.plan.plan_activation(
+            target="6.6.0", current="6.5.0", installation=contested)
+        self.assertFalse(plan.ok)
+        self.assertEqual((), plan.steps)
+
+    def test_nothing_disturbs_the_active_generation_before_the_pointer_moves(
+            self) -> None:
+        """Staging beside the active generation is the whole point.
+
+        An in-place rewrite is what leaves an installation on neither
+        version, so every step that runs before activation must be able
+        to fail without an operator noticing, and activation itself must
+        be the single reversible act.
+        """
+        plan = deploy.plan.plan_activation(target="6.6.0", current="6.5.0")
+        self.assertTrue(plan.ok)
+        activate = plan.index(deploy.plan.ACTIVATE)
+        self.assertEqual(
+            [], [step.name for step in plan.steps[:activate]
+                 if step.touches_active])
+        self.assertTrue(plan.steps[activate].reversible)
+        self.assertEqual("6.5.0", plan.rollback_to)
+        self.assertLess(activate, plan.index(deploy.plan.VERIFY))
+        self.assertLess(plan.index(deploy.plan.STAGE), activate)
+
+    def test_processes_on_the_active_generation_do_not_block_an_upgrade(
+            self) -> None:
+        """Upgrade stops being refusable, which is the operator payoff.
+
+        A watcher holding the active generation keeps executing it and
+        hands off at its next idle version check (#188). A process
+        holding the *target* directory is different: staging would
+        rewrite a directory that is executing, which is the failure this
+        model exists to remove.
+        """
+        running = deploy.plan.plan_activation(
+            target="6.6.0", current="6.5.0",
+            holders={"6.5.0": ("watcher 'nightly' (pid 4242)",)})
+        self.assertTrue(running.ok)
+        self.assertEqual((), running.quiesce)
+        self.assertTrue(any("6.5.0" in note for note in running.notes))
+
+        reinstalling = deploy.plan.plan_activation(
+            target="6.6.0", current="6.5.0",
+            holders={"6.6.0": ("dashboard on port 8080 (pid 77)",)})
+        self.assertFalse(reinstalling.ok)
+        self.assertIn("dashboard on port 8080", reinstalling.refusal)
+
+    def test_the_collector_keeps_the_rollback_and_never_removes_what_runs(
+            self) -> None:
+        """A collector that races an activation is the expensive bug.
+
+        The active generation is what every launcher resolves to, the
+        retained previous one is the rollback, and a held one is
+        executing - on Windows its removal would half-finish.
+        """
+        collectable = deploy.plan.collectable(
+            ("6.3.0", "6.4.0", "6.5.0", "6.6.0"),
+            active="6.6.0",
+            held={"6.3.0": ("watcher 'nightly' (pid 4242)",)},
+            order=("6.3.0", "6.4.0", "6.5.0", "6.6.0"))
+        self.assertEqual(("6.4.0",), collectable)
+        self.assertEqual(
+            (), deploy.plan.collectable(("6.6.0",), active="6.6.0"))
+
+    def test_every_way_a_deployment_can_stop_half_way_has_an_answer(
+            self) -> None:
+        """#369 asks for the failure semantics, not a best effort.
+
+        A state with no stated recovery is one an operator meets for the
+        first time on a broken host.
+        """
+        for state_name in deploy.plan.states():
+            with self.subTest(state=state_name):
+                found = deploy.plan.recovery(state_name)
+                self.assertIsNotNone(found)
+                self.assertTrue(found.action and found.detail)
+        self.assertEqual("verify", deploy.plan.recovery("activated").action)
+        self.assertEqual("rollback", deploy.plan.recovery("unverified").action)
+        self.assertEqual(
+            "discard", deploy.plan.recovery("staging").action)
+        self.assertTrue(deploy.plan.recovery("pointer-unsupported").manual)
+        self.assertIsNone(deploy.plan.recovery("invented-state"))
+
+    def test_the_generation_layout_is_inert_until_upgrade_writes_it(
+            self) -> None:
+        """This change adds the model; it does not switch to it.
+
+        Installation, upgrade, and uninstall stay uv-managed until #334
+        step 2, so no shipped command may write a pointer, record an
+        owner, or relocate itself. Reading is allowed, and `doctor`
+        does exactly that.
+        """
+        self.assertEqual((), deploy.layout.installed_generations())
+        self.assertEqual(
+            deploy.pointer.MISSING, deploy.pointer.status()[1])
+
+        package = REPOSITORY / "src" / "agents_live"
+        writers = {
+            path.relative_to(package).as_posix()
+            for path in package.rglob("*.py")
+            if not path.relative_to(package).as_posix().startswith("deploy/")
+            and any(call in path.read_text(encoding="utf-8")
+                    for call in ("pointer.write(", "ownership.write_record("))
+        }
+        self.assertEqual(set(), writers)
+
+
 class TestCrossModuleAgreements(unittest.TestCase):
     """Assertions that two parts of the tree still agree (#216).
 
@@ -2111,6 +2367,21 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("Documentation-only change", workflow)
         self.assertIn("src/agents_live/skill/SKILL.md", workflow)
         self.assertIn("src/agents_live/skill/templates/*", workflow)
+
+    def test_workflow_actions_use_node24_and_real_cache_inputs(self) -> None:
+        test = self._workflow_text("test.yml")
+        publish = self._workflow_text("publish.yml")
+        for workflow in (test, publish):
+            with self.subTest(workflow=workflow.splitlines()[0]):
+                self.assertIn("actions/checkout@v7", workflow)
+                self.assertIn("astral-sh/setup-uv@v10.0.1", workflow)
+                self.assertIn("cache-dependency-glob: pyproject.toml", workflow)
+                self.assertNotIn("actions/checkout@v4", workflow)
+                self.assertNotIn("astral-sh/setup-uv@v5", workflow)
+        self.assertIn("fetch-depth: 0", test)
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", test)
+        self.assertIn("ref: ${{ inputs.ref || github.ref }}", test)
+        self.assertIn("ref: ${{ needs.resolve.outputs.sha }}", publish)
 
     def test_the_release_gates_pin_the_smoketest_to_this_checkout(self) -> None:
         """Without ``--repo`` the smoketest acts on whatever root
@@ -4419,6 +4690,330 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, gate)
         self.assertIn("tools/dashboard-readiness.py", self._gate_text())
+
+
+class TestRepositoryDiscoveryRoots(TempRepository):
+    """Which files in a repository are Agents Live agents (#388).
+
+    Discovery reaches the project skill directories that Claude and
+    Copilot tooling already use, so the rule that keeps a repository
+    honest is metadata: a guidance skill in a shared root belongs to its
+    own client, and only a definition that opts in with ``agents-live.*``
+    is runnable here. The other half of the decision is that the new
+    roots are added, never substituted: a declared ``agent_directories``
+    list still extends the standard roots, so no repository loses a
+    definition it discovers today.
+    """
+
+    def definition(self, path: Path, name: str, *,
+                   metadata: bool = True, declared: str | None = None) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["---", f"name: {declared or name}",
+                 "description: A portable test definition."]
+        if metadata:
+            lines += ["metadata:",
+                      '  agents-live.schema-version: "1"',
+                      '  agents-live.selector: "fake"']
+        lines += ["---", "Do the work.", ""]
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
+    def names(self, root: Path | None = None) -> set[str]:
+        return {spec.name for spec in agent.discover(root or self.root).specs}
+
+    def test_client_skill_roots_are_searched_but_only_ours_run(self) -> None:
+        """The operator-guidance payload lives in `.claude/skills/`.
+
+        Listing it as a runnable agent would offer Start and Run actions
+        for a document, and the same root holds every unrelated skill the
+        user's coding agent reads.
+        """
+        self.definition(
+            self.root / ".claude" / "skills" / "reviewer" / "SKILL.md", "reviewer")
+        self.definition(
+            self.root / ".github" / "skills" / "summarizer" / "SKILL.md", "summarizer")
+        self.definition(
+            self.root / ".agents" / "skills" / "digest.md", "digest")
+        self.definition(
+            self.root / ".claude" / "skills" / "agents-live" / "SKILL.md",
+            "agents-live", metadata=False)
+
+        self.assertEqual({"reviewer", "summarizer", "digest"}, self.names())
+        self.assertEqual(
+            (self.root / ".claude" / "skills" / "reviewer" / "SKILL.md").resolve(),
+            agent.load("reviewer", root=self.root).prompt_path)
+
+    def test_a_broken_skill_is_reported_only_when_it_claims_to_be_ours(
+            self) -> None:
+        """Silence and a report are both wrong for the other case.
+
+        A malformed definition that declares execution metadata is one
+        the user expects to run, so hiding it strands them. A malformed
+        skill that never mentions Agents Live is another tool's file, and
+        reporting it turns every foreign edit into our error.
+        """
+        self.definition(
+            self.root / ".claude" / "skills" / "ours" / "SKILL.md",
+            "ours", declared="mismatched")
+        self.definition(
+            self.root / ".claude" / "skills" / "theirs" / "SKILL.md",
+            "theirs", metadata=False, declared="also-mismatched")
+
+        discovery = agent.discover(self.root)
+        self.assertEqual((), discovery.specs)
+        self.assertEqual(
+            [(self.root / ".claude" / "skills" / "ours" / "SKILL.md").resolve()],
+            [item.path for item in discovery.broken])
+
+    def test_declared_directories_extend_the_standard_roots(self) -> None:
+        """Configuration adds roots; it never takes one away.
+
+        A repository that named `Email` under 6.x discovers `Agents/`
+        too, and upgrading must not silently drop it. Substituting the
+        declared list for the standard set would strand every definition
+        in `Agents/` the moment the key appears.
+        """
+        self.definition(self.root / "Agents" / "native" / "SKILL.md", "native")
+        self.definition(self.root / "Email" / "digest" / "SKILL.md", "digest")
+        config = self.root / ".agents-live.toml"
+
+        config.write_text('agent_directories = ["Email"]\n', encoding="utf-8")
+        self.assertEqual({"digest", "native"}, self.names())
+
+        config.write_text(
+            'agent_directories = ["Agents", "Email"]\n', encoding="utf-8")
+        self.assertEqual({"digest", "native"}, self.names())
+
+    def test_an_empty_directory_list_still_searches_the_standard_roots(
+            self) -> None:
+        """`[]` keeps meaning "add nothing", as it does today.
+
+        Reading it as "search nothing" is a defensible design, but it
+        would stop a repository that ships `agent_directories = []` from
+        finding the definitions it runs now, so that reading waits for a
+        release that may break behavior.
+        """
+        self.definition(self.root / "Agents" / "digest" / "SKILL.md", "digest")
+        (self.root / ".agents-live.toml").write_text(
+            "agent_directories = []\n", encoding="utf-8")
+
+        self.assertEqual({"digest"}, self.names())
+
+    def test_a_declared_client_root_belongs_to_the_repository(self) -> None:
+        """Naming `.claude/skills` claims it.
+
+        A repository that already listed that directory in
+        `agent_directories` discovered everything in it under 6.x.
+        Applying the metadata rule to a root the repository asked for
+        would remove definitions it runs today.
+        """
+        self.definition(
+            self.root / ".claude" / "skills" / "guide" / "SKILL.md",
+            "guide", metadata=False)
+
+        self.assertEqual(set(), self.names())
+
+        (self.root / ".agents-live.toml").write_text(
+            'agent_directories = [".claude/skills"]\n', encoding="utf-8")
+        self.assertEqual({"guide"}, self.names())
+
+    def test_one_file_reached_by_two_roots_is_one_candidate(self) -> None:
+        self.definition(self.root / "Agents" / "digest" / "SKILL.md", "digest")
+        (self.root / ".agents-live.toml").write_text(
+            'agent_directories = ["Agents", "./Agents"]\n', encoding="utf-8")
+
+        self.assertEqual(1, len(agent.discover(self.root).specs))
+        self.assertEqual("digest", agent.load("digest", root=self.root).name)
+
+    def test_a_new_client_skill_does_not_capture_an_existing_name(self) -> None:
+        """6.x adds discovery sources without re-routing commands.
+
+        A repository that already runs `Agents/digest` must keep running
+        it after `.claude/skills/digest` becomes visible; turning that
+        into an ambiguity error would break working automation on
+        upgrade. Two definitions in Agents Live's own roots stay
+        ambiguous, because neither is the established answer.
+        """
+        native = self.definition(
+            self.root / "Agents" / "digest" / "SKILL.md", "digest")
+        self.definition(
+            self.root / ".claude" / "skills" / "digest" / "SKILL.md", "digest")
+
+        self.assertEqual(
+            native.resolve(), agent.load("digest", root=self.root).prompt_path)
+
+        self.definition(self.root / "Email" / "digest.md", "digest")
+        (self.root / ".agents-live.toml").write_text(
+            'agent_directories = ["Agents", "Email"]\n', encoding="utf-8")
+        with self.assertRaisesRegex(agent.DefinitionError, "ambiguous"):
+            agent.load("digest", root=self.root)
+
+
+class TestCrossRepositoryResolution(TempRepository):
+    """Which repository answers a bare agent name (#388).
+
+    Registration enrolls a repository in this host's managed set, so a
+    name that exactly one registered repository defines should not
+    require the user to remember where it lives. The decisions here are
+    what happens when nothing answers, when two repositories answer, and
+    when the user already said which repository to use - the last one
+    being what keeps a scheduled invocation inside its own project.
+    """
+
+    def repository(self, name: str) -> Path:
+        root = self.root / name
+        (root / "Agents").mkdir(parents=True)
+        repos.ensure_registered(root)
+        return root.resolve()
+
+    def definition(self, root: Path, name: str) -> Path:
+        directory = root / "Agents" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        prompt = directory / "SKILL.md"
+        prompt.write_text("\n".join([
+            "---",
+            f"name: {name}",
+            "description: A portable test definition.",
+            "metadata:",
+            '  agents-live.schema-version: "1"',
+            '  agents-live.selector: "fake"',
+            "---",
+            "Do the work.",
+            "",
+        ]), encoding="utf-8")
+        return prompt
+
+    @contextlib.contextmanager
+    def unpinned(self):
+        """No repository named on the command line or in the environment."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(paths.ENV_VAR, None)
+            yield
+
+    def test_a_unique_name_selects_its_repository(self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        prompt = self.definition(notes, "email-reviewer")
+
+        with self.unpinned():
+            resolution = resolve.resolve("email-reviewer", root=life)
+
+        self.assertTrue(resolution.fallback)
+        self.assertEqual(notes, resolution.root)
+        self.assertEqual(prompt.resolve(), resolution.spec.prompt_path)
+
+    def test_a_shared_name_refuses_and_qualifies_both_choices(self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        self.definition(notes, "git-sync")
+        self.definition(life, "git-sync")
+
+        with self.unpinned(), self.assertRaises(resolve.AmbiguousAgent) as raised:
+            resolve.resolve("git-sync", root=self.root, action="start")
+
+        message = str(raised.exception)
+        self.assertIn("ambiguous across registered repositories", message)
+        self.assertIn("life/git-sync-", message)
+        self.assertIn("notes/git-sync-", message)
+        self.assertIn("--repo <repository> start", message)
+
+    def test_stop_does_not_choose_the_first_registered_repository(self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        self.definition(notes, "git-sync")
+        self.definition(life, "git-sync")
+        error = io.StringIO()
+
+        with (
+            self.unpinned(),
+            contextlib.redirect_stderr(error),
+            mock.patch.object(stop.paths, "resolve_root", return_value=self.root),
+            mock.patch.object(stop.lifecycle, "converge") as converge,
+        ):
+            code = stop.main(["--name", "git-sync", "--dry-run"])
+
+        self.assertEqual(1, code)
+        self.assertIn("ambiguous across registered repositories", error.getvalue())
+        self.assertIn("life/git-sync-", error.getvalue())
+        self.assertIn("notes/git-sync-", error.getvalue())
+        converge.assert_not_called()
+
+    def test_stop_reports_a_missing_name_without_a_traceback(self) -> None:
+        error = io.StringIO()
+
+        with (
+            self.unpinned(),
+            contextlib.redirect_stderr(error),
+            mock.patch.object(stop.paths, "resolve_root", return_value=self.root),
+            mock.patch.object(stop.lifecycle, "converge") as converge,
+        ):
+            code = stop.main(["--name", "absent", "--dry-run"])
+
+        self.assertEqual(1, code)
+        self.assertIn("definition not found: absent", error.getvalue())
+        converge.assert_not_called()
+
+    def test_a_missing_name_reports_where_it_looked(self) -> None:
+        notes = self.repository("notes")
+        with self.unpinned(), self.assertRaises(agent.DefinitionNotFound) as raised:
+            resolve.resolve("absent", root=self.root)
+        self.assertIn(str(notes), str(raised.exception))
+
+    def test_an_explicit_repository_narrows_the_search(self) -> None:
+        """`--repo` is a decision, not a hint.
+
+        It exports the repository environment variable, which is also how
+        every persisted invocation pins its project. Searching past it
+        would let a scheduled run fire an agent from another repository
+        that happens to share the name.
+        """
+        notes = self.repository("notes")
+        life = self.repository("life")
+        self.definition(notes, "email-reviewer")
+
+        os.environ[paths.ENV_VAR] = str(life)
+        with self.assertRaises(agent.DefinitionNotFound) as raised:
+            resolve.resolve("email-reviewer", root=life)
+        self.assertNotIn(str(notes), str(raised.exception))
+
+    def test_a_local_answer_survives_and_warns_about_the_other_repository(
+            self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        here = self.definition(notes, "git-sync")
+        self.definition(life, "git-sync")
+
+        with self.unpinned():
+            resolution = resolve.resolve("git-sync", root=notes)
+
+        self.assertFalse(resolution.fallback)
+        self.assertEqual(here.resolve(), resolution.spec.prompt_path)
+        self.assertIn("life/git-sync-", resolution.warning or "")
+
+    def test_selection_does_not_follow_registration_order(self) -> None:
+        notes = self.repository("notes")
+        life = self.repository("life")
+        self.definition(notes, "git-sync")
+        self.definition(life, "git-sync")
+        registry = repos.config_path()
+        forward = registry.read_text(encoding="utf-8")
+        reversed_entries = "\n".join([
+            "[repos]",
+            f'"notes" = {json.dumps(str(notes))}',
+            f'"life" = {json.dumps(str(life))}',
+            "",
+        ])
+        self.assertNotEqual(forward, reversed_entries)
+
+        messages = []
+        for content in (forward, reversed_entries):
+            registry.write_text(content, encoding="utf-8")
+            with self.unpinned(), self.assertRaises(
+                    resolve.AmbiguousAgent) as raised:
+                resolve.resolve("git-sync", root=self.root)
+            messages.append(str(raised.exception))
+
+        self.assertEqual(messages[0], messages[1])
 
 
 if __name__ == "__main__":

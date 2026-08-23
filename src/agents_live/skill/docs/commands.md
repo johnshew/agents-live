@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-20
+ms.date: 2026-08-23
 ms.topic: reference
 ---
 
@@ -106,6 +106,17 @@ agents-live stop link-check
 agents-live stop link-check --dry-run
 ```
 
+### Cross-repository resolution
+
+`run`, `start`, `stop`, and `status` look in the selected repository first.
+When the name is not there, they search the registered repositories in alias
+order and use the single repository that answers, printing which one it was.
+When several answer, `run`, `start`, and `stop` stop and list the qualified
+`<alias>/<identifier>` choices instead of guessing; `status` only reports, so
+it lists every match. Pinning a repository with `--repo`, or invoking from a
+persisted trigger, keeps the search local. `run --json` names the repository
+that ran the agent.
+
 ## Operations
 
 - `status [name] [--all-repos]` reports definitions and their started or
@@ -135,7 +146,9 @@ agents-live stop link-check --dry-run
 - `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.
-  A scan covers `Agents/` and every configured `agent_directories` root.
+  A scan covers every effective discovery root except unclaimed standard
+  client skill roots. A repository can opt a client root into migration by
+  naming it in `agent_directories`.
 - `uninstall` removes host integration and the uv-managed tool. If a watcher
   from that installation does not stop within the grace period, the command
   exits nonzero before host cleanup and names the processes to stop. On native
