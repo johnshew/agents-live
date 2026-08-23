@@ -34,7 +34,14 @@ def _interpreter(environment: Path) -> Path:
 
 def _populate(uv: str, source: Path | None, version: str, staging: Path) -> None:
     _run(
-        [uv, "venv", "--python", sys.executable, str(staging)],
+        [
+            uv,
+            "venv",
+            "--relocatable",
+            "--python",
+            sys.executable,
+            str(staging),
+        ],
         step="creating the generation environment",
     )
     requirement = str(source) if source is not None else f"agents-live=={version}"

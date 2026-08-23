@@ -2193,6 +2193,31 @@ class TestInstallationGenerations(unittest.TestCase):
         deploy.generation.activate(built)
         self.assertEqual("6.6.0", deploy.pointer.read().generation)
 
+    def test_generation_promotion_waits_out_a_transient_windows_hold(
+            self) -> None:
+        """Freshly executed generation files may remain briefly held on Windows."""
+        staging = deploy.layout.staging_dir("6.6.0")
+        real_replace = paths.os.replace
+        attempts = 0
+
+        def held_once(source, destination):
+            nonlocal attempts
+            if Path(source) == staging and attempts == 0:
+                attempts += 1
+                raise PermissionError(13, "held")
+            return real_replace(source, destination)
+
+        with mock.patch.object(paths.os, "replace", side_effect=held_once):
+            built = deploy.generation.build(
+                "6.6.0",
+                populate=lambda path: path.mkdir(parents=True),
+                validate=lambda _path: None,
+            )
+        self.assertEqual(1, attempts)
+        self.assertEqual(
+            deploy.layout.generation_dir("6.6.0"), built.path)
+        self.assertTrue(built.path.is_dir())
+
     def test_activation_refuses_unvalidated_or_damaged_installation_state(
             self) -> None:
         """Activation cannot skip validation or overwrite pointer damage."""
@@ -2260,6 +2285,18 @@ class TestInstallationGenerations(unittest.TestCase):
         )
         self.assertEqual(0, reported.returncode, reported.stderr)
         self.assertEqual(version, reported.stdout.strip())
+        launcher = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename("agents-live")
+        )
+        launched = subprocess.run(
+            [str(launcher), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertEqual(f"agents-live {version}", launched.stdout.strip())
 
     def test_official_release_metadata_authenticates_exact_wheel_bytes(
             self) -> None:
@@ -2408,12 +2445,18 @@ class TestInstallationGenerations(unittest.TestCase):
             deploy.generation.Provenance("github-release", wheel.name, digest),
             installed.provenance,
         )
-        self.assertTrue(
-            (
-                hostruntime.executable_dir(installed.path)
-                / hostruntime.executable_filename("agents-live")
-            ).is_file()
+        launcher = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename("agents-live")
         )
+        launched = subprocess.run(
+            [str(launcher), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertEqual(f"agents-live {version}", launched.stdout.strip())
 
         with (
             mock.patch.object(

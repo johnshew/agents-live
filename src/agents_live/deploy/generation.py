@@ -185,7 +185,7 @@ def build(
             paths.atomic_write_text(
                 staging / layout.GENERATION_RECORD, _record(generation))
             try:
-                staging.rename(target)
+                paths.replace_when_windows_lets_go(staging, target)
             except OSError as exc:
                 raise GenerationError(
                     f"could not complete generation {generation_name}: {exc}") from exc
