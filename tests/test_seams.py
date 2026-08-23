@@ -3364,12 +3364,20 @@ class RecordingRunner:
         self.inputs: list[str | None] = []
         self.environments: list[dict[str, str]] = []
         self.mcp_configs: list[tuple[Path, dict[str, object]]] = []
+        self.copilot_homes: list[tuple[Path, dict[str, object]]] = []
 
     def run_child(self, argv, **kwargs):
         self.argv.append(tuple(argv))
         self.inputs.append(kwargs.get("input_text"))
-        self.environments.append(dict(kwargs.get("env", {})))
+        environment = dict(kwargs.get("env", {}))
+        self.environments.append(environment)
         arguments = tuple(argv)
+        if arguments[0] == "copilot" and "COPILOT_HOME" in environment:
+            home = Path(environment["COPILOT_HOME"])
+            self.copilot_homes.append((
+                home,
+                json.loads((home / "settings.json").read_text(encoding="utf-8")),
+            ))
         for flag in ("--mcp-config", "--additional-mcp-config"):
             if flag in arguments:
                 value = arguments[arguments.index(flag) + 1].removeprefix("@")
@@ -4743,6 +4751,37 @@ class TestAgentPipeline(TempRepository):
             payload["mcpServers"]["repo-tool"]["command"],
         )
         self.assertFalse(config_path.exists())
+
+    def test_copilot_uses_an_ephemeral_untrusted_configuration_home(self) -> None:
+        self.skill("isolated-copilot-config", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mode: "write"',
+            'agents-live.env: "{\\"COPILOT_ALLOW_ALL\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS\\":\\"true\\"}"',
+        ])
+        runner = RecordingRunner([
+            ChildResult(("copilot",), 0, "done", ""),
+        ])
+
+        result = dispatch(
+            Firing("isolated-copilot-config", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        environment = runner.environments[-1]
+        for name in (
+            "COPILOT_ALLOW_ALL",
+            "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS",
+            "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP",
+            "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
+        ):
+            self.assertEqual("false", environment[name])
+        home, settings = runner.copilot_homes[-1]
+        self.assertEqual({"disableAllHooks": True}, settings)
+        self.assertFalse(home.exists())
 
     def test_project_mcp_config_is_removed_after_cli_failure(self) -> None:
         (self.root / ".mcp.json").write_text(json.dumps({

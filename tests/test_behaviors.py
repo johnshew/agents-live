@@ -2818,6 +2818,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def _parse(self, name: str, stdout: str):
         return providers.get(name).parse(RawOutput(0, stdout, ""))
 
+    def test_claude_never_loads_implicit_repository_configuration(self) -> None:
+        for mode in ("plan", "write", "pipeline"):
+            with self.subTest(mode=mode):
+                launch = providers.get("claude").prepare(
+                    ResolvedSpec(
+                        "isolated", "prompt", mode, (), (), (),
+                        "claude", None, None,
+                    ),
+                    Request(),
+                )
+                self.assertIn("--bare", launch.argv)
+                self.assertEqual(1, launch.argv.count("--strict-mcp-config"))
+
+    def test_copilot_explicitly_disables_prompt_mode_repository_code(self) -> None:
+        launch = providers.get("copilot").prepare(
+            ResolvedSpec(
+                "isolated", "prompt", "write", (), (), (
+                    ("COPILOT_ALLOW_ALL", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP", "true"),
+                ), "copilot", None, None,
+            ),
+            Request(),
+        )
+
+        environment = dict(launch.env)
+        self.assertEqual("false", environment["COPILOT_ALLOW_ALL"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP"])
+
     def test_a_provider_that_reports_cost_reports_it_under_one_key(self) -> None:
         """Zero spend and unreported spend look identical on screen.
 

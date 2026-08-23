@@ -74,6 +74,12 @@ subscription through the current CLI, and exits.
 Provider plugins contain Claude and Copilot argv and output quirks. The fake
 provider and fake CLI exercise the same path deterministically. Providers
 receive a narrow immutable projection, not trigger or repository state.
+Unattended launches do not implicitly run repository-controlled hooks,
+workspace MCP servers, or project extensions, and provider project
+instructions are disabled. Claude uses bare mode; Copilot uses a fresh
+run-scoped configuration home and explicit prompt-mode opt-out environment
+values. Only MCP servers named by `agents-live.mcps` are added to a
+non-pipeline session.
 
 ## Dispatch
 

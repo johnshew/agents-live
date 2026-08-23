@@ -26,6 +26,11 @@ machine-readable output where a command supports it.
 
 Runs a definition once through the fixed pre-processor, provider, and
 post-processor pipeline. A manual run does not change started state.
+The provider session does not run implicit repository hooks, workspace MCP
+servers, or project extensions, and provider project instructions are disabled
+even when the provider has previously trusted the checkout. Only servers
+explicitly listed in `agents-live.mcps` are added. See
+[Definition format](definition-format.md) for provider authentication effects.
 
 ```bash
 agents-live run link-check

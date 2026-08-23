@@ -130,7 +130,9 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                 events, firing, run_id, "invocation_input_overflow", overflow)
     scratch = _scratch(spec, run_id)
     try:
-        with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
+        with _resource(
+            spec, shape.needs_mcp, run_id, scratch
+        ) as (resource_env, session):
             def context(step: Step, **extra) -> StepContext:
                 return StepContext(
                     request,
@@ -441,13 +443,17 @@ def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:
 
 
 @contextlib.contextmanager
-def _resource(spec, needed: bool, run_id: str):
+def _resource(spec, needed: bool, run_id: str, scratch: Path):
     from .agent.mcp import mcp_config_runtime, resolve_mcp_servers
+    from .agent.unattended import provider_environment
 
     environment: dict[str, str] = {}
     pipeline_session = None
     config = spec.execution
     with contextlib.ExitStack() as stack:
+        if config is not None:
+            environment.update(stack.enter_context(
+                provider_environment(config.selector.provider, scratch)))
         if config is not None and config.mcps and config.mode != "pipeline":
             resolved = resolve_mcp_servers(spec.root, config.mcps)
             project_config = stack.enter_context(mcp_config_runtime(resolved))

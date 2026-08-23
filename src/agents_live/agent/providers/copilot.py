@@ -23,6 +23,12 @@ class CopilotProvider:
         would hand the child a terminal width to wrap those lines at.
         """
         environment = dict(spec.env)
+        environment.update({
+            "COPILOT_ALLOW_ALL": "false",
+            "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS": "false",
+            "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS": "false",
+            "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP": "false",
+        })
         flags = ["--autopilot", "--no-ask-user", "--no-custom-instructions"]
         if spec.mode == "write":
             flags.insert(0, "--allow-all-tools")
@@ -60,7 +66,7 @@ class CopilotProvider:
             argv.extend(("--additional-mcp-config", f"@{pipeline_config}"))
         return Launch(
             tuple(argv),
-            spec.env,
+            tuple(sorted(environment.items())),
             timeout=None,
             provider=self.name,
         )

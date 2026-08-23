@@ -66,6 +66,12 @@ COMMANDS = (
     Cmd(
         "run", "Execute an agent once.", "cli.commands.run", "in-process",
         json=True, name_sugar=True,
+        help_details=(
+            "Unattended provider sessions do not run implicit repository "
+            "hooks, workspace MCP servers, or project extensions. Provider "
+            "project instructions are also disabled. Only MCP servers "
+            "explicitly named by agents-live.mcps are added."
+        ),
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
