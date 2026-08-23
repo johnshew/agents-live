@@ -19,7 +19,7 @@ jobs:
     outputs:
       sha: ${{ steps.target.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
       - id: target
@@ -41,10 +41,12 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.sha }}
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
       # Source verification above runs against the exact release commit. The
       # release assets are the exact wheel accepted through installed-tool,
       # watcher, browser, and provider-cost validation before publication.

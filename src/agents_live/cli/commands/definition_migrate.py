@@ -49,12 +49,20 @@ def convert(
 
 
 def _discovery_roots(root: Path) -> list[Path]:
-    """Every directory a definition may live in, matching discovery."""
-    configured = paths.validated_agent_directories(
-        root, paths.load_config(root).get("agent_directories", []))
+    """Every directory a 5.x definition may live in.
+
+    The shared client skill roots are excluded: a definition there is
+    ours only when it already declares ``agents-live.*`` metadata, so a
+    5.x conversion would rewrite another tool's guidance skill (#388). A
+    repository that names one of those roots in ``agent_directories``
+    has claimed it, and it is scanned like any other root.
+    """
     found: list[Path] = []
-    for directory in [root / "Agents", *configured]:
+    client_roots = paths.client_skill_roots(root)
+    for directory in paths.effective_agent_directories(root):
         resolved = directory.resolve()
+        if resolved in client_roots:
+            continue
         if resolved not in found and resolved.is_dir():
             found.append(resolved)
     return found

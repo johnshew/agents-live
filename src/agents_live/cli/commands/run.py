@@ -7,8 +7,9 @@ import os
 import sys
 from pathlib import Path
 
-from ... import paths, runtime
+from ... import agent, paths, runtime
 from ...dispatch import Firing, dispatch
+from .. import resolve
 
 
 def main(
@@ -35,9 +36,31 @@ def main(
         return 1
     origin = metadata.origin if metadata is not None else (
         "watch" if changed else "manual")
+    root = paths.resolve_root()
+    name = args.name
+    if origin == "manual":
+        # Only an interactive run resolves across repositories; a
+        # persisted invocation names its own repository and must stay
+        # in it (#388). A name nothing answers is still handed to
+        # dispatch, which records the failed run where a reader of this
+        # agent's history will find it.
+        try:
+            resolution = resolve.resolve(name, root=root, action="run")
+        except resolve.AmbiguousAgent as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except agent.DefinitionError:
+            resolution = None
+        if resolution is not None:
+            root, name = resolution.root, resolution.identifier
+            if resolution.warning:
+                print(resolution.warning, file=sys.stderr)
+            if resolution.fallback:
+                print(f"Running '{resolution.spec.name}' in {root}.",
+                      file=sys.stderr)
     result = dispatch(Firing(
-        args.name,
-        str(paths.resolve_root()),
+        name,
+        str(root),
         origin,
         metadata.id if metadata is not None else "",
         changed,
@@ -57,6 +80,7 @@ def main(
             "transcript": result.transcript,
             "usage": dict(result.usage),
             "run_id": result.run_id,
+            "repository": str(root),
         }
         if result.result_status is not None:
             payload["result_status"] = result.result_status

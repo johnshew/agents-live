@@ -54,6 +54,16 @@ class DefinitionError(ValueError):
     pass
 
 
+class DefinitionNotFound(DefinitionError):
+    """No definition in this repository answers to that name.
+
+    Separate from a malformed definition because the remedy differs: a
+    caller that can look somewhere else (the cross-repository resolver)
+    may continue, while a definition that exists and does not parse must
+    be reported where it is.
+    """
+
+
 class UnsupportedSchemaVersion(DefinitionError):
     """The definition asks for a format this release does not implement.
 
@@ -102,11 +112,23 @@ def load_definition(agent_id: str, *, root: Path) -> AgentSpec:
         for item in discovery.broken:
             if agent_id in {item.name, item.identifier_in(repository)}:
                 return _load_prompt(item.path, repository)
-        raise DefinitionError(f"definition not found: {agent_id}")
+        raise DefinitionNotFound(f"definition not found: {agent_id}")
     exact = [spec for spec in matches if spec.identifier == agent_id]
     if exact:
         return exact[0]
     if len(matches) > 1:
+        # A client skill root is a discovery source 6.x added, so a name
+        # it newly shares with an Agents Live root must not turn a
+        # command that already selected one definition into an ambiguity
+        # error (#388, staged delivery). Strict ambiguity over the whole
+        # candidate set arrives at the major boundary.
+        client_roots = paths.client_skill_roots(repository)
+        native = [
+            spec for spec in matches
+            if _discovery_root(spec).resolve() not in client_roots
+        ]
+        if len(native) == 1:
+            return native[0]
         choices = ", ".join(spec.identifier for spec in matches)
         raise DefinitionError(
             f"definition name '{agent_id}' is ambiguous; use one of: {choices}")
@@ -118,44 +140,77 @@ def discover_definitions(root: Path) -> Discovery:
 
     A definition that cannot be parsed is reported rather than raised, so one
     bad file does not make a whole repository look empty to convergence.
+
+    Roots come from :func:`paths.effective_agent_directories` - the
+    standard set plus any declared ``agent_directories`` (issue #388).
+    Each root is searched for its immediate ``<name>/SKILL.md``
+    bundles and ``<name>.md`` flat definitions; the same physical file
+    reached through two roots is one candidate. In the shared client
+    skill roots only a definition carrying ``agents-live.*`` execution
+    metadata is an Agents Live agent: guidance-only skills belong to
+    their own client and are ignored, while one that declares the
+    metadata and is malformed is reported broken rather than dropped.
     """
     repository = Path(root).resolve()
     try:
-        configured = paths.validated_agent_directories(
-            repository,
-            paths.load_config(repository).get("agent_directories", []),
-        )
+        config = paths.load_config(repository)
+        directories = paths.effective_agent_directories(repository, config)
+        client_roots = paths.client_skill_roots(repository, config)
     except ValueError as exc:
         # Unreadable configuration leaves the discovery roots unknown, so
         # nothing about this repository can be trusted. That stays fatal.
         raise DefinitionError(str(exc)) from exc
-    directories = [repository / "Agents", *configured]
     seen_directories: set[Path] = set()
-    prompts: list[Path] = []
+    prompts: dict[Path, bool] = {}
     broken: list[BrokenDefinition] = []
     for directory in directories:
         resolved = directory.resolve()
         if resolved in seen_directories or not directory.is_dir():
             continue
         seen_directories.add(resolved)
+        metadata_required = resolved in client_roots
         for item in sorted(directory.glob("*.md")):
             if item.name == "_index_.md":
                 continue
             try:
                 if _is_flat_definition(item):
-                    prompts.append(item)
+                    prompts.setdefault(item.resolve(), metadata_required)
             except DefinitionError as exc:
                 broken.append(BrokenDefinition(item, str(exc)))
-        prompts.extend(
-            item / "SKILL.md" for item in sorted(directory.iterdir())
-            if item.is_dir() and (item / "SKILL.md").is_file())
+        for item in sorted(directory.iterdir()):
+            if item.is_dir() and (item / "SKILL.md").is_file():
+                prompts.setdefault(
+                    (item / "SKILL.md").resolve(), metadata_required)
     specs: list[AgentSpec] = []
-    for prompt in prompts:
+    for prompt, metadata_required in prompts.items():
         try:
-            specs.append(_load_prompt(prompt, repository))
+            spec = _load_prompt(prompt, repository)
         except DefinitionError as exc:
+            if metadata_required and not _declares_execution_metadata(prompt):
+                # A guidance-only client skill is not ours to report on.
+                continue
             broken.append(BrokenDefinition(prompt, str(exc)))
+            continue
+        if metadata_required and spec.execution is None:
+            continue
+        specs.append(spec)
     return Discovery(tuple(specs), tuple(broken))
+
+
+def _declares_execution_metadata(prompt: Path) -> bool:
+    """Whether a definition that failed to load claims to be ours."""
+    try:
+        return "agents-live." in prompt.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+
+
+def _discovery_root(spec: AgentSpec) -> Path:
+    """The searched root a definition was found under."""
+    if spec.prompt_path.name == "SKILL.md":
+        return spec.prompt_path.parent.parent
+    return spec.prompt_path.parent
+
 
 
 def _is_flat_definition(prompt: Path) -> bool:

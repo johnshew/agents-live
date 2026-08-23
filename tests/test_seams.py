@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from agents_live import (
-    agent, obs, paths, plugins, runtime, state,
+    agent, deploy, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
 from agents_live.cli.main import main as cli_main
@@ -478,6 +478,48 @@ class TestDoctor(unittest.TestCase):
             doctor.main(["--all-repos"])
 
         collect.assert_called_once_with(selected_roots=None, persist=False)
+
+    def test_doctor_reports_which_channel_owns_the_installation(self) -> None:
+        """An operator must be able to see the upgrade owner (#369).
+
+        Ownership decides who may replace the runtime, and two channels
+        that both believe they may will eventually race. Reporting it is
+        additive here: nothing writes a generation layout yet, so an
+        ordinary uv-managed host reports its owner and stays green.
+        """
+        collected = mock.Mock(
+            unavailable_repositories=(), broken_definitions=(),
+            unknown_metadata=())
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.dict(os.environ, {
+                    deploy.layout.ENV_INSTALL_ROOT:
+                        str(Path(temporary) / "install"),
+                }),
+                mock.patch.object(
+                    doctor.repos, "load", return_value={"repos": {}}),
+                mock.patch.object(
+                    doctor.runtime, "health",
+                    return_value=Health(True, "fresh")),
+                mock.patch.object(
+                    doctor.lifecycle, "collect", return_value=collected),
+                mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+                mock.patch.object(doctor, "_health_payload", return_value=None),
+                mock.patch.object(
+                    doctor.update_check, "interactive", return_value=False),
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = doctor.main(["--all-repos"])
+
+        reported = [line for line in stdout.getvalue().splitlines()
+                    if line.startswith("ok: installation:")]
+        self.assertEqual(0, code, stdout.getvalue())
+        self.assertEqual(1, len(reported), stdout.getvalue())
+        self.assertTrue(
+            any(label in reported[0]
+                for label in deploy.ownership.LABELS.values()),
+            reported[0])
 
     def test_doctor_repair_scopes_convergence_to_selected_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -5839,7 +5881,7 @@ class TestArchitectureFitness(unittest.TestCase):
         allowed = {
             "agents_live.agent", "agents_live.dispatch", "agents_live.obs",
             "agents_live.runtime", "agents_live.state", "agents_live.cli",
-            "agents_live.legacy",
+            "agents_live.legacy", "agents_live.deploy",
         }
         for imported in _imports(package / "cli"):
             if imported.startswith("agents_live."):
@@ -5847,6 +5889,27 @@ class TestArchitectureFitness(unittest.TestCase):
                     any(imported == item or imported.startswith(f"{item}.") for item in allowed),
                     imported,
                 )
+
+    def test_deployment_primitives_stay_below_the_commands_that_use_them(
+            self) -> None:
+        """`deploy/` is planning and paths, not composition (#369).
+
+        Deployment is the one place a CLI command still owns real
+        composition, and the point of extracting these primitives is
+        that they can be tested without a host. A dependency on the
+        command layer would put the composition back, and a subprocess
+        in the detection path would put a package manager back into a
+        report that has to answer while a runtime is being replaced.
+        """
+        package = Path(__file__).parents[1] / "src" / "agents_live"
+        imported = _imports(package / "deploy")
+        for forbidden in ("agents_live.cli", "agents_live.agent",
+                          "agents_live.dispatch", "agents_live.pipeline",
+                          "subprocess"):
+            self.assertFalse(
+                any(name == forbidden or name.startswith(f"{forbidden}.")
+                    for name in imported),
+                f"deploy/ imports {forbidden}")
 
     def test_platform_detection_is_confined_to_host_adapters_in_new_seams(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"

@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-08-14
+ms.date: 2026-08-23
 ms.topic: overview
 ---
 
@@ -15,8 +15,9 @@ observability.
 ## Definition
 
 Each runnable definition is either a standard `<name>/SKILL.md` bundle or an
-Agents Live flat `<name>.md` document in `Agents/` or a configured
-repository-relative discovery directory. Standard Agent Skills properties stay
+Agents Live flat `<name>.md` document in one of the standard discovery roots
+(`Agents/`, `.claude/skills/`, `.github/skills/`, `.agents/skills/`) or a
+repository-relative root you configure. Standard Agent Skills properties stay
 at the top level; Agents Live policy uses quoted `agents-live.*` metadata.
 Flat documents use the same content schema but are an Agents Live extension,
 not conforming Agent Skills.
@@ -109,6 +110,11 @@ uv tool install agents-live
 agents-live init --repo /path/to/repository
 agents-live doctor
 ```
+
+The package also installs `al` as an exact shorthand for `agents-live`, so
+`al status` and `agents-live status` are interchangeable. uv refuses the
+installation if an unrelated `al` executable already exists; remove or rename
+that executable before retrying rather than using `--force`.
 
 Python 3.12 or newer is required. POSIX schedules use the user crontab and
 watchers use `inotifywait`. Native Windows schedules use Task Scheduler and

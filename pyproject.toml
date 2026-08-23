@@ -21,6 +21,7 @@ classifiers = [
 
 [project.scripts]
 agents-live = "agents_live.cli:main"
+al = "agents_live.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/johnshew/agents-live"

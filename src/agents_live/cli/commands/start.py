@@ -6,7 +6,7 @@ import sys
 
 from ... import agent, paths, state
 from ...state import ownership, registry as repos
-from .. import lifecycle
+from .. import lifecycle, resolve
 from . import init
 
 
@@ -33,7 +33,18 @@ def main(argv: list[str] | None = None) -> int:
                 spec for spec in discovery.specs if spec.execution is not None)
             unloadable = discovery.broken
         else:
-            specs = (agent.load(args.name, root=root),)
+            # Starting is persistent, so the repository that answers the
+            # name is the one enrolled - never the one the caller happened
+            # to stand in (#388).
+            resolution = resolve.resolve(args.name, root=root, action="start")
+            root = resolution.root
+            if resolution.warning:
+                print(resolution.warning, file=sys.stderr)
+            if resolution.fallback:
+                print(f"Starting '{resolution.spec.name}' in {root}.",
+                      file=sys.stderr)
+            repos.ensure_registered(root)
+            specs = (resolution.spec,)
             unloadable = ()
         if args.transfer_here or args.transfer_to:
             return _transfer(root, specs[0], args)

@@ -41,6 +41,11 @@ agents-live init
 agents-live start markdown-polisher
 ```
 
+The package also installs `al` as an exact shorthand for `agents-live`, so
+`al status` and `agents-live status` are interchangeable. uv refuses the
+installation if an unrelated `al` executable already exists; remove or rename
+that executable before retrying rather than using `--force`.
+
 The watcher sleeps until a file changes, then runs the agent immediately with
 the changed paths. Add or edit a Markdown file under `docs/`, then open the
 file to see the fixes.
@@ -143,9 +148,14 @@ configuration issues.
 ## Go further
 
 Definitions live under a registered repository's `Agents/` directory by
-default. Set `agent_directories = ["foo"]` in `.agents-live.toml` to also
-discover immediate `foo/<name>.md` files and `foo/<name>/SKILL.md` bundles.
-Register another repository with `agents-live init --repo <path>`.
+default, and Agents Live also searches `.claude/skills/`, `.github/skills/`,
+and `.agents/skills/`, claiming a skill there only when it carries
+`agents-live.` execution metadata. Set `agent_directories = ["foo"]` in
+`.agents-live.toml` to also discover immediate `foo/<name>.md` files and
+`foo/<name>/SKILL.md` bundles.
+Register another repository with `agents-live init --repo <path>`. Once
+registered, `run`, `start`, `stop`, and `status` fall back to the other
+registered repositories when a name is not present locally.
 
 See the [command reference](src/agents_live/skill/docs/commands.md) for
 repository workflows, health checks and repair, upgrades, dashboards, shell

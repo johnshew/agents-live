@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ... import agent, obs, paths, state
 from ...state import registry as repos
+from .. import resolve
 
 
 def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
@@ -119,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     rows = [row for root in roots for row in _rows(root, args.name)]
+    if args.name and not rows and not args.all_repos:
+        rows = _elsewhere(args.name, roots[0])
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         print(json.dumps({"ok": True, "agents": rows}))
     elif not rows:
@@ -133,6 +136,23 @@ def main(argv: list[str] | None = None) -> int:
             label = row["identifier"] or "unreadable"
             print(f"{row['name']} ({label}): {row['state']}{suffix}")
     return 0
+
+
+def _elsewhere(name: str, root: Path) -> list[dict[str, object]]:
+    """Rows for a name this repository does not have, if a peer does.
+
+    A read of a registered repository owns no state, so the fallback is
+    safe to run whenever the local lookup came back empty (#388); an
+    explicit repository selection still narrows it away. Reporting is
+    not selection, so several answers are all listed rather than refused:
+    the caller sees each qualified identifier and can pick one.
+    """
+    if resolve.repository_pinned():
+        return []
+    found: list[dict[str, object]] = []
+    for candidate in resolve.registered_roots(exclude=root):
+        found.extend(_rows(candidate, name))
+    return found
 
 
 if __name__ == "__main__":
