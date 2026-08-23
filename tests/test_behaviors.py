@@ -37,7 +37,13 @@ from unittest import mock
 from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
-from agents_live.cli.commands import install_release, internal, start, stop
+from agents_live.cli.commands import (
+    install_release,
+    internal,
+    ownership as ownership_command,
+    start,
+    stop,
+)
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
@@ -1825,7 +1831,10 @@ class TestDashboardProcessIdentity(unittest.TestCase):
 class TestOwnershipMovesInBothDirections(TempRepository):
     """An agent can be claimed here or assigned to another runtime."""
 
-    def _spec(self):
+    def _spec(self, *, enabled: bool = True):
+        if enabled:
+            (self.root / ".agents-live.toml").write_text(
+                'ownership = "registry"\n', encoding="utf-8")
         self.skill("movable", [
             'agents-live.selector: "fake"',
             'agents-live.schedule: "0 8 * * *"',
@@ -1841,7 +1850,6 @@ class TestOwnershipMovesInBothDirections(TempRepository):
             with (
                 contextlib.redirect_stdout(out),
                 contextlib.redirect_stderr(err),
-                mock.patch.object(start.repos, "ensure_registered"),
                 mock.patch.object(lifecycle.repos, "load", return_value={
                     "repos": {"here": str(self.root)}, "default_repo": "here"}),
             ):
@@ -1849,6 +1857,22 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         finally:
             runtime.configure(previous)
         return code, out.getvalue(), err.getvalue()
+
+    def test_transfer_refuses_before_enable_without_mutation(self) -> None:
+        self._spec(enabled=False)
+        with (
+            mock.patch.object(start.repos, "ensure_registered") as register,
+            mock.patch.object(start.ownership, "current_owner_id") as identity,
+            mock.patch.object(start.ownership, "set_owner") as set_owner,
+        ):
+            code, _, err = self._run(
+                ["--name", "movable", "--transfer-here"])
+        self.assertEqual(1, code)
+        self.assertIn("agents-live ownership enable", err)
+        register.assert_not_called()
+        identity.assert_not_called()
+        set_owner.assert_not_called()
+        self.assertFalse((self.root / ".agents-live.toml").exists())
 
     def test_a_missing_backend_refuses_instead_of_pretending(self) -> None:
         self._spec()
@@ -1911,6 +1935,93 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         code, _, err = self._run(["--all", "--transfer-here"])
         self.assertEqual(2, code)
         self.assertIn("--name", err)
+
+
+class TestOwnershipEnablement(TempRepository):
+    def _run(self, command: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ownership_command.main([command])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_installed_backend_does_not_enable_ownership(self) -> None:
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = False
+        with (
+            mock.patch.object(ownership, "_backend", return_value=backend),
+            self.assertRaisesRegex(
+                ownership.OwnershipUnavailableError,
+                "agents-live ownership enable",
+            ),
+        ):
+            ownership.set_owner("sample", "*", root=self.root)
+        code, out, _ = self._run("status")
+        self.assertEqual(0, code)
+        self.assertIn("local-only", out)
+        backend.registry_file_exists.assert_not_called()
+        backend.set_owner.assert_not_called()
+        self.assertFalse((self.root / ".agents-live.toml").exists())
+
+    def test_enable_requires_a_backend_without_rewriting_config(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'agent_directories = ["Extra"]\n'
+        config.write_text(original, encoding="utf-8")
+        with mock.patch.object(ownership, "_backend", return_value=None):
+            code, _, err = self._run("enable")
+        self.assertEqual(1, code)
+        self.assertIn(ownership.ENTRY_POINT_GROUP, err)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+
+    def test_malformed_registry_refuses_before_rewriting_config(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'agent_directories = ["Extra"]\n'
+        config.write_text(original, encoding="utf-8")
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = True
+        backend.load_owners.side_effect = ownership.OwnershipUnavailableError(
+            "owners document malformed")
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, _, err = self._run("enable")
+        self.assertEqual(1, code)
+        self.assertIn("malformed", err)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+
+    def test_status_reports_declared_but_unavailable(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        with mock.patch.object(ownership, "_backend", return_value=None):
+            code, out, _ = self._run("status")
+        self.assertEqual(1, code)
+        self.assertIn("registry declared but unavailable", out)
+
+    def test_enable_validates_then_writes_the_declaration(self) -> None:
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = False
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, out, _ = self._run("enable")
+        self.assertEqual(0, code)
+        self.assertIn("Registry ownership enabled", out)
+        self.assertEqual("registry", ownership.mode(self.root))
+        backend.registry_file_exists.assert_called_once_with(root=self.root)
+        backend.load_owners.assert_not_called()
+
+    def test_existing_registry_is_validated_and_remains_enabled(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'ownership = "registry"\n'
+        config.write_text(original, encoding="utf-8")
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = True
+        backend.load_owners.return_value = {"sample": "*"}
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, out, _ = self._run("enable")
+        self.assertEqual(0, code)
+        self.assertIn("already enabled", out)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+        backend.load_owners.assert_called_once_with(
+            rate_limit_secs=0, root=self.root)
 
 
 class TestRunsAreRecordedUnderOneName(TempRepository):

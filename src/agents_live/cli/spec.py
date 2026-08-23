@@ -324,6 +324,23 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "ownership", "Manage optional cross-machine ownership.",
+        "cli.commands.ownership", "in-process", json=True,
+        subcommand_required=True,
+        subcommands=(
+            Cmd(
+                "status",
+                "Report local, registry enabled, or unavailable state.",
+                "cli.commands.ownership", "in-process", json=True,
+            ),
+            Cmd(
+                "enable",
+                "Explicitly enable registry ownership for this project.",
+                "cli.commands.ownership", "in-process", json=True,
+            ),
+        ),
+    ),
+    Cmd(
         "completions", "Generate shell completion scripts.", "cli.commands.completions",
         "in-process", root="none",
         mutually_exclusive=(("shell", "--update"),),

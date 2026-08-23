@@ -523,6 +523,25 @@ class TestDoctor(unittest.TestCase):
                 for label in deploy.ownership.LABELS.values()),
             reported[0])
 
+    def test_doctor_distinguishes_ownership_modes(self) -> None:
+        root = Path("C:/work/selected")
+        with mock.patch.object(
+                doctor.ownership, "local_only", return_value=True):
+            local = doctor._ownership_check(root, "selected")
+        self.assertTrue(local["ok"])
+        self.assertIn("local-only", local["detail"])
+
+        with (
+            mock.patch.object(
+                doctor.ownership, "local_only", return_value=False),
+            mock.patch.object(
+                doctor.ownership, "validate_registry",
+                side_effect=ownership.OwnershipUnavailableError("missing")),
+        ):
+            unavailable = doctor._ownership_check(root, "selected")
+        self.assertFalse(unavailable["ok"])
+        self.assertIn("registry declared but unavailable", unavailable["detail"])
+
     def test_doctor_repair_scopes_convergence_to_selected_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             selected = Path(temporary)
@@ -5964,6 +5983,9 @@ class TestArchitectureFitness(unittest.TestCase):
                             stopped_snapshot["agents"][0]["can_pause"])
                         self.assertTrue(
                             stopped_snapshot["agents"][0]["can_activate"])
+                        self.assertIn(
+                            "agents-live ownership enable",
+                            stopped_snapshot["agents"][0]["claim_tip"])
                         with (
                             mock.patch.object(
                                 dashboard.ownership, "local_only",

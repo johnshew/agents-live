@@ -57,6 +57,11 @@ repair the system without adding another lifecycle vocabulary. The public
 heartbeat command is gone. On WSL, convergence stages a distinct liveness task,
 waits for a fresh beacon, and only then replaces the prior task.
 
+Cross-machine assignment is optional. Repository registration and ownership
+backend installation leave a project local-only. Run
+`agents-live ownership enable` to validate the backend and owners document
+before enabling transfers; `agents-live ownership status` reports the mode.
+
 ## Safety model
 
 - `plan` allows read-oriented provider work and is the default.

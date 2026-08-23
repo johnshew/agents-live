@@ -101,7 +101,11 @@ which definitions should be automated here. Missing started state adopts
 identifiable installed subscriptions exactly once. Present but unreadable state
 causes collection to abstain before any mutation.
 
-An optional assignment plugin may filter collected work. Local mode makes no
+An optional assignment plugin may filter collected work. Repository
+registration and plugin installation do not activate it. Projects are
+local-only until `agents-live ownership enable` validates the backend and
+project configuration, then writes the explicit registry declaration. Transfer
+operations never create that declaration as a side effect. Local mode makes no
 assignment decision.
 
 `obs/` creates versioned immutable event records. The dispatch envelope and

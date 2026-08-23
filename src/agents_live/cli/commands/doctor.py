@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ... import agent, deploy, paths, runtime, state
 from ...runtime.hosts import system as hostruntime
-from ...state import registry as repos
+from ...state import ownership, registry as repos
 from .. import lifecycle, update_check
 from . import internal
 
@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                             "record-atomic appends; that history will not "
                             "appear in logs, timeline, or the dashboard"),
                     })
+            checks.append(_ownership_check(root, name))
         selected_roots = None if args.all_repos else tuple(checked_roots)
         try:
             collected = lifecycle.collect(
@@ -433,6 +434,25 @@ def _installation_check() -> dict[str, object]:
         "check": "installation",
         "ok": not (damaged or installation.contested),
         "detail": installation.summary(),
+    }
+
+
+def _ownership_check(root: Path, name: str) -> dict[str, object]:
+    try:
+        if ownership.local_only(root):
+            return {
+                "check": f"ownership {name}", "ok": True,
+                "detail": "local-only (cross-machine assignment not enabled)",
+            }
+        ownership.validate_registry(root, rate_limit_secs=10**9)
+    except (ownership.OwnershipUnavailableError, ValueError) as exc:
+        return {
+            "check": f"ownership {name}", "ok": False,
+            "detail": f"registry declared but unavailable: {exc}",
+        }
+    return {
+        "check": f"ownership {name}", "ok": True,
+        "detail": "registry enabled",
     }
 
 

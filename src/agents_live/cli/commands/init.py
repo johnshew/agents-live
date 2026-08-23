@@ -13,11 +13,10 @@ The full init (vendored skill install, templates, closing ``doctor`` run)
 lands with Phase 3.
 
 Ownership needs no init-time choice: a fresh project is local BY
-DEFINITION (no declaration), and the first ``start <agent> --transfer-to
-<host>`` upgrades the project to registry mode itself via
-``declare_ownership`` below - transferring IS the declaration of
-multi-host intent. This module stays the single sanctioned mutation
-point for the project config either way.
+DEFINITION (no declaration). ``agents-live ownership enable`` is the only
+operation that adds the registry declaration through ``declare_ownership``
+below. This module stays the single sanctioned mutation point for the project
+config.
 
 Counterpart: ``ownership.py`` is the read side of this seam - runtime
 mode resolution and registry enforcement. It never writes the project
@@ -30,6 +29,7 @@ first and then enrolls the selected repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -46,7 +46,7 @@ from . import completions
 _DOTFILE_HEADER = (
     "# agents-live project config (and the project-root marker).\n"
     "# Managed by `agents-live init`; `ownership = \"registry\"` is\n"
-    "# written only by the first --transfer-to. Do not hand-edit.\n"
+    "# written only by `agents-live ownership enable`. Do not hand-edit.\n"
 )
 
 # The skill payload init installs into a target repo (§3.4 step 2):
@@ -63,9 +63,7 @@ def initialize(root: Path) -> bool:
     Logs and other machine-local runtime state live in the user-level
     XDG state home (``paths.repo_state_dir``), never in the tree.
     Returns True if the config marker was created.
-    THE single initialization code path - ``init`` runs it from the CLI
-    and activate's ``--transfer-to`` bootstrap runs it before declaring
-    registry mode.
+    THE single initialization code path - ``init`` runs it from the CLI.
 
     Reads the existing config STRICTLY first (TT-002): a malformed
     config file - including a pyproject.toml that might hold the
@@ -169,11 +167,9 @@ def install_skill(root: Path) -> str | None:
 def declare_ownership(root: Path, value: str) -> bool:
     """Write the ownership declaration into the root config dotfile.
 
-    The single sanctioned mutation point for the ``ownership`` key.
-    Sole caller: activate's ``--transfer-to`` bootstrap (transferring IS
-    the declaration of multi-host intent; there is deliberately no
-    init-time flag for it). Returns True if the config changed. Raises
-    ValueError if the existing config is unreadable (repair it; never
+    The single sanctioned mutation point for the ``ownership`` key, called
+    only by explicit ownership enablement. Returns True if the config changed.
+    Raises ValueError if the existing config is unreadable (repair it; never
     overwrite blindly).
 
     Always targets ``.agents-live.toml``: when the effective config
@@ -207,7 +203,18 @@ def _write_dotfile(root: Path, config: dict) -> None:
     lines = [_DOTFILE_HEADER]
     for key, val in config.items():
         lines.append(f"{key} = {_toml_value(key, val)}\n")
-    (root / paths.CONFIG_DOTFILE).write_text("".join(lines), encoding="utf-8")
+    target = root / paths.CONFIG_DOTFILE
+    descriptor, temporary = tempfile.mkstemp(
+        dir=root, prefix=f".{paths.CONFIG_DOTFILE}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def _toml_value(key: str, value: object) -> str:
