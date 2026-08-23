@@ -1693,6 +1693,17 @@ def _sorted_agent_rows(rows: list[dict], sort_by: str,
                   reverse=descending)
 
 
+def _ungrouped_agent_rows(groups: list[dict]) -> list[dict]:
+    return [
+        {
+            **row,
+            "repository": group["name"],
+            "repository_identifier": f"{group['name']}/{row['identifier']}",
+        }
+        for group in groups for row in group["rows"]
+    ]
+
+
 def all_repo_groups() -> list[dict]:
     settings = STATE["all_repos"]
     selected = settings.get("repo", "All")
@@ -1724,7 +1735,7 @@ def api_all_repos() -> dict:
 
 
 def build_all_repos_page() -> None:
-    """Read-only registered-repository view; no lifecycle actions are exposed."""
+    """Registered-repository view with no agent lifecycle actions."""
     ui.dark_mode().auto()
     state_settings = STATE["all_repos"]
     groups = all_repo_groups()
@@ -1741,7 +1752,7 @@ def build_all_repos_page() -> None:
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
         ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label("All registered repositories (read only)").classes(
+        ui.label("All registered repositories (agent lifecycle read only)").classes(
             "text-sm text-gray-500")
     host_service_panel()
     with ui.expansion("Repository settings").classes("w-full"):
@@ -1789,10 +1800,7 @@ def build_all_repos_page() -> None:
             if state_settings.get("grouped", True):
                 render_groups(groups)
             else:
-                rows = [
-                    {**row, "repository": group["name"]}
-                    for group in groups for row in group["rows"]
-                ]
+                rows = _ungrouped_agent_rows(groups)
                 table = ui.table(
                     columns=[
                         {"name": "repository", "label": "Repository",
@@ -1802,7 +1810,7 @@ def build_all_repos_page() -> None:
                     rows=_sorted_agent_rows(
                         rows, str(state_settings.get("sort_by") or "name"),
                         bool(state_settings.get("descending"))),
-                    row_key="identifier",
+                    row_key="repository_identifier",
                     pagination={"rowsPerPage": 0},
                 ).classes("w-full").props("flat dense hide-bottom separator=none")
                 _add_agent_information_slots(table)
@@ -1946,7 +1954,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--all-repos", action="store_true",
-        help="Show a read-only view of all registered repositories")
+        help="Show all registered repositories without agent lifecycle controls")
     args = parser.parse_args()
 
     if args.port == "next" and __name__ != "__main__":

@@ -4794,7 +4794,10 @@ class TestDashboardRepositorySurface(TempRepository):
         path = repos.config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         missing = self.root / "missing"
-        path.write_text(f'[repos]\nmissing = "{missing}"\n', encoding="utf-8")
+        path.write_text(
+            f"[repos]\nmissing = {json.dumps(str(missing))}\n",
+            encoding="utf-8",
+        )
 
         groups = dashboard.all_repo_groups()
         self.assertEqual(1, len(groups))
@@ -4802,6 +4805,20 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertFalse(groups[0]["available"])
         self.assertIn("not an existing directory", groups[0]["error"])
         self.assertEqual([], groups[0]["rows"])
+
+    def test_dashboard_ungrouped_rows_have_repository_qualified_keys(self) -> None:
+        dashboard = self._dashboard_module()
+        groups = [
+            {"name": "first", "rows": [{"identifier": "daily-123"}]},
+            {"name": "second", "rows": [{"identifier": "daily-123"}]},
+        ]
+
+        rows = dashboard._ungrouped_agent_rows(groups)
+
+        self.assertEqual(["first", "second"], [
+            row["repository"] for row in rows])
+        self.assertEqual(2, len({
+            row["repository_identifier"] for row in rows}))
 
     def test_dashboard_host_service_shows_failed_idle_and_running_states(self) -> None:
         dashboard = self._dashboard_module()
