@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.5.0 - 2026-08-22
+
 - fix: retain managed dashboard identity during candidate acceptance.
   The operational gate now reads the PID from the public dashboard list's
   `PORT URL PID` columns, preserving identity-safe cleanup after browser checks.
