@@ -469,13 +469,13 @@ def _boundary(trigger: dict[str, object], now: datetime) -> str:
                               minute=int(trigger["minute"]))
         if start <= now:
             start += timedelta(days=1)
-        return start.strftime("%Y-%m-%dT%H:%M:%S")
+        return start.isoformat(timespec="seconds")
     step = int(trigger["minutes"])
     anchor = int(trigger["anchor_minute"])
     start = start.replace(minute=0) + timedelta(minutes=anchor)
     while start <= now:
         start += timedelta(minutes=step)
-    return start.strftime("%Y-%m-%dT%H:%M:%S")
+    return start.isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +544,7 @@ def build_task_xml(*, command: str, arguments: str, working_dir: str,
     contains an ampersand or a quote is escaped by the XML writer
     instead of by hand.
     """
-    now = now or datetime.now()
+    now = now or datetime.now().astimezone()
     ET.register_namespace("", _NS)
     task = ET.Element(f"{{{_NS}}}Task", {"version": _TASK_VERSION})
 

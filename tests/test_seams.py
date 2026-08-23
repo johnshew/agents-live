@@ -5132,6 +5132,30 @@ class TestDashboardRepositorySurface(TempRepository):
             runtime.configure(previous)
 
 
+class TestWindowsTaskScheduling(unittest.TestCase):
+    def test_daily_boundary_preserves_local_utc_offset(self) -> None:
+        local_now = datetime(
+            2026, 8, 23, 16, 0,
+            tzinfo=timezone(timedelta(hours=-6)),
+        )
+
+        task_xml = task_scheduler.build_task_xml(
+            command="agents-live.exe",
+            arguments="run --name daily",
+            working_dir=r"C:\repo",
+            schedules=("0 0 * * *",),
+            description="daily",
+            uri=r"\AgentsLive\daily",
+            user_id="user",
+            now=local_now,
+        )
+
+        self.assertIn(
+            "<StartBoundary>2026-08-24T00:00:00-06:00</StartBoundary>",
+            task_xml,
+        )
+
+
 
 class TestArchitectureFitness(unittest.TestCase):
     def test_long_lived_process_creation_stays_with_host_owners(self) -> None:

@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve the local UTC offset in Windows task boundaries so daily,
+  weekly, monthly, and interval schedules fire at their declared local cron
+  time instead of the corresponding UTC wall time. (#397)
 - feat: install `al` as a package-owned shorthand for `agents-live`. The
   packaged artifact gate runs `--version` and `--help` through both entry
   points on Windows and POSIX, and verifies that uv refuses to replace an
