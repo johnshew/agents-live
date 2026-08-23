@@ -221,18 +221,21 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
 def _scratch(spec, run_id: str) -> Path:
     """Where this run's children may write control, logs, and results."""
     from .paths import repo_state_dir
+    from .obs.retention import mark_active
     directory = repo_state_dir(spec.root) / "runs" / spec.name / run_id
     directory.mkdir(parents=True, exist_ok=True)
+    mark_active(directory)
     return directory
 
 
 def _discard_if_empty(scratch: Path) -> None:
     """Leave nothing behind for a run whose children wrote nothing.
 
-    Nothing prunes the run directory yet (#259), so an unused channel must
-    not cost a file.
+    An unused channel should not wait for retention before disappearing.
     """
+    from .obs.retention import ACTIVE_MARKER
     with contextlib.suppress(OSError):
+        (scratch / ACTIVE_MARKER).unlink(missing_ok=True)
         scratch.rmdir()
 
 

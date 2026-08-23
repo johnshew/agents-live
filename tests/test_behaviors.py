@@ -37,7 +37,7 @@ from unittest import mock
 from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
-from agents_live.cli.commands import install_release, start, stop
+from agents_live.cli.commands import install_release, internal, start, stop
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
@@ -864,6 +864,113 @@ class TestFailuresAreVisible(TempRepository):
         self.assertEqual("ok", status)
         self.assertEqual("2026-08-12T04:08:19.249904+00:00", last_ok)
         self.assertEqual("2026-08-11T16:06:30.128Z", last_err)
+
+
+class TestFrameworkRetention(TempRepository):
+    def test_maintenance_rotates_queryable_logs_and_skips_active_runs(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            "retention_days = 1\n", encoding="utf-8")
+        repos._add(str(self.root))
+        state_dir = paths.repo_state_dir(self.root)
+        logs = state_dir / "logs"
+        log = logs / "retained.jsonl"
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        for timestamp, run_id in ((old, "old"), (recent, "recent")):
+            obs.record(log, obs.Event(
+                timestamp=timestamp.isoformat(),
+                event="run",
+                status="success",
+                repository=str(self.root),
+                agent="retained",
+                run_id=run_id,
+                origin="clock",
+            ))
+        host_log = paths.host_logs_dir() / "host-retained.jsonl"
+        obs.record(host_log, obs.Event(
+            timestamp=old.isoformat(),
+            event="admin",
+            status="success",
+            repository="",
+            agent="host-retained",
+            run_id="host-old",
+            origin="maintenance",
+        ))
+
+        archive = logs / "archive"
+        archive.mkdir()
+        expired = archive / "expired.jsonl"
+        expired.write_text("{}\n", encoding="utf-8")
+        expired_time = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+        os.utime(expired, (expired_time, expired_time))
+
+        runs = state_dir / "runs" / "retained"
+        inactive = runs / "inactive"
+        inactive.mkdir(parents=True)
+        inactive_output = inactive / "processor-output.json"
+        inactive_output.write_text("old", encoding="utf-8")
+        inactive_transcript = runs / "inactive-agent-1.json"
+        inactive_transcript.write_text("old", encoding="utf-8")
+        active_id = "active"
+        active = runs / active_id
+        active.mkdir()
+        (active / ".active").write_text(
+            json.dumps({"pid": os.getpid()}), encoding="ascii")
+        active_output = active / "processor-output.json"
+        active_output.write_text("in use", encoding="utf-8")
+        active_pipeline = runs / f"{active_id}-pipeline.jsonl"
+        active_pipeline.write_text("in use", encoding="utf-8")
+        for artifact in (
+            inactive_output, inactive_transcript, active_output, active_pipeline,
+        ):
+            os.utime(artifact, (expired_time, expired_time))
+
+        result = mock.Mock(done=(), failed=(), health=runtime.Health(True))
+        collected = mock.Mock(subscriptions=())
+        with (
+            mock.patch.object(
+                internal.lifecycle, "converge", return_value=result),
+            mock.patch.object(
+                internal.lifecycle, "collect", return_value=collected),
+        ):
+            self.assertEqual(0, internal.main(["maintain", "--quiet"]))
+
+        self.assertFalse(log.exists())
+        self.assertFalse(expired.exists())
+        self.assertFalse(inactive_output.exists())
+        self.assertFalse(inactive_transcript.exists())
+        self.assertTrue(active_output.exists())
+        self.assertTrue(active_pipeline.exists())
+        self.assertEqual(
+            {"old", "recent"},
+            {str(record["run_id"]) for record in obs.load(obs.files(logs))},
+        )
+
+        connection = qlog.duckdb.connect(":memory:")
+        qlog.build_view(
+            connection, [str(logs / "*.jsonl")], archives=archive)
+        self.assertEqual(
+            [(2, True)],
+            connection.sql(
+                "SELECT count(*), bool_and(_archive) FROM log").fetchall(),
+        )
+        host_connection = qlog.duckdb.connect(":memory:")
+        qlog.build_view(
+            host_connection, qlog.all_log_globs(), archives=qlog.archive_dirs())
+        self.assertEqual(
+            [(1, True)],
+            host_connection.sql(
+                "SELECT count(*), bool_and(_archive) FROM log "
+                "WHERE agent_name = 'host-retained'").fetchall(),
+        )
+        maintenance = [
+            record for record in obs.load(obs.files(paths.host_logs_dir()))
+            if record.get("operation") == "maintenance"
+            and record.get("status") == "ok"
+        ][-1]
+        self.assertEqual(2, maintenance["rotated_logs"])
+        self.assertEqual(1, maintenance["removed_archives"])
+        self.assertEqual(2, maintenance["removed_run_artifacts"])
 
 
 class TestProviderOutputSurvivesItsFooter(unittest.TestCase):

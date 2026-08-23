@@ -110,6 +110,12 @@ needed when definitions watch files or directories. On WSL, the first
 convergence stages and verifies Windows-side liveness before replacing an
 existing task, so scheduled runs do not require an open session.
 
+Automatic maintenance rotates framework logs and removes retained transcripts
+and processor output after 30 days by default. Set `retention_days` to a
+positive integer in `.agents-live.toml` (or `[tool.agents-live]`) to change the
+repository policy. Rotated records remain available through `agents-live logs`
+until their retention boundary.
+
 On Windows:
 
 ```powershell

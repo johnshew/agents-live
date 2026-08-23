@@ -120,6 +120,12 @@ Python 3.12 or newer is required. POSIX schedules use the user crontab and
 watchers use `inotifywait`. Native Windows schedules use Task Scheduler and
 watchers use directory change notifications.
 
+Automatic maintenance rotates framework logs and removes retained transcripts
+and processor output after 30 days by default. Set `retention_days` to a
+positive integer in `.agents-live.toml` (or `[tool.agents-live]`) to change the
+repository policy. Rotated records remain available through `agents-live logs`
+until their retention boundary.
+
 On native Windows, install a provider CLI and uv through WinGet, open a new
 PowerShell session, then use the installed tool's absolute path until future
 shells receive uv's PATH update:

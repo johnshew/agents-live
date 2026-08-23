@@ -58,9 +58,12 @@ def resolve_since(value: str | None) -> str | None:
 def files(directory: Path) -> tuple[Path, ...]:
     if not directory.is_dir():
         return ()
+    archive = directory / "archive"
     return tuple(sorted({
         *directory.glob("*.jsonl"),
         *directory.glob("*.log"),
+        *(archive.glob("*.jsonl") if archive.is_dir() else ()),
+        *(archive.glob("*.log") if archive.is_dir() else ()),
     }))
 
 

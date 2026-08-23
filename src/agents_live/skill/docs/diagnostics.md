@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-17
+ms.date: 2026-08-23
 ms.topic: troubleshooting
 ---
 
@@ -337,6 +337,28 @@ stop/start cycle is required.
 Never inspect runtime log files by hand. Use `agents-live logs` and
 `agents-live logs timeline`; they correlate versioned event records and
 provider transcripts.
+
+## Log and run-output retention
+
+Automatic maintenance applies a 30-day retention period by default. Configure a
+repository with a positive whole number of days:
+
+```toml
+retention_days = 14
+```
+
+The same key may appear under `[tool.agents-live]` in `pyproject.toml`.
+Maintenance atomically rotates an append-only `.jsonl` or `.log` file when its
+oldest timestamp crosses the boundary. The rotated segment stays queryable
+through `agents-live logs` and `agents-live logs timeline`; it is removed only
+after its last write also crosses the boundary. Run transcripts, pipeline
+journals, and processor control, log, and oversized-output files are removed
+after the same period. Active runs carry a process-owned marker and are never
+pruned.
+
+Host-scoped logs use the longest configured period among available registered
+repositories, or 30 days when none supplies a policy. Repository configuration
+therefore cannot shorten another registered repository's host-level history.
 
 ## Uninstall outcomes
 

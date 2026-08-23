@@ -16,9 +16,11 @@ from typing import Any
 from ... import __version__, agent, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
+from ...obs import retention
 from ...runtime.hosts import filesystem as watchsource
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
+from ...state import registry as repos
 from .. import lifecycle, upgrade_handoff
 
 
@@ -75,6 +77,9 @@ def _maintain(
             watchers=0,
             cron=0,
             repositories=0,
+            rotated_logs=0,
+            removed_archives=0,
+            removed_run_artifacts=0,
             smoketest="unknown",
             message="maintenance did not complete",
         )
@@ -120,6 +125,27 @@ def _maintain_once(*, dry_run: bool, outcome: dict | None = None) -> int:
         cron=len(clocks),
         repositories=len(repositories),
     )
+    if not dry_run:
+        try:
+            registered = set(repos.load()["repos"].values()) | repositories
+            retained = retention.Result()
+            policies = []
+            for value in sorted(registered):
+                root = Path(value)
+                if root.is_dir():
+                    policies.append(retention.retention_days(root))
+                    retained += retention.maintain(root)
+            retained += retention.maintain_host(
+                days=max(policies, default=retention.DEFAULT_RETENTION_DAYS))
+        except (OSError, ValueError) as exc:
+            outcome["message"] = f"retention failed: {exc}"
+            print(outcome["message"], file=sys.stderr)
+            return 1
+        outcome.update(
+            rotated_logs=retained.rotated_logs,
+            removed_archives=retained.removed_archives,
+            removed_run_artifacts=retained.removed_run_artifacts,
+        )
     if result.failed or not result.health.healthy:
         outcome["health"] = "unhealthy"
         outcome["message"] = "; ".join(

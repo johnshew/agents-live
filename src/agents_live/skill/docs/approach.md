@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-17
+ms.date: 2026-08-23
 ms.topic: concept-article
 ---
 
@@ -49,8 +49,12 @@ under `legacy/` and exists to replace old artifacts during convergence.
 Every non-preview maintenance pass records correlated start and terminal admin
 events. The terminal event includes its source, subscription ID when scheduled,
 exit code, convergence counts, watcher and schedule counts, smoketest verdict,
-and resulting health status. The health beacon remains the current-state record;
-events are the durable account of how it got there.
+retention counts, and resulting health status. The same pass rotates
+framework-owned repository and host logs into queryable archives and removes
+expired run transcripts, pipeline journals, and processor channels. A
+process-owned marker protects every active run from retention. The health beacon
+remains the current-state record; events are the durable account of how it got
+there.
 
 Long-lived watchers compare their loaded package version with the installed
 distribution at a bounded idle check. A mismatch is handled only between
