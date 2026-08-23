@@ -119,6 +119,21 @@ def qualified_identifiers(
     ]
 
 
+def collision_warning(name: str, *, root: Path) -> str | None:
+    """Warn about registered definitions strict resolution will make ambiguous."""
+    others = _candidates(name, registered_roots(exclude=root))
+    if not others:
+        return None
+    choices = ", ".join(qualified_identifiers([
+        (candidate_root, candidate.identifier)
+        for candidate_root, candidate in others
+    ]))
+    return (
+        f"warning: '{name}' also names a definition in another registered "
+        f"repository ({choices}); qualify it with `--repo` before this "
+        "becomes ambiguous")
+
+
 def resolve(name: str, *, root: Path, action: str = "run") -> Resolution:
     """Resolve *name* against *root*, then the registered repositories.
 
@@ -137,21 +152,7 @@ def resolve(name: str, *, root: Path, action: str = "run") -> Resolution:
         return _fallback(name, root=root, action=action, missing=exc)
     if narrowed:
         return Resolution(root, spec)
-    here = spec.prompt_path.resolve()
-    others = [
-        item for item in _candidates(name, registered_roots(exclude=root))
-        if item[1].prompt_path.resolve() != here
-    ]
-    if not others:
-        return Resolution(root, spec)
-    choices = ", ".join(qualified_identifiers([
-        (candidate_root, candidate.identifier)
-        for candidate_root, candidate in others
-    ]))
-    return Resolution(root, spec, warning=(
-        f"warning: '{name}' also names a definition in another registered "
-        f"repository ({choices}); qualify it with `--repo` before this "
-        "becomes ambiguous"))
+    return Resolution(root, spec, warning=collision_warning(name, root=root))
 
 
 def _is_explicit_path(name: str) -> bool:
