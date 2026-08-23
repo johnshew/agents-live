@@ -63,9 +63,9 @@ def main(
         str(root),
         origin,
         metadata.id if metadata is not None else "",
-        changed,
-        instructions,
-        options,
+        changed_files=changed,
+        instructions=instructions,
+        options=options,
     ))
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         payload = {

@@ -30,6 +30,7 @@ class Firing:
     origin: str
     subscription_key: str = ""
     changed_files: tuple[str, ...] = ()
+    debounce_ms: int | None = None
     instructions: str = ""
     options: tuple[tuple[str, str | bool], ...] = ()
 
@@ -381,6 +382,7 @@ def _finish(
         message=_recorded(result),
         transcript=result.transcript,
         usage=result.usage,
+        attributes=_firing_attributes(firing),
     ))
     return result
 
@@ -403,7 +405,8 @@ def _skip(events: Path, firing: Firing, run_id: str, reason: str) -> Outcome:
     result = Outcome(True, "skipped", message=reason, run_id=run_id)
     obs.record(events, obs.create(
         "firing", "skipped", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, message=reason))
+        run_id=run_id, origin=firing.origin, message=reason,
+        attributes=_firing_attributes(firing)))
     return result
 
 
@@ -418,8 +421,20 @@ def _failure(
         False, "failed", category=category, message=message, run_id=run_id)
     obs.record(events, obs.create(
         "run", "failed", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, category=category, message=message))
+        run_id=run_id, origin=firing.origin, category=category, message=message,
+        attributes=_firing_attributes(firing)))
     return result
+
+
+def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:
+    if firing.origin != "watch":
+        return ()
+    attributes: list[tuple[str, object]] = [
+        ("matched_path_count", len(firing.changed_files)),
+    ]
+    if firing.debounce_ms is not None:
+        attributes.append(("watch_debounce_ms", firing.debounce_ms))
+    return tuple(attributes)
 
 
 @contextlib.contextmanager
