@@ -9,11 +9,18 @@ ms.topic: concept
 
 ## Status
 
-Foundation accepted and landed as primitives only. The layout, the pointer,
-the ownership model, and the lifecycle planning exist and are tested; nothing
-uses them to install, upgrade, or uninstall anything. Installation stays
-uv-managed, `agents-live upgrade` still runs `uv tool upgrade`, and the
-Windows deferred-handoff machinery is untouched.
+Foundation accepted. The layout, pointer, ownership model, lifecycle planning,
+and a generation builder now exist and are tested. The builder stages a new
+environment, validates it, promotes it without touching the active generation,
+and can activate it with the single pointer write. Hidden `install-generation`
+and `install-release` seams compose that API with `uv`. The latter resolves an
+exact version, or GitHub's latest stable release, from the official repository,
+requires GitHub's SHA-256 asset digest, downloads the exact wheel without
+consulting a package index for Agents Live, and verifies both size and digest
+before the builder can see it. No public bootstrap script, install, upgrade, or
+uninstall path calls these seams. Installation stays uv-managed,
+`agents-live upgrade` still runs `uv tool upgrade`, and the Windows
+deferred-handoff machinery is untouched.
 
 This record supplies the vocabulary, failure semantics, and ownership rules
 that [#369](https://github.com/johnshew/agents-live/issues/369) owes
@@ -178,7 +185,14 @@ launchers.
 
 Landed now: the layout, the pointer format and its refusals, the ownership
 classification, the lifecycle plan with its ordering invariant, the retention
-and collection rule, and a `doctor` check that names the upgrade owner.
+and collection rule, a `doctor` check that names the upgrade owner, and the
+tested staging, validation, promotion, and activation API. The hidden
+`install-generation` command is an integration seam for exact local artifacts.
+The hidden `install-release [version]` command adds authenticated GitHub release
+resolution and downloads, feeds only a verified local wheel to that same
+builder, and prints the generation-local executable path, including the native
+`.exe` path on Windows. Its optional activation exists for isolated acceptance;
+it is not yet the supported installer or upgrader.
 
 Deferred, and each is a breaking step that must land on its own:
 
@@ -190,6 +204,9 @@ Deferred, and each is a breaking step that must land on its own:
   reconcile hook in `cli/main.py`, plus adding the collector (#334 step 3);
 - pointing `cli_executable_path` and the pinned Task Scheduler and crontab
   command paths at the stable launcher, including the WSL liveness pin;
+- publishing a separately authenticated bootstrap entry point that acquires
+  Python and `uv` when absent, invokes the verified-release seam, and installs
+  the stable native launcher without executing an unverified remote script;
 - migrating existing uv-managed installations, which must not break the
   executable paths already written into host artifacts;
 - choosing the Windows launcher trampoline, and deciding self-relocation.

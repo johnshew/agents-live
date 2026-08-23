@@ -4,16 +4,23 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
 import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
+from typing import Any
 
 from ... import __version__, agent, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
+from ...obs import retention
+from ...runtime.hosts import filesystem as watchsource
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
+from ...state import registry as repos
 from .. import lifecycle, upgrade_handoff
 
 
@@ -70,6 +77,9 @@ def _maintain(
             watchers=0,
             cron=0,
             repositories=0,
+            rotated_logs=0,
+            removed_archives=0,
+            removed_run_artifacts=0,
             smoketest="unknown",
             message="maintenance did not complete",
         )
@@ -115,6 +125,27 @@ def _maintain_once(*, dry_run: bool, outcome: dict | None = None) -> int:
         cron=len(clocks),
         repositories=len(repositories),
     )
+    if not dry_run:
+        try:
+            registered = set(repos.load()["repos"].values()) | repositories
+            retained = retention.Result()
+            policies = []
+            for value in sorted(registered):
+                root = Path(value)
+                if root.is_dir():
+                    policies.append(retention.retention_days(root))
+                    retained += retention.maintain(root)
+            retained += retention.maintain_host(
+                days=max(policies, default=retention.DEFAULT_RETENTION_DAYS))
+        except (OSError, ValueError) as exc:
+            outcome["message"] = f"retention failed: {exc}"
+            print(outcome["message"], file=sys.stderr)
+            return 1
+        outcome.update(
+            rotated_logs=retained.rotated_logs,
+            removed_archives=retained.removed_archives,
+            removed_run_artifacts=retained.removed_run_artifacts,
+        )
     if result.failed or not result.health.healthy:
         outcome["health"] = "unhealthy"
         outcome["message"] = "; ".join(
@@ -214,6 +245,8 @@ def _watch(
 ) -> int:
     root = paths.resolve_root()
     retirement: dict[str, str | None] = {"reason": None, "operation": None}
+    watcher_run_id = uuid.uuid4().hex
+    watcher_id = args.name
 
     def should_continue() -> bool:
         operation = upgrade_handoff.quiesce_operation(sys.executable)
@@ -240,8 +273,19 @@ def _watch(
                 message=f"watcher '{args.name}' quiesced at idle boundary",
             )
 
+    def record(status: str, message: str, **fields: Any) -> None:
+        _record_watcher_event(
+            root,
+            watcher_id,
+            watcher_run_id,
+            status=status,
+            message=message,
+            **fields,
+        )
+
     try:
         spec = agent.load(args.name, root=root)
+        watcher_id = spec.identifier
         if spec.execution is None or not spec.execution.watch:
             raise agent.DefinitionError(f"'{args.name}' has no watch expression")
         expression = args.watch_expression or spec.execution.watch
@@ -251,24 +295,149 @@ def _watch(
             [str(item) for item in roots])
         if source is None:
             raise RuntimeError("this host does not support file watching")
+        if hasattr(source, "set_reporter"):
+            source.set_reporter(lambda kind, payload: record(
+                "degraded",
+                _degradation_message(kind),
+                category="watch_degraded",
+                degradation=kind,
+                **payload,
+            ))
+        record(
+            "start",
+            "watcher started",
+            watcher_pid=os.getpid(),
+            watch_expression=watch.canonical,
+            watch_root_count=len(roots),
+            watch_roots=[str(item) for item in roots],
+            watch_debounce_ms=watch.debounce_ms,
+            watch_mechanism=watchsource.mechanism(),
+        )
         run_watchloop(
             source,
             watch,
             root=root,
-            fire=lambda changed: dispatch(Firing(
+            fire=lambda changed: _watch_fire(
                 args.name,
-                str(root),
-                "watch",
+                root,
                 metadata.id if metadata is not None else "",
                 changed,
-            )),
+                watch.debounce_ms,
+                record,
+            ),
             should_continue=should_continue,
             on_retire=lambda: on_retire(expression),
         )
+        reason = retirement["reason"] or "stopped"
+        record(
+            "ok",
+            f"watcher stopped ({reason})",
+            stop_reason=reason,
+        )
+    except watchsource.WatchFailed as exc:
+        text = str(exc)
+        record(
+            "error",
+            f"watcher failed: {text}",
+            category="watch_failed",
+            stop_reason="watch_failed",
+            watch_error=text,
+        )
+        _record_watch_failure(root, watcher_id, text)
+        print(text, file=sys.stderr)
+        return 1
     except (agent.DefinitionError, RuntimeError, OSError, ValueError) as exc:
+        record(
+            "error",
+            f"watcher stopped: {exc}",
+            category="watch_error",
+            stop_reason="error",
+            watch_error=str(exc),
+        )
         print(str(exc), file=sys.stderr)
         return 1
     return 0
+
+
+def _watch_fire(
+    dispatch_name: str,
+    root: Path,
+    subscription_key: str,
+    changed: tuple[str, ...],
+    debounce_ms: int,
+    record: Callable[..., None],
+):
+    matched = len(changed)
+    record(
+        "ok",
+        f"watch trigger matched {matched} path(s)",
+        matched_path_count=matched,
+        watch_debounce_ms=debounce_ms,
+    )
+    return dispatch(Firing(
+        dispatch_name,
+        str(root),
+        "watch",
+        subscription_key,
+        changed,
+        debounce_ms=debounce_ms,
+    ))
+
+
+def _record_watch_failure(root: Path, watcher_id: str, message: str) -> None:
+    try:
+        obs.record(_watch_log_path(root, watcher_id), obs.create(
+            "run",
+            "failed",
+            repository=str(root),
+            agent=watcher_id,
+            run_id=uuid.uuid4().hex,
+            origin="watch",
+            category="watch_failed",
+            message=message,
+        ))
+    except Exception:
+        return
+
+
+def _record_watcher_event(
+    root: Path,
+    watcher_id: str,
+    watcher_run_id: str,
+    *,
+    status: str,
+    message: str,
+    category: str | None = None,
+    **fields: object,
+) -> None:
+    try:
+        obs.record(_watch_log_path(root, watcher_id), obs.create(
+            "watcher",
+            status,
+            repository=str(root),
+            agent=watcher_id,
+            run_id=watcher_run_id,
+            origin="watch",
+            category=category,
+            message=message,
+            attributes=tuple(fields.items()),
+        ))
+    except Exception:
+        return
+
+
+def _watch_log_path(root: Path, watcher_id: str) -> Path:
+    return paths.repo_state_dir(root) / "logs" / f"{watcher_id}.jsonl"
+
+
+def _degradation_message(kind: str) -> str:
+    if kind == "overflow":
+        return "watch overflow degraded to rescan"
+    if kind == "queue-drop":
+        return "watch queue dropped events and degraded to rescan"
+    if kind == "truncated-rescan":
+        return "watch rescan was truncated at the file limit"
+    return f"watch degraded: {kind}"
 
 
 def _runtime_is_current() -> bool:

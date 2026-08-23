@@ -37,7 +37,13 @@ from unittest import mock
 from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
-from agents_live.cli.commands import start, stop
+from agents_live.cli.commands import (
+    install_release,
+    internal,
+    ownership as ownership_command,
+    start,
+    stop,
+)
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
 from agents_live.agent.values import McpServer, RawOutput, Request, ResolvedSpec
@@ -811,6 +817,8 @@ class TestFailuresAreVisible(TempRepository):
             "log_schema": 5, "ts": "2026-08-01T00:00:00Z",
             "agent_name": "handler",
         }) + "\n", encoding="utf-8")
+        (archive / "heartbeat.log").write_text(
+            "2026-08-01 heartbeat is healthy\n", encoding="utf-8")
         parquet = archive / "2026-08.parquet"
         writer = qlog.duckdb.connect(":memory:")
         writer.sql(
@@ -864,6 +872,113 @@ class TestFailuresAreVisible(TempRepository):
         self.assertEqual("ok", status)
         self.assertEqual("2026-08-12T04:08:19.249904+00:00", last_ok)
         self.assertEqual("2026-08-11T16:06:30.128Z", last_err)
+
+
+class TestFrameworkRetention(TempRepository):
+    def test_maintenance_rotates_queryable_logs_and_skips_active_runs(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            "retention_days = 1\n", encoding="utf-8")
+        repos._add(str(self.root))
+        state_dir = paths.repo_state_dir(self.root)
+        logs = state_dir / "logs"
+        log = logs / "retained.jsonl"
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        for timestamp, run_id in ((old, "old"), (recent, "recent")):
+            obs.record(log, obs.Event(
+                timestamp=timestamp.isoformat(),
+                event="run",
+                status="success",
+                repository=str(self.root),
+                agent="retained",
+                run_id=run_id,
+                origin="clock",
+            ))
+        host_log = paths.host_logs_dir() / "host-retained.jsonl"
+        obs.record(host_log, obs.Event(
+            timestamp=old.isoformat(),
+            event="admin",
+            status="success",
+            repository="",
+            agent="host-retained",
+            run_id="host-old",
+            origin="maintenance",
+        ))
+
+        archive = logs / "archive"
+        archive.mkdir()
+        expired = archive / "expired.jsonl"
+        expired.write_text("{}\n", encoding="utf-8")
+        expired_time = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+        os.utime(expired, (expired_time, expired_time))
+
+        runs = state_dir / "runs" / "retained"
+        inactive = runs / "inactive"
+        inactive.mkdir(parents=True)
+        inactive_output = inactive / "processor-output.json"
+        inactive_output.write_text("old", encoding="utf-8")
+        inactive_transcript = runs / "inactive-agent-1.json"
+        inactive_transcript.write_text("old", encoding="utf-8")
+        active_id = "active"
+        active = runs / active_id
+        active.mkdir()
+        (active / ".active").write_text(
+            json.dumps({"pid": os.getpid()}), encoding="ascii")
+        active_output = active / "processor-output.json"
+        active_output.write_text("in use", encoding="utf-8")
+        active_pipeline = runs / f"{active_id}-pipeline.jsonl"
+        active_pipeline.write_text("in use", encoding="utf-8")
+        for artifact in (
+            inactive_output, inactive_transcript, active_output, active_pipeline,
+        ):
+            os.utime(artifact, (expired_time, expired_time))
+
+        result = mock.Mock(done=(), failed=(), health=runtime.Health(True))
+        collected = mock.Mock(subscriptions=())
+        with (
+            mock.patch.object(
+                internal.lifecycle, "converge", return_value=result),
+            mock.patch.object(
+                internal.lifecycle, "collect", return_value=collected),
+        ):
+            self.assertEqual(0, internal.main(["maintain", "--quiet"]))
+
+        self.assertFalse(log.exists())
+        self.assertFalse(expired.exists())
+        self.assertFalse(inactive_output.exists())
+        self.assertFalse(inactive_transcript.exists())
+        self.assertTrue(active_output.exists())
+        self.assertTrue(active_pipeline.exists())
+        self.assertEqual(
+            {"old", "recent"},
+            {str(record["run_id"]) for record in obs.load(obs.files(logs))},
+        )
+
+        connection = qlog.duckdb.connect(":memory:")
+        qlog.build_view(
+            connection, [str(logs / "*.jsonl")], archives=archive)
+        self.assertEqual(
+            [(2, True)],
+            connection.sql(
+                "SELECT count(*), bool_and(_archive) FROM log").fetchall(),
+        )
+        host_connection = qlog.duckdb.connect(":memory:")
+        qlog.build_view(
+            host_connection, qlog.all_log_globs(), archives=qlog.archive_dirs())
+        self.assertEqual(
+            [(1, True)],
+            host_connection.sql(
+                "SELECT count(*), bool_and(_archive) FROM log "
+                "WHERE agent_name = 'host-retained'").fetchall(),
+        )
+        maintenance = [
+            record for record in obs.load(obs.files(paths.host_logs_dir()))
+            if record.get("operation") == "maintenance"
+            and record.get("status") == "ok"
+        ][-1]
+        self.assertEqual(2, maintenance["rotated_logs"])
+        self.assertEqual(1, maintenance["removed_archives"])
+        self.assertEqual(2, maintenance["removed_run_artifacts"])
 
 
 class TestProviderOutputSurvivesItsFooter(unittest.TestCase):
@@ -1718,7 +1833,10 @@ class TestDashboardProcessIdentity(unittest.TestCase):
 class TestOwnershipMovesInBothDirections(TempRepository):
     """An agent can be claimed here or assigned to another runtime."""
 
-    def _spec(self):
+    def _spec(self, *, enabled: bool = True):
+        if enabled:
+            (self.root / ".agents-live.toml").write_text(
+                'ownership = "registry"\n', encoding="utf-8")
         self.skill("movable", [
             'agents-live.selector: "fake"',
             'agents-live.schedule: "0 8 * * *"',
@@ -1734,7 +1852,6 @@ class TestOwnershipMovesInBothDirections(TempRepository):
             with (
                 contextlib.redirect_stdout(out),
                 contextlib.redirect_stderr(err),
-                mock.patch.object(start.repos, "ensure_registered"),
                 mock.patch.object(lifecycle.repos, "load", return_value={
                     "repos": {"here": str(self.root)}, "default_repo": "here"}),
             ):
@@ -1742,6 +1859,22 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         finally:
             runtime.configure(previous)
         return code, out.getvalue(), err.getvalue()
+
+    def test_transfer_refuses_before_enable_without_mutation(self) -> None:
+        self._spec(enabled=False)
+        with (
+            mock.patch.object(start.repos, "ensure_registered") as register,
+            mock.patch.object(start.ownership, "current_owner_id") as identity,
+            mock.patch.object(start.ownership, "set_owner") as set_owner,
+        ):
+            code, _, err = self._run(
+                ["--name", "movable", "--transfer-here"])
+        self.assertEqual(1, code)
+        self.assertIn("agents-live ownership enable", err)
+        register.assert_not_called()
+        identity.assert_not_called()
+        set_owner.assert_not_called()
+        self.assertFalse((self.root / ".agents-live.toml").exists())
 
     def test_a_missing_backend_refuses_instead_of_pretending(self) -> None:
         self._spec()
@@ -1804,6 +1937,93 @@ class TestOwnershipMovesInBothDirections(TempRepository):
         code, _, err = self._run(["--all", "--transfer-here"])
         self.assertEqual(2, code)
         self.assertIn("--name", err)
+
+
+class TestOwnershipEnablement(TempRepository):
+    def _run(self, command: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = ownership_command.main([command])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_installed_backend_does_not_enable_ownership(self) -> None:
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = False
+        with (
+            mock.patch.object(ownership, "_backend", return_value=backend),
+            self.assertRaisesRegex(
+                ownership.OwnershipUnavailableError,
+                "agents-live ownership enable",
+            ),
+        ):
+            ownership.set_owner("sample", "*", root=self.root)
+        code, out, _ = self._run("status")
+        self.assertEqual(0, code)
+        self.assertIn("local-only", out)
+        backend.registry_file_exists.assert_not_called()
+        backend.set_owner.assert_not_called()
+        self.assertFalse((self.root / ".agents-live.toml").exists())
+
+    def test_enable_requires_a_backend_without_rewriting_config(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'agent_directories = ["Extra"]\n'
+        config.write_text(original, encoding="utf-8")
+        with mock.patch.object(ownership, "_backend", return_value=None):
+            code, _, err = self._run("enable")
+        self.assertEqual(1, code)
+        self.assertIn(ownership.ENTRY_POINT_GROUP, err)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+
+    def test_malformed_registry_refuses_before_rewriting_config(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'agent_directories = ["Extra"]\n'
+        config.write_text(original, encoding="utf-8")
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = True
+        backend.load_owners.side_effect = ownership.OwnershipUnavailableError(
+            "owners document malformed")
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, _, err = self._run("enable")
+        self.assertEqual(1, code)
+        self.assertIn("malformed", err)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+
+    def test_status_reports_declared_but_unavailable(self) -> None:
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        with mock.patch.object(ownership, "_backend", return_value=None):
+            code, out, _ = self._run("status")
+        self.assertEqual(1, code)
+        self.assertIn("registry declared but unavailable", out)
+
+    def test_enable_validates_then_writes_the_declaration(self) -> None:
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = False
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, out, _ = self._run("enable")
+        self.assertEqual(0, code)
+        self.assertIn("Registry ownership enabled", out)
+        self.assertEqual("registry", ownership.mode(self.root))
+        backend.registry_file_exists.assert_called_once_with(root=self.root)
+        backend.load_owners.assert_not_called()
+
+    def test_existing_registry_is_validated_and_remains_enabled(self) -> None:
+        config = self.root / ".agents-live.toml"
+        original = 'ownership = "registry"\n'
+        config.write_text(original, encoding="utf-8")
+        backend = mock.Mock()
+        backend.registry_file_exists.return_value = True
+        backend.load_owners.return_value = {"sample": "*"}
+        with mock.patch.object(ownership, "_backend", return_value=backend):
+            code, out, _ = self._run("enable")
+        self.assertEqual(0, code)
+        self.assertIn("already enabled", out)
+        self.assertEqual(original, config.read_text(encoding="utf-8"))
+        backend.load_owners.assert_called_once_with(
+            rate_limit_secs=0, root=self.root)
 
 
 class TestRunsAreRecordedUnderOneName(TempRepository):
@@ -1970,6 +2190,53 @@ class TestInstallationGenerations(unittest.TestCase):
             "[tool]\n", encoding="utf-8")
         return environment / "bin" / "agents-live"
 
+    def _package_wheel(self, version: str) -> Path:
+        wheel = (
+            Path(self.temporary.name)
+            / f"agents_live-{version}-py3-none-any.whl"
+        )
+        dist_info = f"agents_live-{version}.dist-info"
+        files = {
+            "agents_live/__init__.py": f'__version__ = "{version}"\n',
+            "agents_live/cli/__init__.py": (
+                "from agents_live import __version__\n"
+                "def main():\n"
+                "    import sys\n"
+                "    if '--version' in sys.argv:\n"
+                "        print(f'agents-live {__version__}')\n"
+                "    else:\n"
+                "        print('usage: agents-live [options]')\n"
+            ),
+            "agents_live/cli/__main__.py": (
+                "from . import main\n"
+                "main()\n"
+            ),
+            f"{dist_info}/METADATA": (
+                "Metadata-Version: 2.1\n"
+                "Name: agents-live\n"
+                f"Version: {version}\n"
+                "Requires-Python: >=3.12\n"
+            ),
+            f"{dist_info}/WHEEL": (
+                "Wheel-Version: 1.0\n"
+                "Generator: agents-live-tests\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+            f"{dist_info}/entry_points.txt": (
+                "[console_scripts]\n"
+                "agents-live = agents_live.cli:main\n"
+                "al = agents_live.cli:main\n"
+            ),
+        }
+        record = "\n".join(f"{name},," for name in files)
+        record += f"\n{dist_info}/RECORD,,\n"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+            archive.writestr(f"{dist_info}/RECORD", record)
+        return wheel
+
     def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
         """A staged generation writes wherever its name resolves.
 
@@ -2107,6 +2374,332 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertLess(activate, plan.index(deploy.plan.VERIFY))
         self.assertLess(plan.index(deploy.plan.STAGE), activate)
 
+    def test_failed_validation_leaves_the_active_generation_untouched(
+            self) -> None:
+        """A broken candidate stays recognizable and inert beside the active."""
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+
+        def populate(staging: Path) -> None:
+            staging.mkdir(parents=True)
+            (staging / "runtime").write_text("candidate", encoding="utf-8")
+
+        def reject(_staging: Path) -> None:
+            raise RuntimeError("smoke check failed")
+
+        with self.assertRaises(deploy.generation.GenerationError) as failed:
+            deploy.generation.build(
+                "6.6.0", populate=populate, validate=reject)
+        self.assertIn("smoke check failed", str(failed.exception))
+        self.assertTrue(deploy.layout.staging_dir("6.6.0").is_dir())
+        self.assertFalse(deploy.layout.generation_dir("6.6.0").exists())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+
+        def validate(staging: Path) -> None:
+            self.assertFalse((staging / "obsolete").exists())
+            self.assertEqual(
+                "candidate",
+                (staging / "runtime").read_text(encoding="utf-8"),
+            )
+
+        (deploy.layout.staging_dir("6.6.0") / "obsolete").write_text(
+            "from failed attempt", encoding="utf-8")
+        built = deploy.generation.build(
+            "6.6.0", populate=populate, validate=validate)
+        self.assertEqual(
+            deploy.layout.generation_dir("6.6.0"), built.path)
+        self.assertFalse(deploy.layout.staging_dir("6.6.0").exists())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+
+        deploy.generation.activate(built)
+        self.assertEqual("6.6.0", deploy.pointer.read().generation)
+
+    def test_generation_promotion_waits_out_a_transient_windows_hold(
+            self) -> None:
+        """Freshly executed generation files may remain briefly held on Windows."""
+        staging = deploy.layout.staging_dir("6.6.0")
+        real_replace = paths.os.replace
+        attempts = 0
+
+        def held_once(source, destination):
+            nonlocal attempts
+            if Path(source) == staging and attempts == 0:
+                attempts += 1
+                raise PermissionError(13, "held")
+            return real_replace(source, destination)
+
+        with mock.patch.object(paths.os, "replace", side_effect=held_once):
+            built = deploy.generation.build(
+                "6.6.0",
+                populate=lambda path: path.mkdir(parents=True),
+                validate=lambda _path: None,
+            )
+        self.assertEqual(1, attempts)
+        self.assertEqual(
+            deploy.layout.generation_dir("6.6.0"), built.path)
+        self.assertTrue(built.path.is_dir())
+
+    def test_activation_refuses_unvalidated_or_damaged_installation_state(
+            self) -> None:
+        """Activation cannot skip validation or overwrite pointer damage."""
+        incomplete = self._generation("6.6.0")
+        with self.assertRaises(deploy.generation.GenerationError):
+            deploy.generation.load("6.6.0")
+        self.assertFalse(deploy.layout.pointer_path().exists())
+
+        shutil.rmtree(incomplete)
+        built = deploy.generation.build(
+            "6.6.0",
+            populate=lambda staging: staging.mkdir(parents=True),
+            validate=lambda _staging: None,
+        )
+        deploy.layout.pointer_path().write_text("{broken", encoding="utf-8")
+        with self.assertRaises(deploy.generation.GenerationError) as refused:
+            deploy.generation.activate(built)
+        self.assertIn("not readable JSON", str(refused.exception))
+        self.assertEqual(
+            "{broken",
+            deploy.layout.pointer_path().read_text(encoding="utf-8"),
+        )
+
+    def test_hidden_install_seam_builds_and_activates_an_exact_wheel(
+            self) -> None:
+        """The CLI boundary drives real uv staging and staged-CLI validation."""
+        version = "9.9.9"
+        wheel = self._package_wheel(version)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agents_live.cli",
+                "install-generation",
+                version,
+                "--from",
+                str(wheel),
+                "--install-root",
+                str(self.root),
+                "--activate",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(
+            f"built and activated generation {version}", completed.stdout)
+        self.assertEqual(version, deploy.pointer.read().generation)
+        installed = deploy.generation.load(version)
+        interpreter = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename(hostruntime.interpreter_name())
+        )
+        reported = subprocess.run(
+            [
+                str(interpreter),
+                "-I",
+                "-c",
+                "from agents_live import __version__; print(__version__)",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, reported.returncode, reported.stderr)
+        self.assertEqual(version, reported.stdout.strip())
+        launcher = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename("agents-live")
+        )
+        launched = subprocess.run(
+            [str(launcher), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertEqual(f"agents-live {version}", launched.stdout.strip())
+
+    def test_official_release_metadata_authenticates_exact_wheel_bytes(
+            self) -> None:
+        """The release API digest, not a configured index, authenticates bytes."""
+        version = "9.8.7"
+        content = b"exact wheel bytes"
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_url = (
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/agents_live-{version}-py3-none-any.whl"
+        )
+        metadata = json.dumps({
+            "tag_name": f"v{version}",
+            "draft": False,
+            "prerelease": False,
+            "assets": [{
+                "name": f"agents_live-{version}-py3-none-any.whl",
+                "state": "uploaded",
+                "browser_download_url": artifact_url,
+                "digest": f"sha256:{digest}",
+                "size": len(content),
+            }],
+        }).encode()
+        requested: list[str] = []
+
+        class Response(io.BytesIO):
+            def __init__(self, value: bytes, url: str):
+                super().__init__(value)
+                self.url = url
+
+            def geturl(self) -> str:
+                return self.url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        def opener(request, **_kwargs):
+            requested.append(request.full_url)
+            if request.full_url.startswith(deploy.release_artifact.API_ROOT):
+                return Response(metadata, "https://api.github.com/release")
+            return Response(
+                content,
+                "https://release-assets.githubusercontent.com/artifact",
+            )
+
+        latest = deploy.release_artifact.resolve(opener=opener)
+        artifact = deploy.release_artifact.resolve(version, opener=opener)
+        self.assertEqual(artifact, latest)
+        with deploy.release_artifact.verified_download(
+                artifact, root=self.root, opener=opener) as wheel:
+            self.assertEqual(content, wheel.read_bytes())
+            self.assertEqual(artifact.name, wheel.name)
+        self.assertEqual(
+            [
+                "https://api.github.com/repos/johnshew/agents-live/releases/latest",
+                "https://api.github.com/repos/johnshew/agents-live/releases/"
+                f"tags/v{version}",
+                artifact_url,
+            ],
+            requested,
+        )
+        self.assertEqual([], list(self.root.glob(".artifact-*")))
+
+    def test_release_download_fails_closed_on_a_checksum_mismatch(self) -> None:
+        """Corrupt bytes never reach uv or leave an installable partial artifact."""
+        content = b"tampered"
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            "9.8.7",
+            "agents_live-9.8.7-py3-none-any.whl",
+            "https://github.com/johnshew/agents-live/releases/download/"
+            "v9.8.7/agents_live-9.8.7-py3-none-any.whl",
+            "0" * 64,
+            len(content),
+        )
+
+        class Response(io.BytesIO):
+            def geturl(self) -> str:
+                return "https://release-assets.githubusercontent.com/artifact"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        with self.assertRaises(
+                deploy.release_artifact.ReleaseArtifactError) as failed:
+            with deploy.release_artifact.verified_download(
+                    artifact,
+                    root=self.root,
+                    opener=lambda *_args, **_kwargs: Response(content)):
+                self.fail("unverified bytes were yielded")
+        self.assertIn("checksum mismatch", str(failed.exception))
+        self.assertEqual([], list(self.root.glob(".artifact-*")))
+        self.assertFalse(deploy.layout.pointer_path().exists())
+
+    def test_verified_release_cli_builds_the_generation_from_a_local_wheel(
+            self) -> None:
+        """The network seam hands exact bytes to the landed generation builder."""
+        version = "9.7.6"
+        wheel = self._package_wheel(version)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            version,
+            wheel.name,
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/{wheel.name}",
+            digest,
+            wheel.stat().st_size,
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact,
+                "verified_download",
+                return_value=contextlib.nullcontext(wheel),
+            ),
+            mock.patch.dict(
+                os.environ,
+                {"UV_INDEX_URL": "http://127.0.0.1:9/simple"},
+            ),
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = install_release.main()
+        self.assertEqual(0, code)
+        self.assertIn(f"sha256:{digest}", stdout.getvalue())
+        self.assertEqual(version, deploy.pointer.read().generation)
+        installed = deploy.generation.load(version)
+        self.assertEqual(
+            deploy.generation.Provenance("github-release", wheel.name, digest),
+            installed.provenance,
+        )
+        launcher = (
+            hostruntime.executable_dir(installed.path)
+            / hostruntime.executable_filename("agents-live")
+        )
+        launched = subprocess.run(
+            [str(launcher), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        self.assertEqual(f"agents-live {version}", launched.stdout.strip())
+
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact, "verified_download") as download,
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = install_release.main()
+        self.assertEqual(0, code)
+        download.assert_not_called()
+
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
         """Upgrade stops being refusable, which is the operator payoff.
@@ -2166,14 +2759,13 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertTrue(deploy.plan.recovery("pointer-unsupported").manual)
         self.assertIsNone(deploy.plan.recovery("invented-state"))
 
-    def test_the_generation_layout_is_inert_until_upgrade_writes_it(
+    def test_the_existing_upgrade_path_does_not_activate_generations(
             self) -> None:
-        """This change adds the model; it does not switch to it.
+        """The hidden builder seam does not switch the active upgrade path.
 
-        Installation, upgrade, and uninstall stay uv-managed until #334
-        step 2, so no shipped command may write a pointer, record an
-        owner, or relocate itself. Reading is allowed, and `doctor`
-        does exactly that.
+        Installation, upgrade, and uninstall stay uv-managed until their
+        migration lands. Only the explicit hidden generation command composes
+        the new mutating API.
         """
         self.assertEqual((), deploy.layout.installed_generations())
         self.assertEqual(
@@ -2188,6 +2780,12 @@ class TestInstallationGenerations(unittest.TestCase):
                     for call in ("pointer.write(", "ownership.write_record("))
         }
         self.assertEqual(set(), writers)
+        upgrade_source = (
+            REPOSITORY / "src" / "agents_live" / "cli" / "commands" /
+            "upgrade.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("install_generation", upgrade_source)
+        self.assertNotIn("deploy.generation", upgrade_source)
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
@@ -2221,6 +2819,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
     def _parse(self, name: str, stdout: str):
         return providers.get(name).parse(RawOutput(0, stdout, ""))
+
+    def test_claude_never_loads_implicit_repository_configuration(self) -> None:
+        for mode in ("plan", "write", "pipeline"):
+            with self.subTest(mode=mode):
+                launch = providers.get("claude").prepare(
+                    ResolvedSpec(
+                        "isolated", "prompt", mode, (), (), (),
+                        "claude", None, None,
+                    ),
+                    Request(),
+                )
+                self.assertIn("--bare", launch.argv)
+                self.assertEqual(1, launch.argv.count("--strict-mcp-config"))
+
+    def test_copilot_explicitly_disables_prompt_mode_repository_code(self) -> None:
+        launch = providers.get("copilot").prepare(
+            ResolvedSpec(
+                "isolated", "prompt", "write", (), (), (
+                    ("COPILOT_ALLOW_ALL", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "true"),
+                    ("GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP", "true"),
+                ), "copilot", None, None,
+            ),
+            Request(),
+        )
+
+        environment = dict(launch.env)
+        self.assertEqual("false", environment["COPILOT_ALLOW_ALL"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS"])
+        self.assertEqual(
+            "false", environment["GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP"])
 
     def test_a_provider_that_reports_cost_reports_it_under_one_key(self) -> None:
         """Zero spend and unreported spend look identical on screen.

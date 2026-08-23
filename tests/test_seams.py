@@ -59,6 +59,8 @@ from agents_live.runtime.hosts.posix import PosixHost
 from agents_live.runtime.hosts.memory import MemoryHost
 from agents_live.runtime.hosts.windows import WindowsHost, WindowsProcesses
 from agents_live.runtime.hosts import system as hostruntime, task_scheduler
+from agents_live.runtime.hosts import windows_watch as winwatch
+from agents_live.runtime.hosts import filesystem as watchsource
 
 
 # The repository registry lives under the data home, not the state home, so
@@ -520,6 +522,25 @@ class TestDoctor(unittest.TestCase):
             any(label in reported[0]
                 for label in deploy.ownership.LABELS.values()),
             reported[0])
+
+    def test_doctor_distinguishes_ownership_modes(self) -> None:
+        root = Path("C:/work/selected")
+        with mock.patch.object(
+                doctor.ownership, "local_only", return_value=True):
+            local = doctor._ownership_check(root, "selected")
+        self.assertTrue(local["ok"])
+        self.assertIn("local-only", local["detail"])
+
+        with (
+            mock.patch.object(
+                doctor.ownership, "local_only", return_value=False),
+            mock.patch.object(
+                doctor.ownership, "validate_registry",
+                side_effect=ownership.OwnershipUnavailableError("missing")),
+        ):
+            unavailable = doctor._ownership_check(root, "selected")
+        self.assertFalse(unavailable["ok"])
+        self.assertIn("registry declared but unavailable", unavailable["detail"])
 
     def test_doctor_repair_scopes_convergence_to_selected_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2262,6 +2283,148 @@ class TestStartedState(TempRepository):
         restart.assert_not_called()
         self.assertEqual("quiesced", record.call_args.kwargs["upgrade_phase"])
 
+    def test_watch_records_lifecycle_trigger_and_degradation_events(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1ms"',
+        ])
+        spec = agent.load("sample", root=self.root)
+
+        class Source:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+                self.started = False
+                self.stopped = False
+                self.polls = 0
+                self._reporter = None
+
+            def set_reporter(self, reporter) -> None:
+                self._reporter = reporter
+
+            def start(self) -> None:
+                self.started = True
+
+            def poll(self, _timeout: float | None) -> list[str]:
+                self.polls += 1
+                if self.polls == 1:
+                    assert self._reporter is not None
+                    self._reporter("queue-drop", {
+                        "dropped_directory_count": 1,
+                        "rescan_directory_count": 1,
+                    })
+                    return [str(self.root / "src" / "changed.py")]
+                return []
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        source = Source(self.root)
+        request = {"operation": None}
+        host = mock.Mock()
+        host.change_source.return_value = source
+        args = mock.Mock()
+        args.name = "sample"
+        args.watch_expression = None
+
+        def fire(firing):
+            self.assertEqual(1, len(firing.changed_files))
+            self.assertEqual(1, firing.debounce_ms)
+            request["operation"] = "upgrade-operation"
+            return mock.Mock()
+
+        with (
+            mock.patch.object(internal.runtime, "current", return_value=host),
+            mock.patch.object(internal, "dispatch", side_effect=fire),
+            mock.patch.object(
+                internal.upgrade_handoff,
+                "quiesce_operation",
+                side_effect=lambda _executable: request["operation"],
+            ),
+            mock.patch.object(internal, "_restart_watcher"),
+        ):
+            self.assertEqual(0, internal._watch(args))
+
+        self.assertTrue(source.started)
+        self.assertTrue(source.stopped)
+        records = [
+            item for item in obs.load(
+                obs.files(paths.repo_state_dir(self.root) / "logs"))
+            if item["agent_name"] == spec.identifier and item["phase"] == "watcher"
+        ]
+        self.assertEqual(4, len(records))
+        self.assertEqual("start", records[0]["status"])
+        self.assertEqual(1, records[0]["watch_root_count"])
+        self.assertEqual(1, records[0]["watch_debounce_ms"])
+        self.assertEqual("degraded", records[1]["status"])
+        self.assertEqual("queue-drop", records[1]["degradation"])
+        self.assertEqual("ok", records[2]["status"])
+        self.assertEqual(1, records[2]["matched_path_count"])
+        self.assertEqual(1, records[2]["watch_debounce_ms"])
+        self.assertEqual("ok", records[3]["status"])
+        self.assertEqual("quiesce", records[3]["stop_reason"])
+
+    def test_terminal_watch_failure_records_a_durable_agent_failure(self) -> None:
+        self.skill("sample", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "src/** debounce 1s"',
+        ])
+        spec = agent.load("sample", root=self.root)
+        state.record(self.root, spec.identifier)
+        source = mock.Mock()
+        source.poll.side_effect = watchsource.WatchFailed("watch root is gone")
+        host = mock.Mock()
+        host.change_source.return_value = source
+        args = mock.Mock()
+        args.name = "sample"
+        args.watch_expression = None
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(internal.runtime, "current", return_value=host),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(1, internal._watch(args))
+        self.assertIn("watch root is gone", stderr.getvalue())
+        records = [
+            item for item in obs.load(
+                obs.files(paths.repo_state_dir(self.root) / "logs"))
+            if item["agent_name"] == spec.identifier
+        ]
+        self.assertEqual(["watcher", "watcher", "done"], [
+            item["phase"] for item in records
+        ])
+        self.assertEqual("error", records[1]["status"])
+        self.assertEqual("watch_failed", records[1]["error_category"])
+        self.assertEqual("watch_failed", records[2]["error_category"])
+        rows = status._rows(self.root)
+        sample = next(item for item in rows if item["identifier"] == spec.identifier)
+        self.assertEqual("started", sample["state"])
+        self.assertEqual(1, sample["consecutive_failures"])
+
+    def test_windows_source_reports_overflow_queue_drop_and_truncated_rescan(self) -> None:
+        watched = self.root / "src"
+        source = winwatch.WindowsEventSource([str(watched)])
+        fake_watch = mock.Mock()
+        fake_watch.directory = watched
+        fake_watch.dropped = threading.Event()
+        fake_watch.dropped.set()
+        source._watches = [fake_watch]
+        reported: list[tuple[str, dict[str, object]]] = []
+        source.set_reporter(lambda kind, payload: reported.append((kind, payload)))
+        source.events.put(("overflow", str(watched)))
+        with mock.patch.object(
+            winwatch,
+            "rescan",
+            return_value=([str(watched / "changed.py")], True),
+        ):
+            self.assertEqual([str(watched / "changed.py")], source.poll(0))
+        self.assertEqual(
+            ["overflow", "queue-drop", "truncated-rescan"],
+            [kind for kind, _payload in reported],
+        )
+        self.assertEqual(1, reported[0][1]["overflowed_directory_count"])
+        self.assertEqual(1, reported[1][1]["dropped_directory_count"])
+        self.assertEqual(winwatch.RESCAN_FILE_LIMIT, reported[2][1]["rescan_file_limit"])
+
     def test_upgrade_continuation_restores_quiesced_started_watcher(self) -> None:
         self.skill("sample", [
             'agents-live.selector: "fake"',
@@ -3201,12 +3364,20 @@ class RecordingRunner:
         self.inputs: list[str | None] = []
         self.environments: list[dict[str, str]] = []
         self.mcp_configs: list[tuple[Path, dict[str, object]]] = []
+        self.copilot_homes: list[tuple[Path, dict[str, object]]] = []
 
     def run_child(self, argv, **kwargs):
         self.argv.append(tuple(argv))
         self.inputs.append(kwargs.get("input_text"))
-        self.environments.append(dict(kwargs.get("env", {})))
+        environment = dict(kwargs.get("env", {}))
+        self.environments.append(environment)
         arguments = tuple(argv)
+        if arguments[0] == "copilot" and "COPILOT_HOME" in environment:
+            home = Path(environment["COPILOT_HOME"])
+            self.copilot_homes.append((
+                home,
+                json.loads((home / "settings.json").read_text(encoding="utf-8")),
+            ))
         for flag in ("--mcp-config", "--additional-mcp-config"):
             if flag in arguments:
                 value = arguments[arguments.index(flag) + 1].removeprefix("@")
@@ -3507,6 +3678,29 @@ class TestProcessorContractVersion2(TempRepository):
         environment = json.loads(result.text)
         self.assertEqual(
             list(crowd), json.loads(environment["AGENTS_LIVE_CHANGED_FILES"]))
+
+    def test_watch_firings_record_matched_path_count_and_debounce(self) -> None:
+        self.skill("watch-observed", ['agents-live.selector: "fake/echo"'], version="2")
+        spec = agent.load("watch-observed", root=self.root)
+        state.record(self.root, spec.identifier)
+
+        result = dispatch(Firing(
+            spec.identifier,
+            str(self.root),
+            "watch",
+            changed_files=("docs/a.md", "docs/b.md", "docs/c.md"),
+            debounce_ms=1200,
+        ))
+
+        self.assertTrue(result.ok, result)
+        log = paths.repo_state_dir(self.root) / "logs" / f"{spec.identifier}.jsonl"
+        records = [
+            item for item in obs.load((log,))
+            if item["phase"] == "done" and item["run_id"] == result.run_id
+        ]
+        self.assertEqual(1, len(records))
+        self.assertEqual(3, records[0]["matched_path_count"])
+        self.assertEqual(1200, records[0]["watch_debounce_ms"])
 
     def test_an_option_value_survives_spaces_quotes_and_semicolons(self) -> None:
         directory = self.skill("hostile", [
@@ -3998,7 +4192,13 @@ class TestProviderPromptDelivery(TempRepository):
 
         self.assertNotIn("x" * 50000, launch.argv)
         self.assertIn("x" * 50000, launch.input_text)
-        self.assertEqual(("claude", "-p", "--output-format", "json"), launch.argv[:4])
+        self.assertEqual(
+            (
+                "claude", "-p", "--bare", "--strict-mcp-config",
+                "--output-format", "json",
+            ),
+            launch.argv[:6],
+        )
         self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
 
 
@@ -4557,6 +4757,37 @@ class TestAgentPipeline(TempRepository):
             payload["mcpServers"]["repo-tool"]["command"],
         )
         self.assertFalse(config_path.exists())
+
+    def test_copilot_uses_an_ephemeral_untrusted_configuration_home(self) -> None:
+        self.skill("isolated-copilot-config", [
+            'agents-live.selector: "copilot"',
+            'agents-live.mode: "write"',
+            'agents-live.env: "{\\"COPILOT_ALLOW_ALL\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP\\":\\"true\\",'
+            '\\"GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS\\":\\"true\\"}"',
+        ])
+        runner = RecordingRunner([
+            ChildResult(("copilot",), 0, "done", ""),
+        ])
+
+        result = dispatch(
+            Firing("isolated-copilot-config", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        environment = runner.environments[-1]
+        for name in (
+            "COPILOT_ALLOW_ALL",
+            "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS",
+            "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP",
+            "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
+        ):
+            self.assertEqual("false", environment[name])
+        home, settings = runner.copilot_homes[-1]
+        self.assertEqual({"disableAllHooks": True}, settings)
+        self.assertFalse(home.exists())
 
     def test_project_mcp_config_is_removed_after_cli_failure(self) -> None:
         (self.root / ".mcp.json").write_text(json.dumps({
@@ -5797,6 +6028,9 @@ class TestArchitectureFitness(unittest.TestCase):
                             stopped_snapshot["agents"][0]["can_pause"])
                         self.assertTrue(
                             stopped_snapshot["agents"][0]["can_activate"])
+                        self.assertIn(
+                            "agents-live ownership enable",
+                            stopped_snapshot["agents"][0]["claim_tip"])
                         with (
                             mock.patch.object(
                                 dashboard.ownership, "local_only",

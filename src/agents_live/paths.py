@@ -441,17 +441,16 @@ def validated_plugins(root: Path, values: object, *,
 _REPLACE_DEADLINE_SECONDS = 2.0
 
 
-def _replace_when_windows_lets_go(temporary: str, path: Path) -> None:
-    """``os.replace``, waiting out a Windows hold on the destination.
+def replace_when_windows_lets_go(source: str | Path, destination: Path) -> None:
+    """``os.replace``, waiting out a Windows hold on either path.
 
     POSIX ``rename`` succeeds no matter who holds the target open, so
     this loop is inert there: the first attempt either works or fails
     for a reason waiting cannot cure. Windows instead refuses with
-    ``ERROR_ACCESS_DENIED`` for as long as any process holds the
-    destination open without ``FILE_SHARE_DELETE`` -- which every plain
-    ``open()`` omits, so one process merely *reading* a state file
-    defeats another's write. Antivirus and search indexers take the same
-    kind of hold on a freshly written file.
+    ``ERROR_ACCESS_DENIED`` for as long as any process holds the source or
+    destination open without ``FILE_SHARE_DELETE``. Antivirus and search
+    indexers can take that kind of hold on a freshly written file or
+    environment directory.
 
     Every such holder releases in milliseconds, so a bounded retry turns
     a spurious hard failure into a brief wait. A caller that still times
@@ -462,7 +461,7 @@ def _replace_when_windows_lets_go(temporary: str, path: Path) -> None:
     delay = 0.005
     while True:
         try:
-            os.replace(temporary, path)
+            os.replace(source, destination)
             return
         except PermissionError:
             if time.monotonic() >= deadline:
@@ -502,7 +501,7 @@ def atomic_write_text(path: Path, content: str, *,
         os.fsync(handle.fileno())
         handle.close()
         handle = None
-        _replace_when_windows_lets_go(temporary, path)
+        replace_when_windows_lets_go(temporary, path)
     except BaseException:
         # Close before unlinking: Windows refuses to remove a file that
         # anything still holds open, and a failure before fdopen leaves

@@ -41,6 +41,8 @@ GENERATIONS = "versions"
 LAUNCHERS = "bin"
 POINTER = "current.json"
 OWNERSHIP = "owner.json"
+GENERATION_RECORD = "generation.json"
+DEPLOYMENT_LOCK = ".deployment.lock"
 STAGING_PREFIX = ".staging-"
 
 #: The entry points a stable launcher must answer for. ``al`` is the same
@@ -130,6 +132,16 @@ def ownership_path(root: Path | None = None) -> Path:
     command can read both facts from the tree it is about to change.
     """
     return (root or installation_root()) / OWNERSHIP
+
+
+def deployment_lock_path(root: Path | None = None) -> Path:
+    """The inter-process lock shared by builders, activators, and collectors."""
+    return (root or installation_root()) / DEPLOYMENT_LOCK
+
+
+def generation_record_path(version: str, root: Path | None = None) -> Path:
+    """The validation record inside a complete generation."""
+    return generation_dir(version, root) / GENERATION_RECORD
 
 
 def launcher_root(root: Path | None = None) -> Path:

@@ -824,6 +824,7 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
     """Shared informational row model for single and aggregate dashboards."""
     rows: list[dict] = []
     host = ownership.current_label()
+    ownership_mode = ownership.mode(root)
     logs_dir = paths.repo_state_dir(root) / "logs"
     runs, costs = _scan(_history_aliases(agents), logs_dir=logs_dir)
     for agent in agents:
@@ -854,8 +855,12 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
         model = _agent_model(agent, STATE["models"])
         can_pause = local and state == "started"
         can_activate = local and state == "stopped"
-        can_claim = ownership_available and not local
+        can_claim = (
+            ownership_mode == "registry" and ownership_available and not local)
         unavailable_tip = "Ownership registry unavailable"
+        local_tip = (
+            "Cross-machine ownership is disabled; run "
+            "`agents-live ownership enable`")
         rows.append({
             "name": name,
             "identifier": identifier,
@@ -887,7 +892,8 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
                 if can_pause else
                 unavailable_tip if not ownership_available else
                 "Not running on this host"),
-            "claim_tip": (unavailable_tip if not ownership_available else
+            "claim_tip": (local_tip if ownership_mode == "local" else
+                          unavailable_tip if not ownership_available else
                           "Already local" if local else
                           f"Claim onto {host} (transfer ownership + register trigger)"),
         })
@@ -1148,12 +1154,8 @@ async def _pause_row(event) -> None:
 
 
 async def _claim_row(event) -> None:
-    name = event.args["name"]
     identifier = event.args["identifier"]
-    ownership.set_owner(
-        name, ownership.current_owner_id(),
-        root=_require_repo_path(REPO_ROOT))
-    await do_action("Start", "start", ["--name", identifier],
+    await do_action("Claim", "start", ["--name", identifier, "--transfer-here"],
                     agent_name=identifier)
 
 

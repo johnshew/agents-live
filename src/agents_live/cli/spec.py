@@ -66,6 +66,12 @@ COMMANDS = (
     Cmd(
         "run", "Execute an agent once.", "cli.commands.run", "in-process",
         json=True, name_sugar=True,
+        help_details=(
+            "Unattended provider sessions do not run implicit repository "
+            "hooks, workspace MCP servers, or project extensions. Provider "
+            "project instructions are also disabled. Only MCP servers "
+            "explicitly named by agents-live.mcps are added."
+        ),
         args=(
             Arg(("--name",), "Agent name.", kind="value", required=True),
             Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
@@ -251,6 +257,32 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "install-generation", "Build a self-managed runtime generation.",
+        "cli.commands.install_generation", "in-process",
+        root="none", hidden=True, update_notice=False,
+        args=(
+            Arg(("version",), "Exact package version.", kind="positional",
+                required=True),
+            Arg(("--from",), "Install from a local project or wheel.",
+                kind="value"),
+            Arg(("--install-root",), "Override the installation root.",
+                kind="value"),
+            Arg(("--activate",), "Activate after validation."),
+        ),
+    ),
+    Cmd(
+        "install-release", "Install an authenticated official release.",
+        "cli.commands.install_release", "in-process",
+        root="none", hidden=True, update_notice=False,
+        args=(
+            Arg(("version",), "Exact stable version; defaults to latest.",
+                kind="positional"),
+            Arg(("--install-root",), "Override the installation root.",
+                kind="value"),
+            Arg(("--activate",), "Activate after validation."),
+        ),
+    ),
+    Cmd(
         "migrate", "Convert 5.x flat definitions.", "cli.commands.definition_migrate",
         "in-process",
         args=(
@@ -294,6 +326,23 @@ COMMANDS = (
                 "in-process", root="none",
                 args=(Arg(("repo",), "Repository path or alias.",
                           kind="positional", required=True),),
+            ),
+        ),
+    ),
+    Cmd(
+        "ownership", "Manage optional cross-machine ownership.",
+        "cli.commands.ownership", "in-process", json=True,
+        subcommand_required=True,
+        subcommands=(
+            Cmd(
+                "status",
+                "Report local, registry enabled, or unavailable state.",
+                "cli.commands.ownership", "in-process", json=True,
+            ),
+            Cmd(
+                "enable",
+                "Explicitly enable registry ownership for this project.",
+                "cli.commands.ownership", "in-process", json=True,
             ),
         ),
     ),

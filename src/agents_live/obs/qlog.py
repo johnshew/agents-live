@@ -64,6 +64,7 @@ import argparse
 import glob as _glob
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import duckdb
@@ -96,6 +97,10 @@ def logs_dir() -> Path:
 
 def archive_dir() -> Path:
     return logs_dir() / "archive"
+
+
+def archive_dirs() -> tuple[Path, ...]:
+    return archive_dir(), host_logs_dir() / "archive"
 
 
 def all_log_globs() -> list[str]:
@@ -146,16 +151,19 @@ def _is_jsonl(path: str) -> bool:
     return query.is_jsonl(Path(path))
 
 
-def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
-               archives: Path | None = None) -> None:
-    """Create a `log` view over the given files plus Parquet archives.
+def build_view(
+    con: duckdb.DuckDBPyConnection,
+    patterns: list[str],
+    archives: Path | Iterable[Path] | None = None,
+) -> None:
+    """Create a `log` view over the given files plus retained archives.
 
     Each file is read separately (read_json_auto infers schema per file)
     and the results are unioned by name so schema drift across files
     doesn't collapse rows into a raw JSON column.
 
-    `archives` is the directory holding monthly Parquet archives; the
-    caller passes it because it knows which repo the patterns came from.
+    `archives` names directories holding framework JSONL segments or legacy
+    monthly Parquet archives. The caller knows which archives match its globs.
 
     Adds `_src` (filename) for provenance.
     """
@@ -165,10 +173,21 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
     # offset-free legacy rows a deterministic UTC interpretation.
     con.sql("SET TimeZone='UTC'")
     files = _expand(patterns)
-    if not files:
-        raise SystemExit(f"no log files matched: {patterns}")
+    archive_paths = (
+        ()
+        if archives is None
+        else (archives,) if isinstance(archives, Path)
+        else tuple(archives)
+    )
+    archived_logs = sorted({
+        str(item)
+        for directory in archive_paths
+        if directory.is_dir()
+        for pattern in ("*.jsonl", "*.log")
+        for item in directory.glob(pattern)
+    })
     selects = []
-    for f in files:
+    for f in [*files, *archived_logs]:
         read_expr = (
             f"read_json_auto('{f}', format='newline_delimited', "
             f"ignore_errors=true, maximum_object_size=16777216)"
@@ -187,21 +206,28 @@ def build_view(con: duckdb.DuckDBPyConnection, patterns: list[str],
                 projection_parts.append(f'"{name}"')
         cols_sql = ", ".join(projection_parts) if projection_parts else "*"
         jsonl_sql = "TRUE" if _is_jsonl(f) else "FALSE"
+        archive_sql = "TRUE" if f in archived_logs else "FALSE"
         selects.append(
             f"SELECT {cols_sql}, '{Path(f).name}' AS _src, "
-            f"{jsonl_sql} AS _jsonl, FALSE AS _archive FROM {read_expr}"
+            f"{jsonl_sql} AS _jsonl, {archive_sql} AS _archive FROM {read_expr}"
         )
     # Include current unified monthly Parquet archives if any exist.
     # Archives are produced from JSONL sources only, so they are always
     # in scope for schema validation.
-    if archives is not None and archives.is_dir():
-        unified_files = sorted(archives.glob("*.parquet"))
-        if unified_files:
-            paths_csv = ", ".join(f"'{p}'" for p in unified_files)
-            selects.append(
-                f"SELECT *, TRUE AS _jsonl, TRUE AS _archive "
-                f"FROM read_parquet([{paths_csv}], union_by_name=true)"
-            )
+    unified_files = sorted({
+        item
+        for directory in archive_paths
+        if directory.is_dir()
+        for item in directory.glob("*.parquet")
+    })
+    if unified_files:
+        paths_csv = ", ".join(f"'{p}'" for p in unified_files)
+        selects.append(
+            f"SELECT *, TRUE AS _jsonl, TRUE AS _archive "
+            f"FROM read_parquet([{paths_csv}], union_by_name=true)"
+        )
+    if not selects:
+        raise SystemExit(f"no log files matched: {patterns}")
     union = " UNION ALL BY NAME ".join(selects)
     con.sql(f"CREATE VIEW _log_raw AS {union}")
 
@@ -343,7 +369,7 @@ def check_schema(con: duckdb.DuckDBPyConnection,
         )
         archive_invalid_count = con.sql(
             "SELECT count(*) FROM log "
-            "WHERE _archive AND (ts IS NULL OR agent_name IS NULL "
+            "WHERE _archive AND _jsonl AND (ts IS NULL OR agent_name IS NULL "
             "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
         ).fetchone()[0]
         invalid_count = live_invalid_count + archive_invalid_count
@@ -476,7 +502,7 @@ def main() -> int:
         # answered "nothing matched" while the records sat next to it.
         span_everything = args.all or args.log is None
         patterns = all_log_globs() if span_everything else [args.log]
-        archives = archive_dir()
+        archives = archive_dirs()
     except ValueError as exc:
         preflight.emit_failure("logs", str(exc), code="no_project_root")
         return 2

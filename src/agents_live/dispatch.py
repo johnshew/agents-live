@@ -30,6 +30,7 @@ class Firing:
     origin: str
     subscription_key: str = ""
     changed_files: tuple[str, ...] = ()
+    debounce_ms: int | None = None
     instructions: str = ""
     options: tuple[tuple[str, str | bool], ...] = ()
 
@@ -129,7 +130,9 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                 events, firing, run_id, "invocation_input_overflow", overflow)
     scratch = _scratch(spec, run_id)
     try:
-        with _resource(spec, shape.needs_mcp, run_id) as (resource_env, session):
+        with _resource(
+            spec, shape.needs_mcp, run_id, scratch
+        ) as (resource_env, session):
             def context(step: Step, **extra) -> StepContext:
                 return StepContext(
                     request,
@@ -220,18 +223,21 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
 def _scratch(spec, run_id: str) -> Path:
     """Where this run's children may write control, logs, and results."""
     from .paths import repo_state_dir
+    from .obs.retention import mark_active
     directory = repo_state_dir(spec.root) / "runs" / spec.name / run_id
     directory.mkdir(parents=True, exist_ok=True)
+    mark_active(directory)
     return directory
 
 
 def _discard_if_empty(scratch: Path) -> None:
     """Leave nothing behind for a run whose children wrote nothing.
 
-    Nothing prunes the run directory yet (#259), so an unused channel must
-    not cost a file.
+    An unused channel should not wait for retention before disappearing.
     """
+    from .obs.retention import ACTIVE_MARKER
     with contextlib.suppress(OSError):
+        (scratch / ACTIVE_MARKER).unlink(missing_ok=True)
         scratch.rmdir()
 
 
@@ -381,6 +387,7 @@ def _finish(
         message=_recorded(result),
         transcript=result.transcript,
         usage=result.usage,
+        attributes=_firing_attributes(firing),
     ))
     return result
 
@@ -403,7 +410,8 @@ def _skip(events: Path, firing: Firing, run_id: str, reason: str) -> Outcome:
     result = Outcome(True, "skipped", message=reason, run_id=run_id)
     obs.record(events, obs.create(
         "firing", "skipped", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, message=reason))
+        run_id=run_id, origin=firing.origin, message=reason,
+        attributes=_firing_attributes(firing)))
     return result
 
 
@@ -418,18 +426,34 @@ def _failure(
         False, "failed", category=category, message=message, run_id=run_id)
     obs.record(events, obs.create(
         "run", "failed", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, category=category, message=message))
+        run_id=run_id, origin=firing.origin, category=category, message=message,
+        attributes=_firing_attributes(firing)))
     return result
 
 
+def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:
+    if firing.origin != "watch":
+        return ()
+    attributes: list[tuple[str, object]] = [
+        ("matched_path_count", len(firing.changed_files)),
+    ]
+    if firing.debounce_ms is not None:
+        attributes.append(("watch_debounce_ms", firing.debounce_ms))
+    return tuple(attributes)
+
+
 @contextlib.contextmanager
-def _resource(spec, needed: bool, run_id: str):
+def _resource(spec, needed: bool, run_id: str, scratch: Path):
     from .agent.mcp import mcp_config_runtime, resolve_mcp_servers
+    from .agent.unattended import provider_environment
 
     environment: dict[str, str] = {}
     pipeline_session = None
     config = spec.execution
     with contextlib.ExitStack() as stack:
+        if config is not None:
+            environment.update(stack.enter_context(
+                provider_environment(config.selector.provider, scratch)))
         if config is not None and config.mcps and config.mode != "pipeline":
             resolved = resolve_mcp_servers(spec.root, config.mcps)
             project_config = stack.enter_context(mcp_config_runtime(resolved))

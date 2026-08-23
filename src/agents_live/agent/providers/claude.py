@@ -24,13 +24,14 @@ class ClaudeProvider:
         elif spec.mode == "pipeline":
             tools = tools or ["mcp__pipeline__get", "mcp__pipeline__put"]
             mode = [
-                "--permission-mode", "default", "--strict-mcp-config",
+                "--permission-mode", "default",
                 "--allowedTools", *tools,
             ]
         else:
             mode = ["--dangerously-skip-permissions"]
         argv = [
-            "claude", "-p", "--output-format", "json",
+            "claude", "-p", "--bare", "--strict-mcp-config",
+            "--output-format", "json",
             "--append-system-prompt", "Follow the loaded Agent Skill exactly.",
             *mode,
         ]

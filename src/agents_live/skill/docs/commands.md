@@ -26,6 +26,11 @@ machine-readable output where a command supports it.
 
 Runs a definition once through the fixed pre-processor, provider, and
 post-processor pipeline. A manual run does not change started state.
+The provider session does not run implicit repository hooks, workspace MCP
+servers, or project extensions, and provider project instructions are disabled
+even when the provider has previously trusted the checkout. Only servers
+explicitly listed in `agents-live.mcps` are added. See
+[Definition format](definition-format.md) for provider authentication effects.
 
 ```bash
 agents-live run link-check
@@ -92,9 +97,28 @@ processes.
 `--transfer-here` claims an agent for this runtime and starts it here.
 `--transfer-to` assigns it to another runtime, named by the full identity
 `status --json` reports, and withdraws its triggers from this host. Both
-need an ownership registry backend, and the first transfer in a project
-declares registry ownership. Use `--transfer-here` to recover an agent
-whose owner value cannot be matched to any runtime.
+require registry ownership to be explicitly enabled first. Use
+`agents-live ownership enable` after installing the ownership backend. A
+refused transfer in local mode does not change project configuration, registry
+assignments, repository registration, or host triggers. Use `--transfer-here`
+to recover an agent whose owner value cannot be matched to any runtime.
+
+### `ownership`
+
+Cross-machine assignment is optional and local-only by default. Installing an
+ownership backend or registering a repository does not enable it.
+
+```bash
+agents-live ownership status
+agents-live ownership enable
+```
+
+`ownership status` reports `local`, `registry`, or `registry-unavailable`.
+`ownership enable` validates project configuration, the installed backend, and
+any existing owners document before writing `ownership = "registry"`. If
+validation fails, project configuration is unchanged. An absent owners document
+is initialized safely by the backend on the first assignment. Repositories that
+already declare registry ownership remain enabled.
 
 ### `stop`
 
@@ -193,7 +217,7 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | completions | dashboard
+command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
@@ -208,6 +232,7 @@ upgrade      ::= "upgrade" [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+ownership    ::= "ownership" ( "status" | "enable" )
 completions  ::= "completions" ( "bash" | "zsh" | "powershell" | "--update" )
 dashboard    ::= "dashboard" ( dashboard_query | "list" | "stop" stop_args )
 dashboard_query ::= [ PROJECT ] [ "--native" ] [ "--open" ] [ "--dev" ] [ "--port" VALUE ] [ "--all-repos" ]
@@ -235,6 +260,9 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | repos add | in-process | none |  |  |  |  |  | Register a repository. |
 | repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
+| ownership | in-process | required |  | yes |  |  |  | Manage optional cross-machine ownership. |
+| ownership status | in-process | required |  | yes |  |  |  | Report local, registry enabled, or unavailable state. |
+| ownership enable | in-process | required |  | yes |  |  |  | Explicitly enable registry ownership for this project. |
 | completions | in-process | none |  |  |  |  | --update | Generate shell completion scripts. |
 | dashboard | subprocess | registry |  |  | yes |  | --native, --open, --dev, --port, --all-repos | Open the interactive control panel. |
 | dashboard list | subprocess | none |  |  |  |  |  | List dashboards this host is running. |

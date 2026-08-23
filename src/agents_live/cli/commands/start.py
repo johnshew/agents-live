@@ -7,7 +7,6 @@ import sys
 from ... import agent, paths, state
 from ...state import ownership, registry as repos
 from .. import lifecycle, resolve
-from . import init
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,13 +20,13 @@ def main(argv: list[str] | None = None) -> int:
     transfer.add_argument("--transfer-to")
     args = parser.parse_args(argv)
     root = paths.resolve_root()
-    repos.ensure_registered(root)
     if (args.transfer_here or args.transfer_to) and args.all:
         print("--transfer-here and --transfer-to act on one agent; use --name",
               file=sys.stderr)
         return 2
     try:
         if args.all:
+            repos.ensure_registered(root)
             discovery = agent.discover(root)
             specs = tuple(
                 spec for spec in discovery.specs if spec.execution is not None)
@@ -43,6 +42,13 @@ def main(argv: list[str] | None = None) -> int:
             if resolution.fallback:
                 print(f"Starting '{resolution.spec.name}' in {root}.",
                       file=sys.stderr)
+            if (
+                (args.transfer_here or args.transfer_to)
+                and ownership.local_only(root)
+            ):
+                raise ownership.OwnershipUnavailableError(
+                    "cross-machine ownership is not enabled for this "
+                    "repository; run `agents-live ownership enable` first")
             repos.ensure_registered(root)
             specs = (resolution.spec,)
             unloadable = ()
@@ -52,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         result = lifecycle.converge(
             additions={root: set(identifiers)}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,
+            ownership.OwnershipUnavailableError,
             state.StartedStateUnavailable, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -72,10 +79,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def _transfer(root, spec, args) -> int:
     """Move one agent's ownership, then converge what that implies."""
-    owner = (ownership.current_owner_id() if args.transfer_here
-             else args.transfer_to)
-    mine = args.transfer_here or ownership.owns(owner)
     try:
+        if ownership.local_only(root):
+            raise ownership.OwnershipUnavailableError(
+                "cross-machine ownership is not enabled for this repository; "
+                "run `agents-live ownership enable` first")
+        owner = (ownership.current_owner_id() if args.transfer_here
+                 else args.transfer_to)
+        mine = args.transfer_here or ownership.owns(owner)
         if not ownership.registry_available():
             raise ownership.OwnershipUnavailableError(
                 "multi-host ownership is a private plugin exposing the "
@@ -89,10 +100,6 @@ def _transfer(root, spec, args) -> int:
         if args.dry_run:
             print(f"Would assign '{spec.name}' to {ownership.display_owner(owner)}.")
             return 0
-        if ownership.local_only(root):
-            # Transferring is the declaration of multi-host intent; there
-            # is deliberately no init-time flag for it.
-            init.declare_ownership(root, "registry")
         ownership.set_owner(spec.name, owner, root=root)
     except (ownership.OwnershipUnavailableError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

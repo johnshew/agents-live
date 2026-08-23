@@ -56,7 +56,7 @@ metadata:
 | `agents-live.mode` | enum | `plan` by default; `plan`, `write`, or `pipeline`. |
 | `agents-live.result-path` | absolute PipelineMcp path | Optional in `pipeline` mode only. The declared value becomes `structured` in `run --json`; absence is nonfatal. |
 | `agents-live.allow-tools` | JSON string array | Empty by default. Narrows unattended authority; it is not standard `allowed-tools`. |
-| `agents-live.mcps` | JSON string array | Empty by default. |
+| `agents-live.mcps` | JSON string array | Empty by default. Explicitly opts named servers from `.mcp.json` or `.vscode/mcp.json` into the otherwise isolated provider session. |
 | `agents-live.env` | JSON string map | Empty by default. Do not store secrets. |
 | `agents-live.transcript` | `true` or `false` | `true` by default. |
 | `agents-live.timeout` | positive integer | Provider or processor timeout in seconds; `120` by default. |
@@ -92,6 +92,23 @@ resumes once the tool is upgraded.
 `allowed-tools` and `agents-live.allow-tools` are different security
 contracts. The standard field pre-approves tools for interactive skill use.
 The Agents Live key can only narrow tools during an unattended run.
+
+Provider sessions do not implicitly run repository-controlled hooks, workspace
+MCP servers, or project extensions. Provider project instructions are also
+disabled so the definition body is the unattended instruction source. This
+policy is the same for Claude and Copilot and does not depend on whether either
+CLI has previously trusted the checkout. A repository MCP server runs only
+when its name appears in `agents-live.mcps`; a missing or malformed named
+server fails the run before the provider starts. Repository hooks and project
+extensions have no unattended opt-in surface.
+
+Claude runs in `--bare` mode, so an Anthropic-hosted account must supply
+`ANTHROPIC_API_KEY`; subscription credentials are not read. Bedrock, Google
+Cloud's Agent Platform, and Microsoft Foundry retain their provider credential
+mechanisms. Copilot uses a fresh run-scoped configuration home. Secure
+credential-store login continues to work; on a host without a credential
+store, supply `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` because
+credentials stored below the normal Copilot configuration home are not read.
 
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired

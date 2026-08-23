@@ -110,6 +110,12 @@ needed when definitions watch files or directories. On WSL, the first
 convergence stages and verifies Windows-side liveness before replacing an
 existing task, so scheduled runs do not require an open session.
 
+Automatic maintenance rotates framework logs and removes retained transcripts
+and processor output after 30 days by default. Set `retention_days` to a
+positive integer in `.agents-live.toml` (or `[tool.agents-live]`) to change the
+repository policy. Rotated records remain available through `agents-live logs`
+until their retention boundary.
+
 On Windows:
 
 ```powershell
@@ -156,6 +162,11 @@ and `.agents/skills/`, claiming a skill there only when it carries
 Register another repository with `agents-live init --repo <path>`. Once
 registered, `run`, `start`, `stop`, and `status` fall back to the other
 registered repositories when a name is not present locally.
+
+Cross-machine assignment is optional. Repository registration and ownership
+backend installation leave a project local-only. Run
+`agents-live ownership enable` to validate the backend and owners document
+before enabling transfers; `agents-live ownership status` reports the mode.
 
 See the [command reference](src/agents_live/skill/docs/commands.md) for
 repository workflows, health checks and repair, upgrades, dashboards, shell

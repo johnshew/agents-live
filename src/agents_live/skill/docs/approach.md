@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-17
+ms.date: 2026-08-23
 ms.topic: concept-article
 ---
 
@@ -49,8 +49,12 @@ under `legacy/` and exists to replace old artifacts during convergence.
 Every non-preview maintenance pass records correlated start and terminal admin
 events. The terminal event includes its source, subscription ID when scheduled,
 exit code, convergence counts, watcher and schedule counts, smoketest verdict,
-and resulting health status. The health beacon remains the current-state record;
-events are the durable account of how it got there.
+retention counts, and resulting health status. The same pass rotates
+framework-owned repository and host logs into queryable archives and removes
+expired run transcripts, pipeline journals, and processor channels. A
+process-owned marker protects every active run from retention. The health beacon
+remains the current-state record; events are the durable account of how it got
+there.
 
 Long-lived watchers compare their loaded package version with the installed
 distribution at a bounded idle check. A mismatch is handled only between
@@ -70,6 +74,12 @@ subscription through the current CLI, and exits.
 Provider plugins contain Claude and Copilot argv and output quirks. The fake
 provider and fake CLI exercise the same path deterministically. Providers
 receive a narrow immutable projection, not trigger or repository state.
+Unattended launches do not implicitly run repository-controlled hooks,
+workspace MCP servers, or project extensions, and provider project
+instructions are disabled. Claude uses bare mode; Copilot uses a fresh
+run-scoped configuration home and explicit prompt-mode opt-out environment
+values. Only MCP servers named by `agents-live.mcps` are added to a
+non-pipeline session.
 
 ## Dispatch
 
@@ -97,7 +107,11 @@ which definitions should be automated here. Missing started state adopts
 identifiable installed subscriptions exactly once. Present but unreadable state
 causes collection to abstain before any mutation.
 
-An optional assignment plugin may filter collected work. Local mode makes no
+An optional assignment plugin may filter collected work. Repository
+registration and plugin installation do not activate it. Projects are
+local-only until `agents-live ownership enable` validates the backend and
+project configuration, then writes the explicit registry declaration. Transfer
+operations never create that declaration as a side effect. Local mode makes no
 assignment decision.
 
 `obs/` creates versioned immutable event records. The dispatch envelope and

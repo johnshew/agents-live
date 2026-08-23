@@ -25,6 +25,7 @@ import ctypes
 import queue
 import struct
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 # Spelled out rather than imported from ``ctypes.wintypes``, which only
@@ -260,21 +261,24 @@ def _records(buffer) -> list[str]:
     return names
 
 
-def rescan(directories) -> list[str]:
+def rescan(directories) -> tuple[list[str], bool]:
     """Every file under *directories*, up to the rescan limit.
 
     What an overflow degrades to. A superset of the changes that were
     lost, bounded so that the response to a storm cannot itself be a
-    storm.
+    storm. Returns ``(paths, truncated)``, where ``truncated`` means the
+    bounded walk hit ``RESCAN_FILE_LIMIT``.
     """
     found: list[str] = []
+    truncated = False
     for directory in directories:
         for path in Path(directory).rglob("*"):
             if len(found) >= RESCAN_FILE_LIMIT:
-                return found
+                truncated = True
+                return found, truncated
             if path.is_file():
                 found.append(str(path))
-    return found
+    return found, truncated
 
 
 class WindowsEventSource:
@@ -289,6 +293,12 @@ class WindowsEventSource:
         self._watches = [DirectoryWatch(Path(d), self.events)
                          for d in directories]
         self._overflowed: set[str] = set()
+        self._overflowed_by_kernel: set[str] = set()
+        self._overflowed_by_queue: set[str] = set()
+        self._reporter: Callable[[str, dict[str, object]], None] | None = None
+
+    def set_reporter(self, reporter: Callable[[str, dict[str, object]], None]) -> None:
+        self._reporter = reporter
 
     def start(self) -> None:
         for watch in self._watches:
@@ -318,10 +328,35 @@ class WindowsEventSource:
         for watch in self._watches:
             if watch.dropped.is_set():
                 watch.dropped.clear()
-                self._overflowed.add(str(watch.directory))
+                directory = str(watch.directory)
+                self._overflowed.add(directory)
+                self._overflowed_by_queue.add(directory)
         if self._overflowed:
-            paths.extend(rescan(sorted(self._overflowed)))
+            directories = sorted(self._overflowed)
+            if self._overflowed_by_kernel:
+                self._report(
+                    "overflow",
+                    overflowed_directory_count=len(self._overflowed_by_kernel),
+                    rescan_directory_count=len(directories),
+                )
+            if self._overflowed_by_queue:
+                self._report(
+                    "queue-drop",
+                    dropped_directory_count=len(self._overflowed_by_queue),
+                    rescan_directory_count=len(directories),
+                )
+            rescanned, truncated = rescan(directories)
+            paths.extend(rescanned)
+            if truncated:
+                self._report(
+                    "truncated-rescan",
+                    rescan_directory_count=len(directories),
+                    rescanned_path_count=len(rescanned),
+                    rescan_file_limit=RESCAN_FILE_LIMIT,
+                )
             self._overflowed.clear()
+            self._overflowed_by_kernel.clear()
+            self._overflowed_by_queue.clear()
         return [path for path in paths if path]
 
     def _take(self, item) -> str:
@@ -330,10 +365,20 @@ class WindowsEventSource:
             raise WatchFailed(value)
         if kind == "overflow":
             self._overflowed.add(value)
+            self._overflowed_by_kernel.add(value)
             return ""
         if kind == "stopped":
             return ""
         return value
+
+    def _report(self, kind: str, **fields: object) -> None:
+        reporter = self._reporter
+        if reporter is None:
+            return
+        try:
+            reporter(kind, dict(fields))
+        except Exception:
+            return
 
     def stop(self) -> None:
         for watch in self._watches:

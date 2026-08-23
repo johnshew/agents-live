@@ -55,8 +55,8 @@ Public API (see ``__all__``):
 * ``set_owner(name, owner, root=None)`` / ``remove_owner(name, root=None)`` - registry
   mutations via the backend; raise ``OwnershipUnavailableError`` when
   no backend is installed.
-* ``registry_file_exists(root=None)`` - bootstrap check for the first
-    ``--transfer-to`` (False when no backend is installed).
+* ``validate_registry(root=None)`` - verify that the backend and any existing
+  owners document are ready before explicit enablement.
 
 See ``.claude/skills/agents-live/docs/commands.md`` for the operator
 contract.
@@ -204,20 +204,32 @@ def _require_backend():
 
 
 def registry_available() -> bool:
-    """Whether a registry backend is installed. Gate multi-host bootstrap
-    (the first ``--transfer-to``) on this BEFORE declaring registry mode,
-    so a kernel-only install can never write a declaration it cannot
-    honor."""
+    """Whether a registry backend is installed."""
     return _backend() is not None
 
 
 def registry_file_exists(root: Path | None = None) -> bool:
-    """Whether the owners document exists on disk (bootstrap check for
-    the first --transfer-to in ``root``; validity is load_owners' job).
-    False when no backend is installed."""
+    """Whether the owners document exists on disk."""
     backend = _backend()
     return bool(
         backend is not None and backend.registry_file_exists(root=root))
+
+
+def validate_registry(
+    root: Path | None = None, *, rate_limit_secs: int = 0,
+) -> None:
+    """Validate registry capability before enabling it for a project.
+
+    An existing document must pass the backend's strict reader. An absent
+    document is safe to initialize on the first assignment through the
+    backend's atomic ``set_owner`` operation. This deliberately bypasses
+    :func:`load_owners`, whose local-mode behavior must not consult ambient
+    registry state.
+    """
+    backend = _require_backend()
+    if backend.registry_file_exists(root=root):
+        backend.load_owners(
+            rate_limit_secs=rate_limit_secs, root=root)
 
 
 def resolve_owners(
@@ -433,6 +445,10 @@ def set_owner(name: str, owner: str, *, root: Path | None = None) -> None:
     write + git commit + detached background push; no-op if unchanged).
     Raises :class:`OwnershipUnavailableError` when no backend is
     installed."""
+    if local_only(root):
+        raise OwnershipUnavailableError(
+            "cross-machine ownership is not enabled for this repository; "
+            "run `agents-live ownership enable` first")
     backend = _require_backend()
     previous = _recorded_owner(name, root=root)
     backend.set_owner(name, owner, root=root)
@@ -452,6 +468,10 @@ def remove_owner(name: str, *, root: Path | None = None) -> bool:
     + git commit + detached background push). Returns True if an entry
     was removed. Raises :class:`OwnershipUnavailableError` when no
     backend is installed."""
+    if local_only(root):
+        raise OwnershipUnavailableError(
+            "cross-machine ownership is not enabled for this repository; "
+            "run `agents-live ownership enable` first")
     previous = _recorded_owner(name, root=root)
     removed = _require_backend().remove_owner(name, root=root)
     if removed:
@@ -493,6 +513,7 @@ __all__ = [
     "local_only",
     "registry_available",
     "registry_file_exists",
+    "validate_registry",
     "current_host",
     "current_label",
     "current_owner_id",
