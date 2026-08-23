@@ -4192,7 +4192,13 @@ class TestProviderPromptDelivery(TempRepository):
 
         self.assertNotIn("x" * 50000, launch.argv)
         self.assertIn("x" * 50000, launch.input_text)
-        self.assertEqual(("claude", "-p", "--output-format", "json"), launch.argv[:4])
+        self.assertEqual(
+            (
+                "claude", "-p", "--bare", "--strict-mcp-config",
+                "--output-format", "json",
+            ),
+            launch.argv[:6],
+        )
         self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
 
 
