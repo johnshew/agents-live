@@ -209,7 +209,14 @@ def _declares_execution_metadata(prompt: Path) -> bool:
     try:
         frontmatter, _body = _extract(text, prompt)
     except DefinitionError:
-        return False
+        lines = text.splitlines()
+        if not lines or lines[0] != "---":
+            return False
+        try:
+            end = lines.index("---", 1)
+        except ValueError:
+            end = len(lines)
+        frontmatter = "\n".join(lines[1:end])
     return _has_execution_metadata(frontmatter)
 
 

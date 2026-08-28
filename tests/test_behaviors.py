@@ -5410,6 +5410,29 @@ class TestRepositoryDiscoveryRoots(TempRepository):
             [(self.root / ".claude" / "skills" / "ours" / "SKILL.md").resolve()],
             [item.path for item in discovery.broken])
 
+    def test_unterminated_owned_client_skill_is_reported_broken(self) -> None:
+        ours = self.root / ".github" / "skills" / "ours" / "SKILL.md"
+        ours.parent.mkdir(parents=True)
+        ours.write_text(
+            "---\nname: ours\ndescription: Broken while being edited.\n"
+            "metadata:\n  agents-live.selector: fake\n",
+            encoding="utf-8",
+        )
+        foreign = self.root / ".agents" / "skills" / "foreign" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text(
+            "---\nname: foreign\ndescription: Broken foreign skill.\n",
+            encoding="utf-8",
+        )
+
+        discovery = agent.discover(self.root)
+
+        self.assertEqual((), discovery.specs)
+        self.assertEqual([ours.resolve()], [
+            item.path for item in discovery.broken
+        ])
+        self.assertIn("unterminated frontmatter", discovery.broken[0].message)
+
     def test_declared_directories_extend_the_standard_roots(self) -> None:
         """Configuration adds roots; it never takes one away.
 
