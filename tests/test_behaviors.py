@@ -38,6 +38,7 @@ from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
 from agents_live.cli.commands import (
+    install_generation,
     install_release,
     internal,
     ownership as ownership_command,
@@ -2698,6 +2699,52 @@ class TestInstallationGenerations(unittest.TestCase):
         ):
             code = install_release.main()
         self.assertEqual(0, code)
+        download.assert_not_called()
+
+    def test_verified_release_refuses_a_damaged_existing_generation(self) -> None:
+        """Matching provenance cannot authorize a payload that no longer runs."""
+        version = "9.7.5"
+        wheel = self._package_wheel(version)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            version,
+            wheel.name,
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/{wheel.name}",
+            digest,
+            wheel.stat().st_size,
+        )
+        provenance = deploy.generation.Provenance(
+            "github-release", wheel.name, digest)
+        built = install_generation.install(
+            version, source=wheel, root=self.root, provenance=provenance)
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        install_generation.executable(built).unlink()
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact, "verified_download") as download,
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = install_release.main()
+
+        self.assertEqual(1, code)
+        self.assertIn("is damaged: missing launcher", stderr.getvalue())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
         download.assert_not_called()
 
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
