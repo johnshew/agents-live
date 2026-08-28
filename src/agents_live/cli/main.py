@@ -213,9 +213,11 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
     metadata: artifacts.InvocationMetadata | None = None
+    option_boundary = args.index("--") if "--" in args else len(args)
 
     metadata_indexes = [
-        index for index, token in enumerate(args) if token == "--metadata"
+        index for index, token in enumerate(args[:option_boundary])
+        if token == "--metadata"
     ]
     if len(metadata_indexes) > 1:
         _emit_failure(
@@ -238,7 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         del args[index:index + 2]
 
     repo_indexes = [
-        index for index, token in enumerate(args) if token == "--repo"
+        index for index, token in enumerate(args[:option_boundary])
+        if token == "--repo"
     ]
     if len(repo_indexes) > 1:
         _emit_failure(
