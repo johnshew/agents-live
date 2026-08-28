@@ -38,6 +38,7 @@ def main() -> int:
                     f"generation {artifact.version} is already installed without "
                     "matching official release provenance and will not be "
                     "overwritten")
+            install_generation.validate(built)
             action = "already installed"
             if args.activate:
                 deploy.generation.activate(built, root=root)

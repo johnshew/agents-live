@@ -115,6 +115,24 @@ def executable(generation: deploy.generation.Generation) -> Path:
     )
 
 
+def validate(generation: deploy.generation.Generation) -> None:
+    """Revalidate an installed generation before it is reused or activated."""
+    interpreter = _interpreter(generation.path)
+    launcher = executable(generation)
+    missing = [
+        label for label, path in (
+            ("interpreter", interpreter),
+            ("launcher", launcher),
+        )
+        if not path.is_file()
+    ]
+    if missing:
+        raise deploy.generation.GenerationError(
+            f"generation {generation.name} is damaged: missing "
+            f"{', '.join(missing)}")
+    _validate(generation.name, generation.path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and optionally activate one self-managed generation")
