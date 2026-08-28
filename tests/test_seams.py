@@ -692,11 +692,19 @@ class TestDoctor(unittest.TestCase):
             ),
             mock.patch.object(
                 doctor.repos, "load", return_value={"repos": {}}),
+            mock.patch.object(
+                doctor.state, "resolve_root", side_effect=KeyError("no repository")),
             mock.patch.object(doctor.runtime, "health", return_value=initial),
+            mock.patch.object(
+                doctor, "_installation_check", return_value={
+                    "check": "installation", "ok": True, "detail": "test",
+                }),
             mock.patch.object(
                 doctor.lifecycle, "collect", return_value=collected),
             mock.patch.object(
                 doctor.lifecycle, "converge", return_value=result),
+            mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+            mock.patch.object(doctor, "_health_payload", return_value=None),
             mock.patch.object(
                 doctor.update_check, "interactive", return_value=False),
             contextlib.redirect_stdout(stdout),
