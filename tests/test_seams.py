@@ -1751,13 +1751,26 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertIsNotNone(runtime.artifacts.from_rendered(rendered.rendered))
 
     def test_windows_maintenance_artifact_reaches_the_real_cli(self) -> None:
-        with mock.patch(
-            "agents_live.runtime.hosts.windows.shutil.which",
-            return_value="C:/tools/agents-live.exe",
-        ):
-            rendered = WindowsHost().render(
-                lifecycle.maintenance_subscription())
+        with tempfile.TemporaryDirectory() as temporary:
+            interpreter = Path(temporary) / hostruntime.executable_filename(
+                hostruntime.interpreter_name())
+            launcher = interpreter.with_name(
+                hostruntime.executable_filename("agents-live"))
+            launcher.touch()
+            with (
+                mock.patch(
+                    "agents_live.runtime.spawn.sys.executable",
+                    str(interpreter),
+                ),
+                mock.patch(
+                    "agents_live.runtime.spawn.shutil.which",
+                    return_value=None,
+                ),
+            ):
+                rendered = WindowsHost().render(
+                    lifecycle.maintenance_subscription())
         argv = json.loads(rendered.rendered)["argv"]
+        self.assertEqual(str(launcher.resolve()), argv[0])
         result = mock.Mock(done=(), failed=(), health=Health(True))
         collected = mock.Mock(subscriptions=())
         with (
@@ -2653,16 +2666,16 @@ class TestStartedState(TempRepository):
         spec = agent.load("sample", root=self.root)
         host = WindowsMigrationHost()
         host.legacy[str(self.root)] = {"sample"}
+        launcher = Path("C:/tools/agents-live.exe")
         with (
             mock.patch.object(
                 migrate.hostruntime,
                 "native_scheduler",
                 return_value=migrate.hostruntime.TASK_SCHEDULER,
             ),
-            mock.patch.object(
-                task_scheduler.shutil,
-                "which",
-                return_value="C:/tools/agents-live.exe",
+            mock.patch(
+                "agents_live.runtime.hosts.windows.cli_executable_path",
+                return_value=launcher,
             ),
         ):
             self.assertEqual(0, self._migrate_with_legacy(host))
@@ -2680,7 +2693,7 @@ class TestStartedState(TempRepository):
         self.assertEqual("clock", metadata.origin)
         self.assertEqual(
             [
-                "C:/tools/agents-live.exe",
+                str(launcher),
                 "--repo",
                 str(self.root),
                 "run",
