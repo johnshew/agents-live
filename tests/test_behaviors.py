@@ -4065,6 +4065,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
         contract.assert_called_once_with(status)
         watcher_contract.assert_called_once_with({"agents": []})
 
+    def test_local_deploy_counts_launcher_and_child_as_one_watcher(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        repository = str(Path("C:/repo").resolve())
+
+        logical = script["_logical_watchers"]([
+            (101, "sample-123", "C:/repo"),
+            (102, "sample-123", "C:/repo"),
+            (103, "other-456", "C:/repo"),
+        ])
+
+        self.assertEqual((
+            (repository, "other-456"),
+            (repository, "sample-123"),
+        ), logical)
+        self.assertLessEqual(set(logical), {
+            (repository, "other-456"),
+            (repository, "sample-123"),
+        })
+
     def test_local_deploy_verifies_events_for_local_watchers_only(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))

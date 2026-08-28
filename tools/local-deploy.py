@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import collections
 import contextlib
 import json
 import os
@@ -214,6 +213,17 @@ def _installed_cli() -> Path:
 
 def _installed_run(*args: str) -> subprocess.CompletedProcess[str]:
     return RELEASE["_installed_run"](list(args))
+
+
+def _logical_watchers(
+    rows: list[tuple[int, str, str | None]],
+) -> tuple[tuple[str, str], ...]:
+    """Deduplicate physical launcher/child rows into logical watchers."""
+    return tuple(sorted({
+        (str(Path(project).resolve()), name)
+        for _pid, name, project in rows
+        if project
+    }))
 
 
 def _dashboard_modes(pid: int) -> tuple[str, ...]:
@@ -545,12 +555,9 @@ def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
     environment = plugins.tool_environment()
     if environment is None:
         raise LocalDeployError("cannot locate the uv tool environment")
-    local_watchers = tuple(sorted(
-        (str(Path(project).resolve()), name)
-        for _pid, name, project in watchers_on_host(under=environment)
-        if project
-    ))
-    if not collections.Counter(local_watchers) <= collections.Counter(all_watchers):
+    local_watchers = _logical_watchers(
+        watchers_on_host(under=environment))
+    if not set(local_watchers) <= set(all_watchers):
         raise LocalDeployError(
             "running local watchers are outside the all-repository baseline")
     dashboards = _running_dashboards()
