@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-23
+ms.date: 2026-08-28
 ms.topic: concept-article
 ---
 
@@ -118,6 +118,13 @@ assignment decision.
 event envelope are deliberately separate.
 
 ## Safety invariants
+
+Handlers, processors, and plugins that share a mutable resource can serialize
+their critical section with `agents-live lock PATH -- COMMAND`. This public CLI
+wrapper uses `LockFileEx` on Windows and `flock` on POSIX, opens the lock file
+without truncating it, and avoids coupling consumer code to package internals.
+Bare `fcntl` is not a portable fallback: it is unavailable on Windows, where a
+handler that continues after `ImportError` holds no lock at all.
 
 - Runtime and agent ports never import each other.
 - Only immutable primitive records cross seams.

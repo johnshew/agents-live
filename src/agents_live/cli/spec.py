@@ -232,6 +232,16 @@ COMMANDS = (
         ),
     ),
     Cmd(
+        "lock", "Run a command while holding a cross-platform file lock.",
+        "cli.commands.lock", "in-process", root="none",
+        args=(
+            Arg(("path",), "Lock file path.", kind="positional", required=True),
+            Arg(("command",), "Command and arguments after --.",
+                kind="positional", required=True),
+            Arg(("--timeout",), "Seconds to wait for the lock.", kind="value"),
+        ),
+    ),
+    Cmd(
         "init", "Initialize the global or repository workspace.", "cli.commands.init",
         "in-process",
         root="none", json=True,
@@ -713,6 +723,8 @@ def unknown_flag(command: Cmd, argv: list[str]) -> str | None:
     }
     skip_value = False
     for token in argv:
+        if token == "--":
+            break
         if skip_value:
             skip_value = False
             continue

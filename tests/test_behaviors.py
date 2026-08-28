@@ -2867,6 +2867,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def _parse(self, name: str, stdout: str):
         return providers.get(name).parse(RawOutput(0, stdout, ""))
 
+    def test_lock_command_excludes_a_contender_and_runs_after_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = root / "shared.lock"
+            result_path = root / "result.txt"
+            command = [
+                sys.executable,
+                "-m",
+                "agents_live.cli",
+                "lock",
+                str(lock_path),
+                "--timeout",
+                "0",
+                "--",
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(result_path)!r}).write_text('ran')"
+                ),
+                "--repo",
+                "opaque-child-argument",
+            ]
+            with hostruntime.exclusive_lock(lock_path, blocking=False):
+                refused = subprocess.run(
+                    command, check=False, capture_output=True, text=True)
+            completed = subprocess.run(
+                command, check=False, capture_output=True, text=True)
+            result = result_path.read_text(encoding="utf-8")
+
+        self.assertEqual(75, refused.returncode, refused.stderr)
+        self.assertIn("lock is busy", refused.stderr)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("ran", result)
+
     def test_claude_never_loads_implicit_repository_configuration(self) -> None:
         for mode in ("plan", "write", "pipeline"):
             with self.subTest(mode=mode):
