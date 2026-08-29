@@ -19,3 +19,10 @@ delivered = [400, 402, 403, 404, 406]
 partial = [334, 395]
 deferred = [401, 405]
 promotion_decision = [334, 395, 401]
+
+[bake.recommendations]
+overall = "Keep all three decisions in bake. Complete the v6.6 work described below, test the newest bake, and then move bake to main."
+"334" = "Include the safer side-by-side installation work already completed and tested for v6.6.0. Do not switch existing users to it in this release; that change needs separate migration testing."
+"395" = "Include the download and security checks already completed and tested for v6.6.0. Do not add the public install scripts in this release; they depend on the later migration work in #334."
+"401" = "Fix and test the Windows dashboard exit in bake before moving to main. The current workaround was accepted for local testing only, not for a public release."
+testing = "After all approved bake pull requests are merged, build the bake from its newest commit, install that exact version, and repeat the release tests before opening the pull request to main."

@@ -54,6 +54,10 @@ def _count(left: str, right: str) -> tuple[int, int]:
     return int(behind), int(ahead)
 
 
+def _commits(count: int) -> str:
+    return f"{count} commit{'s' if count != 1 else ''}"
+
+
 def _link(repository: str, kind: str, number: int) -> str:
     return f"[#{number}](https://github.com/{repository}/{kind}/{number})"
 
@@ -99,6 +103,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     repository = repository_data["nameWithOwner"]
     release = config["release"]
     bake = config["bake"]
+    recommendations = bake["recommendations"]
     release_ref = f"origin/{release['branch']}"
     bake_ref = f"origin/{bake['branch']}"
     release_sha = _sha(release_ref)
@@ -155,13 +160,34 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "git", "rev-list", "--count", f"{deployed_sha}..{bake_ref}"
     )) if deployed_in_bake else -1
 
-    bake_state = "promotion proposed" if promotion else "baking" if bake_ahead else "idle"
-    if decisions:
-        bake_state += ", promotion decisions open"
     deployed_state = (
-        "at tip" if deployed_sha == bake_sha else
-        f"behind tip by {deployed_distance} commit(s)" if deployed_in_bake else
-        "not in channel history"
+        "matches the current bake" if deployed_sha == bake_sha else
+        f"is older than the current bake by {_commits(deployed_distance)}" if deployed_in_bake else
+        "does not belong to the current bake"
+    )
+    release_actions = []
+    if not promotion:
+        release_actions.append("We have not opened a pull request to move bake into `main`.")
+    if decisions:
+        release_actions.append(
+            "We still need to decide how to handle "
+            f"{', '.join(_link(repository, 'issues', n) for n in decisions)}.")
+    if deployed_sha != bake_sha:
+        release_actions.append(
+            "The version installed for testing is not the newest bake. "
+            "Install and test the current bake before release.")
+
+    recommendation_lines = [
+        f"- {_link(repository, 'issues', number)}: "
+        f"{recommendations[str(number)]}"
+        for number in decisions
+        if str(number) in recommendations
+    ]
+    recommendation_lines.append(f"- Testing: {recommendations['testing']}")
+    bake_next = (
+        "Complete the recommendations below and test the newest bake."
+        if decisions or deployed_sha != bake_sha else
+        "Open a pull request to `main`."
     )
 
     lines = [
@@ -178,43 +204,47 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"[{repository}]({repository_data['url']}), generated at "
         f"`{generated_at.isoformat().replace('+00:00', 'Z')}`.",
         "",
-        "## Executive summary",
+        "## Can we release this version now?",
         "",
-        "| Channel | Branch / artifact | Current state | Next promotion |",
+        "**No, not yet.**",
+        "",
+        " ".join(release_actions) if release_actions else
+        "All recorded decisions and bake testing are complete.",
+        "",
+        "## What we recommend",
+        "",
+        f"**{recommendations['overall']}**",
+        "",
+        *recommendation_lines,
+        "",
+        "## Where each channel stands",
+        "",
+        "| Channel | Branch and version | Where things stand | What happens next |",
         "|---|---|---|---|",
-        f"| Bake | `{bake['branch']}` at `{bake_sha[:8]}` | {bake_state}; "
-        f"{bake_ahead} commit(s) ahead of release | Pull request to `{release['branch']}` |",
+        f"| Bake | `{bake['branch']}` at `{bake_sha[:8]}` | Work is still being tested. "
+        f"It contains changes not yet in `main`. | {bake_next} |",
         f"| Release | `{release['branch']}` at `{release_sha[:8]}`; "
-        f"[{latest['tagName']}]({latest['url']}) at `{tag_sha[:8]}` | released; "
-        f"{release_ahead} commit(s) on `{release['branch']}` after the latest release | "
-        f"{release['promotes_to']} |",
-        "",
-        f"Promotion readiness: **not ready**. "
-        f"{'No bake-to-release pull request is open. ' if not promotion else ''}"
-        f"Open promotion decisions: "
-        f"{', '.join(_link(repository, 'issues', n) for n in decisions) or 'none'}. "
-        f"The deployed bake is {deployed_state}.",
+        f"[{latest['tagName']}]({latest['url']}) at `{tag_sha[:8]}` | "
+        f"{latest['tagName']} is public. `main` contains newer work not yet published. | "
+        f"Publish the next approved version to GitHub and PyPI. |",
         "",
         "## Channel definitions",
         "",
-        "- `bake`: focused PRs integrate on "
-        f"`{bake['branch']}` and produce `{bake['version']}.dev*` artifacts. "
-        f"This channel promotes to `{bake['promotes_to']}`.",
-        "- `release`: reviewed promotion lands on "
-        f"`{release['branch']}`; `tools/release.py` creates an ephemeral candidate, "
-        "receipt-bound artifacts, an immutable tag, a GitHub Release, and PyPI publication.",
+        "- `bake` is where we combine and test changes planned for "
+        f"{bake['version']}. When it is ready, we move it to `main` through one pull request.",
+        "- `release` is the work approved for the next public version. After it reaches "
+        "`main`, `tools/release.py` builds it, runs the final tests, and publishes it.",
         "",
-        "## Bake deployment",
+        "## Version installed for testing",
         "",
-        "| Version | Commit | Validated | Relation to channel tip |",
+        "| Version | Commit | Tested | Compared with current bake |",
         "|---|---|---|---|",
         f"| `{bake['deployed_version']}` | `{deployed_sha[:8]}` | "
         f"`{bake['validated_on']}` | {deployed_state} |",
         "",
-        "Deployment identity is reviewed manifest data. Update it only after the exact "
-        "artifact has been installed and validated.",
+        "Update this row only after that exact version has been installed and tested.",
         "",
-        "## Pull request flow",
+        "## Changes moving through the channels",
         "",
         f"### Merged into release since {latest['tagName']} ({len(merged_to_release)})",
         "",
@@ -244,7 +274,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
 
     lines.extend([
         "",
-        f"### Open flow ({len(open_to_bake) + len(open_to_release)})",
+        f"### Pull requests still in progress ({len(open_to_bake) + len(open_to_release)})",
         "",
     ])
     if not open_to_bake and not open_to_release:
@@ -256,16 +286,16 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
 
     lines.extend([
         "",
-        "## Issue disposition",
+        "## Work tracked in issues",
         "",
         "Open does not mean absent from bake: GitHub closes linked issues only after "
         "the work reaches the default branch.",
         "",
-        "| Issue | Work | Bake disposition | GitHub state | Promotion decision |",
+        "| Issue | Work | What happened in bake | GitHub state | Decision needed before release |",
         "|---|---|---|---|---|",
         *issue_rows,
         "",
-        "### Recent open issues without a channel disposition",
+        "### Recent open issues not assigned to a channel",
         "",
     ])
     if unassigned:
@@ -278,16 +308,16 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
 
     lines.extend([
         "",
-        "## Promotion path",
+        "## What needs to happen next",
         "",
-        f"1. Resolve or explicitly accept open promotion decisions and validate an artifact at `{bake_sha[:8]}`.",
-        "2. Run changelog maintenance on bake and commit any release-report updates.",
-        f"3. Open one promotion PR from `{bake['branch']}` to `{release['branch']}`.",
-        "4. After required Ubuntu and Windows checks pass, merge the promotion.",
-        "5. Prepare and accept the receipt-bound official candidate from clean `main`.",
+        f"1. Decide whether to finish or accept the remaining work, then install and test a version built from `{bake_sha[:8]}`.",
+        "2. Make sure the changelog describes everything included in bake.",
+        f"3. Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
+        "4. After the Ubuntu and Windows checks pass, merge it into `main`.",
+        "5. Use the release tool to build the candidate, install it, and complete the final tests.",
         f"6. Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
         "",
-        "## Provenance",
+        "## Report sources",
         "",
         f"- Release branch: `{release_sha}`",
         f"- Bake branch: `{bake_sha}`",
