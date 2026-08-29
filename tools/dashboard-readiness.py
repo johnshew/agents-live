@@ -480,8 +480,8 @@ def _terminate(process: subprocess.Popen) -> None:
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-           *, dev: bool, all_repos: bool = False) -> None:
-    mode = "--dev" if dev else "packaged"
+        *, dev: bool, source: bool, all_repos: bool = False) -> None:
+    mode = ("source" if source else "packaged") + (" --dev" if dev else "")
     if all_repos:
         mode += " all-repositories"
     port = _free_port()
@@ -532,10 +532,16 @@ def main() -> int:
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
         _seed_started_state(python, directory, environment)
-        _check(launcher, directory, environment, dev=False)
-        _check(launcher, directory, environment, dev=False, all_repos=True)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable, all_repos=True)
         if not args.skip_dev:
-            _check(launcher, directory, environment, dev=True)
+            _check(
+                launcher, directory, environment, dev=True,
+                source=args.editable)
     _say("ok")
     return 0
 

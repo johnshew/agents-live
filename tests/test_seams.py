@@ -5227,6 +5227,16 @@ class TestDashboardRepositorySurface(TempRepository):
             self.assertIn("canonical agent", output)
             self.assertEqual(1, run.call_count)
 
+            dashboard._log_action(
+                "Stop", "stop", ["--name", identifier], 0, "",
+                agent_name=identifier, repository=self.root.name,
+                repository_path=str(self.root))
+            action_log = (
+                paths.repo_state_dir(self.root) / "logs" / "dashboard.jsonl")
+            record = json.loads(action_log.read_text(encoding="utf-8"))
+            self.assertEqual(str(self.root), record["repository"])
+            self.assertEqual(identifier, record["agent"])
+
         repos._remove(self.root.name)
         code, _stdout, output = dashboard._run_script(
             "stop", ["--name", identifier],

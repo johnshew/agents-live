@@ -491,9 +491,8 @@ def _command_argv(command: str, args: list[str],
     return [*repos.cli_base(), *repo_option, *json_option, command, *args]
 
 
-def _validated_action_root(repository: str, repository_path: str,
-                           agent_identifier: str) -> Path:
-    """Resolve an aggregate row again immediately before mutation."""
+def _validated_repository_root(repository: str,
+                               repository_path: str) -> Path:
     current = repos.load()
     root = repos.resolve_name(repository, current)
     expected = Path(repository_path).expanduser().resolve()
@@ -501,6 +500,13 @@ def _validated_action_root(repository: str, repository_path: str,
         raise ValueError(
             f"registered repository {repository!r} no longer resolves to "
             f"{expected}")
+    return root
+
+
+def _validated_action_root(repository: str, repository_path: str,
+                           agent_identifier: str) -> Path:
+    """Resolve an aggregate row again immediately before mutation."""
+    root = _validated_repository_root(repository, repository_path)
     identifiers = {
         row.identifier for row in agent_view.repository_agents(
             root, ownership_rate_limit_secs=10**9)
@@ -561,6 +567,7 @@ def _run_script(command: str, args: list[str],
 
 def _log_action(label: str, command: str, args: list[str], code: int,
                 out: str, *, agent_name: str | None,
+                repository: str | None = None,
                 repository_path: str | None = None,
                 run_id: str | None = None,
                 run_status: str | None = None) -> None:
@@ -570,10 +577,26 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     `dashboard-transcript.log` keeps the complete, untruncated stdout+
     stderr so a failed Activate/Run can be reviewed after the fact.
     """
-    obs.record(DASHBOARD_LOG, obs.create(
+    target_root = None
+    if repository and repository_path:
+        try:
+            target_root = _validated_repository_root(
+                repository, repository_path)
+        except (OSError, ValueError):
+            pass
+    log = (
+        paths.repo_state_dir(target_root) / "logs" / "dashboard.jsonl"
+        if target_root is not None else DASHBOARD_LOG
+    )
+    transcript = (
+        paths.repo_state_dir(target_root) / "logs" /
+        "dashboard-transcript.log"
+        if target_root is not None else DASHBOARD_TRANSCRIPT
+    )
+    obs.record(log, obs.create(
         "dashboard-action",
         "success" if code == 0 else "failed",
-        repository=repository_path or str(REPO_ROOT or ""),
+        repository=str(target_root or REPO_ROOT or ""),
         agent=agent_name or "dashboard",
         run_id=run_id or str(time.time_ns()),
         origin="dashboard",
@@ -584,7 +607,6 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = " ".join([command, *args])
     header = f"\n===== {ts} {label}: {cmd} (exit {code}) =====\n"
-    transcript = DASHBOARD_TRANSCRIPT
     try:
         transcript.parent.mkdir(parents=True, exist_ok=True)
         with transcript.open("a", encoding="utf-8") as handle:
@@ -698,6 +720,7 @@ async def _execute_action(request: _ActionRequest) -> int:
     _log_action(
         request.label, request.script, request.args, code, out,
         agent_name=request.agent_name,
+        repository=request.repository,
         repository_path=request.repository_path,
         run_id=run_id,
         run_status=run_status)
@@ -723,7 +746,6 @@ async def _process_action_queue() -> None:
     try:
         while _ACTION_QUEUE:
             request = _ACTION_QUEUE.popleft()
-            _PENDING_ACTIONS.pop(request.key, None)
             _ACTION_RUNNING = True
             started = time.monotonic()
             try:
@@ -734,7 +756,9 @@ async def _process_action_queue() -> None:
                 output = f"unexpected dashboard action error: {exc}"
                 _log_action(
                     request.label, request.script, request.args, code, output,
-                    agent_name=request.agent_name)
+                    agent_name=request.agent_name,
+                    repository=request.repository,
+                    repository_path=request.repository_path)
                 _push_log(
                     f"failed: {request.description} "
                     f"(exit {code}, {elapsed:.1f}s): {exc}")
@@ -745,6 +769,7 @@ async def _process_action_queue() -> None:
                 if not request.future.done():
                     request.future.set_result(code)
             finally:
+                _PENDING_ACTIONS.pop(request.key, None)
                 _ACTION_RUNNING = False
     finally:
         _ACTION_WORKER = None
@@ -1996,10 +2021,6 @@ def build_all_repos_page() -> None:
     # Same cadence as the single-repo page: the view tracks reality
     # instead of freezing at process start.
     ui.timer(600.0, refresh)
-    ui.label(
-        "Select one repository with `agents-live --repo NAME dashboard` "
-        "to enable actions."
-    ).classes("text-sm text-gray-500")
 
 
 PORT_PROBE_TIMEOUT_S = 0.5
