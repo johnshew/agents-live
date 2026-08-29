@@ -339,7 +339,18 @@ def _assert_operational_viewport(port: int, mode: str) -> None:
             page.get_by_role("button", name="Settings").click()
             page.locator(".dashboard-settings .host-service-panel").wait_for()
             page.locator(".dashboard-settings .repository-settings-panel").wait_for()
-            page.set_viewport_size({"width": 390, "height": 844})
+            page.close()
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="Settings").click()
+            page.wait_for_function("""
+                () => {
+                    const drawer = document.querySelector('.dashboard-settings');
+                    if (!drawer) return false;
+                    const box = drawer.getBoundingClientRect();
+                    return box.left >= 0 && box.right <= window.innerWidth;
+                }
+            """)
             drawer_box = page.locator(".dashboard-settings").bounding_box()
             if drawer_box is None or drawer_box["x"] < 0 \
                     or drawer_box["x"] + drawer_box["width"] > 390:
