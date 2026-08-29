@@ -1,0 +1,21 @@
+schema = 1
+
+[release]
+name = "release"
+branch = "main"
+promotes_to = "GitHub Release and PyPI"
+
+[bake]
+name = "bake"
+branch = "bake/v6.6.0-local"
+version = "6.6.0"
+promotes_to = "release"
+deployed_version = "6.6.0.dev0+g0b63622b"
+deployed_commit = "0b63622b305daebec1815b546b446e2e896d48db"
+validated_on = "2026-08-29"
+
+[bake.issues]
+delivered = [400, 402, 403, 404, 406]
+partial = [334, 395]
+deferred = [401, 405]
+promotion_decision = [334, 395, 401]
