@@ -117,9 +117,22 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     recommendations = bake["recommendations"]
     release_ref = f"origin/{release['branch']}"
     bake_ref = f"origin/{bake['branch']}"
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", bake_ref],
+        cwd=ROOT, check=False, capture_output=True,
+    ).returncode != 0:
+        merged_promotions = _json(
+            "gh", "pr", "list", "--state", "merged", "--base", release["branch"],
+            "--head", bake["branch"], "--limit", "1", "--json",
+            "headRefOid,mergedAt")
+        if not merged_promotions:
+            raise ReportError(
+                f"cannot resolve bake branch {bake['branch']} or a merged promotion")
+        bake_ref = merged_promotions[0]["headRefOid"]
     release_sha = _sha(release_ref)
     bake_sha = _sha(bake_ref)
     _, bake_ahead = _count(release_ref, bake_ref)
+    bake_moved = bake_ahead == 0
 
     latest = _json(
         "gh", "release", "view", "--json",
@@ -182,7 +195,10 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "does not belong to the current bake"
     )
     release_actions = []
-    if not promotion:
+    if bake_moved:
+        release_actions.append(
+            "Bake has moved into `main`. Prepare, install, and accept the official candidate.")
+    elif not promotion:
         release_actions.append("We have not opened a pull request to move bake into `main`.")
     else:
         release_actions.append(
@@ -204,6 +220,8 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     ]
     recommendation_lines.append(f"- Testing: {recommendations['testing']}")
     bake_next = (
+        "Prepare the official candidate from `main`."
+        if bake_moved else
         "Complete the recommendations below and test the newest bake."
         if decisions or not runtime_current else
         "Open a pull request to `main`."
@@ -214,13 +232,24 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     if not runtime_current:
         next_actions.append(
             f"Install and test a version built from `{bake_sha[:8]}`.")
+    if not bake_moved:
+        next_actions.extend([
+            "Make sure the changelog describes everything included in bake.",
+            f"Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
+            "After the Ubuntu and Windows checks pass, merge it into `main`.",
+        ])
     next_actions.extend([
-        "Make sure the changelog describes everything included in bake.",
-        f"Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
-        "After the Ubuntu and Windows checks pass, merge it into `main`.",
         "Use the release tool to build the candidate, install it, and complete the final tests.",
         f"Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
     ])
+    overall_recommendation = (
+        f"Bake has moved into `main`. Prepare and accept the official {bake['version']} candidate."
+        if bake_moved else recommendations["overall"]
+    )
+    bake_state = (
+        "All bake changes are in `main`."
+        if bake_moved else "Work is still being tested. It contains changes not yet in `main`."
+    )
 
     lines = [
         "---",
@@ -245,7 +274,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "",
         "## What we recommend",
         "",
-        f"**{recommendations['overall']}**",
+        f"**{overall_recommendation}**",
         "",
         *recommendation_lines,
         "",
@@ -253,8 +282,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "",
         "| Channel | Branch and version | Where things stand | What happens next |",
         "|---|---|---|---|",
-        f"| Bake | `{bake['branch']}` at `{bake_sha[:8]}` | Work is still being tested. "
-        f"It contains changes not yet in `main`. | {bake_next} |",
+        f"| Bake | `{bake['branch']}` at `{bake_sha[:8]}` | {bake_state} | {bake_next} |",
         f"| Release | `{release['branch']}` at `{release_sha[:8]}`; "
         f"[{latest['tagName']}]({latest['url']}) at `{tag_sha[:8]}` | "
         f"{latest['tagName']} is public. `main` contains newer work not yet published. | "
