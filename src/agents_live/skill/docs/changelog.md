@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-28
+ms.date: 2026-08-29
 ms.topic: reference
 ---
 
@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: restore the dashboard agent inventory and log to the first viewport. (#419)
+  Host services and repository administration now open in a settings drawer,
+  leaving independently bounded inventory and log regions visible together.
 - fix: keep the Windows dashboard serving after an abortive client disconnect. (#401)
   The dashboard uses asyncio's selector server loop on native Windows instead
   of the Proactor accept path that can stop accepting new connections.
