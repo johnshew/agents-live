@@ -280,12 +280,11 @@ and only partial progress toward requirements that explicitly require the
 default all-repositories view.
 
 Issue [#421](https://github.com/johnshew/agents-live/issues/421) is the separate
-qualified-action candidate for the v6.6 bake. If it is included, it requires
-Run, Start, Stop, and Claim from aggregate rows, repository and canonical-agent
-revalidation at acceptance, semantic command outcomes, and
-repository-qualified durable evidence. If it is not ready when the required
-#419 recovery is accepted, the release record must defer #421 explicitly; its
-absence does not invalidate the viewport recovery.
+qualified-action gate for the v6.6 bake. It requires Run, Start, Stop, and Claim
+from aggregate rows, repository and canonical-agent revalidation at acceptance,
+semantic command outcomes, and repository-qualified durable evidence. The v6.6
+bake is not complete until the installed test version passes this gate together
+with the #419 viewport recovery.
 
 ### Deferred slice 1: Unify operational utility
 

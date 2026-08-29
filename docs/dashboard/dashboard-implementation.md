@@ -21,11 +21,12 @@ As of 2026-08-29:
 - v6.6 is still being tested in the `bake/v6.6.0-local` branch. It has not
   moved to `main` and is not an official release candidate.
 - The last installed v6.6 test version predates the dashboard viewport repair.
-- [#419](https://github.com/johnshew/agents-live/issues/419) and
-  [PR #420](https://github.com/johnshew/agents-live/pull/420) contain the
-  minimum repair needed to make the current dashboard usable again. That work
-  must merge into bake, be built from the resulting bake commit, and pass the
-  installed-tool checks before v6.6 can move toward release.
+- [#419](https://github.com/johnshew/agents-live/issues/419) is merged into
+  bake through [PR #420](https://github.com/johnshew/agents-live/pull/420),
+  restoring the current dashboard viewport.
+- [#421](https://github.com/johnshew/agents-live/issues/421) is the remaining
+  v6.6 dashboard work. After it merges, the resulting exact bake commit must be
+  built, installed locally, and validated before v6.6 moves to `main`.
 
 The generated release report remains the source for the latest branch, test,
 and installed-version details. This section explains why the dashboard work is
@@ -40,12 +41,9 @@ completion of the dashboard product target.
 - [#419](https://github.com/johnshew/agents-live/issues/419) is the mandatory
   usability recovery: keep the single-repository inventory and log together in
   the first viewport and move administration into settings.
-- [#421](https://github.com/johnshew/agents-live/issues/421) is a small,
-  separately reviewed follow-up that should be attempted in the v6.6 bake:
-  add repository-qualified Run, Start, Stop, and Claim controls to aggregate
-  rows. It must not delay the #419 repair. If it is not complete and validated
-  when v6.6 is otherwise ready, defer it explicitly rather than holding the
-  usability repair.
+- [#421](https://github.com/johnshew/agents-live/issues/421) completes the v6.6
+  dashboard slice by adding repository-qualified Run, Start, Stop, and Claim
+  controls to aggregate rows.
 - The unified page, complete truth model, and continuity work are deferred to
   their own implementation issues. They do not block v6.6 unless a later
   release decision explicitly brings them into that milestone.
@@ -77,17 +75,16 @@ the preceding section belongs in the current bake.
 
 ### A. Stabilize the v6.6 bake
 
-Land #419 first. Then attempt #421 as a small follow-up using the existing
-public CLI boundary. Adding `--repo` is the main execution change, but the
-dashboard must also carry the row's registered repository path and canonical
-agent identifier to that boundary. The worker invokes
+Land #419 first, then #421 as a small follow-up using the existing public CLI
+boundary. Adding `--repo` is the main execution change, but the dashboard must
+also carry the row's registered repository path and canonical agent identifier
+to that boundary. The worker invokes
 `agents-live --repo <path> <command> --name <identifier>`, revalidates both
 values, and fails closed when the target has changed.
 
-The mandatory #419 exit is an installed v6.6 test version that passes the
-viewport and disconnect gates on Linux and Windows. If #421 is included, it
-must also pass the action-scope, semantic-result, and durable-action-evidence
-gates. Record an explicit release decision if #421 is deferred.
+The v6.6 dashboard exit is an installed test version containing #419 and #421.
+It must pass the viewport, disconnect, action-scope, semantic-result, and
+durable-action-evidence gates on Linux and Windows.
 
 ### B. Unify the operational page
 

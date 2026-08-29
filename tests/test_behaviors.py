@@ -5341,12 +5341,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
         nicegui.ui.refreshable.side_effect = lambda function: function
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
+            repo_root = Path("/repos/sample")
             with mock.patch.object(
                     repos, "cli_base",
                     return_value=["/env/bin/agents-live"]):
-                argv = dashboard._command_argv("run", ["--name", "sample"])
+                argv = dashboard._command_argv(
+                    "run", ["--name", "sample"],
+                    repo_root=repo_root)
         self.assertEqual(
-            ["/env/bin/agents-live", "--json", "run", "--name", "sample"],
+            ["/env/bin/agents-live", "--repo", str(repo_root), "--json",
+             "run", "--name", "sample"],
             argv)
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
         body = source.split("def _command_argv", 1)[1].split("\ndef ", 1)[0]
