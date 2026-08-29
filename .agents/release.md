@@ -8,11 +8,11 @@ source since 2026-07-18.
 Use [testing.md](testing.md) to validate source, target-version artifacts, and
 the installed PyPI tool as separate execution modes.
 
-Before release review, refresh [the generated channel report](../docs/release-report.md)
-using the policy and command in [release-report.md](release-report.md). The
-report shows what has reached bake, what remains deferred or needs a promotion
-decision, whether the deployed artifact matches the channel tip, and the next
-promotion target. It summarizes evidence but does not replace any gate below.
+Before release review, generate a local channel report using the policy and
+command in [release-report.md](release-report.md). The report shows what has
+reached bake, what remains deferred or needs a promotion decision, whether the
+deployed artifact matches the channel tip, and the next promotion target. It is
+gitignored and summarizes evidence without replacing any gate below.
 
 ## Changelog readiness
 

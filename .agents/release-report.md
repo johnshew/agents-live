@@ -33,13 +33,38 @@ show issue disposition and channel separately.
 - GitHub issues establish whether work remains open or closed.
 - [.github/release-channels.toml](../.github/release-channels.toml) records
   decisions APIs cannot infer: partial delivery, explicit deferral, promotion
-  blockers, and the last deployed bake artifact.
+  decisions, and the last deployed bake artifact.
 - Preparation and acceptance receipts remain authoritative for official
   candidate acceptance. The report summarizes them; it never replaces a gate.
 
 Keep the manifest small. Do not copy PR titles, issue titles, check results, or
 commit counts into it because the generator reads those live. Update its
 deployment fields only after installing and validating that exact artifact.
+
+## Required report contents
+
+Every generated report must include:
+
+- each active channel, its branch and immutable tip, artifact identity, current
+  state, and next promotion target;
+- the latest published release and divergence between release, `main`, and
+  bake;
+- pull requests merged into each channel since its upstream release, open pull
+  requests targeting a channel, and their required-check state;
+- issues delivered, partially delivered, deferred, awaiting a promotion
+  decision, or not yet assigned to a channel;
+- the last deployed bake artifact, its validation date, and its distance from
+  the current bake tip;
+- an explicit promotion-readiness result and the decisions or failed evidence
+  preventing promotion;
+- the ordered promotion path; and
+- generation time and full source SHAs so the report can be cited as a
+  point-in-time observation.
+
+The report must keep GitHub issue state separate from channel delivery state.
+It must not infer successful deployment from a merged PR, infer release
+readiness from a green check alone, or replace release preparation and
+acceptance receipts.
 
 ## Channel states
 
@@ -60,15 +85,17 @@ gate in [release.md](release.md).
 
 ## Generate the report
 
-Refresh remote refs first, then generate the checked-in snapshot:
+Refresh remote refs first, then generate the local snapshot:
 
 ```bash
 git fetch origin --prune
 uv run --script tools/release-report.py
 ```
 
-Use `--check` in automation to fail when the checked-in report differs from
-current Git/GitHub data. The report carries its generation time and source SHAs
-so readers can recognize a stale snapshot. Generate it for release reviews,
-after channel promotion, and whenever the manifest's deployment or disposition
-decisions change.
+The default output is `.reports/release-report.md`, which is intentionally
+gitignored. Use `--output <path>` for another local destination and `--check`
+to verify that an existing local report still matches current Git and GitHub
+data. The report carries its generation time and source SHAs so readers can
+recognize a stale snapshot. Generate it for release reviews, after channel
+promotion, and whenever the manifest's deployment or disposition decisions
+change. Do not commit generated reports.

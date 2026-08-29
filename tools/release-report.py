@@ -18,7 +18,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / ".github" / "release-channels.toml"
-OUTPUT = ROOT / "docs" / "release-report.md"
+OUTPUT = ROOT / ".reports" / "release-report.md"
 
 
 class ReportError(RuntimeError):
@@ -323,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"release report is stale: run {Path(__file__).name}", file=sys.stderr)
             return 1
         return 0
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report, encoding="utf-8", newline="\n")
     print(f"Wrote {args.output.relative_to(ROOT)}")
     return 0
