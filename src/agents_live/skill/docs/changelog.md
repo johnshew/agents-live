@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve terminal evidence for deferred Windows upgrades.
+  Transcript setup and cleanup failures now report a numeric failed result
+  instead of leaving the handoff permanently marked as started.
 - feat: operate agents directly from the all-repositories dashboard. (#421)
   Run, Start, Stop, and Claim now retain and revalidate the selected repository
   and canonical agent before invoking the repository-qualified CLI action.
