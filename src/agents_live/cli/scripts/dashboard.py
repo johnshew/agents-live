@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview"]
+# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview", "uvicorn>=0.36"]
 # ///
 """Interactive agents-live control panel (single host).
 
