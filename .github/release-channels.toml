@@ -10,18 +10,19 @@ name = "bake"
 branch = "bake/v6.6.0-local"
 version = "6.6.0"
 promotes_to = "release"
-deployed_version = "6.6.0.dev0+gf1a273e2"
-deployed_commit = "f1a273e2d2ff6fd3ef349d07af0328a318d349ee"
+deployed_version = "6.6.0.dev0+gccbe4a0a"
+deployed_commit = "ccbe4a0abc3ab29f7cb8b1ea538f49da07ecabbf"
 validated_on = "2026-08-29"
 
 [bake.issues]
-delivered = [400, 401, 402, 403, 404, 406]
-partial = [334, 395]
-deferred = [405]
+delivered = [400, 401, 402, 403, 404, 406, 419, 421]
+partial = [334, 388, 395]
+deferred = [405, 422, 423, 424, 426]
 promotion_decision = []
 
 [bake.recommendations]
 overall = "The planned v6.6 work is complete in bake and the newest runtime has passed source, packaged, and installed tests. Open the pull request to main."
 "334" = "Include the safer side-by-side installation work already completed and tested for v6.6.0. Do not switch existing users to it in this release; that change needs separate migration testing."
+"388" = "Include the additive discovery and cross-repository resolution work already completed for v6.6.0. Keep authoritative roots, default-repository removal, and the init/registration clean break for the planned major release."
 "395" = "Include the download and security checks already completed and tested for v6.6.0. Do not add the public install scripts in this release; they depend on the later migration work in #334."
-testing = "The installed bake passed source, packaged, and installed tests on 2026-08-29, including repeated Windows client resets in normal and development dashboard modes."
+testing = "The exact installed bake passed the Ubuntu and Windows source matrix, packaged dashboard journeys, repository-qualified aggregate actions, repeated Windows client resets, and a terminal Windows self-upgrade handoff on 2026-08-29."
