@@ -19,6 +19,10 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / ".github" / "release-channels.toml"
 OUTPUT = ROOT / ".reports" / "release-report.md"
+REPORT_ONLY_PATHS = {
+    ".github/release-channels.toml",
+    "tools/release-report.py",
+}
 
 
 class ReportError(RuntimeError):
@@ -56,6 +60,13 @@ def _count(left: str, right: str) -> tuple[int, int]:
 
 def _commits(count: int) -> str:
     return f"{count} commit{'s' if count != 1 else ''}"
+
+
+def _has_runtime_changes(deployed_sha: str, bake_ref: str) -> bool:
+    paths = set(_run(
+        "git", "diff", "--name-only", f"{deployed_sha}..{bake_ref}"
+    ).splitlines())
+    return bool(paths - REPORT_ONLY_PATHS)
 
 
 def _link(repository: str, kind: str, number: int) -> str:
@@ -159,20 +170,28 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     deployed_distance = int(_run(
         "git", "rev-list", "--count", f"{deployed_sha}..{bake_ref}"
     )) if deployed_in_bake else -1
+    runtime_current = deployed_sha == bake_sha or (
+        deployed_in_bake and not _has_runtime_changes(deployed_sha, bake_ref)
+    )
 
     deployed_state = (
         "matches the current bake" if deployed_sha == bake_sha else
+        "matches the current bake code; only release reporting changed afterward"
+        if runtime_current else
         f"is older than the current bake by {_commits(deployed_distance)}" if deployed_in_bake else
         "does not belong to the current bake"
     )
     release_actions = []
     if not promotion:
         release_actions.append("We have not opened a pull request to move bake into `main`.")
+    else:
+        release_actions.append(
+            "The pull request to move bake into `main` must pass its checks and be merged.")
     if decisions:
         release_actions.append(
             "We still need to decide how to handle "
             f"{', '.join(_link(repository, 'issues', n) for n in decisions)}.")
-    if deployed_sha != bake_sha:
+    if not runtime_current:
         release_actions.append(
             "The version installed for testing is not the newest bake. "
             "Install and test the current bake before release.")
@@ -186,9 +205,22 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     recommendation_lines.append(f"- Testing: {recommendations['testing']}")
     bake_next = (
         "Complete the recommendations below and test the newest bake."
-        if decisions or deployed_sha != bake_sha else
+        if decisions or not runtime_current else
         "Open a pull request to `main`."
     )
+    next_actions = []
+    if decisions:
+        next_actions.append("Resolve the remaining release decisions.")
+    if not runtime_current:
+        next_actions.append(
+            f"Install and test a version built from `{bake_sha[:8]}`.")
+    next_actions.extend([
+        "Make sure the changelog describes everything included in bake.",
+        f"Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
+        "After the Ubuntu and Windows checks pass, merge it into `main`.",
+        "Use the release tool to build the candidate, install it, and complete the final tests.",
+        f"Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
+    ])
 
     lines = [
         "---",
@@ -310,12 +342,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "",
         "## What needs to happen next",
         "",
-        f"1. Decide whether to finish or accept the remaining work, then install and test a version built from `{bake_sha[:8]}`.",
-        "2. Make sure the changelog describes everything included in bake.",
-        f"3. Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
-        "4. After the Ubuntu and Windows checks pass, merge it into `main`.",
-        "5. Use the release tool to build the candidate, install it, and complete the final tests.",
-        f"6. Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
+        *(f"{index}. {action}" for index, action in enumerate(next_actions, 1)),
         "",
         "## Report sources",
         "",
