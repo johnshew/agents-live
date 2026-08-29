@@ -1572,6 +1572,40 @@ class TestDashboardHealthPolicy(unittest.TestCase):
 
 
 class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_running_duplicate_action_is_coalesced(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        started = asyncio.Event()
+        release = asyncio.Event()
+        executions = 0
+
+        async def execute(_request):
+            nonlocal executions
+            executions += 1
+            started.set()
+            await release.wait()
+            return 0
+
+        dashboard._ACTION_QUEUE.clear()
+        dashboard._PENDING_ACTIONS.clear()
+        dashboard._ACTION_WORKER = None
+        dashboard._ACTION_RUNNING = False
+        with mock.patch.object(dashboard, "_execute_action", side_effect=execute):
+            first = asyncio.create_task(dashboard.do_action(
+                "Run", "run", ["--name", "sample"], agent_name="sample",
+                repository="repo", repository_path="/repos/sample"))
+            await started.wait()
+            second = asyncio.create_task(dashboard.do_action(
+                "Run", "run", ["--name", "sample"], agent_name="sample",
+                repository="repo", repository_path="/repos/sample"))
+            await asyncio.sleep(0)
+            release.set()
+            self.assertEqual([0, 0], await asyncio.gather(first, second))
+        self.assertEqual(1, executions)
+
     async def test_health_check_finishes_with_modern_maintenance(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
@@ -5341,12 +5375,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
         nicegui.ui.refreshable.side_effect = lambda function: function
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
+            repo_root = Path("/repos/sample")
             with mock.patch.object(
                     repos, "cli_base",
                     return_value=["/env/bin/agents-live"]):
-                argv = dashboard._command_argv("run", ["--name", "sample"])
+                argv = dashboard._command_argv(
+                    "run", ["--name", "sample"],
+                    repo_root=repo_root)
         self.assertEqual(
-            ["/env/bin/agents-live", "--json", "run", "--name", "sample"],
+            ["/env/bin/agents-live", "--repo", str(repo_root), "--json",
+             "run", "--name", "sample"],
             argv)
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
         body = source.split("def _command_argv", 1)[1].split("\ndef ", 1)[0]

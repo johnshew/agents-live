@@ -5137,11 +5137,15 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual(["other", self.root.name], [group["name"] for group in groups])
         local_group = next(group for group in groups if group["name"] == self.root.name)
         self.assertEqual(["alpha", "zeta"], [row["name"] for row in local_group["rows"]])
+        self.assertTrue(all(
+            row["repository"] == self.root.name
+            and row["repository_path"] == str(self.root)
+            for row in local_group["rows"]
+        ))
         self.assertEqual("handler", local_group["rows"][0]["agent"])
         self.assertEqual("fake", local_group["rows"][1]["agent"])
         self.assertEqual(
-            [column["name"] for column in dashboard._AGENT_COLUMNS
-             if column["name"] != "actions"],
+            [column["name"] for column in dashboard._AGENT_COLUMNS],
             [column["name"] for column in dashboard._AGGREGATE_COLUMNS],
         )
         self.assertEqual(groups, dashboard.all_repo_groups())
@@ -5172,16 +5176,76 @@ class TestDashboardRepositorySurface(TempRepository):
     def test_dashboard_ungrouped_rows_have_repository_qualified_keys(self) -> None:
         dashboard = self._dashboard_module()
         groups = [
-            {"name": "first", "rows": [{"identifier": "daily-123"}]},
-            {"name": "second", "rows": [{"identifier": "daily-123"}]},
+            {"name": "first", "path": "/repos/first",
+             "rows": [{"identifier": "daily-123"}]},
+            {"name": "second", "path": "/repos/second",
+             "rows": [{"identifier": "daily-123"}]},
         ]
 
         rows = dashboard._ungrouped_agent_rows(groups)
 
         self.assertEqual(["first", "second"], [
             row["repository"] for row in rows])
+        self.assertEqual(["/repos/first", "/repos/second"], [
+            row["repository_path"] for row in rows])
         self.assertEqual(2, len({
             row["repository_identifier"] for row in rows}))
+
+    def test_dashboard_aggregate_action_target_fails_closed(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        identifier = agent.load("sample", root=self.root).identifier
+
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(
+                dashboard.repos, "cli_base", return_value=["agents-live"]),
+            mock.patch.object(
+                dashboard.subprocess, "run", return_value=completed) as run,
+        ):
+            code, _stdout, _output = dashboard._run_script(
+                "stop", ["--name", identifier],
+                repository=self.root.name,
+                repository_path=str(self.root),
+                agent_identifier=identifier,
+            )
+            self.assertEqual(0, code)
+            self.assertEqual(
+                ["agents-live", "--repo", str(self.root), "stop",
+                 "--name", identifier],
+                run.call_args.args[0],
+            )
+
+            code, _stdout, output = dashboard._run_script(
+                "stop", ["--name", "missing-agent"],
+                repository=self.root.name,
+                repository_path=str(self.root),
+                agent_identifier="missing-agent",
+            )
+            self.assertEqual(2, code)
+            self.assertIn("canonical agent", output)
+            self.assertEqual(1, run.call_count)
+
+            dashboard._log_action(
+                "Stop", "stop", ["--name", identifier], 0, "",
+                agent_name=identifier, repository=self.root.name,
+                repository_path=str(self.root))
+            action_log = (
+                paths.repo_state_dir(self.root) / "logs" / "dashboard.jsonl")
+            record = json.loads(action_log.read_text(encoding="utf-8"))
+            self.assertEqual(str(self.root), record["repository"])
+            self.assertEqual(identifier, record["agent"])
+
+        repos._remove(self.root.name)
+        code, _stdout, output = dashboard._run_script(
+            "stop", ["--name", identifier],
+            repository=self.root.name,
+            repository_path=str(self.root),
+            agent_identifier=identifier,
+        )
+        self.assertEqual(2, code)
+        self.assertIn("not registered", output)
 
     def test_dashboard_host_service_shows_failed_idle_and_running_states(self) -> None:
         dashboard = self._dashboard_module()

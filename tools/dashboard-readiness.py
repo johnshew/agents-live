@@ -174,6 +174,13 @@ def _fixture(directory: Path) -> None:
     (skill / "SKILL.md").write_text(DEFINITION, encoding="utf-8")
     (directory / ".agents-live.toml").write_text(
         "# readiness fixture\n", encoding="utf-8")
+    registry = directory / "config" / "agents-live" / "config.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        f'default_repo = "readiness"\n\n[repos]\n'
+        f'readiness = {json.dumps(str(directory))}\n',
+        encoding="utf-8",
+    )
 
 
 def _environment(directory: Path) -> dict[str, str]:
@@ -365,6 +372,57 @@ def _assert_operational_viewport(port: int, mode: str) -> None:
     _say(f"{mode}: inventory and log fit the 1280x720 viewport")
 
 
+def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        for log in directory.rglob("dashboard.jsonl"):
+            try:
+                records = [
+                    json.loads(line) for line in log.read_text(
+                        encoding="utf-8").splitlines() if line.strip()
+                ]
+            except (OSError, json.JSONDecodeError):
+                continue
+            if any(
+                    record.get("event") == "dashboard-action"
+                    and record.get("status") == "success"
+                    and record.get("repository") == str(directory)
+                    and record.get("agent") == identifier
+                    and str(record.get("message", "")).startswith("Run:")
+                    for record in records):
+                return
+        time.sleep(POLL_INTERVAL_S)
+    raise ReadinessError(
+        f"{mode}: aggregate Run produced no repository-qualified evidence")
+
+
+def _assert_aggregate_run(port: int, directory: Path,
+                          payload: dict, mode: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    identifier = payload["agents"][0].get("identifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise ReadinessError(f"{mode}: fixture row has no canonical identifier")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(_browser_executable()), headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            row = page.get_by_role("row").filter(
+                has=page.get_by_text("readiness-agent", exact=True))
+            if row.count() != 1:
+                raise ReadinessError(
+                    f"{mode}: aggregate dashboard rendered {row.count()} "
+                    "fixture rows")
+            row.get_by_role(
+                "button", name="Run this agent once now").click()
+            _await_aggregate_run(directory, identifier, mode)
+        finally:
+            browser.close()
+    _say(f"{mode}: aggregate Run kept repository-qualified evidence")
+
+
 def _assert_abortive_disconnect_survives(
         process: subprocess.Popen, port: int, mode: str) -> None:
     if os.name != "nt":
@@ -422,11 +480,15 @@ def _terminate(process: subprocess.Popen) -> None:
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-           *, dev: bool) -> None:
-    mode = "--dev" if dev else "packaged"
+        *, dev: bool, source: bool, all_repos: bool = False) -> None:
+    mode = ("source" if source else "packaged") + (" --dev" if dev else "")
+    if all_repos:
+        mode += " all-repositories"
     port = _free_port()
     argv = [*launcher, "--repo", str(directory), "dashboard",
             "--port", str(port)]
+    if all_repos:
+        argv.append("--all-repos")
     if dev:
         argv.append("--dev")
     _say(f"{mode}: starting on port {port}")
@@ -438,8 +500,11 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
         _say(f"{mode}: served a started row with Stop available")
-        _assert_operational_viewport(port, mode)
-        _assert_abortive_disconnect_survives(process, port, mode)
+        if all_repos:
+            _assert_aggregate_run(port, directory, payload, mode)
+        else:
+            _assert_operational_viewport(port, mode)
+            _assert_abortive_disconnect_survives(process, port, mode)
     finally:
         _terminate(process)
 
@@ -467,9 +532,16 @@ def main() -> int:
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
         _seed_started_state(python, directory, environment)
-        _check(launcher, directory, environment, dev=False)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable, all_repos=True)
         if not args.skip_dev:
-            _check(launcher, directory, environment, dev=True)
+            _check(
+                launcher, directory, environment, dev=True,
+                source=args.editable)
     _say("ok")
     return 0
 

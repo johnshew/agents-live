@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: operate agents directly from the all-repositories dashboard. (#421)
+  Run, Start, Stop, and Claim now retain and revalidate the selected repository
+  and canonical agent before invoking the repository-qualified CLI action.
 - fix: restore the dashboard agent inventory and log to the first viewport. (#419)
   Host services and repository administration now open in a settings drawer,
   leaving independently bounded inventory and log regions visible together.
