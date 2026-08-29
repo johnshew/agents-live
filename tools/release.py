@@ -716,7 +716,9 @@ def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def _installed_version() -> str:
     completed = _installed_run(["--version"])
     match = re.fullmatch(
-        r"agents-live (\d+\.\d+\.\d+)\s*", completed.stdout)
+        r"agents-live (\d+\.\d+\.\d+)(?: \(channel: [a-z]+\))?\s*",
+        completed.stdout,
+    )
     if completed.returncode != 0 or match is None:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise ReleaseError(

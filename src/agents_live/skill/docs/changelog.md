@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: expose the installed runtime channel in version and status output.
+  Stable versions identify the `release` channel; development artifacts
+  identify the `bake` channel and include commit metadata when available.
 - fix: refuse reuse or activation of a damaged existing release generation. (#402)
   Matching provenance is no longer enough: the installed interpreter, package,
   and CLI are revalidated while the previously active pointer stays unchanged.

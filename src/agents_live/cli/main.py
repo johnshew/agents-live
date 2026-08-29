@@ -50,7 +50,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from .. import state
 from ..runtime import artifacts
 from ..runtime.hosts import system
-from . import update_check
+from . import identity, update_check
 from .spec import (
     COMMAND_BY_NAME,
     Cmd,
@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         if args[0] == "--version":
             # __version__ is the same source every other consumer reads
             # (update checks, doctor), so the numbers can never disagree.
-            print(f"agents-live {__version__}")
+            print(identity.label(__version__))
             return 0
         if args[0] == "--json":
             json_mode = True
