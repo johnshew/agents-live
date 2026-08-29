@@ -33,6 +33,7 @@ import json
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -276,6 +277,31 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
             f"{expected_state} row")
 
 
+def _assert_abortive_disconnect_survives(
+        process: subprocess.Popen, port: int, mode: str) -> None:
+    if os.name != "nt":
+        return
+    request = (
+        "GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Connection: Upgrade\r\n"
+        "Upgrade: websocket\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: SGVsbG9Xb3JsZDEyMzQ1Ng==\r\n\r\n"
+    ).encode("ascii")
+    for _ in range(25):
+        with socket.socket() as client:
+            client.settimeout(2)
+            client.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+            client.connect(("127.0.0.1", port))
+            with contextlib.suppress(OSError):
+                client.sendall(request)
+    payload = _await_rows(process, port, f"{mode} after client resets")
+    _assert_row(payload, mode, started=True)
+    _say(f"{mode}: remained available after abortive client disconnects")
+
+
 def _terminate(process: subprocess.Popen) -> None:
     """Stop the dashboard and every descendant it spawned.
 
@@ -324,6 +350,7 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
         _say(f"{mode}: served a started row with Stop available")
+        _assert_abortive_disconnect_survives(process, port, mode)
     finally:
         _terminate(process)
 

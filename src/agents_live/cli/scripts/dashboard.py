@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview"]
+# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview", "uvicorn>=0.36"]
 # ///
 """Interactive agents-live control panel (single host).
 
@@ -2005,6 +2005,10 @@ def main() -> None:
             reload=args.dev,
             uvicorn_reload_dirs=str(SCRIPTS_DIR),
             uvicorn_reload_includes="dashboard.py",
+            # Uvicorn's Windows default can lose its Proactor accept loop
+            # after an abortive client disconnect (#401).
+            loop=("asyncio:SelectorEventLoop"
+                if hostruntime.id() == hostruntime.WINDOWS else "auto"),
         )
     except KeyboardInterrupt:
         # Ctrl+C is the documented way to stop a foreground dashboard, so it
