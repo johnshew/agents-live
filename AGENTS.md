@@ -20,6 +20,7 @@ work on it.
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
 | Adding, changing, or deleting a test | [docs/testing-methodology.md](docs/testing-methodology.md) |
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
+| Reporting bake and release channel state | [.agents/release-report.md](.agents/release-report.md) |
 | Creating, running, or debugging triggered agents in this checkout | [.agents/agents-live.md](.agents/agents-live.md) |
 | Changing the skill payload, docs, or templates | [src/agents_live/skill/SKILL.md](src/agents_live/skill/SKILL.md) and [docs/](src/agents_live/skill/docs/) |
 | Recording a design decision or checking project direction | [docs/README.md](docs/README.md) and [docs/backlog.md](docs/backlog.md) |

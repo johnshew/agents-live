@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-23
+ms.date: 2026-08-28
 ms.topic: reference
 ---
 
@@ -143,8 +143,12 @@ that ran the agent.
 
 ## Operations
 
+- `--version` reports the installed version and its `release`, `bake`, or
+  `unknown` channel. Bake artifacts also report their commit when encoded in
+  the package version.
 - `status [name] [--all-repos]` reports definitions and their started or
-  stopped state.
+  stopped state, preceded by the same runtime identity. Its JSON envelope
+  includes this information in the additive `runtime` object.
 - `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health. A
   normal invocation checks and repairs only the selected repository; pass
   `--all-repos` to inspect every registered repository. `--repair` invokes the
@@ -157,6 +161,13 @@ that ran the agent.
   healthy record exists after that attempt. It checks only the runtime where it
   runs.
 - `logs` and `logs timeline` query local event records.
+- `lock PATH [--timeout SECONDS] -- COMMAND [ARGS...]` runs one command while
+  holding the same cross-platform advisory lock used by Agents Live. It opens
+  the lock file in append mode so another contender cannot replace the locked
+  inode. A zero timeout fails immediately with exit code 75; a positive timeout
+  waits for that many seconds. Use this wrapper from handlers, processors, and
+  plugins instead of importing `fcntl`, which is POSIX-only and provides no
+  exclusion when an ImportError fallback silently continues on Windows.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload. An installed
@@ -217,7 +228,7 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= run | start | stop | status | logs | smoketest | doctor | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+command      ::= run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
@@ -227,6 +238,7 @@ logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "-
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
+lock         ::= "lock" PATH COMMAND [ "--timeout" VALUE ]
 init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
@@ -251,6 +263,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
+| lock | in-process | none |  |  |  |  | --timeout | Run a command while holding a cross-platform file lock. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
 | upgrade | in-process | none |  | yes |  |  | --from | Upgrade runtime and project skill payloads. |
 | migrate | in-process | required |  |  |  |  | --dry-run, --bundle | Convert 5.x flat definitions. |

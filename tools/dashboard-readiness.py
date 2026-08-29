@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = []
+# dependencies = ["playwright>=1.50"]
 # ///
 """Prove a built dashboard serves real rows with real action flags (#279).
 
@@ -31,8 +31,10 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -172,6 +174,13 @@ def _fixture(directory: Path) -> None:
     (skill / "SKILL.md").write_text(DEFINITION, encoding="utf-8")
     (directory / ".agents-live.toml").write_text(
         "# readiness fixture\n", encoding="utf-8")
+    registry = directory / "config" / "agents-live" / "config.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        f'default_repo = "readiness"\n\n[repos]\n'
+        f'readiness = {json.dumps(str(directory))}\n',
+        encoding="utf-8",
+    )
 
 
 def _environment(directory: Path) -> dict[str, str]:
@@ -276,6 +285,169 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
             f"{expected_state} row")
 
 
+def _browser_executable() -> Path:
+    candidates = []
+    if os.name == "nt":
+        for base in (os.environ.get("PROGRAMFILES"),
+                     os.environ.get("PROGRAMFILES(X86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if base:
+                candidates.extend((
+                    Path(base) / "Microsoft/Edge/Application/msedge.exe",
+                    Path(base) / "Google/Chrome/Application/chrome.exe",
+                ))
+    elif sys.platform == "darwin":
+        candidates.extend((
+            Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ))
+    else:
+        for name in ("microsoft-edge", "google-chrome", "chromium",
+                     "chromium-browser"):
+            executable = shutil.which(name)
+            if executable:
+                candidates.append(Path(executable))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise ReadinessError("no installed Edge, Chrome, or Chromium browser is available")
+
+
+def _assert_operational_viewport(port: int, mode: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(_browser_executable()), headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            body = page.locator(".dashboard-body")
+            body.wait_for(state="visible")
+            if body.locator(
+                    ".host-service-panel, .repository-settings-panel").count():
+                raise ReadinessError(
+                    f"{mode}: settings consume the operational viewport")
+            agent_box = page.locator(".agent-panel").bounding_box()
+            log_box = page.locator(".dashboard-log-panel").bounding_box()
+            if agent_box is None or log_box is None:
+                raise ReadinessError(
+                    f"{mode}: inventory or log is absent from the first viewport")
+            if log_box["height"] < 140:
+                raise ReadinessError(
+                    f"{mode}: log height {log_box['height']:.0f}px cannot show ten lines")
+            if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > 720:
+                raise ReadinessError(
+                    f"{mode}: inventory or log extends below the 1280x720 viewport")
+            if page.evaluate(
+                    "document.documentElement.scrollHeight > window.innerHeight"):
+                raise ReadinessError(
+                    f"{mode}: operational view requires page-level scrolling")
+            page.get_by_role("button", name="Settings").click()
+            page.locator(".dashboard-settings .host-service-panel").wait_for()
+            page.locator(".dashboard-settings .repository-settings-panel").wait_for()
+            page.close()
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            page.get_by_role("button", name="Settings").click()
+            page.wait_for_function("""
+                () => {
+                    const drawer = document.querySelector('.dashboard-settings');
+                    if (!drawer) return false;
+                    const box = drawer.getBoundingClientRect();
+                    return box.left >= 0 && box.right <= window.innerWidth;
+                }
+            """)
+            drawer_box = page.locator(".dashboard-settings").bounding_box()
+            if drawer_box is None or drawer_box["x"] < 0 \
+                    or drawer_box["x"] + drawer_box["width"] > 390:
+                raise ReadinessError(
+                    f"{mode}: settings drawer extends outside a mobile viewport")
+            if page.evaluate(
+                    "document.documentElement.scrollWidth > window.innerWidth"):
+                raise ReadinessError(
+                    f"{mode}: settings drawer creates horizontal page scrolling")
+        finally:
+            browser.close()
+    _say(f"{mode}: inventory and log fit the 1280x720 viewport")
+
+
+def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        for log in directory.rglob("dashboard.jsonl"):
+            try:
+                records = [
+                    json.loads(line) for line in log.read_text(
+                        encoding="utf-8").splitlines() if line.strip()
+                ]
+            except (OSError, json.JSONDecodeError):
+                continue
+            if any(
+                    record.get("event") == "dashboard-action"
+                    and record.get("status") == "success"
+                    and record.get("repository") == str(directory)
+                    and record.get("agent") == identifier
+                    and str(record.get("message", "")).startswith("Run:")
+                    for record in records):
+                return
+        time.sleep(POLL_INTERVAL_S)
+    raise ReadinessError(
+        f"{mode}: aggregate Run produced no repository-qualified evidence")
+
+
+def _assert_aggregate_run(port: int, directory: Path,
+                          payload: dict, mode: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    identifier = payload["agents"][0].get("identifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise ReadinessError(f"{mode}: fixture row has no canonical identifier")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(_browser_executable()), headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            row = page.get_by_role("row").filter(
+                has=page.get_by_text("readiness-agent", exact=True))
+            if row.count() != 1:
+                raise ReadinessError(
+                    f"{mode}: aggregate dashboard rendered {row.count()} "
+                    "fixture rows")
+            row.get_by_role(
+                "button", name="Run this agent once now").click()
+            _await_aggregate_run(directory, identifier, mode)
+        finally:
+            browser.close()
+    _say(f"{mode}: aggregate Run kept repository-qualified evidence")
+
+
+def _assert_abortive_disconnect_survives(
+        process: subprocess.Popen, port: int, mode: str) -> None:
+    if os.name != "nt":
+        return
+    request = (
+        "GET /socket.io/?EIO=4&transport=websocket HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Connection: Upgrade\r\n"
+        "Upgrade: websocket\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Key: SGVsbG9Xb3JsZDEyMzQ1Ng==\r\n\r\n"
+    ).encode("ascii")
+    for _ in range(25):
+        with socket.socket() as client:
+            client.settimeout(2)
+            client.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("hh", 1, 0))
+            client.connect(("127.0.0.1", port))
+            with contextlib.suppress(OSError):
+                client.sendall(request)
+    payload = _await_rows(process, port, f"{mode} after client resets")
+    _assert_row(payload, mode, started=True)
+    _say(f"{mode}: remained available after abortive client disconnects")
+
+
 def _terminate(process: subprocess.Popen) -> None:
     """Stop the dashboard and every descendant it spawned.
 
@@ -308,11 +480,15 @@ def _terminate(process: subprocess.Popen) -> None:
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-           *, dev: bool) -> None:
-    mode = "--dev" if dev else "packaged"
+        *, dev: bool, source: bool, all_repos: bool = False) -> None:
+    mode = ("source" if source else "packaged") + (" --dev" if dev else "")
+    if all_repos:
+        mode += " all-repositories"
     port = _free_port()
     argv = [*launcher, "--repo", str(directory), "dashboard",
             "--port", str(port)]
+    if all_repos:
+        argv.append("--all-repos")
     if dev:
         argv.append("--dev")
     _say(f"{mode}: starting on port {port}")
@@ -324,6 +500,11 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
         _say(f"{mode}: served a started row with Stop available")
+        if all_repos:
+            _assert_aggregate_run(port, directory, payload, mode)
+        else:
+            _assert_operational_viewport(port, mode)
+            _assert_abortive_disconnect_survives(process, port, mode)
     finally:
         _terminate(process)
 
@@ -351,9 +532,16 @@ def main() -> int:
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
         _seed_started_state(python, directory, environment)
-        _check(launcher, directory, environment, dev=False)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable)
+        _check(
+            launcher, directory, environment, dev=False,
+            source=args.editable, all_repos=True)
         if not args.skip_dev:
-            _check(launcher, directory, environment, dev=True)
+            _check(
+                launcher, directory, environment, dev=True,
+                source=args.editable)
     _say("ok")
     return 0
 

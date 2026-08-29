@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import tempfile
 import time
 from collections.abc import Sequence
@@ -16,6 +15,7 @@ from pathlib import Path
 from ...legacy import artifacts as legacy_artifacts
 from .. import artifacts
 from ..grammars import parse_schedule, parse_watch
+from ..spawn import cli_executable_path
 from ..values import (
     Health,
     InstalledTrigger,
@@ -219,9 +219,7 @@ class WindowsHost:
             subscription.target,
             origin,
         ))
-        executable = shutil.which("agents-live")
-        if executable is None:
-            raise RuntimeError("agents-live executable is not available")
+        executable = str(cli_executable_path())
         if subscription.kind == "schedule":
             schedule = parse_schedule(subscription.trigger).canonical
             if subscription.target == "runtime":

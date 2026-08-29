@@ -38,6 +38,7 @@ from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
 from agents_live.cli.commands import (
+    install_generation,
     install_release,
     internal,
     ownership as ownership_command,
@@ -1571,6 +1572,40 @@ class TestDashboardHealthPolicy(unittest.TestCase):
 
 
 class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_running_duplicate_action_is_coalesced(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            from agents_live.cli.scripts import dashboard
+        started = asyncio.Event()
+        release = asyncio.Event()
+        executions = 0
+
+        async def execute(_request):
+            nonlocal executions
+            executions += 1
+            started.set()
+            await release.wait()
+            return 0
+
+        dashboard._ACTION_QUEUE.clear()
+        dashboard._PENDING_ACTIONS.clear()
+        dashboard._ACTION_WORKER = None
+        dashboard._ACTION_RUNNING = False
+        with mock.patch.object(dashboard, "_execute_action", side_effect=execute):
+            first = asyncio.create_task(dashboard.do_action(
+                "Run", "run", ["--name", "sample"], agent_name="sample",
+                repository="repo", repository_path="/repos/sample"))
+            await started.wait()
+            second = asyncio.create_task(dashboard.do_action(
+                "Run", "run", ["--name", "sample"], agent_name="sample",
+                repository="repo", repository_path="/repos/sample"))
+            await asyncio.sleep(0)
+            release.set()
+            self.assertEqual([0, 0], await asyncio.gather(first, second))
+        self.assertEqual(1, executions)
+
     async def test_health_check_finishes_with_modern_maintenance(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
@@ -2700,6 +2735,52 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(0, code)
         download.assert_not_called()
 
+    def test_verified_release_refuses_a_damaged_existing_generation(self) -> None:
+        """Matching provenance cannot authorize a payload that no longer runs."""
+        version = "9.7.5"
+        wheel = self._package_wheel(version)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        artifact = deploy.release_artifact.ReleaseArtifact(
+            version,
+            wheel.name,
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/{wheel.name}",
+            digest,
+            wheel.stat().st_size,
+        )
+        provenance = deploy.generation.Provenance(
+            "github-release", wheel.name, digest)
+        built = install_generation.install(
+            version, source=wheel, root=self.root, provenance=provenance)
+        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        install_generation.executable(built).unlink()
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                deploy.release_artifact, "resolve", return_value=artifact),
+            mock.patch.object(
+                deploy.release_artifact, "verified_download") as download,
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "agents-live install-release",
+                    version,
+                    "--install-root",
+                    str(self.root),
+                    "--activate",
+                ],
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = install_release.main()
+
+        self.assertEqual(1, code)
+        self.assertIn("is damaged: missing launcher", stderr.getvalue())
+        self.assertEqual("6.5.0", deploy.pointer.read().generation)
+        download.assert_not_called()
+
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
         """Upgrade stops being refusable, which is the operator payoff.
@@ -2819,6 +2900,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
     def _parse(self, name: str, stdout: str):
         return providers.get(name).parse(RawOutput(0, stdout, ""))
+
+    def test_lock_command_excludes_a_contender_and_runs_after_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = root / "shared.lock"
+            result_path = root / "result.txt"
+            command = [
+                sys.executable,
+                "-m",
+                "agents_live.cli",
+                "lock",
+                str(lock_path),
+                "--timeout",
+                "0",
+                "--",
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(result_path)!r}).write_text('ran')"
+                ),
+                "--repo",
+                "opaque-child-argument",
+            ]
+            with hostruntime.exclusive_lock(lock_path, blocking=False):
+                refused = subprocess.run(
+                    command, check=False, capture_output=True, text=True)
+            completed = subprocess.run(
+                command, check=False, capture_output=True, text=True)
+            result = result_path.read_text(encoding="utf-8")
+
+        self.assertEqual(75, refused.returncode, refused.stderr)
+        self.assertIn("lock is busy", refused.stderr)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("ran", result)
 
     def test_claude_never_loads_implicit_repository_configuration(self) -> None:
         for mode in ("plan", "write", "pipeline"):
@@ -4065,6 +4181,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
         contract.assert_called_once_with(status)
         watcher_contract.assert_called_once_with({"agents": []})
 
+    def test_local_deploy_counts_launcher_and_child_as_one_watcher(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        repository = str(Path("C:/repo").resolve())
+
+        logical = script["_logical_watchers"]([
+            (101, "sample-123", "C:/repo"),
+            (102, "sample-123", "C:/repo"),
+            (103, "other-456", "C:/repo"),
+        ])
+
+        self.assertEqual((
+            (repository, "other-456"),
+            (repository, "sample-123"),
+        ), logical)
+        self.assertLessEqual(set(logical), {
+            (repository, "other-456"),
+            (repository, "sample-123"),
+        })
+
     def test_local_deploy_verifies_events_for_local_watchers_only(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
@@ -5239,12 +5375,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
         nicegui.ui.refreshable.side_effect = lambda function: function
         with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
             from agents_live.cli.scripts import dashboard
+            repo_root = Path("/repos/sample")
             with mock.patch.object(
                     repos, "cli_base",
                     return_value=["/env/bin/agents-live"]):
-                argv = dashboard._command_argv("run", ["--name", "sample"])
+                argv = dashboard._command_argv(
+                    "run", ["--name", "sample"],
+                    repo_root=repo_root)
         self.assertEqual(
-            ["/env/bin/agents-live", "--json", "run", "--name", "sample"],
+            ["/env/bin/agents-live", "--repo", str(repo_root), "--json",
+             "run", "--name", "sample"],
             argv)
         source = Path(dashboard.__file__).read_text(encoding="utf-8")
         body = source.split("def _command_argv", 1)[1].split("\ndef ", 1)[0]
@@ -5409,6 +5549,29 @@ class TestRepositoryDiscoveryRoots(TempRepository):
         self.assertEqual(
             [(self.root / ".claude" / "skills" / "ours" / "SKILL.md").resolve()],
             [item.path for item in discovery.broken])
+
+    def test_unterminated_owned_client_skill_is_reported_broken(self) -> None:
+        ours = self.root / ".github" / "skills" / "ours" / "SKILL.md"
+        ours.parent.mkdir(parents=True)
+        ours.write_text(
+            "---\nname: ours\ndescription: Broken while being edited.\n"
+            "metadata:\n  agents-live.selector: fake\n",
+            encoding="utf-8",
+        )
+        foreign = self.root / ".agents" / "skills" / "foreign" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text(
+            "---\nname: foreign\ndescription: Broken foreign skill.\n",
+            encoding="utf-8",
+        )
+
+        discovery = agent.discover(self.root)
+
+        self.assertEqual((), discovery.specs)
+        self.assertEqual([ours.resolve()], [
+            item.path for item in discovery.broken
+        ])
+        self.assertIn("unterminated frontmatter", discovery.broken[0].message)
 
     def test_declared_directories_extend_the_standard_roots(self) -> None:
         """Configuration adds roots; it never takes one away.

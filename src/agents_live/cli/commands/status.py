@@ -7,9 +7,9 @@ import os
 import sys
 from pathlib import Path
 
-from ... import agent, obs, paths, state
+from ... import __version__, agent, obs, paths, state
 from ...state import registry as repos
-from .. import resolve
+from .. import identity, resolve
 
 
 def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
@@ -123,18 +123,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.name and not rows and not args.all_repos:
         rows = _elsewhere(args.name, roots[0])
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
-        print(json.dumps({"ok": True, "agents": rows}))
-    elif not rows:
-        print("No agent definitions found.")
+        print(json.dumps({
+            "ok": True,
+            "runtime": identity.details(__version__),
+            "agents": rows,
+        }))
     else:
-        for row in rows:
-            suffix = f" ({row['error']})" if row["error"] else ""
-            raw_failures = row["consecutive_failures"]
-            failures = raw_failures if isinstance(raw_failures, int) else 0
-            if failures:
-                suffix += f"; {failures} consecutive failure(s)"
-            label = row["identifier"] or "unreadable"
-            print(f"{row['name']} ({label}): {row['state']}{suffix}")
+        print(identity.label(__version__))
+        if not rows:
+            print("No agent definitions found.")
+        else:
+            for row in rows:
+                suffix = f" ({row['error']})" if row["error"] else ""
+                raw_failures = row["consecutive_failures"]
+                failures = raw_failures if isinstance(raw_failures, int) else 0
+                if failures:
+                    suffix += f"; {failures} consecutive failure(s)"
+                label = row["identifier"] or "unreadable"
+                print(f"{row['name']} ({label}): {row['state']}{suffix}")
     return 0
 
 

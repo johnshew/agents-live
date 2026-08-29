@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview"]
+# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview", "uvicorn>=0.36"]
 # ///
 """Interactive agents-live control panel (single host).
 
@@ -479,29 +479,71 @@ DASHBOARD_LOG = _DASHBOARD_LOG_DIR / "dashboard.jsonl"
 DASHBOARD_TRANSCRIPT = _DASHBOARD_LOG_DIR / "dashboard-transcript.log"
 
 
-def _command_argv(command: str, args: list[str]) -> list[str]:
+def _command_argv(command: str, args: list[str],
+                  *, repo_root: Path | None = None) -> list[str]:
     """Invoke the public CLI from the environment that provides the package.
 
     Not ``sys.executable``: this script runs under ``uv run --script``,
     whose environment holds NiceGUI and no agents-live (#288).
     """
+    repo_option = ["--repo", str(repo_root)] if repo_root is not None else []
     json_option = ["--json"] if command == "run" else []
-    return [*repos.cli_base(), *json_option, command, *args]
+    return [*repos.cli_base(), *repo_option, *json_option, command, *args]
+
+
+def _validated_repository_root(repository: str,
+                               repository_path: str) -> Path:
+    current = repos.load()
+    root = repos.resolve_name(repository, current)
+    expected = Path(repository_path).expanduser().resolve()
+    if root != expected:
+        raise ValueError(
+            f"registered repository {repository!r} no longer resolves to "
+            f"{expected}")
+    return root
+
+
+def _validated_action_root(repository: str, repository_path: str,
+                           agent_identifier: str) -> Path:
+    """Resolve an aggregate row again immediately before mutation."""
+    root = _validated_repository_root(repository, repository_path)
+    identifiers = {
+        row.identifier for row in agent_view.repository_agents(
+            root, ownership_rate_limit_secs=10**9)
+    }
+    if agent_identifier not in identifiers:
+        raise ValueError(
+            f"canonical agent {agent_identifier!r} is no longer available "
+            f"in repository {repository!r}")
+    return root
 
 
 def _run_script(command: str, args: list[str],
-                *, timeout: float | None = None) -> tuple[int, str, str]:
+                *, timeout: float | None = None,
+                repository: str | None = None,
+                repository_path: str | None = None,
+                agent_identifier: str | None = None) -> tuple[int, str, str]:
     """Run a lifecycle script; return (exit_code, stdout, transcript).
 
     ``timeout`` caps slow checks (e.g. the health-check worker, which runs
     the framework smoketest) so the dashboard can never spin forever; a
     timed-out run reports exit 124 with whatever output was captured.
     """
+    repo_root = None
+    if repository is not None or repository_path is not None:
+        if not repository or not repository_path or not agent_identifier:
+            return 2, "", "aggregate action target is incomplete"
+        try:
+            repo_root = _validated_action_root(
+                repository, repository_path, agent_identifier)
+        except (OSError, ValueError, agent.DefinitionError,
+                state.StartedStateUnavailable) as exc:
+            return 2, "", f"aggregate action rejected: {exc}"
     try:
         cwd = REPO_ROOT or paths.global_root()
         cwd.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
-            _command_argv(command, args),
+            _command_argv(command, args, repo_root=repo_root),
             cwd=cwd,
             capture_output=True,
             **hostruntime.CHILD_TEXT,
@@ -525,6 +567,8 @@ def _run_script(command: str, args: list[str],
 
 def _log_action(label: str, command: str, args: list[str], code: int,
                 out: str, *, agent_name: str | None,
+                repository: str | None = None,
+                repository_path: str | None = None,
                 run_id: str | None = None,
                 run_status: str | None = None) -> None:
     """Persist a dashboard action: a JSONL event plus a full transcript.
@@ -533,10 +577,26 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     `dashboard-transcript.log` keeps the complete, untruncated stdout+
     stderr so a failed Activate/Run can be reviewed after the fact.
     """
-    obs.record(DASHBOARD_LOG, obs.create(
+    target_root = None
+    if repository and repository_path:
+        try:
+            target_root = _validated_repository_root(
+                repository, repository_path)
+        except (OSError, ValueError):
+            pass
+    log = (
+        paths.repo_state_dir(target_root) / "logs" / "dashboard.jsonl"
+        if target_root is not None else DASHBOARD_LOG
+    )
+    transcript = (
+        paths.repo_state_dir(target_root) / "logs" /
+        "dashboard-transcript.log"
+        if target_root is not None else DASHBOARD_TRANSCRIPT
+    )
+    obs.record(log, obs.create(
         "dashboard-action",
         "success" if code == 0 else "failed",
-        repository=str(REPO_ROOT) if REPO_ROOT is not None else "",
+        repository=str(target_root or REPO_ROOT or ""),
         agent=agent_name or "dashboard",
         run_id=run_id or str(time.time_ns()),
         origin="dashboard",
@@ -547,7 +607,6 @@ def _log_action(label: str, command: str, args: list[str], code: int,
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cmd = " ".join([command, *args])
     header = f"\n===== {ts} {label}: {cmd} (exit {code}) =====\n"
-    transcript = DASHBOARD_TRANSCRIPT
     try:
         transcript.parent.mkdir(parents=True, exist_ok=True)
         with transcript.open("a", encoding="utf-8") as handle:
@@ -575,28 +634,36 @@ def _safe_ui(func, *args, **kwargs):
 class _ActionRequest:
     def __init__(self, label: str, script: str, args: list[str],
                  agent_name: str | None, timeout: float | None,
-                 future: asyncio.Future[int]) -> None:
+                 future: asyncio.Future[int], *,
+                 repository: str | None = None,
+                 repository_path: str | None = None) -> None:
         self.label = label
         self.script = script
         self.args = args
         self.agent_name = agent_name
         self.timeout = timeout
         self.future = future
-        self.key = (self.script, tuple(self.args))
+        self.repository = repository
+        self.repository_path = repository_path
+        self.key = (self.repository_path or "", self.script, tuple(self.args))
 
     @property
     def description(self) -> str:
-        return f"{self.label} {self.agent_name or ' '.join(self.args)}".strip()
+        target = self.agent_name or " ".join(self.args)
+        scope = f" in {self.repository}" if self.repository else ""
+        return f"{self.label} {target}{scope}".strip()
 
 
 _ACTION_QUEUE: deque[_ActionRequest] = deque()
-_PENDING_ACTIONS: dict[tuple[str, tuple[str, ...]], _ActionRequest] = {}
+_PENDING_ACTIONS: dict[tuple[str, str, tuple[str, ...]], _ActionRequest] = {}
 _ACTION_WORKER: asyncio.Task[None] | None = None
 _ACTION_RUNNING = False
 
 
 def _push_log(message: str) -> None:
-    _safe_ui(output_log.push, f"[{_local_time()}] {message}")
+    log = globals().get("output_log")
+    if log is not None:
+        _safe_ui(log.push, f"[{_local_time()}] {message}")
 
 
 def _timezone_abbreviation(moment: datetime) -> str:
@@ -626,7 +693,10 @@ async def _execute_action(request: _ActionRequest) -> int:
     _push_log(f"started: {request.description}")
     try:
         result = await ng_run.io_bound(
-            _run_script, request.script, request.args, timeout=request.timeout)
+            _run_script, request.script, request.args, timeout=request.timeout,
+            repository=request.repository,
+            repository_path=request.repository_path,
+            agent_identifier=request.agent_name)
         if result is None:
             raise asyncio.CancelledError
         code, stdout, out = result
@@ -649,7 +719,10 @@ async def _execute_action(request: _ActionRequest) -> int:
     # Persist the outcome first so a disconnected client never loses the record.
     _log_action(
         request.label, request.script, request.args, code, out,
-        agent_name=request.agent_name, run_id=run_id,
+        agent_name=request.agent_name,
+        repository=request.repository,
+        repository_path=request.repository_path,
+        run_id=run_id,
         run_status=run_status)
     _safe_ui(
         ui.notify,
@@ -660,8 +733,10 @@ async def _execute_action(request: _ActionRequest) -> int:
     outcome = "completed" if ok else "failed"
     _push_log(
         f"{outcome}: {request.description} (exit {code}, {elapsed:.1f}s)")
-    for line in out.splitlines():
-        _safe_ui(output_log.push, f"    {line}")
+    log = globals().get("output_log")
+    if log is not None:
+        for line in out.splitlines():
+            _safe_ui(log.push, f"    {line}")
     _safe_ui(_refresh_views)
     return code
 
@@ -671,7 +746,6 @@ async def _process_action_queue() -> None:
     try:
         while _ACTION_QUEUE:
             request = _ACTION_QUEUE.popleft()
-            _PENDING_ACTIONS.pop(request.key, None)
             _ACTION_RUNNING = True
             started = time.monotonic()
             try:
@@ -682,7 +756,9 @@ async def _process_action_queue() -> None:
                 output = f"unexpected dashboard action error: {exc}"
                 _log_action(
                     request.label, request.script, request.args, code, output,
-                    agent_name=request.agent_name)
+                    agent_name=request.agent_name,
+                    repository=request.repository,
+                    repository_path=request.repository_path)
                 _push_log(
                     f"failed: {request.description} "
                     f"(exit {code}, {elapsed:.1f}s): {exc}")
@@ -693,6 +769,7 @@ async def _process_action_queue() -> None:
                 if not request.future.done():
                     request.future.set_result(code)
             finally:
+                _PENDING_ACTIONS.pop(request.key, None)
                 _ACTION_RUNNING = False
     finally:
         _ACTION_WORKER = None
@@ -700,9 +777,11 @@ async def _process_action_queue() -> None:
 
 async def do_action(label: str, script: str, args: list[str],
                     *, agent_name: str | None = None,
-                    timeout: float | None = None) -> int:
+                    timeout: float | None = None,
+                    repository: str | None = None,
+                    repository_path: str | None = None) -> int:
     global _ACTION_WORKER
-    key = (script, tuple(args))
+    key = (repository_path or "", script, tuple(args))
     pending = _PENDING_ACTIONS.get(key)
     if pending is not None:
         _push_log(f"already queued: {pending.description}")
@@ -710,7 +789,8 @@ async def do_action(label: str, script: str, args: list[str],
 
     loop = asyncio.get_running_loop()
     request = _ActionRequest(
-        label, script, list(args), agent_name, timeout, loop.create_future())
+        label, script, list(args), agent_name, timeout, loop.create_future(),
+        repository=repository, repository_path=repository_path)
     if _ACTION_RUNNING or _ACTION_QUEUE:
         _push_log(f"queued: {request.description}")
     _ACTION_QUEUE.append(request)
@@ -1159,6 +1239,44 @@ async def _claim_row(event) -> None:
                     agent_name=identifier)
 
 
+def _aggregate_action_target(event) -> tuple[str, str, str]:
+    identifier = str(event.args.get("identifier", "")).strip()
+    repository = str(event.args.get("repository", "")).strip()
+    repository_path = str(event.args.get("repository_path", "")).strip()
+    if not identifier or not repository or not repository_path:
+        raise ValueError("aggregate action target is incomplete")
+    return identifier, repository, repository_path
+
+
+async def _run_aggregate_row(event) -> None:
+    identifier, repository, repository_path = _aggregate_action_target(event)
+    await do_action(
+        "Run", "run", ["--name", identifier], agent_name=identifier,
+        repository=repository, repository_path=repository_path)
+
+
+async def _activate_aggregate_row(event) -> None:
+    identifier, repository, repository_path = _aggregate_action_target(event)
+    await do_action(
+        "Start", "start", ["--name", identifier], agent_name=identifier,
+        repository=repository, repository_path=repository_path)
+
+
+async def _pause_aggregate_row(event) -> None:
+    identifier, repository, repository_path = _aggregate_action_target(event)
+    await do_action(
+        "Stop", "stop", ["--name", identifier], agent_name=identifier,
+        repository=repository, repository_path=repository_path)
+
+
+async def _claim_aggregate_row(event) -> None:
+    identifier, repository, repository_path = _aggregate_action_target(event)
+    await do_action(
+        "Claim", "start", ["--name", identifier, "--transfer-here"],
+        agent_name=identifier, repository=repository,
+        repository_path=repository_path)
+
+
 _AGENT_COLUMNS = [
     {"name": "name", "label": "Agent", "field": "name", "align": "left", "sortable": True},
     {"name": "state", "label": "State", "field": "state", "align": "left", "sortable": True},
@@ -1178,9 +1296,7 @@ _AGENT_COLUMNS = [
      "sortable": True, "style": "width: 64px", "headerStyle": "width: 64px"},
 ]
 
-_AGGREGATE_COLUMNS = [
-    column for column in _AGENT_COLUMNS if column["name"] != "actions"
-]
+_AGGREGATE_COLUMNS = list(_AGENT_COLUMNS)
 
 
 def _add_agent_information_slots(table) -> None:
@@ -1220,6 +1336,44 @@ def _add_agent_information_slots(table) -> None:
                    >{{ props.row.state }}</span>
         </q-td>
     ''')
+
+
+def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
+    event_prefix = "aggregate-" if aggregate else ""
+    table.add_slot("header-cell-actions", '''
+        <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
+    ''')
+    table.add_slot("body-cell-actions", f'''
+        <q-td :props="props" class="text-left">
+          <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
+                 :title="props.row.run_tip"
+                 @click="() => $parent.$emit('{event_prefix}run', props.row)" />
+          <q-btn flat dense round size="xs" icon="power_settings_new"
+                 :color="props.row.can_activate ? 'primary' : 'grey-7'"
+                 :disable="!props.row.can_activate"
+                 :title="props.row.activate_tip"
+                 @click="() => $parent.$emit('{event_prefix}activate', props.row)" />
+          <q-btn flat dense round size="xs" icon="stop"
+                 :color="props.row.can_pause ? 'primary' : 'grey-7'"
+                 :disable="!props.row.can_pause"
+                 :title="props.row.pause_tip"
+                 @click="() => $parent.$emit('{event_prefix}pause', props.row)" />
+          <q-btn flat dense round size="xs" icon="download"
+                 :color="props.row.can_claim ? 'primary' : 'grey-7'"
+                 :disable="!props.row.can_claim"
+                 :title="props.row.claim_tip"
+                 @click="() => $parent.$emit('{event_prefix}claim', props.row)" />
+        </q-td>
+    ''')
+    handlers = (
+        (_run_aggregate_row, _activate_aggregate_row,
+         _pause_aggregate_row, _claim_aggregate_row)
+        if aggregate else
+        (_run_row, _activate_row, _pause_row, _claim_row)
+    )
+    for event, handler in zip(
+            ("run", "activate", "pause", "claim"), handlers, strict=True):
+        table.on(event_prefix + event, handler)
 
 
 @ui.refreshable
@@ -1304,35 +1458,7 @@ def agent_grid() -> None:
                    >{{ props.row.state }}</span>
         </q-td>
     ''')
-    table.add_slot("header-cell-actions", '''
-        <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
-    ''')
-    table.add_slot("body-cell-actions", '''
-        <q-td :props="props" class="text-left">
-          <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
-                 :title="props.row.run_tip"
-                 @click="() => $parent.$emit('run', props.row)" />
-          <q-btn flat dense round size="xs" icon="power_settings_new"
-                 :color="props.row.can_activate ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_activate"
-                 :title="props.row.activate_tip"
-                 @click="() => $parent.$emit('activate', props.row)" />
-          <q-btn flat dense round size="xs" icon="stop"
-                 :color="props.row.can_pause ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_pause"
-                 :title="props.row.pause_tip"
-                 @click="() => $parent.$emit('pause', props.row)" />
-          <q-btn flat dense round size="xs" icon="download"
-                 :color="props.row.can_claim ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_claim"
-                 :title="props.row.claim_tip"
-                 @click="() => $parent.$emit('claim', props.row)" />
-        </q-td>
-    ''')
-    table.on("run", _run_row)
-    table.on("activate", _activate_row)
-    table.on("pause", _pause_row)
-    table.on("claim", _claim_row)
+    _add_agent_action_slots(table)
     day_total, week_total = _cost_totals(filtered_rows)
     totals = ui.label(
         f"List cost: ${day_total} / 24h   ${week_total} / 1w"
@@ -1477,6 +1603,12 @@ def repository_settings_panel() -> None:
 
 
 def _refresh_views() -> None:
+    aggregate_refresh = globals().get("_all_repos_refresh")
+    if aggregate_refresh is not None:
+        with hostruntime.enumeration_pass():
+            _safe_ui(aggregate_refresh)
+            _safe_ui(host_service_panel.refresh)
+        return
     # One pass for the whole render: the summary, the table, and the
     # header each ask every agent for its state, and without this they
     # would each read the host's process table and task folder again.
@@ -1523,6 +1655,8 @@ def _build_page() -> None:
         ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
         ".dashboard-identity{min-width:0}"
         ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".dashboard-settings{padding:1rem}"
+        ".dashboard-settings-content{min-width:0}"
         "@media(max-width:640px){"
         ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
         ".dashboard-identity{flex-wrap:wrap}"
@@ -1530,13 +1664,27 @@ def _build_page() -> None:
         ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
         "}"
         ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
-        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) auto "
-        "minmax(15rem,.7fr);min-height:0}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
+        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
         ".agent-panel{overflow:hidden;display:flex;flex-direction:column}"
         ".agent-table-scroll{min-height:0}"
         ".agent-filters .q-field{min-width:8rem}"
+        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column}"
+        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
     )
     host = ownership.current_label()
+
+    with ui.right_drawer(value=False).classes(
+            "dashboard-settings").props(
+                "width=360 bordered") as settings_drawer:
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Settings").classes("text-lg font-semibold")
+            ui.button(icon="close", on_click=settings_drawer.hide).props(
+                "flat round dense aria-label=Close")
+        with ui.column().classes(
+                "dashboard-settings-content w-full gap-4 no-wrap"):
+            host_service_panel()
+            repository_settings_panel()
 
     with ui.row().classes(
             "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
@@ -1549,6 +1697,8 @@ def _build_page() -> None:
             header_actions()
             refresh_age = ui.label().classes("text-sm text-gray-500")
             ui.button(icon="refresh", on_click=_refresh_views).props("flat round dense")
+            ui.button(icon="settings", on_click=settings_drawer.show).props(
+                "flat round dense aria-label=Settings")
 
     def tick_age() -> None:
         ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
@@ -1558,18 +1708,16 @@ def _build_page() -> None:
     ui.timer(1.0, tick_age)
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
-        host_service_panel()
-        with ui.expansion("Repository settings").classes("w-full"):
-            repository_settings_panel()
         with ui.card().classes("agent-panel w-full min-h-0"):
             agent_grid()
 
-        ui.label("Log").classes("text-sm text-gray-500 mt-2")
-        global output_log
-        output_log = ui.log(max_lines=300).classes(
-            "w-full h-full font-mono text-xs"
-        )
-        _push_log(startup_summary)
+        with ui.element("section").classes("dashboard-log-panel w-full"):
+            ui.label("Log").classes("text-sm text-gray-500")
+            global output_log
+            output_log = ui.log(max_lines=300).classes(
+                "w-full grow font-mono text-xs"
+            )
+            _push_log(startup_summary)
 
     _timer_after_first_interval(600.0, _refresh_views)
 
@@ -1659,7 +1807,15 @@ def _all_repos_groups() -> list[dict]:
                     for row in agent_view.repository_agents(
                         root, ownership_rate_limit_secs=10**9)
                 ]
-                group["rows"] = _agent_rows_for(root, agents)
+                group["rows"] = [
+                    {
+                        **row,
+                        "repository": alias,
+                        "repository_path": str(root),
+                        "repository_identifier": f"{alias}/{row['identifier']}",
+                    }
+                    for row in _agent_rows_for(root, agents)
+                ]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
                 group["available"] = False
@@ -1700,6 +1856,7 @@ def _ungrouped_agent_rows(groups: list[dict]) -> list[dict]:
         {
             **row,
             "repository": group["name"],
+            "repository_path": group["path"],
             "repository_identifier": f"{group['name']}/{row['identifier']}",
         }
         for group in groups for row in group["rows"]
@@ -1737,7 +1894,8 @@ def api_all_repos() -> dict:
 
 
 def build_all_repos_page() -> None:
-    """Registered-repository view with no agent lifecycle actions."""
+    """Registered-repository view with repository-qualified actions."""
+    global _all_repos_refresh
     ui.dark_mode().auto()
     state_settings = STATE["all_repos"]
     groups = all_repo_groups()
@@ -1754,7 +1912,7 @@ def build_all_repos_page() -> None:
     with ui.row().classes("w-full items-center gap-4"):
         ui.label("Agents Live").classes("text-xl font-semibold")
         ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label("All registered repositories (agent lifecycle read only)").classes(
+        ui.label("All registered repositories").classes(
             "text-sm text-gray-500")
     host_service_panel()
     with ui.expansion("Repository settings").classes("w-full"):
@@ -1791,6 +1949,7 @@ def build_all_repos_page() -> None:
                                 "flat dense hide-bottom separator=none")
                             tables.append(table)
                             _add_agent_information_slots(table)
+                            _add_agent_action_slots(table, aggregate=True)
 
     container = ui.element("div").classes("w-full")
 
@@ -1816,6 +1975,9 @@ def build_all_repos_page() -> None:
                     pagination={"rowsPerPage": 0},
                 ).classes("w-full").props("flat dense hide-bottom separator=none")
                 _add_agent_information_slots(table)
+                _add_agent_action_slots(table, aggregate=True)
+
+    _all_repos_refresh = rebuild
 
     def select_repo(event) -> None:
         state_settings["repo"] = event.value
@@ -1859,10 +2021,6 @@ def build_all_repos_page() -> None:
     # Same cadence as the single-repo page: the view tracks reality
     # instead of freezing at process start.
     ui.timer(600.0, refresh)
-    ui.label(
-        "Select one repository with `agents-live --repo NAME dashboard` "
-        "to enable actions."
-    ).classes("text-sm text-gray-500")
 
 
 PORT_PROBE_TIMEOUT_S = 0.5
@@ -2005,6 +2163,10 @@ def main() -> None:
             reload=args.dev,
             uvicorn_reload_dirs=str(SCRIPTS_DIR),
             uvicorn_reload_includes="dashboard.py",
+            # Uvicorn's Windows default can lose its Proactor accept loop
+            # after an abortive client disconnect (#401).
+            loop=("asyncio:SelectorEventLoop"
+                if hostruntime.id() == hostruntime.WINDOWS else "auto"),
         )
     except KeyboardInterrupt:
         # Ctrl+C is the documented way to stop a foreground dashboard, so it

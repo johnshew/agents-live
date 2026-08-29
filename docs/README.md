@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, and backlog
-ms.date: 2026-08-23
+ms.date: 2026-08-29
 ms.topic: overview
 ---
 
@@ -43,6 +43,14 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [processor-contract.md](processor-contract.md) - why the processor contract
   is shaped the way it is, and which alternatives were rejected. The contract
   itself is specified in the skill payload.
+- [dashboard/dashboard-product-requirements.md](dashboard/dashboard-product-requirements.md) -
+  durable dashboard product direction and experience contract.
+- [dashboard/dashboard-requirements.md](dashboard/dashboard-requirements.md) -
+  prioritized, testable dashboard requirements.
+- [dashboard/dashboard-implementation.md](dashboard/dashboard-implementation.md) -
+  current dashboard delivery sequence and release boundaries.
+- [dashboard/dashboard-validation.md](dashboard/dashboard-validation.md) -
+  dashboard acceptance evidence and release gates.
 - [backlog.md](backlog.md) - high-level themes linked to GitHub issues.
 
 Design documents are added here as they are written, one file per topic,

@@ -27,6 +27,7 @@ from agents_live import (
     agent, deploy, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
+from agents_live.cli import identity
 from agents_live.cli.main import main as cli_main
 from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
@@ -176,6 +177,41 @@ class TestDefinitionLoader(TempRepository):
         rows = status._rows(self.root)
 
         self.assertEqual(3, rows[0]["consecutive_failures"])
+
+    def test_status_json_identifies_the_runtime_channel(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(status, "__version__", "6.6.0.dev0+gabc1234"),
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            result = status.main([])
+
+        self.assertEqual(0, result)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            {
+                "version": "6.6.0.dev0+gabc1234",
+                "channel": "bake",
+                "commit": "abc1234",
+            },
+            payload["runtime"],
+        )
+        self.assertEqual([], payload["agents"])
+
+    def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
+        self.assertEqual("release", identity.channel("6.6.0"))
+        self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
+        self.assertEqual("unknown", identity.channel("6.6.0rc1"))
+        self.assertEqual(
+            "agents-live 6.6.0 (channel: release)",
+            identity.label("6.6.0"),
+        )
+        self.assertEqual(
+            "agents-live 6.6.0.dev0+gabc1234 "
+            "(channel: bake, commit: abc1234)",
+            identity.label("6.6.0.dev0+gabc1234"),
+        )
 
     def test_rejects_unquoted_metadata_duplicate_keys_and_aliases(self) -> None:
         bad = (
@@ -692,11 +728,19 @@ class TestDoctor(unittest.TestCase):
             ),
             mock.patch.object(
                 doctor.repos, "load", return_value={"repos": {}}),
+            mock.patch.object(
+                doctor.state, "resolve_root", side_effect=KeyError("no repository")),
             mock.patch.object(doctor.runtime, "health", return_value=initial),
+            mock.patch.object(
+                doctor, "_installation_check", return_value={
+                    "check": "installation", "ok": True, "detail": "test",
+                }),
             mock.patch.object(
                 doctor.lifecycle, "collect", return_value=collected),
             mock.patch.object(
                 doctor.lifecycle, "converge", return_value=result),
+            mock.patch.object(doctor.hostruntime, "id", return_value="posix"),
+            mock.patch.object(doctor, "_health_payload", return_value=None),
             mock.patch.object(
                 doctor.update_check, "interactive", return_value=False),
             contextlib.redirect_stdout(stdout),
@@ -1030,6 +1074,22 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_installed_version_accepts_channel_identity(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+        installed_version = release["_installed_version"]
+        completed = subprocess.CompletedProcess(
+            ["agents-live", "--version"],
+            0,
+            "agents-live 6.6.0 (channel: release)\n",
+            "",
+        )
+        with mock.patch.dict(
+            installed_version.__globals__,
+            {"_installed_run": lambda _argv: completed},
+        ):
+            self.assertEqual("6.6.0", installed_version())
+
     def test_unmatched_pull_does_not_claim_changelog_entry_is_missing(self) -> None:
         root = Path(__file__).resolve().parents[1]
         release = runpy.run_path(str(root / "tools" / "release.py"))
@@ -1129,6 +1189,23 @@ class TestRuntimeCore(unittest.TestCase):
             with contextlib.suppress(SystemExit):
                 module.main(["--version"])
         helper.assert_called_once_with()
+
+    def test_version_command_identifies_a_bake_artifact(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                module, "__version__", "6.6.0.dev0+gabc1234"),
+            contextlib.redirect_stdout(output),
+        ):
+            result = module.main(["--version"])
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            "agents-live 6.6.0.dev0+gabc1234 "
+            "(channel: bake, commit: abc1234)",
+            output.getvalue().strip(),
+        )
 
     def test_deferred_upgrade_is_single_flight_and_records_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1370,6 +1447,32 @@ class TestRuntimeCore(unittest.TestCase):
             self.assertIn(
                 "[value with spaces][apostrophe's value]",
                 transcript_path.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows only")
+    def test_windows_deferred_process_reports_after_transcript_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.json"
+            transcript_path = Path(temporary) / "transcript.log"
+            transcript_path.mkdir()
+            command_path = Path(temporary) / "command.cmd"
+            command_path.write_text(
+                "@echo off\n"
+                "exit /b 7\n",
+                encoding="utf-8")
+            try:
+                helper = WindowsProcesses().defer_until_environment_exits(
+                    [str(command_path)],
+                    Path(temporary) / "unused-environment",
+                    operation_id="operation-1", result_path=result_path,
+                    transcript_path=transcript_path)
+                self.assertIsNotNone(helper)
+                result = self._await_terminal(
+                    result_path, transcript_path, timeout=3.0)
+                self.assertEqual("terminal", result["status"])
+                self.assertEqual(1, result["exit_code"])
+            finally:
+                with contextlib.suppress(OSError):
+                    transcript_path.rmdir()
 
     def _await_terminal(self, result_path: Path, transcript_path: Path,
                         *, timeout: float = 30.0) -> dict:
@@ -1751,13 +1854,26 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertIsNotNone(runtime.artifacts.from_rendered(rendered.rendered))
 
     def test_windows_maintenance_artifact_reaches_the_real_cli(self) -> None:
-        with mock.patch(
-            "agents_live.runtime.hosts.windows.shutil.which",
-            return_value="C:/tools/agents-live.exe",
-        ):
-            rendered = WindowsHost().render(
-                lifecycle.maintenance_subscription())
+        with tempfile.TemporaryDirectory() as temporary:
+            interpreter = Path(temporary) / hostruntime.executable_filename(
+                hostruntime.interpreter_name())
+            launcher = interpreter.with_name(
+                hostruntime.executable_filename("agents-live"))
+            launcher.touch()
+            with (
+                mock.patch(
+                    "agents_live.runtime.spawn.sys.executable",
+                    str(interpreter),
+                ),
+                mock.patch(
+                    "agents_live.runtime.spawn.shutil.which",
+                    return_value=None,
+                ),
+            ):
+                rendered = WindowsHost().render(
+                    lifecycle.maintenance_subscription())
         argv = json.loads(rendered.rendered)["argv"]
+        self.assertEqual(str(launcher.resolve()), argv[0])
         result = mock.Mock(done=(), failed=(), health=Health(True))
         collected = mock.Mock(subscriptions=())
         with (
@@ -2653,16 +2769,16 @@ class TestStartedState(TempRepository):
         spec = agent.load("sample", root=self.root)
         host = WindowsMigrationHost()
         host.legacy[str(self.root)] = {"sample"}
+        launcher = Path("C:/tools/agents-live.exe")
         with (
             mock.patch.object(
                 migrate.hostruntime,
                 "native_scheduler",
                 return_value=migrate.hostruntime.TASK_SCHEDULER,
             ),
-            mock.patch.object(
-                task_scheduler.shutil,
-                "which",
-                return_value="C:/tools/agents-live.exe",
+            mock.patch(
+                "agents_live.runtime.hosts.windows.cli_executable_path",
+                return_value=launcher,
             ),
         ):
             self.assertEqual(0, self._migrate_with_legacy(host))
@@ -2680,7 +2796,7 @@ class TestStartedState(TempRepository):
         self.assertEqual("clock", metadata.origin)
         self.assertEqual(
             [
-                "C:/tools/agents-live.exe",
+                str(launcher),
                 "--repo",
                 str(self.root),
                 "run",
@@ -5047,11 +5163,15 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual(["other", self.root.name], [group["name"] for group in groups])
         local_group = next(group for group in groups if group["name"] == self.root.name)
         self.assertEqual(["alpha", "zeta"], [row["name"] for row in local_group["rows"]])
+        self.assertTrue(all(
+            row["repository"] == self.root.name
+            and row["repository_path"] == str(self.root)
+            for row in local_group["rows"]
+        ))
         self.assertEqual("handler", local_group["rows"][0]["agent"])
         self.assertEqual("fake", local_group["rows"][1]["agent"])
         self.assertEqual(
-            [column["name"] for column in dashboard._AGENT_COLUMNS
-             if column["name"] != "actions"],
+            [column["name"] for column in dashboard._AGENT_COLUMNS],
             [column["name"] for column in dashboard._AGGREGATE_COLUMNS],
         )
         self.assertEqual(groups, dashboard.all_repo_groups())
@@ -5082,16 +5202,76 @@ class TestDashboardRepositorySurface(TempRepository):
     def test_dashboard_ungrouped_rows_have_repository_qualified_keys(self) -> None:
         dashboard = self._dashboard_module()
         groups = [
-            {"name": "first", "rows": [{"identifier": "daily-123"}]},
-            {"name": "second", "rows": [{"identifier": "daily-123"}]},
+            {"name": "first", "path": "/repos/first",
+             "rows": [{"identifier": "daily-123"}]},
+            {"name": "second", "path": "/repos/second",
+             "rows": [{"identifier": "daily-123"}]},
         ]
 
         rows = dashboard._ungrouped_agent_rows(groups)
 
         self.assertEqual(["first", "second"], [
             row["repository"] for row in rows])
+        self.assertEqual(["/repos/first", "/repos/second"], [
+            row["repository_path"] for row in rows])
         self.assertEqual(2, len({
             row["repository_identifier"] for row in rows}))
+
+    def test_dashboard_aggregate_action_target_fails_closed(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        identifier = agent.load("sample", root=self.root).identifier
+
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(
+                dashboard.repos, "cli_base", return_value=["agents-live"]),
+            mock.patch.object(
+                dashboard.subprocess, "run", return_value=completed) as run,
+        ):
+            code, _stdout, _output = dashboard._run_script(
+                "stop", ["--name", identifier],
+                repository=self.root.name,
+                repository_path=str(self.root),
+                agent_identifier=identifier,
+            )
+            self.assertEqual(0, code)
+            self.assertEqual(
+                ["agents-live", "--repo", str(self.root), "stop",
+                 "--name", identifier],
+                run.call_args.args[0],
+            )
+
+            code, _stdout, output = dashboard._run_script(
+                "stop", ["--name", "missing-agent"],
+                repository=self.root.name,
+                repository_path=str(self.root),
+                agent_identifier="missing-agent",
+            )
+            self.assertEqual(2, code)
+            self.assertIn("canonical agent", output)
+            self.assertEqual(1, run.call_count)
+
+            dashboard._log_action(
+                "Stop", "stop", ["--name", identifier], 0, "",
+                agent_name=identifier, repository=self.root.name,
+                repository_path=str(self.root))
+            action_log = (
+                paths.repo_state_dir(self.root) / "logs" / "dashboard.jsonl")
+            record = json.loads(action_log.read_text(encoding="utf-8"))
+            self.assertEqual(str(self.root), record["repository"])
+            self.assertEqual(identifier, record["agent"])
+
+        repos._remove(self.root.name)
+        code, _stdout, output = dashboard._run_script(
+            "stop", ["--name", identifier],
+            repository=self.root.name,
+            repository_path=str(self.root),
+            agent_identifier=identifier,
+        )
+        self.assertEqual(2, code)
+        self.assertIn("not registered", output)
 
     def test_dashboard_host_service_shows_failed_idle_and_running_states(self) -> None:
         dashboard = self._dashboard_module()
@@ -5325,6 +5505,31 @@ class TestArchitectureFitness(unittest.TestCase):
                 sys, "argv", ["dashboard.py", "--port", "8231"]),
         ):
             dashboard.main()  # must return rather than propagate
+
+    def test_dashboard_uses_selector_event_loop_on_windows(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.object(
+                dashboard.hostruntime, "id",
+                return_value=dashboard.hostruntime.WINDOWS),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(dashboard, "port_conflict", return_value=None),
+            mock.patch.object(dashboard.dashboards, "record"),
+            mock.patch.object(dashboard.atexit, "register"),
+            mock.patch.object(dashboard, "build_page"),
+            mock.patch.object(dashboard.ui, "run") as run,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "8231"]),
+        ):
+            dashboard.main()
+
+        self.assertEqual("asyncio:SelectorEventLoop", run.call_args.kwargs["loop"])
 
     def test_dashboard_next_port_announces_and_serves_first_available(self) -> None:
         nicegui = mock.MagicMock()
