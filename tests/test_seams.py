@@ -5416,6 +5416,31 @@ class TestArchitectureFitness(unittest.TestCase):
         ):
             dashboard.main()  # must return rather than propagate
 
+    def test_dashboard_uses_selector_event_loop_on_windows(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module(
+                "agents_live.cli.scripts.dashboard")
+        with (
+            mock.patch.object(dashboard, "__name__", "__main__"),
+            mock.patch.object(
+                dashboard.hostruntime, "id",
+                return_value=dashboard.hostruntime.WINDOWS),
+            mock.patch.object(dashboard.app, "is_started", False),
+            mock.patch.object(dashboard, "port_conflict", return_value=None),
+            mock.patch.object(dashboard.dashboards, "record"),
+            mock.patch.object(dashboard.atexit, "register"),
+            mock.patch.object(dashboard, "build_page"),
+            mock.patch.object(dashboard.ui, "run") as run,
+            mock.patch.object(
+                sys, "argv", ["dashboard.py", "--port", "8231"]),
+        ):
+            dashboard.main()
+
+        self.assertEqual("asyncio:SelectorEventLoop", run.call_args.kwargs["loop"])
+
     def test_dashboard_next_port_announces_and_serves_first_available(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function

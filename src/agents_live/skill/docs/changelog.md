@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep the Windows dashboard serving after an abortive client disconnect. (#401)
+  The dashboard uses asyncio's selector server loop on native Windows instead
+  of the Proactor accept path that can stop accepting new connections.
 - feat: expose the installed runtime channel in version and status output.
   Stable versions identify the `release` channel; development artifacts
   identify the `bake` channel and include commit metadata when available.
