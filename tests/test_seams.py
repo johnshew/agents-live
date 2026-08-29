@@ -27,6 +27,7 @@ from agents_live import (
     agent, deploy, obs, paths, plugins, runtime, state,
 )
 from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
+from agents_live.cli import identity
 from agents_live.cli.main import main as cli_main
 from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
 from agents_live.state import registry as repos
@@ -176,6 +177,41 @@ class TestDefinitionLoader(TempRepository):
         rows = status._rows(self.root)
 
         self.assertEqual(3, rows[0]["consecutive_failures"])
+
+    def test_status_json_identifies_the_runtime_channel(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(status, "__version__", "6.6.0.dev0+gabc1234"),
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            result = status.main([])
+
+        self.assertEqual(0, result)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            {
+                "version": "6.6.0.dev0+gabc1234",
+                "channel": "bake",
+                "commit": "abc1234",
+            },
+            payload["runtime"],
+        )
+        self.assertEqual([], payload["agents"])
+
+    def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
+        self.assertEqual("release", identity.channel("6.6.0"))
+        self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
+        self.assertEqual("unknown", identity.channel("6.6.0rc1"))
+        self.assertEqual(
+            "agents-live 6.6.0 (channel: release)",
+            identity.label("6.6.0"),
+        )
+        self.assertEqual(
+            "agents-live 6.6.0.dev0+gabc1234 "
+            "(channel: bake, commit: abc1234)",
+            identity.label("6.6.0.dev0+gabc1234"),
+        )
 
     def test_rejects_unquoted_metadata_duplicate_keys_and_aliases(self) -> None:
         bad = (
@@ -1038,6 +1074,22 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_installed_version_accepts_channel_identity(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+        installed_version = release["_installed_version"]
+        completed = subprocess.CompletedProcess(
+            ["agents-live", "--version"],
+            0,
+            "agents-live 6.6.0 (channel: release)\n",
+            "",
+        )
+        with mock.patch.dict(
+            installed_version.__globals__,
+            {"_installed_run": lambda _argv: completed},
+        ):
+            self.assertEqual("6.6.0", installed_version())
+
     def test_unmatched_pull_does_not_claim_changelog_entry_is_missing(self) -> None:
         root = Path(__file__).resolve().parents[1]
         release = runpy.run_path(str(root / "tools" / "release.py"))
@@ -1137,6 +1189,23 @@ class TestRuntimeCore(unittest.TestCase):
             with contextlib.suppress(SystemExit):
                 module.main(["--version"])
         helper.assert_called_once_with()
+
+    def test_version_command_identifies_a_bake_artifact(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                module, "__version__", "6.6.0.dev0+gabc1234"),
+            contextlib.redirect_stdout(output),
+        ):
+            result = module.main(["--version"])
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            "agents-live 6.6.0.dev0+gabc1234 "
+            "(channel: bake, commit: abc1234)",
+            output.getvalue().strip(),
+        )
 
     def test_deferred_upgrade_is_single_flight_and_records_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

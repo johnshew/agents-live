@@ -143,8 +143,12 @@ that ran the agent.
 
 ## Operations
 
+- `--version` reports the installed version and its `release`, `bake`, or
+  `unknown` channel. Bake artifacts also report their commit when encoded in
+  the package version.
 - `status [name] [--all-repos]` reports definitions and their started or
-  stopped state.
+  stopped state, preceded by the same runtime identity. Its JSON envelope
+  includes this information in the additive `runtime` object.
 - `doctor [--all-repos] [--repair] [--dry-run]` reports runtime health. A
   normal invocation checks and repairs only the selected repository; pass
   `--all-repos` to inspect every registered repository. `--repair` invokes the
