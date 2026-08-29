@@ -1448,6 +1448,32 @@ class TestRuntimeCore(unittest.TestCase):
                 "[value with spaces][apostrophe's value]",
                 transcript_path.read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(os.name == "nt", "native Windows only")
+    def test_windows_deferred_process_reports_after_transcript_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result_path = Path(temporary) / "result.json"
+            transcript_path = Path(temporary) / "transcript.log"
+            transcript_path.mkdir()
+            command_path = Path(temporary) / "command.cmd"
+            command_path.write_text(
+                "@echo off\n"
+                "exit /b 7\n",
+                encoding="utf-8")
+            try:
+                helper = WindowsProcesses().defer_until_environment_exits(
+                    [str(command_path)],
+                    Path(temporary) / "unused-environment",
+                    operation_id="operation-1", result_path=result_path,
+                    transcript_path=transcript_path)
+                self.assertIsNotNone(helper)
+                result = self._await_terminal(
+                    result_path, transcript_path, timeout=3.0)
+                self.assertEqual("terminal", result["status"])
+                self.assertEqual(1, result["exit_code"])
+            finally:
+                with contextlib.suppress(OSError):
+                    transcript_path.rmdir()
+
     def _await_terminal(self, result_path: Path, transcript_path: Path,
                         *, timeout: float = 30.0) -> dict:
         deadline = time.monotonic() + timeout
