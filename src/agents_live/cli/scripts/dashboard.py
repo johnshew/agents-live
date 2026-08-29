@@ -1523,6 +1523,8 @@ def _build_page() -> None:
         ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
         ".dashboard-identity{min-width:0}"
         ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".dashboard-settings{padding:1rem}"
+        ".dashboard-settings-content{min-width:0}"
         "@media(max-width:640px){"
         ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
         ".dashboard-identity{flex-wrap:wrap}"
@@ -1530,13 +1532,27 @@ def _build_page() -> None:
         ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
         "}"
         ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
-        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) auto "
-        "minmax(15rem,.7fr);min-height:0}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
+        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
         ".agent-panel{overflow:hidden;display:flex;flex-direction:column}"
         ".agent-table-scroll{min-height:0}"
         ".agent-filters .q-field{min-width:8rem}"
+        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column}"
+        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
     )
     host = ownership.current_label()
+
+    with ui.right_drawer(value=False).classes(
+            "dashboard-settings").props(
+                "width=360 bordered") as settings_drawer:
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Settings").classes("text-lg font-semibold")
+            ui.button(icon="close", on_click=settings_drawer.hide).props(
+                "flat round dense aria-label=Close")
+        with ui.column().classes(
+                "dashboard-settings-content w-full gap-4 no-wrap"):
+            host_service_panel()
+            repository_settings_panel()
 
     with ui.row().classes(
             "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
@@ -1549,6 +1565,8 @@ def _build_page() -> None:
             header_actions()
             refresh_age = ui.label().classes("text-sm text-gray-500")
             ui.button(icon="refresh", on_click=_refresh_views).props("flat round dense")
+            ui.button(icon="settings", on_click=settings_drawer.show).props(
+                "flat round dense aria-label=Settings")
 
     def tick_age() -> None:
         ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
@@ -1558,18 +1576,16 @@ def _build_page() -> None:
     ui.timer(1.0, tick_age)
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
-        host_service_panel()
-        with ui.expansion("Repository settings").classes("w-full"):
-            repository_settings_panel()
         with ui.card().classes("agent-panel w-full min-h-0"):
             agent_grid()
 
-        ui.label("Log").classes("text-sm text-gray-500 mt-2")
-        global output_log
-        output_log = ui.log(max_lines=300).classes(
-            "w-full h-full font-mono text-xs"
-        )
-        _push_log(startup_summary)
+        with ui.element("section").classes("dashboard-log-panel w-full"):
+            ui.label("Log").classes("text-sm text-gray-500")
+            global output_log
+            output_log = ui.log(max_lines=300).classes(
+                "w-full grow font-mono text-xs"
+            )
+            _push_log(startup_summary)
 
     _timer_after_first_interval(600.0, _refresh_views)
 

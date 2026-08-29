@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = []
+# dependencies = ["playwright>=1.50"]
 # ///
 """Prove a built dashboard serves real rows with real action flags (#279).
 
@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -277,6 +278,82 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
             f"{expected_state} row")
 
 
+def _browser_executable() -> Path:
+    candidates = []
+    if os.name == "nt":
+        for base in (os.environ.get("PROGRAMFILES"),
+                     os.environ.get("PROGRAMFILES(X86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if base:
+                candidates.extend((
+                    Path(base) / "Microsoft/Edge/Application/msedge.exe",
+                    Path(base) / "Google/Chrome/Application/chrome.exe",
+                ))
+    elif sys.platform == "darwin":
+        candidates.extend((
+            Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ))
+    else:
+        for name in ("microsoft-edge", "google-chrome", "chromium",
+                     "chromium-browser"):
+            executable = shutil.which(name)
+            if executable:
+                candidates.append(Path(executable))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise ReadinessError("no installed Edge, Chrome, or Chromium browser is available")
+
+
+def _assert_operational_viewport(port: int, mode: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(_browser_executable()), headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 720})
+            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            body = page.locator(".dashboard-body")
+            body.wait_for(state="visible")
+            if body.locator(
+                    ".host-service-panel, .repository-settings-panel").count():
+                raise ReadinessError(
+                    f"{mode}: settings consume the operational viewport")
+            agent_box = page.locator(".agent-panel").bounding_box()
+            log_box = page.locator(".dashboard-log-panel").bounding_box()
+            if agent_box is None or log_box is None:
+                raise ReadinessError(
+                    f"{mode}: inventory or log is absent from the first viewport")
+            if log_box["height"] < 140:
+                raise ReadinessError(
+                    f"{mode}: log height {log_box['height']:.0f}px cannot show ten lines")
+            if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > 720:
+                raise ReadinessError(
+                    f"{mode}: inventory or log extends below the 1280x720 viewport")
+            if page.evaluate(
+                    "document.documentElement.scrollHeight > window.innerHeight"):
+                raise ReadinessError(
+                    f"{mode}: operational view requires page-level scrolling")
+            page.get_by_role("button", name="Settings").click()
+            page.locator(".dashboard-settings .host-service-panel").wait_for()
+            page.locator(".dashboard-settings .repository-settings-panel").wait_for()
+            page.set_viewport_size({"width": 390, "height": 844})
+            drawer_box = page.locator(".dashboard-settings").bounding_box()
+            if drawer_box is None or drawer_box["x"] < 0 \
+                    or drawer_box["x"] + drawer_box["width"] > 390:
+                raise ReadinessError(
+                    f"{mode}: settings drawer extends outside a mobile viewport")
+            if page.evaluate(
+                    "document.documentElement.scrollWidth > window.innerWidth"):
+                raise ReadinessError(
+                    f"{mode}: settings drawer creates horizontal page scrolling")
+        finally:
+            browser.close()
+    _say(f"{mode}: inventory and log fit the 1280x720 viewport")
+
+
 def _assert_abortive_disconnect_survives(
         process: subprocess.Popen, port: int, mode: str) -> None:
     if os.name != "nt":
@@ -350,6 +427,7 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
         _say(f"{mode}: served a started row with Stop available")
+        _assert_operational_viewport(port, mode)
         _assert_abortive_disconnect_survives(process, port, mode)
     finally:
         _terminate(process)
