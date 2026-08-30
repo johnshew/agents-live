@@ -3555,12 +3555,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_preparation_path": lambda _version: receipt,
                 "_candidate_wheel": lambda _version: wheel,
                 "_gate_commands": lambda: [["gate", "--exact"]],
+                "_evidence_identity": lambda: {
+                    "platform": "test-platform",
+                    "python_version": "3.12.0",
+                    "workflow_sha256": "workflow-digest",
+                },
                 "_git": git,
             }):
                 write("1.2.3", wheel)
                 payload = check("1.2.3")
                 self.assertEqual("candidate-commit", payload["commit"])
                 self.assertEqual([["gate", "--exact"]], payload["gates"])
+                for field in (
+                    "platform", "python_version", "workflow_sha256"):
+                    with self.subTest(field=field):
+                        stale = dict(payload)
+                        stale[field] = "stale"
+                        receipt.write_text(json.dumps(stale), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                                release["ReleaseError"], f"stale.*{field}"):
+                            check("1.2.3")
                 payload["wheel_sha256"] = "stale"
                 receipt.write_text(json.dumps(payload), encoding="utf-8")
                 with self.assertRaisesRegex(
@@ -3613,6 +3627,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "commit": "candidate-commit",
                 "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
                 "wheel_sha256": release["_sha256"](wheel),
+                "platform": "test-platform",
+                "python_version": "3.12.0",
+                "workflow_sha256": "workflow-digest",
                 "operational": True,
                 "operational_agent": "sample-123",
                 "cost_agent": "cost-agent-456",
@@ -3622,12 +3639,27 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "ROOT": root,
                 "_acceptance_path": lambda _version: receipt,
                 "_candidate_wheel": lambda _version: wheel,
+                "_evidence_identity": lambda: {
+                    "platform": "test-platform",
+                    "python_version": "3.12.0",
+                    "workflow_sha256": "workflow-digest",
+                },
                 "_git": lambda *args: (
                     "annotated-tag-object"
                     if args == ("rev-parse", "refs/tags/v1.2.3")
                     else "candidate-commit"),
             }):
                 self.assertEqual(expected, check("1.2.3"))
+                for field in (
+                    "platform", "python_version", "workflow_sha256"):
+                    with self.subTest(field=field):
+                        stale = dict(expected)
+                        stale[field] = "stale"
+                        receipt.write_text(json.dumps(stale), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                                release["ReleaseError"], f"stale.*{field}"):
+                            check("1.2.3")
+                receipt.write_text(json.dumps(expected), encoding="utf-8")
                 expected["tag_object"] = "stale-tag-object"
                 receipt.write_text(json.dumps(expected), encoding="utf-8")
                 with self.assertRaisesRegex(

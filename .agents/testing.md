@@ -130,8 +130,9 @@ stamped as `<target>.dev0+g<commit>` without changing tracked release versions.
 It runs the built-wheel
 dashboard readiness gate in normal and development modes, then records the
 validated commit, artifact digest, and exact gate list. A later deployment of
-the same commit reuses that preparation evidence; a changed commit, wheel, or
-gate list invalidates it mechanically.
+the same commit reuses that preparation evidence; a changed commit, wheel,
+platform, Python version, Test workflow, or gate list invalidates it
+mechanically.
 
 Before replacement, the workflow snapshots release-owned all-repository status
 and doctor contracts plus the selected repository's started watchers. It stops

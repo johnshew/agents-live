@@ -47,8 +47,8 @@ BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
 # Rows are ordered by what the change is, breaking first; anything with an
 # unrecognised prefix sorts last rather than failing the release.
 TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore")
-ACCEPTANCE_SCHEMA = 1
-PREPARATION_SCHEMA = 1
+ACCEPTANCE_SCHEMA = 2
+PREPARATION_SCHEMA = 2
 CHECKPOINT_SCHEMA = 1
 QUEUED_UPGRADE_RE = re.compile(
     r"Upgrade queued as (?P<operation>[0-9a-f]+); "
@@ -582,6 +582,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _evidence_identity() -> dict[str, str]:
+    return {
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0],
+        "workflow_sha256": _sha256(ROOT / ".github" / "workflows" / "test.yml"),
+    }
+
+
 def _acceptance_path(version: str) -> Path:
     return _release_state_path("acceptance", version)
 
@@ -640,7 +648,7 @@ def _write_preparation(version: str, wheel: Path) -> Path:
         "prepared": True,
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         **_release_identity(version, wheel),
-        "platform": sys.platform,
+        **_evidence_identity(),
         "gates": _gate_commands(),
     }
     temporary = destination.with_suffix(".tmp")
@@ -662,6 +670,7 @@ def _check_preparation(version: str) -> dict:
         "schema": PREPARATION_SCHEMA,
         "prepared": True,
         **_release_identity(version, wheel),
+        **_evidence_identity(),
         "gates": _gate_commands(),
     }
     mismatched = [
@@ -973,7 +982,7 @@ def _write_candidate_acceptance(
         "wheel": wheel.relative_to(ROOT).as_posix(),
         "wheel_sha256": _sha256(wheel),
         "repo": str(repo),
-        "platform": sys.platform,
+        **_evidence_identity(),
         "operation_id": operation_id,
         "operational": True,
         "operational_agent": operational_agent,
@@ -1010,6 +1019,7 @@ def _check_candidate_acceptance(version: str) -> dict:
         "commit": _git("rev-parse", "HEAD"),
         "wheel": wheel.relative_to(ROOT).as_posix(),
         "wheel_sha256": _sha256(wheel),
+        **_evidence_identity(),
     }
     mismatched = [key for key, value in expected.items()
                   if receipt.get(key) != value]
