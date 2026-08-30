@@ -10,19 +10,26 @@ name = "bake"
 branch = "bake/v6.7.0-local"
 version = "6.7.0"
 promotes_to = "release"
-deployed_version = "6.6.0"
-deployed_commit = "07f6f330f6b755e5192452f9f068963cc02ab7ac"
+deployed_version = "6.7.0.dev0+ga421dc46"
+deployed_commit = "a421dc464a34f1e2d404bfcbf6a105accb2afcc2"
 validated_on = "2026-08-30"
 
 [bake.issues]
 delivered = []
-partial = []
-deferred = [105, 370, 374, 376, 379, 388, 405, 422, 423, 424]
-promotion_decision = [334, 395, 426]
+partial = [334, 374, 388, 426]
+deferred = [105]
+promotion_decision = [334, 374, 376, 379, 395, 405, 422, 423, 424, 426]
 
 [bake.recommendations]
-overall = "Keep testing in bake while the release pipeline is shortened and the verified GitHub installer path is completed."
+overall = "Keep testing in bake while the August work selected for v6.7 is completed, with verified installers and release-time reduction first."
 "334" = "Complete only the stable-launcher and migration ownership needed by the verified installer; keep broader generation cleanup separately reviewable."
+"374" = "Finish or explicitly narrow Copilot prompt transport after a supported large-prompt Windows test; retain the completed Claude path."
+"376" = "Use Claude schema-validated output and preserve a documented fallback for providers without an equivalent."
+"379" = "Add a read-only processor context command with human and JSON output before restoring documentation claims."
 "395" = "Deliver verified Windows and POSIX bootstrap packages backed by official GitHub release artifacts and the generation layout."
+"405" = "Add provider-neutral transcript discovery and bounded rendering without exposing runtime-private paths as a contract."
+"422" = "Unify the dashboard over one all-repositories snapshot before changing its health and continuity behavior."
+"423" = "Make dashboard health, eligibility, and activity use canonical CLI and observability semantics after the unified snapshot lands."
+"424" = "Prove refresh continuity, reconnect, accessibility, and scale after the unified and truthful dashboard slices land."
 "426" = "Shorten local and CI feedback by reusing environments and one digest-addressed wheel while preserving every distinct release gate."
-testing = "The installed baseline is the released v6.6.0 package. The first v6.7.0 local artifact has not yet been deployed."
+testing = "The installed test version is 6.7.0.dev0+ga421dc46 from the current bake branch; all-repository doctor passed after deployment."
