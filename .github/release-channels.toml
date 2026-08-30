@@ -10,8 +10,8 @@ name = "bake"
 branch = "bake/v6.7.0-local"
 version = "6.7.0"
 promotes_to = "release"
-deployed_version = "6.7.0.dev0+g25da0e83"
-deployed_commit = "25da0e837d18a625795eb23ecd944bd6db40fdb2"
+deployed_version = "6.7.0.dev0+gf9a295f7"
+deployed_commit = "f9a295f7467a9d27987739d200d7cae45ad1ac14"
 validated_on = "2026-08-30"
 
 [bake.issues]
@@ -32,4 +32,4 @@ overall = "Keep testing in bake while the August work selected for v6.7 is compl
 "423" = "Make dashboard health, eligibility, and activity use canonical CLI and observability semantics after the unified snapshot lands."
 "424" = "Prove refresh continuity, reconnect, accessibility, and scale after the unified and truthful dashboard slices land."
 "426" = "Shorten local and CI feedback by reusing environments and one digest-addressed wheel while preserving every distinct release gate."
-testing = "The installed test version is 6.7.0.dev0+g25da0e83 from the current bake branch; all-repository doctor passed after deployment."
+testing = "The installed test version is 6.7.0.dev0+gf9a295f7 from the current bake branch; cross-platform CI and all-repository doctor passed."
