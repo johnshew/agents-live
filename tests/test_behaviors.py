@@ -4343,6 +4343,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             {
                 "identifier": "sample-123", "loadable": True,
                 "state": "started", "execution": {"watch": "src/**"},
+                "is_owner": True, "ownership_available": True,
             },
             {"identifier": "cost-agent-456", "loadable": True},
         ]}
@@ -4377,6 +4378,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             {
                 "identifier": "watcher-123", "loadable": True,
                 "state": "started", "execution": {"watch": "src/**"},
+                "is_owner": True, "ownership_available": True,
             },
             {"identifier": "cost-agent-456", "loadable": True},
         ]}
@@ -4399,6 +4401,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 preflight(
                     Path("agents-live.exe"), Path("C:/repo"),
                     "watcher-123", "cost-agent-456")
+
+    def test_operational_preflight_ignores_remote_started_watchers(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        preflight = script["_preflight"]
+        scope = preflight.__globals__
+        browser = mock.Mock()
+        playwright = mock.Mock()
+        playwright.chromium.launch.return_value = browser
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = playwright
+        sync_api = mock.Mock(sync_playwright=mock.Mock(return_value=manager))
+        status = {"ok": True, "agents": [
+            {
+                "identifier": "remote-watcher-123", "loadable": True,
+                "state": "started", "execution": {"watch": "src/**"},
+                "is_owner": False, "ownership_available": True,
+            },
+            {"identifier": "sample-123", "loadable": True},
+            {"identifier": "cost-agent-456", "loadable": True},
+        ]}
+        with (
+            mock.patch.dict(sys.modules, {"playwright.sync_api": sync_api}),
+            mock.patch.dict(scope, {
+                "_run": mock.Mock(return_value=mock.Mock(
+                    stdout="No dashboard started by this host is running.")),
+                "_json": mock.Mock(return_value=status),
+                "_browser_executable": lambda: Path("browser.exe"),
+                "_resident_watcher_ids": lambda _repo: set(),
+            }),
+        ):
+            preflight(
+                Path("agents-live.exe"), Path("C:/repo"),
+                "sample-123", "cost-agent-456")
+        browser.close.assert_called_once_with()
 
     def test_windows_process_query_uses_a_real_tab_delimiter(self) -> None:
         script = runpy.run_path(

@@ -178,6 +178,25 @@ class TestDefinitionLoader(TempRepository):
 
         self.assertEqual(3, rows[0]["consecutive_failures"])
 
+    def test_status_reports_whether_this_runtime_owns_an_agent(self) -> None:
+        self.skill("remote", ['agents-live.selector: "fake"'])
+        identifier = agent.load("remote", root=self.root).identifier
+
+        with (
+            mock.patch.object(status.ownership, "local_only", return_value=False),
+            mock.patch.object(status.ownership, "load_owners", return_value={}),
+            mock.patch.object(
+                status.ownership, "resolve_owners",
+                return_value={identifier: "other/runtime/identity"},
+            ),
+            mock.patch.object(status.ownership, "owns", return_value=False),
+        ):
+            rows = status._rows(self.root)
+
+        self.assertEqual("other/runtime/identity", rows[0]["owner"])
+        self.assertFalse(rows[0]["is_owner"])
+        self.assertTrue(rows[0]["ownership_available"])
+
     def test_status_json_identifies_the_runtime_channel(self) -> None:
         output = io.StringIO()
         with (

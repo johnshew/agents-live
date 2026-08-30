@@ -102,6 +102,8 @@ require registry ownership to be explicitly enabled first. Use
 refused transfer in local mode does not change project configuration, registry
 assignments, repository registration, or host triggers. Use `--transfer-here`
 to recover an agent whose owner value cannot be matched to any runtime.
+The JSON status row includes `owner`, `is_owner`, and `ownership_available` so
+automation can distinguish remote assignment from missing local runtime state.
 
 ### `ownership`
 
