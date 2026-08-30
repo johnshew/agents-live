@@ -4102,6 +4102,28 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     script["LocalDeployError"], "pass --allow-downgrade"):
                 deploy(Path("C:/repo"))
 
+    def test_release_report_includes_standalone_promotion_decisions(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "release-report.py"))
+        issue_rows = script["_issue_rows"]
+        scope = issue_rows.__globals__
+
+        with mock.patch.dict(scope, {
+            "_json": lambda *_args: {
+                "number": 395,
+                "title": "Publish bootstrap installers",
+                "state": "OPEN",
+                "url": "https://example.invalid/issues/395",
+            },
+        }):
+            rows, assigned = issue_rows(
+                "owner/repository", {"promotion_decision": [395]})
+
+        self.assertEqual({395}, assigned)
+        self.assertEqual(1, len(rows))
+        self.assertIn("Awaiting promotion decision", rows[0])
+        self.assertIn("| open | required |", rows[0])
+
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
