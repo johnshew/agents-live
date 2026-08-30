@@ -59,7 +59,10 @@ In PowerShell a double-quoted string expands `$name` and treats a backtick as
 an escape, so single quotes are the safe default for anything containing them.
 In Bash the equivalent trap is `$` and backticks inside double quotes. Either
 way, `--prompt-file` avoids the question entirely and is the better choice for
-more than a sentence.
+more than a sentence. It does not bypass a provider transport limit: Copilot
+still requires the resolved prompt in `-p`, so an oversized native Windows
+prompt fails before spawn with its measured size. Claude receives the resolved
+prompt on stdin and does not share that command-line limit.
 
 `-o/--option` passes values to the processors. The presence of `=` is the whole
 grammar: `-o dry-run` is a flag and `-o account=team-inbox` carries a value.
