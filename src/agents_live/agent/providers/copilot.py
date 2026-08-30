@@ -69,6 +69,7 @@ class CopilotProvider:
             tuple(sorted(environment.items())),
             timeout=None,
             provider=self.name,
+            prompt=spec.prompt,
         )
 
     def parse(self, raw: RawOutput) -> Completion:

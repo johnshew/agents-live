@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-28
+ms.date: 2026-08-30
 ms.topic: reference
 ---
 
@@ -180,7 +180,11 @@ that ran the agent.
   maintenance once and checks again. The command exits nonzero unless a current
   healthy record exists after that attempt. It checks only the runtime where it
   runs.
-- `logs` and `logs timeline` query local event records.
+- `logs` and `logs timeline` query local event records. Default log columns
+  include `run_id` and `has_transcript`. `logs transcript RUN_ID` renders one
+  provider-neutral conversation; `--agent NAME --last N` selects recent runs,
+  `--summary` bounds prompt and final text, `--json` returns normalized data,
+  and `--raw` prints one private provider envelope for deep diagnosis.
 - `lock PATH [--timeout SECONDS] -- COMMAND [ARGS...]` runs one command while
   holding the same cross-platform advisory lock used by Agents Live. It opens
   the lock file in append mode so another contender cannot replace the locked
@@ -248,13 +252,15 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+command      ::= context | run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+context      ::= "context" ( NAME | "--name" NAME ) [ "--role" ( "pre" | "agent" | "post" ) ] [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ]
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
-logs         ::= "logs" ( logs_query | "timeline" timeline_args )
+logs         ::= "logs" ( logs_query | "transcript" transcript_args | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
+transcript_args ::= [ RUN_ID ] [ "--agent" VALUE ] [ "--last" VALUE ] [ "--since" VALUE ] [ "--errors" ] [ "--summary" ] [ "--raw" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
@@ -263,7 +269,7 @@ init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
-repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+repos        ::= "repos" ( "list" | "add" PATH | "default" [ REPO ] [ "--clear" ] | "remove" REPO )
 ownership    ::= "ownership" ( "status" | "enable" )
 completions  ::= "completions" ( "bash" | "zsh" | "powershell" | "--update" )
 dashboard    ::= "dashboard" ( dashboard_query | "list" | "stop" stop_args )
@@ -275,11 +281,13 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
+| context | in-process | registry |  | yes |  | yes | --name, --role, --changed-files, -p, --prompt, --prompt-file, -o, --option | Inspect what one run step would receive. |
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, -p, --prompt, --prompt-file, -o, --option, --quiet | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --transfer-here, --transfer-to | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
 | status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
+| logs transcript | subprocess | registry |  | yes |  |  | --agent, --last, --since, --errors, --summary, --raw | Read a normalized run conversation. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
@@ -291,7 +299,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |
 | repos add | in-process | none |  |  |  |  |  | Register a repository. |
-| repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
+| repos default | in-process | none |  |  |  |  | --clear | Set or clear the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
 | ownership | in-process | required |  | yes |  |  |  | Manage optional cross-machine ownership. |
 | ownership status | in-process | required |  | yes |  |  |  | Report local, registry enabled, or unavailable state. |

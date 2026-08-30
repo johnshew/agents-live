@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-23
+ms.date: 2026-08-30
 ms.topic: troubleshooting
 ---
 
@@ -337,6 +337,36 @@ stop/start cycle is required.
 Never inspect runtime log files by hand. Use `agents-live logs` and
 `agents-live logs timeline`; they correlate versioned event records and
 provider transcripts.
+
+## Run transcripts
+
+Default `agents-live logs` output includes `run_id` and `has_transcript` so a
+recorded conversation is discoverable without querying the log schema. Read
+one run by its exact ID, or select recent runs for an agent:
+
+```bash
+agents-live logs transcript <run-id>
+agents-live logs transcript --agent link-check --last 3 --summary
+agents-live logs transcript --agent link-check --since 2h --errors --summary
+agents-live logs transcript <run-id> --json
+```
+
+The default rendering shows normalized user and assistant turns plus tool
+calls. `--json` returns the same provider-neutral fields in a `transcripts`
+array. `--summary` limits the prompt and final text to 6,000 characters each
+and lists at most 100 tool names. Use `--raw` with one run ID only when the
+normalized view omits provider detail needed for diagnosis.
+
+`transcript_state` distinguishes `available`, `no_model_call`, `disabled`,
+`missing`, `corrupt`, `invalid_path`, and `unknown`. `unknown` is retained for
+older records whose null transcript field did not say whether a model ran. A
+transcript can become `missing` after retention removes its artifact while an
+older archived event remains queryable. `invalid_path` means a log row points
+outside the repository's managed run storage; the command refuses to read it.
+
+Transcript paths, envelope fields, and provider output formats are private
+runtime details. The normalized CLI fields are the supported retrieval
+contract; neither readable nor JSON output exposes the storage path.
 
 ## Log and run-output retention
 

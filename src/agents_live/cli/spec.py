@@ -186,6 +186,23 @@ COMMANDS = (
         json_args=("--format", "jsonl"), json_shape="records",
         subcommands=(
             Cmd(
+                "transcript", "Read a normalized run conversation.",
+                "obs/transcript.py", "subprocess", root="registry", json=True,
+                json_args=("--format", "json"),
+                args=(
+                    Arg(("run_id",), "Exact run ID.", kind="positional"),
+                    Arg(("--agent",), "Filter by agent name.", kind="value"),
+                    Arg(("--last",), "Last N matching runs.", kind="value",
+                        default=1),
+                    Arg(("--since",), "Start time.", kind="value"),
+                    Arg(("--errors",), "Show errors only."),
+                    Arg(("--summary",), "Show bounded prompt, final text, and tools."),
+                    Arg(("--raw",), "Print the private provider envelope."),
+                    Arg(("--format",), "Output format.", kind="value",
+                        choices=("readable", "json", "raw"), hidden=True),
+                ),
+            ),
+            Cmd(
                 "timeline", "Show a correlated event timeline.", "obs/timeline.py",
                 "subprocess", root="registry", json=True,
                 args=(

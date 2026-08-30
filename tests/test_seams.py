@@ -45,6 +45,7 @@ from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import migrate, triggers
 from agents_live.agent import providers
 from agents_live.agent import port
+from agents_live.obs import transcript as transcript_command
 from agents_live.state import ownership
 from agents_live.dispatch import Firing, _RunLock, dispatch
 from agents_live.cli.commands import definition_migrate
@@ -4092,6 +4093,10 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertTrue(result.ok, result)
         self.assertEqual("skipped", result.status)
         self.assertEqual("nothing to do", result.message)
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        terminal = [record for record in records if record["phase"] == "done"][-1]
+        self.assertFalse(terminal["model_called"])
+        self.assertEqual("no_model_call", terminal["transcript_state"])
 
     def test_only_a_boolean_true_control_value_skips_the_run(self) -> None:
         directory = self.skill("not-skipped", [
@@ -4412,7 +4417,196 @@ class TestProviderPromptDelivery(TempRepository):
         self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
 
 
+class TestTranscriptRetrieval(TempRepository):
+    def _record(
+        self,
+        run_id: str,
+        *,
+        transcript: Path | None = None,
+        transcript_state: str = "available",
+        status: str = "success",
+    ) -> None:
+        destination = paths.repo_state_dir(self.root) / "logs" / "reader.jsonl"
+        obs.record(destination, obs.create(
+            "run",
+            status,
+            repository=str(self.root),
+            agent="reader-1234567890",
+            run_id=run_id,
+            origin="manual",
+            transcript=str(transcript) if transcript else None,
+            attributes=(
+                ("model_called", transcript_state != "no_model_call"),
+                ("transcript_state", transcript_state),
+            ),
+        ))
+
+    def _envelope(self, run_id: str, payload: dict[str, object]) -> Path:
+        destination = (
+            paths.repo_state_dir(self.root) / "runs" / "reader" /
+            f"{run_id}-agent-1.json"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return destination
+
+    def _json(self, *argv: str) -> dict[str, object]:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = transcript_command.main([*argv, "--format", "json"])
+        self.assertEqual(0, code, stdout.getvalue())
+        return json.loads(stdout.getvalue())
+
+    def test_claude_summary_and_raw_output_do_not_disclose_the_path(self) -> None:
+        envelope = self._envelope("claude-run", {
+            "argv": ["claude", "-p"],
+            "prompt": "Inspect the failed build.",
+            "provider": "claude",
+            "provider_transcript": "session-1",
+            "returncode": 0,
+            "stderr": "",
+            "stdout": json.dumps({
+                "result": "The lock timed out.",
+                "structured_output": {"category": "timeout"},
+            }),
+            "timed_out": False,
+        })
+        self._record("claude-run", transcript=envelope)
+
+        payload = self._json("claude-run", "--summary")
+        item = payload["transcripts"][0]
+        self.assertEqual("claude", item["provider"])
+        self.assertEqual("Inspect the failed build.", item["prompt"])
+        self.assertEqual("The lock timed out.", item["final"])
+        self.assertNotIn(str(envelope), json.dumps(payload))
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = transcript_command.main(["claude-run", "--raw"])
+        self.assertEqual(0, code)
+        self.assertEqual(
+            json.loads(envelope.read_text(encoding="utf-8")),
+            json.loads(stdout.getvalue()),
+        )
+
+    def test_copilot_events_become_provider_neutral_turns_and_tools(self) -> None:
+        stream = "\n".join((
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "content": "I will inspect the logs.",
+                    "toolRequests": [{
+                        "name": "shell",
+                        "arguments": {"command": "agents-live logs"},
+                    }],
+                },
+            }),
+            json.dumps({
+                "type": "assistant.message",
+                "data": {"phase": "final_answer", "content": "Resolved."},
+            }),
+        ))
+        envelope = self._envelope("copilot-run", {
+            "argv": ["agency.exe", "copilot", "-p", "Diagnose the run."],
+            "returncode": 0,
+            "stderr": "",
+            "stdout": stream,
+            "timed_out": False,
+        })
+        self._record("copilot-run", transcript=envelope)
+
+        item = self._json("copilot-run")["transcripts"][0]
+
+        self.assertEqual("Resolved.", item["final"])
+        self.assertEqual("shell", item["tool_calls"][0]["name"])
+        self.assertEqual("user", item["turns"][0]["role"])
+        self.assertEqual("assistant", item["turns"][-1]["role"])
+
+    def test_agent_selected_summary_bounds_large_text(self) -> None:
+        envelope = self._envelope("large-run", {
+            "argv": ["claude", "-p"],
+            "provider": "claude",
+            "prompt": "p" * 7000,
+            "returncode": 0,
+            "stderr": "",
+            "stdout": json.dumps({"result": "f" * 7000}),
+            "timed_out": False,
+        })
+        self._record("large-run", transcript=envelope)
+
+        payload = self._json(
+            "--agent", "reader", "--last", "1", "--summary")
+
+        item = payload["transcripts"][0]
+        self.assertLess(len(item["prompt"]), 6100)
+        self.assertLess(len(item["final"]), 6100)
+        self.assertIn("characters omitted", item["prompt"])
+        self.assertNotIn("turns", item)
+
+    def test_unavailable_transcripts_keep_distinct_states(self) -> None:
+        self._record("no-call", transcript_state="no_model_call", status="skipped")
+        self._record("disabled", transcript_state="disabled")
+        missing = paths.repo_state_dir(self.root) / "runs" / "missing.json"
+        self._record("missing", transcript=missing)
+        self._record("legacy", transcript_state="unknown")
+        outside = self.root / "outside.json"
+        outside.write_text('{"stdout": "private"}', encoding="utf-8")
+        self._record("outside", transcript=outside)
+
+        expected = {
+            "no-call": "no_model_call",
+            "disabled": "disabled",
+            "missing": "missing",
+            "legacy": "unknown",
+            "outside": "invalid_path",
+        }
+        for run_id, state_name in expected.items():
+            with self.subTest(run_id=run_id):
+                item = self._json(run_id)["transcripts"][0]
+                self.assertEqual(state_name, item["transcript_state"])
+
+    def test_default_log_columns_expose_run_and_transcript_availability(self) -> None:
+        self._record("visible-run", transcript_state="disabled")
+        completed = subprocess.run(
+            [
+                shutil.which("uv") or "uv",
+                "run",
+                "--script",
+                str(Path(__file__).parents[1] / "src" / "agents_live" /
+                    "obs" / "qlog.py"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=os.environ.copy(),
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        header = completed.stdout.splitlines()[0]
+        self.assertIn("run_id", header)
+        self.assertIn("has_transcript", header)
+
+
 class TestAgentPipeline(TempRepository):
+    def test_model_run_records_when_transcripts_are_disabled(self) -> None:
+        self.skill("no-transcript", [
+            'agents-live.selector: "fake"',
+            'agents-live.transcript: "false"',
+        ])
+        runner = RecordingRunner([ChildResult(
+            ("fake",), 0, json.dumps({"text": "done"}), "",
+        )])
+
+        result = dispatch(
+            Firing("no-transcript", str(self.root), "manual"), runner=runner)
+
+        self.assertTrue(result.ok, result)
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        terminal = [record for record in records if record["phase"] == "done"][-1]
+        self.assertTrue(terminal["model_called"])
+        self.assertEqual("disabled", terminal["transcript_state"])
+
     def test_claude_uses_declared_schema_and_structured_output(self) -> None:
         schema = {
             "type": "object",
@@ -4898,6 +5092,8 @@ class TestAgentPipeline(TempRepository):
         self.assertIsNotNone(result.transcript)
         transcript = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
         self.assertEqual(list(argv), transcript["argv"])
+        self.assertEqual("fake", transcript["provider"])
+        self.assertEqual("Do the work.", transcript["prompt"])
 
     def test_post_processor_preserves_agent_usage_and_transcript(self) -> None:
         self.skill("telemetry", [

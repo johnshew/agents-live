@@ -190,6 +190,7 @@ class Launch:
     use_pty: bool = False
     filters_tui_noise: bool = False
     provider: str | None = None
+    prompt: str | None = None
 
 
 @dataclass(frozen=True)

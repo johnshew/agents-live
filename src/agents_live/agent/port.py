@@ -136,6 +136,7 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         launch.use_pty,
         launch.filters_tui_noise,
         launch.provider,
+        launch.prompt,
     )
 
 

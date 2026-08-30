@@ -59,6 +59,7 @@ class ClaudeProvider:
             input_text=spec.prompt,
             timeout=None,
             provider=self.name,
+            prompt=spec.prompt,
         )
 
     def parse(self, raw: RawOutput) -> Completion:
