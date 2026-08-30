@@ -1,3 +1,3 @@
 """agents-live: take your agents live - cron and file-watch dispatch,
 safety wrappers, and operations for standard agent definitions."""
-__version__ = "6.5.0"
+__version__ = "6.6.0"

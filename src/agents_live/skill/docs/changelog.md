@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.6.0 - 2026-08-30
+
 - fix: require watcher residency only on the runtime that owns the agent.
   Status now reports resolved ownership in JSON, and candidate acceptance
   excludes remotely assigned started watchers while failing closed when
