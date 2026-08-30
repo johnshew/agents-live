@@ -74,11 +74,92 @@ jobs:
           done < <(git diff --name-only "$base...$head")
           echo "full=$full" >> "$GITHUB_OUTPUT"
 
-  test:
+  audit:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
+      - run: uv run --script tools/pre-release-audit.py
+
+  source:
+    if: needs.changes.outputs.full == 'true'
     needs: changes
     strategy:
-      # Both hosts report: a Windows-only break is the whole point of
-      # running it, so it must not be hidden by cancelling the matrix.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'ubuntu-latest' && '["ubuntu-latest"]' || inputs.os == 'windows-latest' && '["windows-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
+        suite:
+          - tests/test_smoke.py
+          - tests/test_seams.py
+          - tests/test_behaviors.py
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
+      - run: uv run --with-editable . --script ${{ matrix.suite }}
+
+  wheel:
+    if: needs.changes.outputs.full == 'true'
+    needs: changes
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.wheel.outputs.name }}
+      sha256: ${{ steps.wheel.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
+      - run: uv build
+      - id: wheel
+        shell: bash
+        run: |
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          test -n "$wheel"
+          echo "name=$(basename "$wheel")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$wheel" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+      - if: inputs['artifact-name'] != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs['artifact-name'] }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows-build:
+    if: >-
+      needs.changes.outputs.full == 'true' &&
+      (inputs.os == '' || inputs.os == 'all' || inputs.os == 'windows-latest')
+    needs: changes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
+      - run: uv build
+
+  readiness:
+    if: needs.changes.outputs.full == 'true'
+    needs: [changes, wheel]
+    strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.os == 'ubuntu-latest' && '["ubuntu-latest"]' || inputs.os == 'windows-latest' && '["windows-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
@@ -90,30 +171,48 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           cache-dependency-glob: pyproject.toml
-      # The audit reads the tree, not the host, so one run is the whole
-      # check - and this is the host a release is cut on.
-      - if: runner.os == 'Linux'
-        run: uv run --script tools/pre-release-audit.py
-      - if: needs.changes.outputs.full == 'true'
-        run: uv run --with-editable . --script tests/test_smoke.py
-      - if: needs.changes.outputs.full == 'true'
-        run: uv run --with-editable . --script tests/test_seams.py
-      - if: needs.changes.outputs.full == 'true'
-        run: uv run --with-editable . --script tests/test_behaviors.py
-      # The artifact, not the source: a packaged dashboard that cannot start
-      # and rows whose actions are reversed both pass every import-level
-      # check, and both shipped (#279).
-      - if: needs.changes.outputs.full == 'true'
-        run: uv build
-      - if: needs.changes.outputs.full == 'true'
-        run: uv run --script tools/dashboard-readiness.py
-      - if: >-
-          needs.changes.outputs.full == 'true' &&
-          runner.os == 'Linux' && inputs['artifact-name'] != ''
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs['artifact-name'] }}
-          path: dist/*
-          if-no-files-found: error
-      - if: needs.changes.outputs.full != 'true' && runner.os != 'Linux'
-        run: echo "Documentation-only change; audit runs on Linux."
+          name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist
+      - shell: bash
+        env:
+          WHEEL_NAME: ${{ needs.wheel.outputs.name }}
+          WHEEL_SHA256: ${{ needs.wheel.outputs.sha256 }}
+        run: echo "$WHEEL_SHA256  dist/$WHEEL_NAME" | sha256sum --check -
+      - run: >-
+          uv run --script tools/dashboard-readiness.py
+          --wheel dist/${{ needs.wheel.outputs.name }}
+
+  test:
+    if: always()
+    needs: [changes, audit, source, wheel, windows-build, readiness]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'ubuntu-latest' && '["ubuntu-latest"]' || inputs.os == 'windows-latest' && '["windows-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Require every selected gate
+        shell: bash
+        env:
+          FULL: ${{ needs.changes.outputs.full }}
+          CHANGES: ${{ needs.changes.result }}
+          AUDIT: ${{ needs.audit.result }}
+          SOURCE: ${{ needs.source.result }}
+          WHEEL: ${{ needs.wheel.result }}
+          WINDOWS_BUILD: ${{ needs.windows-build.result }}
+          READINESS: ${{ needs.readiness.result }}
+        run: |
+          test "$CHANGES" = success
+          test "$AUDIT" = success
+          if test "$FULL" = true; then
+            test "$SOURCE" = success
+            test "$WHEEL" = success
+            test "$READINESS" = success
+            if test '${{ matrix.os }}' = windows-latest; then
+              test "$WINDOWS_BUILD" = success
+            fi
+          else
+            echo "Documentation-only change; audit passed on Linux."
+          fi

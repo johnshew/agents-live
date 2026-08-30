@@ -3134,6 +3134,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("src/agents_live/skill/SKILL.md", workflow)
         self.assertIn("src/agents_live/skill/templates/*", workflow)
 
+    def test_ci_parallelizes_source_and_exact_wheel_readiness(self) -> None:
+        workflow = self._workflow_text("test.yml")
+        self.assertRegex(workflow, r"(?m)^  source:")
+        self.assertRegex(workflow, r"(?m)^  wheel:")
+        self.assertRegex(workflow, r"(?m)^  readiness:")
+        self.assertRegex(workflow, r"(?m)^  test:")
+        self.assertIn("suite:", workflow)
+        self.assertIn("exact-wheel-${{ github.run_id }}", workflow)
+        self.assertIn("needs.wheel.outputs.sha256", workflow)
+        self.assertIn("sha256sum --check", workflow)
+        self.assertIn("--wheel dist/${{ needs.wheel.outputs.name }}", workflow)
+        self.assertEqual(2, workflow.count("uv build"))
+        self.assertIn("needs: [changes, audit, source, wheel, windows-build, readiness]", workflow)
+
     def test_workflow_actions_use_node24_and_real_cache_inputs(self) -> None:
         test = self._workflow_text("test.yml")
         publish = self._workflow_text("publish.yml")

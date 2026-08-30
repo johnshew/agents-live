@@ -78,6 +78,12 @@ groups. Documentation-only changes retain the Linux export audit and required
 job contexts but skip source suites and artifact startup. Ordinary `main` pushes
 do not repeat a PR's identical matrix; the publish workflow verifies the exact
 release commit on both hosts.
+For code changes, the three source suites run as independent jobs on each host
+while Linux builds one wheel in parallel. Both hosts verify that wheel's
+recorded SHA-256 and run packaged dashboard readiness against those exact bytes;
+a separate parallel Windows build keeps native buildability covered. The
+aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain the
+stable required checks and fail unless every selected job succeeds.
 Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
 single host needs to be isolated. The publish workflow calls the same workflow
 against the resolved release commit and cannot publish until both hosts pass.
