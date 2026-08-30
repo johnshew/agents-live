@@ -197,6 +197,28 @@ class TestDefinitionLoader(TempRepository):
         self.assertFalse(rows[0]["is_owner"])
         self.assertTrue(rows[0]["ownership_available"])
 
+    def test_status_fails_closed_when_runtime_identity_is_unavailable(self) -> None:
+        self.skill("assigned", ['agents-live.selector: "fake"'])
+        identifier = agent.load("assigned", root=self.root).identifier
+
+        with (
+            mock.patch.object(status.ownership, "local_only", return_value=False),
+            mock.patch.object(status.ownership, "load_owners", return_value={}),
+            mock.patch.object(
+                status.ownership, "resolve_owners",
+                return_value={identifier: "other/runtime/identity"},
+            ),
+            mock.patch.object(
+                status.ownership, "owns",
+                side_effect=status.ownership.OwnershipUnavailableError(
+                    "runtime identity unreadable"),
+            ),
+        ):
+            rows = status._rows(self.root)
+
+        self.assertFalse(rows[0]["is_owner"])
+        self.assertFalse(rows[0]["ownership_available"])
+
     def test_status_json_identifies_the_runtime_channel(self) -> None:
         output = io.StringIO()
         with (

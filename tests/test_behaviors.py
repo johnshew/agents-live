@@ -3621,6 +3621,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "state": "started",
                 "loadable": True,
                 "execution": {"watch": "src/** debounce 1s"},
+                "is_owner": True,
+                "ownership_available": True,
+            }, {
+                "repository": "C:/repo",
+                "identifier": "remote-789",
+                "state": "started",
+                "loadable": True,
+                "execution": {"watch": "remote/** debounce 1s"},
+                "is_owner": False,
+                "ownership_available": True,
             }],
         }
         all_status = {
@@ -3709,6 +3719,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 operation_id="abc123",
                 contract=(
                     ("C:/other", "other-456", "started", True),
+                    ("C:/repo", "remote-789", "started", True),
                     ("C:/repo", "sample-123", "started", True),
                 ),
                 watchers=(("C:/repo", "sample-123"),),
@@ -3757,6 +3768,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "state": "started",
             "loadable": True,
             "execution": {"watch": "src/** debounce 1s"},
+            "is_owner": True,
+            "ownership_available": True,
         }]}
         doctor = {"ok": True, "checks": []}
         finish = mock.Mock(return_value=Path("acceptance.json"))

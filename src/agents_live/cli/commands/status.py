@@ -54,6 +54,9 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     owner_by_identifier: dict[str, str | None] = {
         identifier: None for identifier in discovered
     }
+    is_owner_by_identifier: dict[str, bool] = {
+        identifier: True for identifier in discovered
+    }
     try:
         if not ownership.local_only(root):
             owners = ownership.load_owners(root=root)
@@ -61,8 +64,15 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
                 ((spec.identifier, spec.name) for spec in discovered.values()),
                 owners,
             ))
+            is_owner_by_identifier = {
+                identifier: ownership.owns(owner) if owner is not None else True
+                for identifier, owner in owner_by_identifier.items()
+            }
     except ownership.OwnershipUnavailableError:
         ownership_available = False
+        is_owner_by_identifier = {
+            identifier: False for identifier in discovered
+        }
     identifiers = set(discovered) | set(started_names)
     if selected:
         try:
@@ -98,8 +108,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "execution": policy,
             "unknown_metadata": unknown_metadata,
             "owner": owner,
-            "is_owner": ownership_available and (
-                ownership.owns(owner) if owner is not None else True),
+            "is_owner": is_owner_by_identifier.get(identifier, False),
             "ownership_available": ownership_available,
             "consecutive_failures": failure_streaks.get(identifier, 0),
             "error": load_error,
