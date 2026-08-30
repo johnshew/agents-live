@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from ... import __version__, agent, obs, paths, state
-from ...state import registry as repos
+from ...state import ownership, registry as repos
 from .. import identity, resolve
 
 
@@ -50,6 +50,29 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     except agent.DefinitionError as exc:
         discovered = {}
         unloadable = (agent.BrokenDefinition(root, str(exc)),)
+    ownership_available = True
+    owner_by_identifier: dict[str, str | None] = {
+        identifier: None for identifier in discovered
+    }
+    is_owner_by_identifier: dict[str, bool] = {
+        identifier: True for identifier in discovered
+    }
+    try:
+        if not ownership.local_only(root):
+            owners = ownership.load_owners(root=root)
+            owner_by_identifier.update(ownership.resolve_owners(
+                ((spec.identifier, spec.name) for spec in discovered.values()),
+                owners,
+            ))
+            is_owner_by_identifier = {
+                identifier: ownership.owns(owner) if owner is not None else True
+                for identifier, owner in owner_by_identifier.items()
+            }
+    except ownership.OwnershipUnavailableError:
+        ownership_available = False
+        is_owner_by_identifier = {
+            identifier: False for identifier in discovered
+        }
     identifiers = set(discovered) | set(started_names)
     if selected:
         try:
@@ -64,6 +87,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
         prompt_path = None
         unknown_metadata: list[str] = []
         name = identifier
+        owner = owner_by_identifier.get(identifier)
         try:
             spec = discovered.get(identifier) or agent.load(identifier, root=root)
             name = spec.name
@@ -83,6 +107,9 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "path": prompt_path,
             "execution": policy,
             "unknown_metadata": unknown_metadata,
+            "owner": owner,
+            "is_owner": is_owner_by_identifier.get(identifier, False),
+            "ownership_available": ownership_available,
             "consecutive_failures": failure_streaks.get(identifier, 0),
             "error": load_error,
         })
@@ -99,6 +126,9 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "path": str(item.path),
             "execution": None,
             "unknown_metadata": [],
+            "owner": None,
+            "is_owner": False,
+            "ownership_available": ownership_available,
             "consecutive_failures": 0,
             "error": item.message,
         })

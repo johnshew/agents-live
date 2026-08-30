@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-29
+ms.date: 2026-08-30
 ms.topic: reference
 ---
 
@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: require watcher residency only on the runtime that owns the agent.
+  Status now reports resolved ownership in JSON, and candidate acceptance
+  excludes remotely assigned started watchers while failing closed when
+  ownership cannot be resolved.
 - fix: preserve terminal evidence for deferred Windows upgrades.
   Transcript setup and cleanup failures now report a numeric failed result
   instead of leaving the handoff permanently marked as started.

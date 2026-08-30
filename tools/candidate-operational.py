@@ -313,10 +313,22 @@ def _preflight(cli: Path, repo: Path, agent_id: str, cost_agent_id: str) -> None
         for row in status.get("agents", [])
         if isinstance(row, dict)
         and row.get("state") == "started"
+        and row.get("is_owner") is True
         and isinstance(row.get("execution"), dict)
         and row["execution"].get("watch")
         and row.get("identifier")
     }
+    if any(
+        isinstance(row, dict)
+        and row.get("state") == "started"
+        and isinstance(row.get("execution"), dict)
+        and row["execution"].get("watch")
+        and row.get("ownership_available") is not True
+        for row in status.get("agents", [])
+    ):
+        raise OperationalError(
+            "started watcher ownership is unavailable; candidate acceptance "
+            "cannot establish the local watcher baseline")
     missing = sorted(started_watchers - _resident_watcher_ids(repo))
     if missing:
         raise OperationalError(

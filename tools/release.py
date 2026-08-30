@@ -811,14 +811,22 @@ def _status_rows(payload: dict) -> list[dict]:
 
 def _started_watchers(payload: dict) -> tuple[tuple[str, str], ...]:
     rows = payload.get("agents", [])
-    return tuple(sorted(
-        (str(row.get("repository", "")), str(row.get("identifier")))
-        for row in rows
+    watched = [
+        row for row in rows
         if isinstance(row, dict)
         and row.get("state") == "started"
         and isinstance(row.get("execution"), dict)
         and row["execution"].get("watch")
         and row.get("identifier")
+    ]
+    if any(row.get("ownership_available") is not True for row in watched):
+        raise ReleaseError(
+            "started watcher ownership is unavailable; candidate acceptance "
+            "cannot establish the local watcher baseline")
+    return tuple(sorted(
+        (str(row.get("repository", "")), str(row.get("identifier")))
+        for row in watched
+        if row.get("is_owner") is True
     ))
 
 
