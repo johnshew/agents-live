@@ -23,6 +23,9 @@ history is retained in the source repository.
 - perf: reuse one declared development environment across release test suites. (#426)
   DuckDB remains outside runtime dependencies while local and CI test commands
   avoid resolving separate ad hoc environments for each suite.
+- perf: parallelize source suites and exact-wheel readiness in CI. (#426)
+  Stable Linux and Windows checks now aggregate independent source, build, and
+  packaged-dashboard jobs while both hosts verify and run one Linux-built wheel.
 
 ## 6.6.0 - 2026-08-30
 
