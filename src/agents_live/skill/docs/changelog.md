@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: deploy local bake artifacts from the configured bake branch. (#426)
+  Local deployment now stamps only the archived build copy with a
+  commit-qualified development version, preserving tracked stable versions
+  while making the installed bake channel and source commit explicit.
 - feat: preflight live candidate prerequisites before release preparation. (#426)
   Release operators can check selected agents, browser launch, managed-dashboard
   state, repository health, ownership, watcher residency, and watched paths
