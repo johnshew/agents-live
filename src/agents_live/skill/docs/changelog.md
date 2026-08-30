@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: preflight live candidate prerequisites before release preparation. (#426)
+  Release operators can check selected agents, browser launch, managed-dashboard
+  state, repository health, ownership, watcher residency, and watched paths
+  before spending time on build and packaging gates.
+- perf: reuse one declared development environment across release test suites. (#426)
+  DuckDB remains outside runtime dependencies while local and CI test commands
+  avoid resolving separate ad hoc environments for each suite.
+
 ## 6.6.0 - 2026-08-30
 
 - fix: require watcher residency only on the runtime that owns the agent.
