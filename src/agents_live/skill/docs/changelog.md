@@ -44,6 +44,9 @@ history is retained in the source repository.
   Preparation and installed-candidate receipts now bind platform, Python
   version, Test workflow digest, candidate commit, artifact digests, and the
   exact gate list before publication can reuse them.
+- fix: stop current managed dashboards before local bake replacement. (#426)
+  Local deployment recognizes both URL-bearing and legacy dashboard list rows,
+  preserving each repository and port while releasing the installed runtime.
 
 ## 6.6.0 - 2026-08-30
 

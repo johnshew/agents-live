@@ -278,17 +278,25 @@ def _dashboard_modes(pid: int) -> tuple[str, ...]:
 def _dashboards(output: str) -> tuple[Dashboard, ...]:
     dashboards = []
     for line in output.splitlines():
-        columns = re.split(r"\s{2,}", line.strip(), maxsplit=4)
-        if len(columns) == 5 and columns[0].isdigit() \
+        columns = re.split(r"\s{2,}", line.strip())
+        if len(columns) == 6 and columns[0].isdigit() \
+                and columns[2].isdigit():
+            port, pid_value, repository_value = (
+                columns[0], columns[2], columns[5])
+        elif len(columns) == 5 and columns[0].isdigit() \
                 and columns[1].isdigit():
-            pid = int(columns[1])
-            modes = _dashboard_modes(pid)
-            repository = None if columns[4] == "-" else columns[4]
-            if repository is None and "--all-repos" not in modes:
-                raise LocalDeployError(
-                    f"dashboard on {columns[0]} has no restorable repository")
-            dashboards.append(Dashboard(
-                int(columns[0]), pid, repository, modes))
+            port, pid_value, repository_value = (
+                columns[0], columns[1], columns[4])
+        else:
+            continue
+        pid = int(pid_value)
+        modes = _dashboard_modes(pid)
+        repository = None if repository_value == "-" else repository_value
+        if repository is None and "--all-repos" not in modes:
+            raise LocalDeployError(
+                f"dashboard on {port} has no restorable repository")
+        dashboards.append(Dashboard(
+            int(port), pid, repository, modes))
     return tuple(dashboards)
 
 

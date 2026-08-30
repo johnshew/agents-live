@@ -4099,8 +4099,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 if flag in commands[pid]),
         }):
             dashboards = script["_dashboards"](
-                "PORT  PID  ANSWERING  STARTED  REPOSITORY\n"
-                "8231  100  yes        now      C:\\Users\\name\\My Repo\n"
+                "PORT  URL                    PID  ANSWERING  STARTED  REPOSITORY\n"
+                "8231  http://127.0.0.1:8231  100  yes        now      C:\\Users\\name\\My Repo\n"
                 "8247  200  yes        now      -\n"
             )
         self.assertEqual([
