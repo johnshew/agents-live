@@ -11,6 +11,20 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: preview the complete processor run context without executing it. (#379)
+  `agents-live context` renders the selected agent's resolved environment and
+  processor inputs as text or JSON so definitions can be checked before a run.
+- feat: enforce declared structured output schemas through Claude. (#376)
+  Claude receives the resolved JSON schema natively and returns its
+  `structured_output`; all providers retain local validation and categorize
+  schema rejection consistently.
+- feat: retrieve provider-neutral run transcripts from managed storage. (#405)
+  `agents-live logs transcript` selects by run or agent, normalizes Claude and
+  Copilot envelopes, reports exact transcript state, supports bounded summaries
+  and batch filters, and confines raw reads to managed run paths.
+- fix: preserve the verified Copilot prompt transport contract. (#374)
+  Copilot remains on the non-interactive `-p` path because its current CLI
+  enters the interactive interface when the prompt is supplied only on stdin.
 - fix: deploy local bake artifacts from the configured bake branch. (#426)
   Local deployment now stamps only the archived build copy with a
   commit-qualified development version, preserving tracked stable versions
@@ -26,6 +40,10 @@ history is retained in the source repository.
 - perf: parallelize source suites and exact-wheel readiness in CI. (#426)
   Stable Linux and Windows checks now aggregate independent source, build, and
   packaged-dashboard jobs while both hosts verify and run one Linux-built wheel.
+- fix: reject release evidence from a different execution identity. (#426)
+  Preparation and installed-candidate receipts now bind platform, Python
+  version, Test workflow digest, candidate commit, artifact digests, and the
+  exact gate list before publication can reuse them.
 
 ## 6.6.0 - 2026-08-30
 
