@@ -84,6 +84,7 @@ artifacts use hidden internal commands and are not a user-facing contract.
 |---------|---------|
 | `create <description>` | Create a standard agent definition with Agents Live fields *(agent-led; generates files -- see [docs/commands.md](docs/commands.md))* |
 | `run <name>` | `agents-live run <name>` |
+| `context <name>` | `agents-live context <name> [--role pre|agent|post] [--json]` *(read-only processor/provider invocation preview)* |
 | `start <name>` | `agents-live start <name>` |
 | `start --all [--dry-run]` | `agents-live start --all [--dry-run]` |
 | `stop <name>` | `agents-live stop <name>` |

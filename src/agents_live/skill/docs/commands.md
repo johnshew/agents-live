@@ -77,6 +77,24 @@ retain the existing envelope and do not emit `result_status`.
 Installed schedule and watcher artifacts use hidden origin and artifact-marker
 flags. They are runtime contracts, not author-facing options.
 
+### `context`
+
+Prints the resolved command line, working directory, and environment for one
+run step without executing it.
+
+```bash
+agents-live context link-check --role pre
+agents-live context link-check --role agent --json
+agents-live context link-check --changed-files '["docs/index.md"]' \
+  -p "Focus on authentication" -o dry-run
+```
+
+The command accepts the same invocation instructions, changed files, and
+processor options as `run`. It names the step's control, log, and output paths
+but does not create them. A post-processor preview cannot know its future stdin,
+so `stdin_available` is false. Pipeline contexts are available only while the
+run-scoped MCP server exists and are rejected by this read-only preview.
+
 ### `start`
 
 Records one or every valid definition as started on this machine, collects the

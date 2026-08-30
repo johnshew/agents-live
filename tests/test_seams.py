@@ -29,7 +29,17 @@ from agents_live import (
 from agents_live.cli import lifecycle, package_index, processor_check, upgrade_handoff
 from agents_live.cli import identity
 from agents_live.cli.main import main as cli_main
-from agents_live.cli.commands import doctor, init, internal, run, status, stop, uninstall, upgrade
+from agents_live.cli.commands import (
+    context as context_command,
+    doctor,
+    init,
+    internal,
+    run,
+    status,
+    stop,
+    uninstall,
+    upgrade,
+)
 from agents_live.state import registry as repos
 from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import migrate, triggers
@@ -3974,6 +3984,49 @@ class TestProcessorContractVersion2(TempRepository):
         # The version 1 name is gone, so a processor cannot read the shared
         # agent log by accident.
         self.assertNotIn("AGENTS_LIVE_LOG_FILE", environment)
+
+    def test_context_command_previews_the_contract_without_creating_run_state(
+            self) -> None:
+        directory = self.skill("context-preview", [
+            'agents-live.selector: "none"',
+            'agents-live.pre-processor: "scripts/process.py"',
+        ], version="2")
+        (directory / "scripts").mkdir()
+        (directory / "scripts" / "process.py").write_text(
+            "raise SystemExit('must not execute')\n", encoding="utf-8")
+        spec = agent.load("context-preview", root=self.root)
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = context_command.main([
+                "--name", "context-preview",
+                "--changed-files", '["docs/a.md"]',
+                "--prompt", "Focus on authentication",
+                "--option", "dry-run",
+                "--option", "account=team-inbox",
+            ])
+
+        self.assertEqual(0, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(spec.identifier, payload["agent"])
+        self.assertEqual("pre", payload["role"])
+        self.assertEqual(str(self.root), payload["cwd"])
+        self.assertFalse(payload["ephemeral_paths_materialized"])
+        environment = payload["environment"]
+        self.assertEqual("context-preview", environment["AGENTS_LIVE_RUN_ID"])
+        self.assertEqual("Focus on authentication",
+                         environment["AGENTS_LIVE_INSTRUCTIONS"])
+        self.assertEqual(["docs/a.md"], json.loads(
+            environment["AGENTS_LIVE_CHANGED_FILES"]))
+        self.assertEqual(
+            {"dry-run": True, "account": "team-inbox"},
+            json.loads(environment["AGENTS_LIVE_OPTIONS"]),
+        )
+        scratch = Path(environment["AGENTS_LIVE_CONTROL"]).parent
+        self.assertFalse(scratch.exists())
 
     def test_version_1_keeps_its_own_environment(self) -> None:
         directory = self.skill("legacy-context", [

@@ -72,6 +72,19 @@ uv run scripts/email_audit.py --account team-inbox
 uv run scripts/email_audit.py --account team-inbox | uv run scripts/apply.py
 ```
 
+To reproduce what Agents Live would hand one step, inspect it without starting
+the processor or provider:
+
+```bash
+agents-live context email-audit --role pre
+agents-live context email-audit --role post --json
+```
+
+The preview names the same command line, working directory, environment, and
+ephemeral channel paths as a run, but it does not materialize those paths. A
+post-processor's future stdin is unavailable. Pipeline mode is rejected because
+its MCP endpoint and credentials exist only while a run is active.
+
 ## Class 1: Agents Live aware
 
 A class 0 program is configured entirely by its own defaults, because it

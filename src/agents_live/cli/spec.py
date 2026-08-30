@@ -64,6 +64,23 @@ POST_COMMAND_ARGS = (GLOBAL_ARGS[0], HELP_ARG)
 
 COMMANDS = (
     Cmd(
+        "context", "Inspect what one run step would receive.",
+        "cli.commands.context", "in-process",
+        root="registry", json=True, name_sugar=True,
+        args=(
+            Arg(("--name",), "Agent name.", kind="value", required=True),
+            Arg(("--role",), "Step to inspect.", kind="value",
+                choices=("pre", "agent", "post")),
+            Arg(("--changed-files",), "JSON array of changed paths.", kind="value"),
+            Arg(("-p", "--prompt"), "Additional invocation instructions.",
+                kind="value"),
+            Arg(("--prompt-file",), "Read instructions from a file or '-'.",
+                kind="value"),
+            Arg(("-o", "--option"), "NAME or NAME=VALUE. Repeatable.",
+                kind="value"),
+        ),
+    ),
+    Cmd(
         "run", "Execute an agent once.", "cli.commands.run", "in-process",
         json=True, name_sugar=True,
         help_details=(
