@@ -4077,13 +4077,69 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = deploy.__globals__
         with mock.patch.dict(scope, {
             "_synchronize": lambda: "abc123",
+            "_bake_configuration": lambda: ("bake/v1.2.2-local", "1.2.2"),
         }), mock.patch.dict(scope["RELEASE"], {
-            "_current_version": lambda: "1.2.2",
             "_installed_version": lambda: "1.2.3",
         }):
             with self.assertRaisesRegex(
                     script["LocalDeployError"], "pass --allow-downgrade"):
                 deploy(Path("C:/repo"))
+
+    def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        synchronize = script["_synchronize"]
+        scope = synchronize.__globals__
+        commands = []
+
+        def git(*args):
+            responses = {
+                ("status", "--porcelain"): "",
+                ("branch", "--show-current"): "bake/v6.7.0-local",
+                ("rev-parse", "HEAD"): "abc123",
+                ("rev-parse", "origin/bake/v6.7.0-local"): "abc123",
+            }
+            return responses[args]
+
+        with mock.patch.dict(scope, {
+            "_git": git,
+            "_bake_configuration": lambda: (
+                "bake/v6.7.0-local", "6.7.0"),
+            "_run": lambda command, **_kwargs: commands.append(command),
+        }):
+            self.assertEqual("abc123", synchronize())
+        self.assertEqual([
+            "git", "pull", "--ff-only", "origin", "bake/v6.7.0-local",
+        ], commands[0])
+
+    def test_local_deploy_stamps_only_the_archived_bake_source(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            package = source / "src" / "agents_live"
+            skill = package / "skill"
+            skill.mkdir(parents=True)
+            (source / "pyproject.toml").write_text(
+                'version = "6.6.0"\n', encoding="utf-8")
+            (package / "__init__.py").write_text(
+                '__version__ = "6.6.0"\n', encoding="utf-8")
+            (skill / "VERSION").write_text("6.6.0\n", encoding="utf-8")
+
+            script["_stamp_bake_version"](
+                source, "6.6.0", "6.7.0.dev0+gabc12345")
+
+            self.assertIn(
+                'version = "6.7.0.dev0+gabc12345"',
+                (source / "pyproject.toml").read_text(encoding="utf-8"))
+            self.assertIn(
+                '__version__ = "6.7.0.dev0+gabc12345"',
+                (package / "__init__.py").read_text(encoding="utf-8"))
+            self.assertEqual(
+                "6.7.0.dev0+gabc12345\n",
+                (skill / "VERSION").read_text(encoding="utf-8"))
+        self.assertEqual((6, 7, 0), script["_version_tuple"](
+            "6.7.0.dev0+gabc12345"))
 
     def test_local_deploy_reuses_only_matching_preparation_evidence(self) -> None:
         script = runpy.run_path(
@@ -4148,6 +4204,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "_prepared_artifact": lambda *_args: None,
                 "_state_directory": lambda: root / "state",
+                "_stamp_bake_version": lambda *_args: None,
                 "_run": run,
                 "_require_unchanged_checkout": mock.Mock(),
             }), mock.patch.object(
@@ -4176,12 +4233,13 @@ class TestCrossModuleAgreements(unittest.TestCase):
             dashboards = mock.Mock()
             with mock.patch.dict(scope, {
                 "_synchronize": lambda: "abc123",
+                "_bake_configuration": lambda: (
+                    "bake/v1.2.3-local", "1.2.3"),
                 "_prepare_artifact": lambda *_args: (wheel, "digest"),
                 "_require_unchanged_checkout": mock.Mock(
                     side_effect=script["LocalDeployError"]("checkout changed")),
                 "_running_dashboards": dashboards,
             }), mock.patch.dict(scope["RELEASE"], {
-                "_current_version": lambda: "1.2.3",
                 "_installed_version": lambda: "1.2.3",
             }):
                 with self.assertRaisesRegex(

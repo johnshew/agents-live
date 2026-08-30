@@ -109,7 +109,7 @@ Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
 or initialize agents in `~/repos/<target-project>` unless that operational change is part
 of the test.
 
-## Deploy current main locally
+## Deploy the current bake locally
 
 Use the focused local deployment workflow after pull requests have merged:
 
@@ -117,8 +117,11 @@ Use the focused local deployment workflow after pull requests have merged:
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
 
-The command requires clean `main`, fast-forwards it to `origin/main`, and
-prepares one commit-and-digest-addressed wheel. It runs the built-wheel
+The command requires the clean bake branch configured in
+`.github/release-channels.toml`, fast-forwards it from `origin`, and prepares
+one commit-and-digest-addressed development wheel. The archived build copy is
+stamped as `<target>.dev0+g<commit>` without changing tracked release versions.
+It runs the built-wheel
 dashboard readiness gate in normal and development modes, then records the
 validated commit, artifact digest, and exact gate list. A later deployment of
 the same commit reuses that preparation evidence; a changed commit, wheel, or

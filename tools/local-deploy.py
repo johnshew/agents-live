@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema"]
 # ///
-"""Deploy current main into the local uv tool with focused validation."""
+"""Deploy the current bake branch into the local uv tool with focused validation."""
 from __future__ import annotations
 
 import argparse
@@ -28,9 +28,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
+CHANNELS = ROOT / ".github" / "release-channels.toml"
 SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
@@ -88,17 +90,33 @@ def _git(*args: str) -> str:
     return _run(["git", *args], capture=True).stdout.strip()
 
 
+def _bake_configuration() -> tuple[str, str]:
+    try:
+        bake = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"]
+        branch = bake["branch"]
+        version = bake["version"]
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        raise LocalDeployError("cannot read the configured bake channel") from exc
+    if not isinstance(branch, str) or not branch.startswith("bake/v"):
+        raise LocalDeployError(f"invalid bake branch: {branch!r}")
+    if not isinstance(version, str) or re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+        raise LocalDeployError(f"invalid bake version: {version!r}")
+    return branch, version
+
+
 def _synchronize() -> str:
     if _git("status", "--porcelain"):
         raise LocalDeployError("working tree is not clean; refusing to pull")
-    if _git("branch", "--show-current") != "main":
-        raise LocalDeployError("local deployment requires the main branch")
-    _run(["git", "pull", "--ff-only", "origin", "main"])
+    branch, _version = _bake_configuration()
+    if _git("branch", "--show-current") != branch:
+        raise LocalDeployError(
+            f"local deployment requires the configured bake branch {branch}")
+    _run(["git", "pull", "--ff-only", "origin", branch])
     head = _git("rev-parse", "HEAD")
-    if head != _git("rev-parse", "origin/main") \
+    if head != _git("rev-parse", f"origin/{branch}") \
             or _git("status", "--porcelain"):
         raise LocalDeployError(
-            "main is not clean and synchronized with origin/main")
+            f"{branch} is not clean and synchronized with origin/{branch}")
     return head
 
 
@@ -160,6 +178,7 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         _run(["git", "archive", "--format=zip", f"--output={archive}", commit])
         source = temporary / "source"
         shutil.unpack_archive(archive, source)
+        _stamp_bake_version(source, RELEASE["_current_version"](), version)
         output = temporary / "dist"
         _run(["uv", "build", "--wheel", "--out-dir", str(output), str(source)])
         wheels = list(output.glob(f"agents_live-{version}-*.whl"))
@@ -197,14 +216,32 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
     return artifact.resolve(), digest
 
 
+def _stamp_bake_version(source: Path, current: str, target: str) -> None:
+    replacements = (
+        (source / "pyproject.toml", f'version = "{current}"',
+         f'version = "{target}"'),
+        (source / "src" / "agents_live" / "__init__.py",
+         f'__version__ = "{current}"', f'__version__ = "{target}"'),
+        (source / "src" / "agents_live" / "skill" / "VERSION",
+         f"{current}\n", f"{target}\n"),
+    )
+    for path, old, new in replacements:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LocalDeployError(
+                f"cannot stamp bake version in {path.relative_to(source)}") from exc
+        if content.count(old) != 1:
+            raise LocalDeployError(
+                f"cannot find one {current} version in {path.relative_to(source)}")
+        path.write_text(content.replace(old, new), encoding="utf-8")
+
+
 def _version_tuple(value: str) -> tuple[int, int, int]:
-    try:
-        parts = tuple(int(part) for part in value.split("."))
-    except ValueError as exc:
-        raise LocalDeployError(f"invalid stable version: {value!r}") from exc
-    if len(parts) != 3:
-        raise LocalDeployError(f"invalid stable version: {value!r}")
-    return parts
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:\.|\+|$)", value)
+    if match is None:
+        raise LocalDeployError(f"invalid package version: {value!r}")
+    return tuple(int(part) for part in match.groups())
 
 
 def _installed_cli() -> Path:
@@ -530,7 +567,8 @@ def _write_receipt(
 
 def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
     commit = _synchronize()
-    version = RELEASE["_current_version"]()
+    _branch, target = _bake_configuration()
+    version = f"{target}.dev0+g{commit[:8]}"
     previous_version = RELEASE["_installed_version"]()
     if _version_tuple(version) < _version_tuple(previous_version) \
             and not allow_downgrade:
