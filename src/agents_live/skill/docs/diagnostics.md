@@ -383,7 +383,10 @@ failures.
 
 Failure categories include `state_unavailable`, `agent_invalid`, `timeout`,
 `cli_crash`, `pre_processor_crash`, `post_processor_crash`,
-`empty_output`, `output_parse_error`, and `agent_output_invalid`.
+`empty_output`, `output_parse_error`, `output_schema_rejected`, and
+`agent_output_invalid`. `output_schema_rejected` means the provider refused
+the declared JSON Schema before running; an output value that fails local
+schema validation is `agent_output_invalid`.
 
 ## WSL liveness
 

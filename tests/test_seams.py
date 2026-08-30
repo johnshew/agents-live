@@ -4413,6 +4413,77 @@ class TestProviderPromptDelivery(TempRepository):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_claude_uses_declared_schema_and_structured_output(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": False,
+        }
+        self.skill("claude-schema", [
+            'agents-live.selector: "claude"',
+            f"agents-live.output-schema: '{json.dumps(schema)}'",
+        ])
+        runner = RecordingRunner([ChildResult(
+            ("claude",), 0,
+            json.dumps({
+                "result": "The requested output is attached.",
+                "structured_output": {"summary": "done"},
+            }),
+            "",
+        )])
+
+        result = dispatch(
+            Firing("claude-schema", str(self.root), "manual"), runner=runner)
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"summary": "done"}, result.structured)
+        schema_index = runner.argv[0].index("--json-schema")
+        self.assertEqual(schema, json.loads(runner.argv[0][schema_index + 1]))
+
+    def test_claude_schema_rejection_has_a_distinct_category(self) -> None:
+        self.skill("claude-schema-rejected", [
+            'agents-live.selector: "claude"',
+            "agents-live.output-schema: '{\"type\": \"object\"}'",
+        ])
+        runner = RecordingRunner([ChildResult(
+            ("claude",), 1, "", "Invalid --json-schema value",
+        )])
+
+        result = dispatch(
+            Firing("claude-schema-rejected", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("output_schema_rejected", result.category)
+
+    def test_copilot_keeps_schema_validation_on_the_extraction_fallback(
+            self) -> None:
+        self.skill("copilot-schema", [
+            'agents-live.selector: "copilot"',
+            "agents-live.output-schema: '{\"type\": \"object\", "
+            "\"required\": [\"summary\"]}'",
+        ])
+        runner = RecordingRunner([ChildResult(
+            ("copilot",), 0,
+            json.dumps({
+                "type": "assistant.message",
+                "data": {
+                    "phase": "final_answer",
+                    "content": '{"summary": "fallback"}',
+                },
+            }),
+            "",
+        )])
+
+        result = dispatch(
+            Firing("copilot-schema", str(self.root), "manual"), runner=runner)
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"summary": "fallback"}, result.structured)
+        self.assertNotIn("--json-schema", runner.argv[0])
+
     def test_processor_crash_gets_reactive_dependency_diagnosis(self) -> None:
         directory = self.skill("diagnosed", [
             'agents-live.selector: "none"',

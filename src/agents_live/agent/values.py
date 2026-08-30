@@ -177,6 +177,7 @@ class ResolvedSpec:
     provider: str
     model: str | None
     effort: str | None
+    output_schema: dict | None = None
 
 
 @dataclass(frozen=True)

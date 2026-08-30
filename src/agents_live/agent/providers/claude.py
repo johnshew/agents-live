@@ -39,6 +39,11 @@ class ClaudeProvider:
             argv.extend(("--model", spec.model))
         if spec.effort:
             argv.extend(("--effort", spec.effort))
+        if spec.output_schema is not None:
+            argv.extend((
+                "--json-schema",
+                json.dumps(spec.output_schema, sort_keys=True, separators=(",", ":")),
+            ))
         project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
         if project_config:
             argv.extend(("--mcp-config", project_config))
@@ -74,6 +79,7 @@ class ClaudeProvider:
             usage_values += (("list_cost_usd", str(total_cost)),)
         return Completion(
             text if isinstance(text, str) else raw.stdout.strip(),
+            structured=payload.get("structured_output"),
             usage=usage_values,
             transcript=payload.get("session_id")
             if isinstance(payload.get("session_id"), str) else None,

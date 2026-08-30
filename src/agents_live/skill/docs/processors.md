@@ -517,10 +517,13 @@ invoked or what it reads and writes.
 | Post-processor stdin | The model's output | The snapshot of `result-path` |
 
 In `plan` mode the same rigor is available without the MCP:
-`agents-live.output-schema` validates the value extracted from the model's
-reply, and `agents-live.output-path-roots` rejects any `path` in it that
-escapes the directories you named. The model proposes; your post-processor
-disposes.
+`agents-live.output-schema` asks Claude to produce a schema-validated value
+and then validates that value again before continuing. Copilot has no
+supported schema-output option, so its final answer is parsed for JSON and
+validated locally. Definitions without a schema also use local extraction
+when another output policy needs a JSON value. In every case,
+`agents-live.output-path-roots` rejects any `path` that escapes the directories
+you named. The model proposes; your post-processor disposes.
 
 Both are tool policy and deterministic mediation, not an operating system
 sandbox. Processors run with the local account's permissions, and what else a
