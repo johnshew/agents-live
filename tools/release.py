@@ -1140,9 +1140,9 @@ def _gate_commands() -> list[list[str]]:
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_smoke.py"],
-        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+        ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_seams.py"],
-        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+        ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_behaviors.py"],
         _smoketest_command(),
         ["uv", "run", "--script", "tools/release.py", "--build-artifacts"],
@@ -1293,6 +1293,19 @@ def _run_operational_acceptance(
     if preflight:
         command.append("--preflight")
     _run(command)
+
+
+def candidate_preflight(repo: Path, agent_id: str, cost_agent: str) -> None:
+    """Reject live-host acceptance blockers before release preparation."""
+    _require_tools()
+    root = repo.expanduser().resolve()
+    if not root.is_dir():
+        raise ReleaseError(f"candidate test repository does not exist: {root}")
+    _run_operational_acceptance(root, agent_id, cost_agent, preflight=True)
+    print(
+        "Candidate preflight passed; the selected agents, browser, dashboard "
+        "state, ownership, watcher residency, and repository health are ready."
+    )
 
 
 def _write_acceptance_checkpoint(
@@ -1607,6 +1620,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Reinstall and verify the prepared candidate before publication",
     )
     parser.add_argument(
+        "--candidate-preflight",
+        action="store_true",
+        help="Check live candidate prerequisites before release preparation",
+    )
+    parser.add_argument(
         "--repo",
         type=Path,
         help="Live repository used by --accept-candidate",
@@ -1646,25 +1664,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     selected = sum((args.dry_run, args.prepare, args.publish,
-                    args.accept_candidate, args.gates, args.build_artifacts,
-                    args.notes is not None))
+                    args.accept_candidate, args.candidate_preflight,
+                    args.gates, args.build_artifacts, args.notes is not None))
     if selected != 1:
         parser.error(
-            "choose exactly one of --dry-run, --prepare, --accept-candidate, "
-            "--publish, --gates, --build-artifacts, or --notes")
+            "choose exactly one of --dry-run, --prepare, "
+            "--candidate-preflight, --accept-candidate, --publish, --gates, "
+            "--build-artifacts, or --notes")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
-    if args.accept_candidate and (
+    if (args.accept_candidate or args.candidate_preflight) and (
             args.repo is None or not args.agent or not args.cost_agent):
         parser.error(
-            "--accept-candidate requires --repo, --agent, and --cost-agent")
+            "candidate preflight and acceptance require --repo, --agent, "
+            "and --cost-agent")
     if (args.repo is not None or args.agent is not None
             or args.cost_agent is not None or args.resume) \
-            and not args.accept_candidate:
+            and not (args.accept_candidate or args.candidate_preflight):
         parser.error(
             "--repo, --agent, --cost-agent, and --resume apply only to "
-            "--accept-candidate")
-    if (args.publish or args.accept_candidate or args.gates or args.notes) \
+            "candidate preflight or acceptance")
+    if args.resume and not args.accept_candidate:
+        parser.error("--resume applies only to --accept-candidate")
+    if (args.publish or args.accept_candidate or args.candidate_preflight
+            or args.gates or args.notes) \
             and args.bump != "patch":
         parser.error(
             "--bump applies only to --dry-run and --prepare")
@@ -1673,6 +1696,11 @@ def main(argv: list[str] | None = None) -> int:
             preview(args.bump)
         elif args.prepare:
             prepare(args.bump)
+        elif args.candidate_preflight:
+            assert args.repo is not None
+            assert args.agent is not None
+            assert args.cost_agent is not None
+            candidate_preflight(args.repo, args.agent, args.cost_agent)
         elif args.accept_candidate:
             assert args.repo is not None
             assert args.agent is not None

@@ -49,6 +49,11 @@ uv run --with-editable . agents-live --help
 uv run --script tools/pre-release-audit.py
 ```
 
+The `dev` dependency group supplies test-only dependencies such as DuckDB to
+all `uv run` commands in this checkout. Do not add per-command `--with` flags
+for dependencies already declared there; doing so creates separate ephemeral
+environments and lengthens the edit loop.
+
 ## Source checkout and installed tool
 
 See [testing.md](testing.md) for the full source, wheel, and installed-tool

@@ -7,22 +7,22 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "bake/v6.6.0-local"
-version = "6.6.0"
+branch = "bake/v6.7.0-local"
+version = "6.7.0"
 promotes_to = "release"
-deployed_version = "6.6.0.dev0+gccbe4a0a"
-deployed_commit = "ccbe4a0abc3ab29f7cb8b1ea538f49da07ecabbf"
-validated_on = "2026-08-29"
+deployed_version = "6.6.0"
+deployed_commit = "07f6f330f6b755e5192452f9f068963cc02ab7ac"
+validated_on = "2026-08-30"
 
 [bake.issues]
-delivered = [400, 401, 402, 403, 404, 406, 419, 421]
-partial = [334, 388, 395]
-deferred = [405, 422, 423, 424, 426]
-promotion_decision = []
+delivered = []
+partial = []
+deferred = [105, 370, 374, 376, 379, 388, 405, 422, 423, 424]
+promotion_decision = [334, 395, 426]
 
 [bake.recommendations]
-overall = "The planned v6.6 work is complete in bake and the newest runtime has passed source, packaged, and installed tests. Open the pull request to main."
-"334" = "Include the safer side-by-side installation work already completed and tested for v6.6.0. Do not switch existing users to it in this release; that change needs separate migration testing."
-"388" = "Include the additive discovery and cross-repository resolution work already completed for v6.6.0. Keep authoritative roots, default-repository removal, and the init/registration clean break for the planned major release."
-"395" = "Include the download and security checks already completed and tested for v6.6.0. Do not add the public install scripts in this release; they depend on the later migration work in #334."
-testing = "The exact installed bake passed the Ubuntu and Windows source matrix, packaged dashboard journeys, repository-qualified aggregate actions, repeated Windows client resets, and a terminal Windows self-upgrade handoff on 2026-08-29."
+overall = "Keep testing in bake while the release pipeline is shortened and the verified GitHub installer path is completed."
+"334" = "Complete only the stable-launcher and migration ownership needed by the verified installer; keep broader generation cleanup separately reviewable."
+"395" = "Deliver verified Windows and POSIX bootstrap packages backed by official GitHub release artifacts and the generation layout."
+"426" = "Shorten local and CI feedback by reusing environments and one digest-addressed wheel while preserving every distinct release gate."
+testing = "The installed baseline is the released v6.6.0 package. The first v6.7.0 local artifact has not yet been deployed."

@@ -3998,6 +3998,30 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 preflight=True)
             self.assertEqual("--preflight", commands[0][-1])
 
+    def test_candidate_preflight_reuses_acceptance_checks(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        preflight = release["candidate_preflight"]
+        scope = preflight.__globals__
+        operational = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(scope, {
+            "_require_tools": mock.Mock(),
+            "_run_operational_acceptance": operational,
+        }):
+            repository = Path(temporary)
+            preflight(repository, "sample-123", "cost-agent-456")
+        operational.assert_called_once_with(
+            repository.resolve(), "sample-123", "cost-agent-456",
+            preflight=True)
+
+    def test_candidate_preflight_rejects_missing_repository(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        preflight = release["candidate_preflight"]
+        scope = preflight.__globals__
+        with mock.patch.dict(scope, {"_require_tools": mock.Mock()}):
+            with self.assertRaisesRegex(
+                    release["ReleaseError"], "repository does not exist"):
+                preflight(Path("missing-repository"), "sample", "cost")
+
     def test_local_deploy_preserves_dashboard_ports_and_repositories(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))

@@ -114,6 +114,20 @@ Preview the selected release without changing files or remotes:
 uv run --script tools/release.py --dry-run --bump patch
 ```
 
+Before preparation, reject live-host acceptance blockers without building or
+changing the checkout:
+
+```bash
+uv run --script tools/release.py --candidate-preflight \
+  --repo <live-repository> --agent <safe-agent-identifier> \
+  --cost-agent <safe-provider-agent-identifier>
+```
+
+This runs the same selected-agent, browser, managed-dashboard, all-repository
+doctor, ownership, watcher-residency, and watched-path checks used by candidate
+acceptance. It does not replace installed candidate acceptance; it moves its
+read-only prerequisites ahead of the expensive preparation gates.
+
 Prepare the release locally:
 
 ```bash

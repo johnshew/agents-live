@@ -19,6 +19,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
+[dependency-groups]
+dev = ["duckdb"]
+
 [project.scripts]
 agents-live = "agents_live.cli:main"
 al = "agents_live.cli:main"

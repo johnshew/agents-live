@@ -62,14 +62,14 @@ tested for factual wording when an association cannot be inferred.
 Run the portable suite and release gates:
 
 ```bash
-uv run --with-editable . --with duckdb python -m unittest discover -s tests -v
+uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
 uv run --script tools/pre-release-audit.py
 uv build
 ```
 
 CI runs the same suites one file at a time
-(`uv run --with-editable . --script tests/<file>.py`), adding `--with duckdb`
+(`uv run --with-editable . --script tests/<file>.py`)
 so the query tool is started rather than skipped. Reproduce that form when a
 failure appears only in CI.
 
