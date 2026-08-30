@@ -716,7 +716,8 @@ def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def _installed_version() -> str:
     completed = _installed_run(["--version"])
     match = re.fullmatch(
-        r"agents-live (\d+\.\d+\.\d+)(?: \(channel: [a-z]+\))?\s*",
+        r"agents-live ([0-9][0-9A-Za-z.+-]*)"
+        r"(?: \(channel: [a-z]+(?:, commit: [0-9a-f]+)?\))?\s*",
         completed.stdout,
     )
     if completed.returncode != 0 or match is None:

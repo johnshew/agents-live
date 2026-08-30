@@ -2870,6 +2870,23 @@ class TestInstallationGenerations(unittest.TestCase):
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
+    def test_release_reads_commit_qualified_installed_bake_version(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        installed_version = release["_installed_version"]
+        scope = installed_version.__globals__
+        completed = mock.Mock(
+            returncode=0,
+            stdout=("agents-live 6.7.0.dev0+g0d2e0159 "
+                    "(channel: bake, commit: 0d2e0159)\n"),
+            stderr="",
+        )
+
+        with mock.patch.dict(scope, {
+            "_installed_run": lambda _argv: completed,
+        }):
+            self.assertEqual(
+                "6.7.0.dev0+g0d2e0159", installed_version())
+
     """Assertions that two parts of the tree still agree (#216).
 
     Each holds a fact that no single module can check, and that a defect
