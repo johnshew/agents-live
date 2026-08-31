@@ -4608,6 +4608,32 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     script["LocalDeployError"], "changed during replacement"):
                 upgrade(Path("C:/repo"), Path("wheel.whl"), "digest")
 
+    def test_local_deploy_accepts_synchronous_self_managed_windows_upgrade(
+            self) -> None:
+        """Generation switching does not need the uv replacement helper."""
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "local-deploy.py"))
+        upgrade_once = script["_upgrade_once"]
+        scope = upgrade_once.__globals__
+        windows = mock.Mock()
+        windows.name = "nt"
+        completed = subprocess.CompletedProcess(
+            [], 0, "Activated self-managed generation 6.7.0\n", "")
+        with (
+            mock.patch.dict(scope, {
+                "os": windows,
+                "_installed_cli": lambda: Path("generation/agents-live.exe"),
+                "_installed_run": lambda *_args: completed,
+            }),
+            mock.patch.object(
+                scope["deployment"].layout,
+                "generation_of",
+                return_value="6.7.0",
+            ),
+        ):
+            self.assertIsNone(
+                upgrade_once(Path("C:/repo"), Path("candidate.whl")))
+
     def test_local_deploy_retries_one_failed_windows_upgrade(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))

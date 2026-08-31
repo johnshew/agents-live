@@ -36,6 +36,7 @@ CHANNELS = ROOT / ".github" / "release-channels.toml"
 SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
+from agents_live import deploy as deployment  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.runtime.hosts.processes import watchers_on_host  # noqa: E402
 
@@ -420,6 +421,7 @@ def _restart_dashboards(dashboards: tuple[Dashboard, ...]) -> None:
 
 
 def _upgrade_once(repo: Path, wheel: Path) -> str | None:
+    self_managed = deployment.layout.generation_of(_installed_cli()) is not None
     completed = _installed_run(
         "--repo", str(repo), "upgrade", "--from", str(wheel))
     if completed.returncode != 0:
@@ -427,7 +429,7 @@ def _upgrade_once(repo: Path, wheel: Path) -> str | None:
         raise LocalDeployError(f"local-wheel upgrade failed: {detail}")
     match = RELEASE["QUEUED_UPGRADE_RE"].search(completed.stdout)
     if match is None:
-        if os.name == "nt":
+        if os.name == "nt" and not self_managed:
             raise LocalDeployError(
                 "Windows upgrade did not queue a durable helper result")
         return None
