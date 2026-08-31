@@ -116,7 +116,11 @@ def _wheel_identity(wheel: Path) -> tuple[str, str]:
     return version, digest
 
 
-def _upgrade_self_managed(source: Path | None) -> int:
+def _upgrade_self_managed(
+    source: Path | None,
+    *,
+    requirements: tuple[Path, ...] = (),
+) -> int:
     """Activate a new immutable generation through the stable current path."""
     if source is None:
         return install_release.main(["--activate"])
@@ -139,7 +143,8 @@ def _upgrade_self_managed(source: Path | None) -> int:
             if target.exists() or target.is_symlink():
                 raise
             built = install_generation.install(
-                version, source=source, provenance=provenance)
+                version, source=source, provenance=provenance,
+                requirements=requirements)
         else:
             if built.provenance != provenance:
                 raise deploy.generation.GenerationError(
@@ -673,7 +678,12 @@ def main() -> int:
                                        code="upgrade_preflight_failed")
             return 1
         if installation.self_managed:
-            runtime_status = _upgrade_self_managed(source)
+            declarations = plugins.union(target_roots, require_exists=True)
+            runtime_status = _upgrade_self_managed(
+                source,
+                requirements=tuple(
+                    declaration.path for declaration in declarations.values()),
+            )
             if runtime_status != 0:
                 return runtime_status
             stable_command = deploy.layout.command_path("agents-live")

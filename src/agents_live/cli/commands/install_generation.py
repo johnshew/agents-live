@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from ... import deploy
@@ -32,7 +33,13 @@ def _interpreter(environment: Path) -> Path:
     )
 
 
-def _populate(uv: str, source: Path | None, version: str, staging: Path) -> None:
+def _populate(
+    uv: str,
+    source: Path | None,
+    version: str,
+    staging: Path,
+    requirements: Sequence[Path] = (),
+) -> None:
     _run(
         [
             uv,
@@ -55,8 +62,23 @@ def _populate(uv: str, source: Path | None, version: str, staging: Path) -> None
             "--reinstall-package",
             "agents-live",
             requirement,
+            *(str(path) for path in requirements),
         ],
         step="installing agents-live",
+    )
+
+
+def install_requirements(environment: Path, requirements: Sequence[Path]) -> None:
+    """Install validated plugin wheels before a generation is sealed."""
+    if not requirements:
+        return
+    _run(
+        [
+            find_uv(), "pip", "install", "--python",
+            str(_interpreter(environment)),
+            *(str(path) for path in requirements),
+        ],
+        step="installing declared plugins",
     )
 
 
@@ -92,13 +114,15 @@ def install(
     root: Path | None = None,
     activate: bool = False,
     provenance: deploy.generation.Provenance | None = None,
+    requirements: Sequence[Path] = (),
 ) -> deploy.generation.Generation:
     """Build an exact generation through the shared uv-backed seam."""
     uv = find_uv()
     built = deploy.generation.build(
         version,
         root=root,
-        populate=lambda staging: _populate(uv, source, version, staging),
+        populate=lambda staging: _populate(
+            uv, source, version, staging, requirements),
         validate=lambda staging: _validate(version, staging),
         provenance=provenance,
     )
