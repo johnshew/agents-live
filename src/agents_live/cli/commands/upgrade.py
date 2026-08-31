@@ -148,7 +148,7 @@ def _upgrade_self_managed(
                     f"generation {version} is already installed from different "
                     "artifact bytes and will not be overwritten")
             install_generation.validate(built)
-        deploy.generation.activate(built)
+        install_generation.activate_generation(built)
         deploy.ownership.write_record(deploy.ownership.SELF)
     except (OSError, ValueError, deploy.generation.GenerationError) as exc:
         preflight.emit_failure("upgrade", str(exc))

@@ -162,6 +162,14 @@ runtime in an isolated environment and must load with the expected provider or
 ownership protocol. Migrate or repair unsafe inputs, then run the command
 again.
 
+Self-managed versions remain under the installation root rather than replacing
+one environment in place. The complete PEP 440 version is the directory name;
+local bake versions include their commit suffix and can coexist with other
+bakes from the same release line. Selection changes only `current`, then runs
+automatic maintenance through the selected command. A dispatch that had already
+started can finish on its original immutable version while new dispatches and
+converged watchers use the selected version.
+
 ### Validate a local wheel through the proxy
 
 This check separates the local Agents Live artifact from its dependencies. It

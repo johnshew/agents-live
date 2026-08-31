@@ -17,7 +17,10 @@ history is retained in the source repository.
   `current` directory link, and accepted from clean Windows and Linux roots
   without resolving Agents Live through a configured package index. Existing
   uv installs migrate under explicit ownership rules; upgrade, doctor, and
-  uninstall now honor the self-managed generation layout.
+  uninstall now honor the self-managed generation layout. Full PEP 440
+  versions, including commit-suffixed bakes, coexist in the version store;
+  registered-repository plugins are installed before a generation is sealed,
+  and selecting one converges host integrations through that version.
 - feat: preview the complete processor run context without executing it. (#379)
   `agents-live context` renders the selected agent's resolved environment and
   processor inputs as text or JSON so definitions can be checked before a run.

@@ -42,6 +42,11 @@ An installation owns this layout:
     owner.json                installation owner
 ```
 
+The directory key is the package's complete PEP 440 version, not its release
+base. Stable releases therefore use names such as `6.6.1`, while local bake
+artifacts use names such as `6.6.1.dev0+gabc1234`. Multiple bakes of the same
+release line coexist without collision and remain independently selectable.
+
 The default root is `%LOCALAPPDATA%\agents-live` on Windows and
 `$XDG_DATA_HOME/agents-live` on POSIX. `AGENTS_LIVE_INSTALL_ROOT` overrides it.
 The stable PATH entry is `current\Scripts` on Windows and `current/bin` on
@@ -67,8 +72,15 @@ The public bootstrap is deliberately limited to transport and placement:
    environment.
 4. Invoke that directory's absolute `agents-live install-release` command.
 
-The final dedicated version then validates and seals itself, performs migration
-and cleanup, switches `current` to itself, records installation ownership, and
+The final dedicated version reads the registered repository set and validates
+every declared plugin wheel before sealing the generation. The core wheel and
+all accessible declared plugin wheels are installed together, so a selected
+generation never depends on mutating its environment later. An unavailable
+registered repository, missing or modified wheel, or incompatible plugin stops
+installation before activation.
+
+The dedicated version then validates and seals itself, performs migration and
+cleanup, switches `current` to itself, records installation ownership, and
 ensures the stable command directory is on PATH. It refuses to initialize a
 different version directory. Bootstrap inputs cross this private boundary in
 environment variables; the public command grammar does not gain artifact
@@ -91,6 +103,19 @@ Activation validates the target before changing `current`. A target outside the
 installation's `versions` directory is invalid and is never followed as an
 active generation.
 
+The installation behaves as a local version store. Installing a new version
+does not remove the others, and selecting an already installed version does not
+rewrite it. Selection moves `current`, then invokes automatic host maintenance
+through the newly selected generation's own command. That generation converges
+native triggers and still-started watchers to its implementation. New
+dispatches resolve through `current`; an in-flight dispatch, watcher, or
+dashboard may finish from the immutable generation where it began.
+
+The hidden installation commands implement this installation and switching
+protocol for bootstrap, upgrade, and bake acceptance. They are not a public
+version-manager command surface. A future public selector can use the same
+protocol without adding a second active-version record.
+
 ### Failure semantics
 
 | Interrupted state | Recovery |
@@ -101,6 +126,7 @@ active generation.
 | initialized, not active | validate it and switch `current` |
 | missing or invalid `current` | report the damage and recreate the intended link; never guess |
 | activation failure | retain or restore the previous `current` target |
+| selected, convergence failed | keep the selected generation visible, report degraded host state, and rerun convergence after correcting the cause |
 
 A running process keeps using the complete version from which it started.
 Collection may remove an old version only after it is neither active, retained,
@@ -126,6 +152,11 @@ PATH is configured once. Scheduled commands and interactive shells can use the
 stable generated command under `current`, while running watchers and dashboards
 finish on their original immutable version. Release assets consist of the wheel,
 source distribution, Windows and POSIX bootstrap scripts, and checksum manifest.
+
+Local bake deployment derives a commit-bearing PEP 440 version and uses the same
+generation builder and selection protocol as a release. Repeated bakes on one
+release line therefore accumulate testable generations instead of overwriting a
+shared environment.
 
 The project owns installation, activation, migration, retention, and cleanup.
 It does not own a custom launcher or a duplicate active-version manifest. The

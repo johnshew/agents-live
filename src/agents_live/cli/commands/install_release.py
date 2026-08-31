@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             action = "built"
         if args.activate:
-            deploy.generation.activate(built, root=root)
+            install_generation.activate_generation(built, root=root)
             deploy.ownership.write_record(deploy.ownership.SELF, root=root)
             if migrate_uv:
                 try:

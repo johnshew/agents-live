@@ -126,6 +126,14 @@ and print the generated command under `current` that works immediately.
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
 
+The installation root is a local version store: complete PEP 440 versions are
+retained side by side and `current` selects one. Commit-suffixed bake versions
+therefore coexist on the same release line. Each generation includes the valid
+plugin wheels declared by registered repositories before it is sealed. When a
+generation is selected, its own command converges native triggers and
+still-started watchers; work already running may finish on the immutable version
+where it began.
+
 The package also installs `al` as an exact shorthand for `agents-live`, so
 `al status` and `agents-live status` are interchangeable. uv refuses the
 installation if an unrelated `al` executable already exists; remove or rename

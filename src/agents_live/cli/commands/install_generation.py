@@ -138,8 +138,22 @@ def install(
         provenance=provenance,
     )
     if activate:
-        deploy.generation.activate(built, root=root)
+        activate_generation(built, root=root)
     return built
+
+
+def activate_generation(
+    generation: deploy.generation.Generation,
+    *,
+    root: Path | None = None,
+) -> None:
+    """Select a generation and converge the host through that version."""
+    deploy.generation.activate(generation, root=root)
+    selected = executable(generation)
+    _run(
+        [str(selected), "internal", "maintain"],
+        step=f"converging generation {generation.name}",
+    )
 
 
 def executable(generation: deploy.generation.Generation) -> Path:

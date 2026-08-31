@@ -201,9 +201,14 @@ that ran the agent.
   self-managed runtime resolves and verifies the official latest stable release,
   stages it beside the active generation, and switches the `current` link;
   `--from <wheel>` uses the same generation builder for candidate acceptance.
-  Version directories are retained, so running processes may finish on the
-  prior generation without blocking activation. A uv-managed runtime retains
-  the existing uv upgrade behavior during migration.
+  The full PEP 440 version names the directory, including a local commit suffix
+  for a bake, so repeated builds on one release line do not collide. Before
+  sealing, the builder validates all registered repositories and installs their
+  declared plugin wheels into the candidate. Version directories are retained.
+  After `current` moves, the selected version runs host maintenance to converge
+  native triggers and still-started watchers; running processes may finish on
+  the prior generation without blocking activation. A uv-managed runtime
+  retains the existing uv upgrade behavior during migration.
   An installed
   native Windows tool queues runtime replacement until the invoking process
   exits. Installed-tool watchers keep started intent unchanged, finish any

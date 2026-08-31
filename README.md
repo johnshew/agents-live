@@ -143,6 +143,14 @@ is active; a host where uv and an active generation both claim ownership is
 refused with corrective guidance. Network, proxy, TLS, missing-digest, size,
 and checksum failures stop without a package-index or stale-cache fallback.
 
+Agents Live retains immutable versions side by side and selects one through the
+stable `current` path. Local bake versions include their commit suffix, so
+multiple builds from the same release line can coexist. Before a generation is
+sealed, installation validates the registered repositories and installs every
+declared plugin wheel into that generation. Selecting a generation runs host
+maintenance through that selected version so native triggers and still-started
+watchers converge without rewriting another installed version.
+
 Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
 install. `init` prints the PowerShell completion script path and the exact line
 to add to `$PROFILE`.
