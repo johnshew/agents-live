@@ -2537,6 +2537,10 @@ class TestInstallationGenerations(unittest.TestCase):
             f"built and activated generation {version}", completed.stdout)
         self.assertEqual(version, deploy.pointer.read().generation)
         installed = deploy.generation.load(version)
+        self.assertEqual(
+            install_generation.local_provenance(wheel),
+            installed.provenance,
+        )
         interpreter = (
             hostruntime.executable_dir(installed.path)
             / hostruntime.executable_filename(hostruntime.interpreter_name())

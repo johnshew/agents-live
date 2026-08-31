@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -164,6 +165,15 @@ def executable(generation: deploy.generation.Generation) -> Path:
     )
 
 
+def local_provenance(source: Path) -> deploy.generation.Provenance:
+    """Return stable provenance for one immutable local wheel."""
+    return deploy.generation.Provenance(
+        "local-artifact",
+        source.name,
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+
+
 def validate(generation: deploy.generation.Generation) -> None:
     """Revalidate an installed generation before it is reused or activated."""
     interpreter = _interpreter(generation.path)
@@ -212,6 +222,11 @@ def main() -> int:
             source=source,
             root=args.install_root,
             activate=args.activate,
+            provenance=(
+                local_provenance(source)
+                if source is not None and source.is_file()
+                else None
+            ),
         )
     except (FileNotFoundError, OSError, ValueError,
             deploy.generation.GenerationError) as exc:
