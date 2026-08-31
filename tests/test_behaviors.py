@@ -2324,6 +2324,19 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
         self.assertEqual(old.path.resolve(), deploy.layout.current_path().resolve())
 
+    def test_bake_commits_are_distinct_immutable_generations(self) -> None:
+        """Local-version commit suffixes prevent bake install collisions."""
+        first = self._activate_generation("6.6.1.dev0+gabc1234")
+        second = self._activate_generation("6.6.1.dev0+gdef5678")
+
+        self.assertNotEqual(first.path, second.path)
+        self.assertTrue(first.path.is_dir())
+        self.assertTrue(second.path.is_dir())
+        self.assertEqual(
+            "6.6.1.dev0+gdef5678", deploy.pointer.read().generation)
+        self.assertEqual(
+            second.path.resolve(), deploy.layout.current_path().resolve())
+
     def test_an_invalid_current_target_is_refused_not_guessed(
             self) -> None:
         """Guessing is how a host runs a generation nobody activated.
