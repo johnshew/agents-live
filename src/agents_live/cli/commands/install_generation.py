@@ -7,9 +7,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from ... import deploy
+from ... import deploy, plugins
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
+from ...state import registry as repos
 
 
 def _run(command: list[str], *, step: str, capture: bool = False) -> str:
@@ -68,8 +69,18 @@ def _populate(
     )
 
 
-def install_requirements(environment: Path, requirements: Sequence[Path]) -> None:
-    """Install validated plugin wheels before a generation is sealed."""
+def _plugin_requirements() -> tuple[Path, ...]:
+    roots = [Path(value) for _alias, value, error in repos.entries() if not error]
+    errors = plugins.validation_errors(roots)
+    if errors:
+        raise deploy.generation.GenerationError("; ".join(errors))
+    declarations = plugins.union(roots, require_exists=True)
+    return tuple(declaration.path for declaration in declarations.values())
+
+
+def install_declared_plugins(environment: Path) -> None:
+    """Install every registered repository's plugin before sealing."""
+    requirements = _plugin_requirements()
     if not requirements:
         return
     _run(
@@ -114,10 +125,10 @@ def install(
     root: Path | None = None,
     activate: bool = False,
     provenance: deploy.generation.Provenance | None = None,
-    requirements: Sequence[Path] = (),
 ) -> deploy.generation.Generation:
     """Build an exact generation through the shared uv-backed seam."""
     uv = find_uv()
+    requirements = _plugin_requirements()
     built = deploy.generation.build(
         version,
         root=root,

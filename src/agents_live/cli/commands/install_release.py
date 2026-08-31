@@ -9,10 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import deploy, plugins
+from ... import deploy
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
-from ...state import registry as repos
 from . import install_generation
 
 
@@ -46,15 +45,6 @@ def _retire_uv_tool(uv: str) -> None:
 def _expose_command_root(root: Path) -> None:
     """Add the stable current command directory to the user's PATH once."""
     hostruntime.expose_user_path_directory(deploy.layout.command_root(root))
-
-
-def _plugin_requirements() -> tuple[Path, ...]:
-    roots = [Path(value) for _alias, value, error in repos.entries() if not error]
-    errors = plugins.validation_errors(roots)
-    if errors:
-        raise deploy.generation.GenerationError("; ".join(errors))
-    declarations = plugins.union(roots, require_exists=True)
-    return tuple(declaration.path for declaration in declarations.values())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,7 +90,6 @@ def main(argv: list[str] | None = None) -> int:
                 deploy.release_artifact.verify_file(artifact, wheel)
         provenance = deploy.generation.Provenance(
             "github-release", artifact.name, artifact.sha256)
-        requirements = _plugin_requirements()
         installed = False
         try:
             built = deploy.generation.load(artifact.version, root=root)
@@ -108,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         except deploy.generation.GenerationError:
             target = deploy.layout.generation_dir(artifact.version, root)
             if target.exists() or target.is_symlink():
-                install_generation.install_requirements(target, requirements)
+                install_generation.install_declared_plugins(target)
                 built = deploy.generation.adopt(
                     artifact.version,
                     root=root,
@@ -139,7 +128,6 @@ def main(argv: list[str] | None = None) -> int:
                     root=root,
                     activate=False,
                     provenance=provenance,
-                    requirements=requirements,
                 )
             action = "built"
         if args.activate:
