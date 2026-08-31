@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema"]
 # ///
-"""Deploy the current bake branch into the local uv tool with focused validation."""
+"""Deploy the current bake branch into the active local installation."""
 from __future__ import annotations
 
 import argparse
@@ -38,7 +38,6 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.runtime.hosts.processes import watchers_on_host  # noqa: E402
-from agents_live import plugins  # noqa: E402
 
 RELEASE = runpy.run_path(str(ROOT / "tools" / "release.py"))
 RELEASE_ERROR = RELEASE["ReleaseError"]
@@ -598,9 +597,7 @@ def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
     all_watchers = RELEASE["_started_watchers"]({
         "agents": RELEASE["_status_rows"](baseline_status),
     })
-    environment = plugins.tool_environment()
-    if environment is None:
-        raise LocalDeployError("cannot locate the uv tool environment")
+    environment = _installed_cli().parent.parent
     local_watchers = _logical_watchers(
         watchers_on_host(under=environment))
     if not set(local_watchers) <= set(all_watchers):

@@ -725,9 +725,23 @@ def _write_artifact_manifest(version: str, preparation: dict) -> Path:
 
 
 def _installed_cli() -> str:
+    explicit_root = os.environ.get("AGENTS_LIVE_INSTALL_ROOT", "").strip()
+    if explicit_root:
+        install_root = Path(explicit_root).expanduser()
+    elif os.name == "nt":
+        install_root = Path(os.environ.get(
+            "LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "agents-live"
+    else:
+        install_root = Path(os.environ.get(
+            "XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agents-live"
+    filename = "agents-live.exe" if os.name == "nt" else "agents-live"
+    command_dir = "Scripts" if os.name == "nt" else "bin"
+    self_managed = install_root / "current" / command_dir / filename
+    if self_managed.is_file():
+        return str(self_managed.resolve())
+
     tool_root = Path(_run(["uv", "tool", "dir"], capture=True))
     environment = tool_root / "agents-live"
-    filename = "agents-live.exe" if os.name == "nt" else "agents-live"
     candidates = (
         environment / "Scripts" / filename,
         environment / "bin" / filename,
@@ -735,8 +749,8 @@ def _installed_cli() -> str:
     executable = next((path for path in candidates if path.is_file()), None)
     if executable is None:
         raise ReleaseError(
-            "the uv-managed agents-live launcher is required for candidate "
-            f"acceptance under {environment}")
+            "an active self-managed or uv-managed agents-live command is "
+            "required for candidate acceptance")
     return str(executable.resolve())
 
 

@@ -5558,7 +5558,25 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 registered_pid(
                     Path("agents-live.exe"), Path("C:/repo"), 8232))
 
-    def test_candidate_acceptance_uses_uv_managed_launcher_not_path(self) -> None:
+    def test_candidate_acceptance_prefers_the_active_self_managed_command(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        installed_cli = release["_installed_cli"]
+        scope = installed_cli.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "self-managed"
+            directory = install_root / "current" / (
+                "Scripts" if os.name == "nt" else "bin")
+            directory.mkdir(parents=True)
+            filename = "agents-live.exe" if os.name == "nt" else "agents-live"
+            managed = directory / filename
+            managed.write_text("managed", encoding="utf-8")
+            with mock.patch.dict(
+                    scope["os"].environ,
+                    {"AGENTS_LIVE_INSTALL_ROOT": str(install_root)}):
+                self.assertEqual(str(managed.resolve()), installed_cli())
+
+    def test_candidate_acceptance_falls_back_to_the_uv_tool(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         installed_cli = release["_installed_cli"]
         scope = installed_cli.__globals__
@@ -5571,14 +5589,13 @@ class TestCrossModuleAgreements(unittest.TestCase):
             filename = "agents-live.exe" if os.name == "nt" else "agents-live"
             managed = directory / filename
             managed.write_text("managed", encoding="utf-8")
-            shadow = root / "shadow" / filename
-            shadow.parent.mkdir()
-            shadow.write_text("shadow", encoding="utf-8")
             with (
+                mock.patch.dict(scope["os"].environ, {
+                    "AGENTS_LIVE_INSTALL_ROOT": str(root / "absent"),
+                }),
                 mock.patch.dict(scope, {
                     "_run": lambda *_args, **_kwargs: str(root),
                 }),
-                mock.patch.object(scope["shutil"], "which", return_value=str(shadow)),
             ):
                 self.assertEqual(str(managed.resolve()), installed_cli())
 
