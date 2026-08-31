@@ -68,7 +68,7 @@ Semantic versioning; the version lives in `pyproject.toml`.
 uv run --script tools/pre-release-audit.py
 uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
-uv build
+uv run --script tools/release.py --build-artifacts
 ```
 
 After the build, run the built-wheel dashboard readiness check described in
@@ -102,7 +102,9 @@ gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`
 are ignored. The names remain local, while the audit reports every
 case-insensitive match in shipped text with its file and line number.
-Inspect the wheel and sdist: `agents-live --help` reports the
+Inspect the wheel, sdist, `install.ps1`, and `install.sh`. The `SHA256SUMS`
+manifest and GitHub release asset
+metadata cover every file consumed by bootstrap. `agents-live --help` reports the
 documented commands, `agents-live init` installs the vendored skill,
 and no private adapter or deployment-specific agent is present.
 
@@ -144,8 +146,8 @@ synchronized with `origin/main`, creates an isolated
 documentation-link, and changelog versions, runs every release gate, and
 creates the release commit, annotated tag, and preparation receipt locally.
 The receipt binds the exact gate list, commit, base commit, tag object, wheel,
-source distribution, and artifact hashes. Preparation copies the wheel and
-source distribution into Git-local immutable release storage and all later
+source distribution, installer scripts, and artifact hashes.
+Preparation copies the complete set into Git-local immutable release storage and all later
 bootstrap, acceptance, and publication steps use those copies. `dist/` may be
 rebuilt for diagnostics without changing the candidate identity. Inspect the
 receipt-bound artifacts and review the commit.
@@ -249,6 +251,8 @@ the workflow. Automation should use noninteractive run-status APIs or
 `GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
 over the terminal's alternate screen.
 
+The exact release commit's reusable Test workflow runs clean-root bootstrap
+acceptance on Windows and Linux with package indexes disabled before publish.
 GitHub also records a SHA-256 digest and byte size for each uploaded asset in
 its release API. The generation bootstrap accepts only the uniquely named wheel
 from the official repository and fails closed when that metadata is absent,

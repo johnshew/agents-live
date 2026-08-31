@@ -112,7 +112,10 @@ server.
 
 **Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
-**Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
+**Bootstrap:** use the verified `install.ps1` or `install.sh` asset from the
+latest official GitHub release. The scripts install uv when needed, authenticate
+the exact release assets, and print a stable executable path that works without
+refreshing the current shell. See [docs/commands.md](docs/commands.md).
 
 ## Automatic-maintenance health gate
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -195,8 +196,57 @@ def build(
             "another generation operation owns the installation lock") from exc
 
 
+def adopt(
+    name: str,
+    *,
+    validate: Callable[[Path], None],
+    root: Path | None = None,
+    provenance: Provenance | None = None,
+) -> Generation:
+    """Validate and seal a bootstrap-created dedicated environment.
+
+    The bootstrap promotes authenticated bytes before invoking the generated
+    command at its final absolute path. That command is the only process
+    allowed to turn the directory into a complete immutable generation.
+    """
+    generation_name = layout.generation_name(name)
+    if provenance is not None:
+        _validate_provenance(provenance)
+    install_root = root or layout.installation_root()
+    target = layout.generation_dir(generation_name, install_root)
+    if layout.generation_of(Path(sys.executable), install_root) != generation_name:
+        raise GenerationError(
+            f"generation {generation_name} can only be finalized by its own "
+            "dedicated runtime")
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            if not target.is_dir() or target.is_symlink():
+                raise GenerationError(
+                    f"generation {generation_name} is not installed")
+            if (target / layout.GENERATION_RECORD).exists():
+                return load(generation_name, root=install_root)
+            try:
+                validate(target)
+            except Exception as exc:
+                raise GenerationError(
+                    f"generation {generation_name} failed validation: {exc}") from exc
+            generation = Generation(
+                generation_name,
+                target,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                provenance=provenance,
+            )
+            paths.atomic_write_text(
+                target / layout.GENERATION_RECORD, _record(generation))
+            return generation
+    except hostruntime.LockBusy as exc:
+        raise GenerationError(
+            "another generation operation owns the installation lock") from exc
+
+
 def activate(generation: Generation, *, root: Path | None = None) -> pointer.Pointer:
-    """Atomically activate a previously validated generation."""
+    """Select a validated generation through the stable ``current`` path."""
     install_root = root or layout.installation_root()
     try:
         with hostruntime.exclusive_lock(
@@ -205,15 +255,35 @@ def activate(generation: Generation, *, root: Path | None = None) -> pointer.Poi
             if installed != generation:
                 raise GenerationError(
                     f"generation {generation.name} changed after validation")
-            _, state, detail = pointer.status(layout.pointer_path(install_root))
+            previous, state, detail = pointer.status(
+                layout.current_path(install_root))
             if state not in (pointer.ACTIVE, pointer.MISSING):
                 raise GenerationError(
                     f"activation refused because {detail}")
-            return pointer.write(
-                generation.name,
-                owner=ownership.SELF,
-                path=layout.pointer_path(install_root),
-            )
+            try:
+                _replace_current(installed.path, root=install_root)
+            except OSError as exc:
+                if previous is not None:
+                    _replace_current(
+                        layout.generation_dir(previous.generation, install_root),
+                        root=install_root,
+                    )
+                raise GenerationError(
+                    f"could not activate generation {generation.name}: {exc}"
+                ) from exc
+            return pointer.read(layout.current_path(install_root))
     except hostruntime.LockBusy as exc:
         raise GenerationError(
             "another generation operation owns the installation lock") from exc
+
+
+def _replace_current(target: Path, *, root: Path) -> None:
+    """Point ``current`` at *target* using the host's directory-link primitive."""
+    hostruntime.replace_directory_link(
+        layout.current_path(root), target, root=root)
+
+
+def clear_activation(*, root: Path | None = None) -> None:
+    """Remove the stable selection and its metadata without touching versions."""
+    install_root = root or layout.installation_root()
+    hostruntime.remove_directory_link(layout.current_path(install_root))

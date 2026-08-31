@@ -79,9 +79,12 @@ job contexts but skip source suites and artifact startup. Ordinary `main` pushes
 do not repeat a PR's identical matrix; the publish workflow verifies the exact
 release commit on both hosts.
 For code changes, the three source suites run as independent jobs on each host
-while Linux builds one wheel in parallel. Both hosts verify that wheel's
-recorded SHA-256 and run packaged dashboard readiness against those exact bytes;
-a separate parallel Windows build keeps native buildability covered. The
+while Linux builds the complete wheel, source distribution, and bootstrap
+scripts in parallel. Both hosts verify the wheel's recorded
+SHA-256, run packaged dashboard readiness against those exact bytes, and run
+the platform bootstrap twice from a clean temporary root with Python indexes
+disabled for Agents Live. The bootstrap gate verifies provenance, activation,
+the stable current command, ownership, exact version, and idempotency. The
 aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain the
 stable required checks and fail unless every selected job succeeds.
 Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a

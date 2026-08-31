@@ -198,6 +198,13 @@ that ran the agent.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload. An installed
+  self-managed runtime resolves and verifies the official latest stable release,
+  stages it beside the active generation, and switches the `current` link;
+  `--from <wheel>` uses the same generation builder for candidate acceptance.
+  Version directories are retained, so running processes may finish on the
+  prior generation without blocking activation. A uv-managed runtime retains
+  the existing uv upgrade behavior during migration.
+  An installed
   native Windows tool queues runtime replacement until the invoking process
   exits. Installed-tool watchers keep started intent unchanged, finish any
   active dispatch, quiesce at their next idle check, and are restored by
@@ -211,7 +218,10 @@ that ran the agent.
   A scan covers every effective discovery root except unclaimed standard
   client skill roots. A repository can opt a client root into migration by
   naming it in `agent_directories`.
-- `uninstall` removes host integration and the uv-managed tool. If a watcher
+- `uninstall` removes host integration and whichever installation owns the
+  running command. A self-managed install removes its generation root and
+  installer-added PATH exposure; a uv-managed install asks uv to remove its
+  tool. If a watcher
   from that installation does not stop within the grace period, the command
   exits nonzero before host cleanup and names the processes to stop. On native
   Windows, a successful command queues final tool removal until its own

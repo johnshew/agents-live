@@ -36,6 +36,14 @@ CHANGELOG_URL = (
     "src/agents_live/skill/docs/changelog.md"
 )
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
+BOOTSTRAP_ASSETS = (
+    "install.ps1",
+    "install.sh",
+)
+BOOTSTRAP_BUILD_INPUTS = (
+    ROOT / "install.ps1",
+    ROOT / "install.sh",
+)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
@@ -571,6 +579,11 @@ def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
     preserved_wheel = destination / wheel.name
     shutil.copy2(wheel, preserved_wheel)
     shutil.copy2(sdist, destination / sdist.name)
+    for name in BOOTSTRAP_ASSETS:
+        source = ROOT / "dist" / name
+        if not source.is_file():
+            raise ReleaseError(f"prepared bootstrap asset is missing: dist/{name}")
+        shutil.copy2(source, destination / name)
     return preserved_wheel
 
 
@@ -627,6 +640,16 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     if not sdist.is_file():
         raise ReleaseError(
             f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+    installers = []
+    for name in BOOTSTRAP_ASSETS:
+        path = wheel.parent / name
+        if not path.is_file():
+            raise ReleaseError(
+                f"prepared bootstrap asset is missing: {path.relative_to(ROOT)}")
+        installers.append({
+            "path": path.relative_to(ROOT).as_posix(),
+            "sha256": _sha256(path),
+        })
     return {
         "version": version,
         "tag": f"v{version}",
@@ -637,6 +660,7 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
         "wheel_sha256": _sha256(wheel),
         "sdist": sdist.relative_to(ROOT).as_posix(),
         "sdist_sha256": _sha256(sdist),
+        "installers": installers,
     }
 
 
@@ -693,6 +717,9 @@ def _write_artifact_manifest(version: str, preparation: dict) -> Path:
     ):
         path = Path(str(preparation[path_key]))
         lines.append(f"{preparation[hash_key]}  {path.name}")
+    for installer in preparation["installers"]:
+        path = Path(str(installer["path"]))
+        lines.append(f"{installer['sha256']}  {path.name}")
     destination.write_text("\n".join(lines) + "\n", encoding="ascii")
     return destination
 
@@ -1126,7 +1153,7 @@ def _build_release_artifacts() -> None:
         ])
         source = temporary / "source"
         shutil.unpack_archive(archive, source, filter="data")
-        for path in RELEASE_FILES:
+        for path in (*RELEASE_FILES, *BOOTSTRAP_BUILD_INPUTS):
             relative = path.relative_to(ROOT)
             destination = source / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1134,6 +1161,8 @@ def _build_release_artifacts() -> None:
         _run([
             "uv", "build", "--out-dir", str(ROOT / "dist"), str(source),
         ])
+        for name in ("install.ps1", "install.sh"):
+            shutil.copy2(source / name, ROOT / "dist" / name)
 
 
 def _gate_commands() -> list[list[str]]:
@@ -1589,6 +1618,7 @@ def publish() -> None:
     accepted_artifacts = (
         Path(str(preparation["wheel"])),
         Path(str(preparation["sdist"])),
+        *(Path(str(asset["path"])) for asset in preparation["installers"]),
     )
     if needs_push:
         _run([

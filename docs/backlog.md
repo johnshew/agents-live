@@ -129,16 +129,15 @@ gap before the platform is releasable from an installed artifact
 
 The first priority cluster is the installation and upgrade path itself. The
 project already accepts the generation-based deployment model as the durable
-shape for the runtime: a versioned installation root, a stable launcher, atomic
-pointer activation, and ownership-aware health checks. The remaining work is to
-move the active install and bootstrap flow onto that model and make the native
-Windows path safe, directly downloadable, and resilient to stale caches and
-configured indexes.
+shape for the runtime: immutable version directories, one stable `current`
+directory link, and ownership-aware health checks. Public bootstrap installs
+authenticated release bytes into that model on Windows and POSIX without a
+custom launcher or package-index fallback for Agents Live.
 
 This cluster is currently tracked by [#334](https://github.com/johnshew/agents-live/issues/334)
 and [#395](https://github.com/johnshew/agents-live/issues/395), with follow-on
-work for migration, collector cleanup, and the Windows launcher tramping step
-still attached to the same delivery line.
+work for migration and collector cleanup still attached to the same delivery
+line.
 
 ## Runtime repair and operational safety
 

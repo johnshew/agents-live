@@ -26,8 +26,8 @@ agents_live/
   state/                 repository registry, ownership, started intent
   obs/                   event schema, administrative events, query, timeline
   pipeline/              run-scoped MCP resources and stdio bridge
-  deploy/                installation root, generation pointer, launcher,
-                         ownership, and lifecycle planning (not yet in use)
+  deploy/                installation root, immutable generations, current
+                         link, ownership, and lifecycle planning
   cli/
     commands/            importable command handlers
     scripts/             optional-dependency PEP 723 tools
@@ -49,10 +49,10 @@ Two root resources are temporary physical-path compatibility exceptions:
 
 Both exceptions expire with the 5.x artifact migration support in 7.0.
 
-`deploy/` is present but inert: it computes the installation root, generation
-directories, pointer, and launcher paths, classifies which channel owns an
-installation, and plans the generation lifecycle. Nothing installs, upgrades,
-or uninstalls through it yet - installation remains uv-managed. See
+`deploy/` computes the installation root, version directories, stable current
+command paths, and ownership, and implements generation activation. Public
+bootstrap installs through this layout; self-managed upgrade and uninstall
+operate on it. See
 [decisions/deployment-generations.md](decisions/deployment-generations.md).
 
 ## Definitions

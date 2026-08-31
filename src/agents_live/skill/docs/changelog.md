@@ -11,6 +11,13 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: install verified releases through first-party Windows and POSIX bootstraps. (#395)
+  Exact or latest-stable assets are authenticated against GitHub release
+  metadata, installed as immutable versions, activated through one stable
+  `current` directory link, and accepted from clean Windows and Linux roots
+  without resolving Agents Live through a configured package index. Existing
+  uv installs migrate under explicit ownership rules; upgrade, doctor, and
+  uninstall now honor the self-managed generation layout.
 - feat: preview the complete processor run context without executing it. (#379)
   `agents-live context` renders the selected agent's resolved environment and
   processor inputs as text or JSON so definitions can be checked before a run.

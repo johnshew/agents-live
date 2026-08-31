@@ -91,12 +91,8 @@ def _read_metadata(url: str, *, opener: Callable[..., Any]) -> dict[str, Any]:
     return document
 
 
-def resolve(
-    version: str | None = None,
-    *,
-    opener: Callable[..., Any] = urllib.request.urlopen,
-) -> ReleaseArtifact:
-    """Resolve one stable release wheel and its GitHub-recorded digest."""
+def _release(version: str | None, *, opener: Callable[..., Any]
+             ) -> tuple[str, dict[str, Any]]:
     if version is None:
         metadata_url = f"{API_ROOT}/latest"
     else:
@@ -120,7 +116,13 @@ def resolve(
     if document.get("draft") is not False or document.get("prerelease") is not False:
         raise ReleaseArtifactError(f"GitHub release v{resolved} is not stable")
 
-    name = f"agents_live-{resolved}-py3-none-any.whl"
+    return resolved, document
+
+
+def _asset(resolved: str, document: dict[str, Any], name: str
+           ) -> ReleaseArtifact:
+    if not name or Path(name).name != name:
+        raise ReleaseArtifactError(f"invalid release asset name: {name!r}")
     assets = document.get("assets")
     if not isinstance(assets, list):
         raise ReleaseArtifactError(
@@ -153,6 +155,49 @@ def resolve(
         resolved, name, expected_url, digest.removeprefix("sha256:"), size)
 
 
+def resolve_asset(
+    name: str,
+    version: str | None = None,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> ReleaseArtifact:
+    """Resolve one named release asset and its GitHub-recorded digest."""
+    resolved, document = _release(version, opener=opener)
+    return _asset(resolved, document, name)
+
+
+def resolve(
+    version: str | None = None,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> ReleaseArtifact:
+    """Resolve one stable release wheel and its GitHub-recorded digest."""
+    resolved, document = _release(version, opener=opener)
+    return _asset(
+        resolved, document, f"agents_live-{resolved}-py3-none-any.whl")
+
+
+def verify_file(artifact: ReleaseArtifact, path: Path) -> None:
+    """Fail unless a local file is exactly the authenticated release asset."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ReleaseArtifactError(
+            f"could not read {artifact.name}: {exc}") from exc
+    if size != artifact.size:
+        raise ReleaseArtifactError(
+            f"{artifact.name} was {size} bytes, expected {artifact.size}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual != artifact.sha256:
+        raise ReleaseArtifactError(
+            f"{artifact.name} checksum mismatch: expected "
+            f"{artifact.sha256}, got {actual}")
+
+
 @contextmanager
 def verified_download(
     artifact: ReleaseArtifact,
@@ -179,14 +224,7 @@ def verified_download(
                             f"{artifact.name} exceeded its recorded size")
                     digest.update(block)
                     stream.write(block)
-        if size != artifact.size:
-            raise ReleaseArtifactError(
-                f"{artifact.name} was {size} bytes, expected {artifact.size}")
-        actual = digest.hexdigest()
-        if actual != artifact.sha256:
-            raise ReleaseArtifactError(
-                f"{artifact.name} checksum mismatch: expected "
-                f"{artifact.sha256}, got {actual}")
+        verify_file(artifact, destination)
         yield destination
     finally:
         shutil.rmtree(staging, ignore_errors=True)

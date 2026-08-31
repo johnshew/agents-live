@@ -121,7 +121,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           cache-dependency-glob: pyproject.toml
-      - run: uv build
+      - run: uv run --script tools/release.py --build-artifacts
       - id: wheel
         shell: bash
         run: |
@@ -140,21 +140,6 @@ jobs:
           name: ${{ inputs['artifact-name'] }}
           path: dist/*
           if-no-files-found: error
-
-  windows-build:
-    if: >-
-      needs.changes.outputs.full == 'true' &&
-      (inputs.os == '' || inputs.os == 'all' || inputs.os == 'windows-latest')
-    needs: changes
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-      - uses: astral-sh/setup-uv@v10.0.1
-        with:
-          cache-dependency-glob: pyproject.toml
-      - run: uv build
 
   readiness:
     if: needs.changes.outputs.full == 'true'
@@ -184,9 +169,37 @@ jobs:
           uv run --script tools/dashboard-readiness.py
           --wheel dist/${{ needs.wheel.outputs.name }}
 
+  bootstrap-readiness:
+    if: needs.changes.outputs.full == 'true'
+    needs: [changes, wheel]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'ubuntu-latest' && '["ubuntu-latest"]' || inputs.os == 'windows-latest' && '["windows-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          cache-dependency-glob: pyproject.toml
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist
+      - shell: bash
+        env:
+          WHEEL_NAME: ${{ needs.wheel.outputs.name }}
+          WHEEL_SHA256: ${{ needs.wheel.outputs.sha256 }}
+        run: echo "$WHEEL_SHA256  dist/$WHEEL_NAME" | sha256sum --check -
+      - run: >-
+          uv run --script tools/bootstrap-readiness.py
+          --wheel dist/${{ needs.wheel.outputs.name }}
+
   test:
     if: always()
-    needs: [changes, audit, source, wheel, windows-build, readiness]
+    needs: [changes, audit, source, wheel, readiness, bootstrap-readiness]
     strategy:
       fail-fast: false
       matrix:
@@ -201,8 +214,8 @@ jobs:
           AUDIT: ${{ needs.audit.result }}
           SOURCE: ${{ needs.source.result }}
           WHEEL: ${{ needs.wheel.result }}
-          WINDOWS_BUILD: ${{ needs.windows-build.result }}
           READINESS: ${{ needs.readiness.result }}
+          BOOTSTRAP_READINESS: ${{ needs.bootstrap-readiness.result }}
         run: |
           test "$CHANGES" = success
           test "$AUDIT" = success
@@ -210,9 +223,7 @@ jobs:
             test "$SOURCE" = success
             test "$WHEEL" = success
             test "$READINESS" = success
-            if test '${{ matrix.os }}' = windows-latest; then
-              test "$WINDOWS_BUILD" = success
-            fi
+            test "$BOOTSTRAP_READINESS" = success
           else
             echo "Documentation-only change; audit passed on Linux."
           fi

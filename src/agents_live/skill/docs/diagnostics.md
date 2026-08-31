@@ -25,23 +25,22 @@ and `agents-live doctor --repair` to apply it.
 
 ## Native Windows first run
 
-Install one provider CLI and uv through WinGet. Native provider packages avoid
+Install one provider CLI through WinGet. Native provider packages avoid
 the `.cmd` and `.ps1` shims that unattended dispatch intentionally refuses:
 
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
-winget install --id=astral-sh.uv -e
 ```
 
-Open a new PowerShell session after WinGet changes PATH. Install Agents Live,
-update PATH for future shells, and invoke the installed executable by its
-absolute uv bin path in the current shell:
+Run the official release bootstrap. It installs uv if needed, verifies the
+wheel against GitHub's recorded size and SHA-256 digest, installs it into its
+version directory, and invokes the generated command under `current` without
+waiting for PATH refresh:
 
 ```powershell
-uv tool install agents-live
-uv tool update-shell
-$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
 & $agentsLive --repo C:\path\to\repository init
 & $agentsLive --repo C:\path\to\repository doctor
 ```
@@ -67,7 +66,10 @@ Inside WSL, test the WSL network path separately:
 curl --head https://files.pythonhosted.org
 ```
 
-If the request fails with a TLS handshake alert and the Microsoft package
+The bootstrap reports GitHub metadata and asset proxy/TLS failures explicitly
+and never falls back to a Python index for Agents Live. Dependencies installed
+inside the verified generation still use uv's configured index. If that
+dependency request fails with a TLS handshake alert and the Microsoft package
 proxy is available, configure uv through its user-level `uv.toml`. Use
 `%APPDATA%\uv\uv.toml` on native Windows and `~/.config/uv/uv.toml` inside
 WSL. Windows and WSL are separate runtimes; configure each one independently.

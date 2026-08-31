@@ -93,15 +93,19 @@ same correction task through validated, deterministic write boundaries.
 Install at least one supported provider CLI using its current official
 installer: [Claude Code](https://code.claude.com/docs/en/setup) or
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started).
-Then install [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-and Agents Live.
+The preferred fresh-install path is the verified release bootstrap. It installs
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/) when needed,
+authenticates the exact Agents Live release assets against GitHub release
+metadata, stages and validates an immutable generation, and only then activates
+it. Omitting a version selects GitHub's latest stable release.
 
 On Debian or Ubuntu:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo apt install cron inotify-tools
-uv tool install agents-live
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 agents-live init
 ```
 
@@ -121,22 +125,27 @@ On Windows:
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
-winget install --id=astral-sh.uv -e
 ```
 
-Open a new PowerShell session, then install the tool and update future shells:
+Install the latest stable release. The final line prints and invokes the exact
+stable executable path, so the current shell does not depend on refreshed PATH:
 
 ```powershell
-uv tool install agents-live
-uv tool update-shell
-$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
 & $agentsLive --repo C:\path\to\repository init
 ```
 
+Pass an exact stable version as the first script argument after downloading the
+installer when reproducibility requires pinning. Re-running the same version is
+idempotent. An existing uv-managed install is retired only after the generation
+is active; a host where uv and an active generation both claim ownership is
+refused with corrective guidance. Network, proxy, TLS, missing-digest, size,
+and checksum failures stop without a package-index or stale-cache fallback.
+
 Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
-install. Using the absolute path from `uv tool dir --bin` avoids mistaking the
-current shell's stale `PATH` for an installation failure. `init` prints the
-PowerShell completion script path and the exact line to add to `$PROFILE`.
+install. `init` prints the PowerShell completion script path and the exact line
+to add to `$PROFILE`.
 
 The installed `.claude/skills/agents-live/` payload is tool-managed and carries
 a directory-local `.gitignore`; project-authored sibling skills are unaffected.

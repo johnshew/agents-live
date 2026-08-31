@@ -38,12 +38,15 @@ from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
 from agents_live.cli import lifecycle, resolve, upgrade_handoff
 from agents_live.cli.commands import (
+    doctor,
     install_generation,
     install_release,
     internal,
     ownership as ownership_command,
     start,
     stop,
+    uninstall,
+    upgrade,
 )
 from agents_live.obs import qlog
 from agents_live.obs.events import append as append_event
@@ -2218,6 +2221,18 @@ class TestInstallationGenerations(unittest.TestCase):
         (directory / "bin").mkdir(parents=True, exist_ok=True)
         return directory
 
+    def _activate_generation(self, name: str) -> deploy.generation.Generation:
+        try:
+            built = deploy.generation.load(name)
+        except deploy.generation.GenerationError:
+            built = deploy.generation.build(
+                name,
+                populate=lambda staging: (staging / "bin").mkdir(parents=True),
+                validate=lambda _staging: None,
+            )
+        deploy.generation.activate(built)
+        return built
+
     def _uv_environment(self) -> Path:
         environment = Path(self.temporary.name) / "uv-tools" / "agents-live"
         (environment / "bin").mkdir(parents=True, exist_ok=True)
@@ -2292,53 +2307,41 @@ class TestInstallationGenerations(unittest.TestCase):
                     deploy.layout.generations_root(), directory.parent)
                 self.assertIn(self.root, directory.parents)
 
-    def test_activation_is_one_pointer_write_and_rollback_is_the_same_write(
+    def test_activation_switches_only_the_stable_current_directory(
             self) -> None:
-        """The pointer is data, not an executable.
+        """PATH stays fixed while current selects one immutable generation.
 
-        That is the property the whole model rests on: Windows locks a
-        running image, so an activation that rewrote `agents-live.exe`
-        would reintroduce #231 in a new place. It also makes rollback
-        free, because the previous generation was never modified.
+        Windows locks a running image, so activation must never rewrite that
+        image. Rollback is the same directory-link switch in reverse.
         """
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
-        deploy.pointer.write("6.6.0", owner=deploy.ownership.SELF)
-        self.assertEqual(
-            ["current.json"], sorted(item.name for item in self.root.iterdir()))
+        old = self._activate_generation("6.5.0")
+        new = self._activate_generation("6.6.0")
         self.assertEqual("6.6.0", deploy.pointer.read().generation)
+        self.assertEqual(new.path.resolve(), deploy.layout.current_path().resolve())
+        self.assertFalse((self.root / "current.json").exists())
 
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        deploy.generation.activate(old)
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
+        self.assertEqual(old.path.resolve(), deploy.layout.current_path().resolve())
 
-    def test_a_pointer_this_runtime_cannot_read_is_refused_not_guessed(
+    def test_an_invalid_current_target_is_refused_not_guessed(
             self) -> None:
         """Guessing is how a host runs a generation nobody activated.
 
-        Both damaged pointers stay damaged: with generations on disk,
-        an implementation that "recovered" by picking the newest
-        directory would look healthy and run something unactivated.
+        With generations on disk, an implementation that recovered by picking
+        the newest directory would look healthy and run something unactivated.
         """
         self._generation("6.5.0")
         self._generation("6.6.0")
-        pointer_path = deploy.layout.pointer_path()
-
-        pointer_path.write_text("{not json", encoding="utf-8")
-        with self.assertRaises(deploy.pointer.PointerError) as malformed:
+        current = deploy.layout.current_path()
+        current.mkdir(parents=True)
+        with self.assertRaises(deploy.pointer.PointerError) as invalid:
             deploy.pointer.read()
-        self.assertEqual(deploy.pointer.MALFORMED, malformed.exception.reason)
-
-        pointer_path.write_text(
-            json.dumps({"format": deploy.pointer.FORMAT + 1,
-                        "generation": "6.6.0"}), encoding="utf-8")
-        with self.assertRaises(deploy.pointer.PointerError) as unsupported:
-            deploy.pointer.read()
-        self.assertEqual(
-            deploy.pointer.UNSUPPORTED, unsupported.exception.reason)
-        self.assertIn("launcher", str(unsupported.exception))
+        self.assertEqual(deploy.pointer.INVALID, invalid.exception.reason)
 
         found, state, detail = deploy.pointer.status()
         self.assertIsNone(found)
-        self.assertEqual(deploy.pointer.UNSUPPORTED, state)
+        self.assertEqual(deploy.pointer.INVALID, state)
         self.assertNotIn("6.6.0", detail)
 
     def test_the_running_image_decides_which_channel_owns_the_runtime(
@@ -2351,7 +2354,7 @@ class TestInstallationGenerations(unittest.TestCase):
         it acts cannot afford a subprocess that may hang.
         """
         generation = self._generation("6.5.0")
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        deploy.generation._replace_current(generation, root=self.root)
 
         managed = deploy.ownership.describe(
             executable=generation / "bin" / "agents-live")
@@ -2378,7 +2381,8 @@ class TestInstallationGenerations(unittest.TestCase):
         different door (#369).
         """
         self._generation("6.5.0")
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        deploy.generation._replace_current(
+            deploy.layout.generation_dir("6.5.0"), root=self.root)
 
         contested = deploy.ownership.describe(executable=self._uv_environment())
         self.assertTrue(contested.contested)
@@ -2412,7 +2416,7 @@ class TestInstallationGenerations(unittest.TestCase):
     def test_failed_validation_leaves_the_active_generation_untouched(
             self) -> None:
         """A broken candidate stays recognizable and inert beside the active."""
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        self._activate_generation("6.5.0")
 
         def populate(staging: Path) -> None:
             staging.mkdir(parents=True)
@@ -2475,11 +2479,11 @@ class TestInstallationGenerations(unittest.TestCase):
 
     def test_activation_refuses_unvalidated_or_damaged_installation_state(
             self) -> None:
-        """Activation cannot skip validation or overwrite pointer damage."""
+        """Activation cannot skip validation or overwrite an invalid selection."""
         incomplete = self._generation("6.6.0")
         with self.assertRaises(deploy.generation.GenerationError):
             deploy.generation.load("6.6.0")
-        self.assertFalse(deploy.layout.pointer_path().exists())
+        self.assertFalse(deploy.layout.current_path().exists())
 
         shutil.rmtree(incomplete)
         built = deploy.generation.build(
@@ -2487,14 +2491,11 @@ class TestInstallationGenerations(unittest.TestCase):
             populate=lambda staging: staging.mkdir(parents=True),
             validate=lambda _staging: None,
         )
-        deploy.layout.pointer_path().write_text("{broken", encoding="utf-8")
+        deploy.layout.current_path().mkdir()
         with self.assertRaises(deploy.generation.GenerationError) as refused:
             deploy.generation.activate(built)
-        self.assertIn("not readable JSON", str(refused.exception))
-        self.assertEqual(
-            "{broken",
-            deploy.layout.pointer_path().read_text(encoding="utf-8"),
-        )
+        self.assertIn("points outside versions", str(refused.exception))
+        self.assertTrue(deploy.layout.current_path().is_dir())
 
     def test_hidden_install_seam_builds_and_activates_an_exact_wheel(
             self) -> None:
@@ -2649,7 +2650,7 @@ class TestInstallationGenerations(unittest.TestCase):
                 self.fail("unverified bytes were yielded")
         self.assertIn("checksum mismatch", str(failed.exception))
         self.assertEqual([], list(self.root.glob(".artifact-*")))
-        self.assertFalse(deploy.layout.pointer_path().exists())
+        self.assertFalse(deploy.layout.current_path().exists())
 
     def test_verified_release_cli_builds_the_generation_from_a_local_wheel(
             self) -> None:
@@ -2712,6 +2713,10 @@ class TestInstallationGenerations(unittest.TestCase):
         )
         self.assertEqual(0, launched.returncode, launched.stderr)
         self.assertEqual(f"agents-live {version}", launched.stdout.strip())
+        self.assertIn(
+            f"stable command: {deploy.layout.command_path()}", stdout.getvalue())
+        self.assertEqual(
+            deploy.ownership.SELF, deploy.ownership.read_record())
 
         with (
             mock.patch.object(
@@ -2752,7 +2757,7 @@ class TestInstallationGenerations(unittest.TestCase):
             "github-release", wheel.name, digest)
         built = install_generation.install(
             version, source=wheel, root=self.root, provenance=provenance)
-        deploy.pointer.write("6.5.0", owner=deploy.ownership.SELF)
+        self._activate_generation("6.5.0")
         install_generation.executable(built).unlink()
 
         stderr = io.StringIO()
@@ -2780,6 +2785,54 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertIn("is damaged: missing launcher", stderr.getvalue())
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
         download.assert_not_called()
+
+    def test_uv_migration_refuses_contested_ownership_before_resolution(
+            self) -> None:
+        """A second owner cannot download, stage, or replace launchers."""
+        self._activate_generation("9.7.5")
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(install_release, "find_uv", return_value="uv"),
+            mock.patch.object(
+                install_release, "_uv_tool_installed", return_value=True),
+            mock.patch.object(deploy.release_artifact, "resolve") as resolve,
+            contextlib.redirect_stderr(stderr),
+        ):
+            with mock.patch.dict(
+                    os.environ, {install_release.ENV_MIGRATE_UV: "1"}):
+                code = install_release.main(["--activate"])
+
+        self.assertEqual(1, code)
+        self.assertIn("retire one owner", stderr.getvalue())
+        resolve.assert_not_called()
+        self.assertEqual("9.7.5", deploy.pointer.read().generation)
+
+    def test_failed_uv_retirement_rolls_back_active_generation_ownership(
+            self) -> None:
+        """Migration does not leave uv and the generation layout both active."""
+        version = "9.7.6"
+        wheel = self._package_wheel(version)
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        with (
+            mock.patch.object(install_release, "find_uv", return_value="uv"),
+            mock.patch.object(
+                install_release, "_uv_tool_installed", return_value=True),
+            mock.patch.object(
+                install_release, "_retire_uv_tool",
+                side_effect=deploy.generation.GenerationError("uv refused")),
+            mock.patch.dict(os.environ, {
+                install_release.ENV_WHEEL: str(wheel),
+                install_release.ENV_WHEEL_SHA256: digest,
+                install_release.ENV_MIGRATE_UV: "1",
+            }),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = install_release.main([version, "--activate"])
+
+        self.assertEqual(1, code)
+        self.assertEqual(deploy.pointer.MISSING, deploy.pointer.status()[1])
+        self.assertIsNone(deploy.ownership.read_record())
+        self.assertEqual((version,), deploy.layout.installed_generations())
 
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
@@ -2837,36 +2890,71 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual("rollback", deploy.plan.recovery("unverified").action)
         self.assertEqual(
             "discard", deploy.plan.recovery("staging").action)
-        self.assertTrue(deploy.plan.recovery("pointer-unsupported").manual)
         self.assertIsNone(deploy.plan.recovery("invented-state"))
 
-    def test_the_existing_upgrade_path_does_not_activate_generations(
+    def test_self_managed_upgrade_switches_generations_through_current(
             self) -> None:
-        """The hidden builder seam does not switch the active upgrade path.
-
-        Installation, upgrade, and uninstall stay uv-managed until their
-        migration lands. Only the explicit hidden generation command composes
-        the new mutating API.
-        """
-        self.assertEqual((), deploy.layout.installed_generations())
+        """Upgrade changes only current and retains the old generation."""
+        old = deploy.generation.build(
+            "9.7.5",
+            populate=lambda staging: staging.mkdir(parents=True),
+            validate=lambda _staging: None,
+        )
+        deploy.generation.activate(old)
+        deploy.ownership.write_record(deploy.ownership.SELF)
+        wheel = self._package_wheel("9.7.6")
+        self.assertEqual(0, upgrade._upgrade_self_managed(wheel))
+        self.assertEqual("9.7.6", deploy.pointer.read().generation)
         self.assertEqual(
-            deploy.pointer.MISSING, deploy.pointer.status()[1])
+            ("9.7.5", "9.7.6"), deploy.layout.installed_generations())
+        installed = deploy.generation.load("9.7.6")
+        self.assertEqual("local-artifact", installed.provenance.channel)
+        self.assertEqual(
+            hashlib.sha256(wheel.read_bytes()).hexdigest(),
+            installed.provenance.sha256,
+        )
+        self.assertEqual(
+            installed.path.resolve(), deploy.layout.current_path().resolve())
 
-        package = REPOSITORY / "src" / "agents_live"
-        writers = {
-            path.relative_to(package).as_posix()
-            for path in package.rglob("*.py")
-            if not path.relative_to(package).as_posix().startswith("deploy/")
-            and any(call in path.read_text(encoding="utf-8")
-                    for call in ("pointer.write(", "ownership.write_record("))
-        }
-        self.assertEqual(set(), writers)
-        upgrade_source = (
-            REPOSITORY / "src" / "agents_live" / "cli" / "commands" /
-            "upgrade.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("install_generation", upgrade_source)
-        self.assertNotIn("deploy.generation", upgrade_source)
+        self.assertEqual(0, upgrade._upgrade_self_managed(wheel))
+        self.assertEqual(
+            ("9.7.5", "9.7.6"), deploy.layout.installed_generations())
+
+    def test_doctor_validates_current_commands_and_generation(self) -> None:
+        """Ownership alone is not health when a generated command is gone."""
+        wheel = self._package_wheel("9.7.6")
+        built = install_generation.install("9.7.6", source=wheel, root=self.root)
+        deploy.generation.activate(built)
+        deploy.ownership.write_record(deploy.ownership.SELF)
+        installation = deploy.ownership.describe(
+            executable=hostruntime.executable_dir(built.path)
+            / hostruntime.executable_filename("python"))
+
+        with mock.patch.object(
+                deploy.ownership, "describe", return_value=installation):
+            healthy = doctor._installation_check()
+            deploy.layout.command_path("al").unlink()
+            damaged = doctor._installation_check()
+
+        self.assertTrue(healthy["ok"])
+        self.assertIn("current selection", healthy["detail"])
+        self.assertFalse(damaged["ok"])
+        self.assertIn("missing stable command", damaged["detail"])
+
+    def test_self_managed_uninstall_removes_the_owned_root(self) -> None:
+        """The self-managed channel never delegates removal to uv."""
+        marker = self.root / "versions" / "9.7.6" / "installed"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("yes", encoding="utf-8")
+
+        with (
+            mock.patch.object(uninstall, "_remove_command_exposure"),
+            mock.patch.object(
+                uninstall.hostruntime, "id", return_value=hostruntime.LINUX),
+        ):
+            self.assertTrue(uninstall._remove_self_managed(self.root))
+
+        self.assertFalse(self.root.exists())
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
@@ -3139,14 +3227,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertRegex(workflow, r"(?m)^  source:")
         self.assertRegex(workflow, r"(?m)^  wheel:")
         self.assertRegex(workflow, r"(?m)^  readiness:")
+        self.assertRegex(workflow, r"(?m)^  bootstrap-readiness:")
         self.assertRegex(workflow, r"(?m)^  test:")
         self.assertIn("suite:", workflow)
         self.assertIn("exact-wheel-${{ github.run_id }}", workflow)
         self.assertIn("needs.wheel.outputs.sha256", workflow)
         self.assertIn("sha256sum --check", workflow)
         self.assertIn("--wheel dist/${{ needs.wheel.outputs.name }}", workflow)
-        self.assertEqual(2, workflow.count("uv build"))
-        self.assertIn("needs: [changes, audit, source, wheel, windows-build, readiness]", workflow)
+        self.assertIn("tools/release.py --build-artifacts", workflow)
+        self.assertIn("tools/bootstrap-readiness.py", workflow)
+        self.assertIn("bootstrap-readiness]", workflow)
 
     def test_workflow_actions_use_node24_and_real_cache_inputs(self) -> None:
         test = self._workflow_text("test.yml")
@@ -3181,7 +3271,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             release_files = tuple(root / name for name in (
                 "pyproject.toml", "src/__init__.py", "src/VERSION",
                 "src/changelog.md"))
-            for path in release_files:
+            bootstrap_inputs = tuple(root / name for name in (
+                "install.ps1", "install.sh"))
+            for path in (*release_files, *bootstrap_inputs):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("committed\n", encoding="utf-8")
             (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
@@ -3198,6 +3290,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             excluded.write_text("local only\n", encoding="utf-8")
             (root / ".git" / "info" / "exclude").write_text(
                 ".copilot-tracking/\n", encoding="utf-8")
+            (root / "dist").mkdir()
             observed: dict[str, bool] = {}
 
             def run(command: list[str], *, capture: bool = False) -> str:
@@ -3218,6 +3311,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "ROOT": root,
                 "RELEASE_FILES": release_files,
+                "BOOTSTRAP_BUILD_INPUTS": bootstrap_inputs,
                 "_run": run,
             }):
                 build()
@@ -3463,6 +3557,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "tag_object": "annotated-tag-object",
             "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
             "sdist": "dist/agents_live-1.2.3.tar.gz",
+            "installers": [
+                {"path": f"dist/{name}", "sha256": "digest"}
+                for name in release["BOOTSTRAP_ASSETS"]
+            ],
         })
         acceptance = mock.Mock(return_value={"accepted": True})
         release_notes = mock.Mock()
@@ -3498,6 +3596,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 Path("SHA256SUMS-1.2.3"),
                 Path("dist/agents_live-1.2.3-py3-none-any.whl"),
                 Path("dist/agents_live-1.2.3.tar.gz"),
+                                *(Path(f"dist/{name}")
+                                    for name in release["BOOTSTRAP_ASSETS"]),
             ),
             resume_draft=False)
 
@@ -3541,6 +3641,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             wheel.parent.mkdir()
             wheel.write_bytes(b"candidate wheel")
             sdist.write_bytes(b"candidate sdist")
+            for name in release["BOOTSTRAP_ASSETS"]:
+                (wheel.parent / name).write_bytes(name.encode())
             receipt = root / "preparation.json"
 
             def git(*args: str) -> str:
@@ -3593,6 +3695,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             wheel.parent.mkdir()
             wheel.write_bytes(b"accepted wheel")
             sdist.write_bytes(b"accepted sdist")
+            for name in release["BOOTSTRAP_ASSETS"]:
+                (wheel.parent / name).write_bytes(name.encode())
             store = root / ".git" / "release" / "artifacts-1.2.3"
             with mock.patch.dict(scope, {
                 "ROOT": root,
@@ -3605,6 +3709,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(
                     b"accepted sdist",
                     (store / "agents_live-1.2.3.tar.gz").read_bytes())
+                for name in release["BOOTSTRAP_ASSETS"]:
+                    self.assertEqual(name.encode(), (store / name).read_bytes())
                 self.assertEqual(preserved, candidate_wheel("1.2.3"))
 
     def test_candidate_acceptance_receipt_binds_commit_and_wheel(self) -> None:

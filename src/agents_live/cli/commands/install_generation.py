@@ -133,6 +133,18 @@ def validate(generation: deploy.generation.Generation) -> None:
     _validate(generation.name, generation.path)
 
 
+def validate_environment(version: str, environment: Path) -> None:
+    """Validate a dedicated environment before it is sealed as immutable."""
+    launcher = (
+        hostruntime.executable_dir(environment)
+        / hostruntime.executable_filename("agents-live")
+    )
+    if not launcher.is_file():
+        raise deploy.generation.GenerationError(
+            f"generation {version} is damaged: missing launcher")
+    _validate(version, environment)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and optionally activate one self-managed generation")

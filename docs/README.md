@@ -38,8 +38,8 @@ this directory is installed by `agents-live init` or `upgrade`.
   use the JSON CLI and child process contract instead of importing the
   package, and what handlers should call instead.
 - [decisions/deployment-generations.md](decisions/deployment-generations.md) -
-  why an installation owns a generation root, a data pointer, and a stable
-  launcher, and what each partial failure recovers to.
+  why installation writes immutable version directories, selects one with a
+  `current` directory link, and how each partial failure recovers.
 - [processor-contract.md](processor-contract.md) - why the processor contract
   is shaped the way it is, and which alternatives were rejected. The contract
   itself is specified in the skill payload.

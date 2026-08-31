@@ -1,5 +1,5 @@
 """Deployment vocabulary and primitives: installation root, generation
-pointer, stable launcher, and the planning rules around them.
+selection, and the planning rules around them.
 
 This subsystem is the foundation described in #334 (step 1: installation
 root and stable launcher) with the vocabulary, failure semantics, and
