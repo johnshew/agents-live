@@ -198,11 +198,14 @@ def expose_user_path_directory(directory: Path) -> None:
                 value, kind = "", winreg.REG_EXPAND_SZ
             entries = [entry for entry in str(value).split(";") if entry]
             normalized = os.path.normcase(os.path.normpath(command_root))
-            if not any(
-                    os.path.normcase(os.path.normpath(entry)) == normalized
-                    for entry in entries):
+            retained = [
+                entry for entry in entries
+                if os.path.normcase(os.path.normpath(entry)) != normalized
+            ]
+            updated = [command_root, *retained]
+            if updated != entries:
                 winreg.SetValueEx(
-                    key, "Path", 0, kind, ";".join([*entries, command_root]))
+                    key, "Path", 0, kind, ";".join(updated))
         return
 
     profile = Path.home() / ".profile"

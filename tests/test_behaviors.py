@@ -2215,6 +2215,10 @@ class TestInstallationGenerations(unittest.TestCase):
         )
         patched.start()
         self.addCleanup(patched.stop)
+        path_patch = mock.patch.object(
+            install_release, "_expose_command_root")
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
 
     def _generation(self, name: str) -> Path:
         directory = deploy.layout.generation_dir(name)
@@ -2286,6 +2290,29 @@ class TestInstallationGenerations(unittest.TestCase):
                 archive.writestr(name, content)
             archive.writestr(f"{dist_info}/RECORD", record)
         return wheel
+
+    def test_windows_generation_path_precedes_retired_tool_bins(self) -> None:
+        """The stable command must win lookup after uv migration."""
+        command_root = Path("C:/Users/example/AppData/Local/agents-live/current/Scripts")
+        key = mock.MagicMock()
+        key.__enter__.return_value = key
+        registry = mock.Mock()
+        registry.HKEY_CURRENT_USER = object()
+        registry.REG_EXPAND_SZ = 2
+        registry.CreateKey.return_value = key
+        registry.QueryValueEx.return_value = (
+            "C:\\Users\\example\\.local\\bin;"
+            f"{command_root};C:\\Windows",
+            registry.REG_EXPAND_SZ,
+        )
+        with (
+            mock.patch.object(hostruntime, "_IS_WINDOWS", True),
+            mock.patch.dict(sys.modules, {"winreg": registry}),
+        ):
+            hostruntime.expose_user_path_directory(command_root)
+        written = registry.SetValueEx.call_args.args[4].split(";")
+        self.assertEqual(str(command_root), written[0])
+        self.assertEqual(1, written.count(str(command_root)))
 
     def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
         """A staged generation writes wherever its name resolves.
@@ -2850,6 +2877,27 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(deploy.pointer.MISSING, deploy.pointer.status()[1])
         self.assertIsNone(deploy.ownership.read_record())
         self.assertEqual((version,), deploy.layout.installed_generations())
+
+    def test_uv_retirement_removes_only_its_agents_live_launchers(self) -> None:
+        """A held console shim must not outrank the selected generation."""
+        command_root = Path(self.temporary.name) / "uv-bin"
+        command_root.mkdir()
+        launchers = tuple(
+            command_root / hostruntime.executable_filename(name)
+            for name in ("agents-live", "al")
+        )
+        for launcher in (*launchers, command_root / "other.exe"):
+            launcher.write_bytes(b"launcher")
+        results = (
+            subprocess.CompletedProcess(
+                [], 0, str(command_root) + "\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        )
+        with mock.patch.object(
+                install_release.subprocess, "run", side_effect=results):
+            install_release._retire_uv_tool("uv")
+        self.assertTrue(all(not launcher.exists() for launcher in launchers))
+        self.assertTrue((command_root / "other.exe").is_file())
 
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:

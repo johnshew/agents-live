@@ -33,6 +33,14 @@ def _uv_tool_installed(uv: str) -> bool:
 
 
 def _retire_uv_tool(uv: str) -> None:
+    bin_result = subprocess.run(
+        [uv, "tool", "dir", "--bin"],
+        capture_output=True, text=True, check=False)
+    if bin_result.returncode != 0:
+        raise deploy.generation.GenerationError(
+            "could not locate the uv tool command directory: "
+            + (bin_result.stderr.strip() or bin_result.stdout.strip()))
+    command_root = Path(bin_result.stdout.strip())
     completed = subprocess.run(
         [uv, "tool", "uninstall", "agents-live"],
         capture_output=True, text=True, check=False)
@@ -40,6 +48,9 @@ def _retire_uv_tool(uv: str) -> None:
         raise deploy.generation.GenerationError(
             "could not retire the uv-managed installation: "
             + (completed.stderr.strip() or completed.stdout.strip()))
+    for name in ("agents-live", "al"):
+        (command_root / hostruntime.executable_filename(name)).unlink(
+            missing_ok=True)
 
 
 def _expose_command_root(root: Path) -> None:
