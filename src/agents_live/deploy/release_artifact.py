@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from . import layout
 
@@ -146,11 +146,13 @@ def _asset(resolved: str, document: dict[str, Any], name: str
             f"GitHub release v{resolved} does not contain exactly one {name}")
     asset = matches[0]
     expected_url = f"{DOWNLOAD_ROOT}/v{resolved}/{name}"
+    asset_url = asset.get("browser_download_url")
     digest = asset.get("digest")
     size = asset.get("size")
     if (
         asset.get("state") != "uploaded"
-        or asset.get("browser_download_url") != expected_url
+        or not isinstance(asset_url, str)
+        or unquote(asset_url) != expected_url
         or not isinstance(digest, str)
         or not digest.startswith("sha256:")
         or _SHA256.fullmatch(digest.removeprefix("sha256:")) is None
@@ -162,7 +164,7 @@ def _asset(resolved: str, document: dict[str, Any], name: str
             f"GitHub release v{resolved} has incomplete or invalid provenance "
             f"for {name}")
     return ReleaseArtifact(
-        resolved, name, expected_url, digest.removeprefix("sha256:"), size)
+        resolved, name, asset_url, digest.removeprefix("sha256:"), size)
 
 
 def resolve_asset(

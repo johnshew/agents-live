@@ -38,6 +38,7 @@ import pathlib
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 version, destination = sys.argv[1:]
@@ -89,22 +90,24 @@ if len(matches) != 1:
     raise SystemExit(f"agents-live: release v{resolved} does not contain {name}")
 asset = matches[0]
 expected_url = f"{download}/v{resolved}/{name}"
+asset_url = asset.get("browser_download_url")
 digest = asset.get("digest", "")
 size = asset.get("size")
 if (asset.get("state") != "uploaded"
-        or asset.get("browser_download_url") != expected_url
+  or not isinstance(asset_url, str)
+  or urllib.parse.unquote(asset_url) != expected_url
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
         or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
     raise SystemExit(
         f"agents-live: release v{resolved} has invalid provenance for {name}")
 path = pathlib.Path(destination, name)
 try:
-    with urllib.request.urlopen(expected_url, timeout=30) as response, path.open("xb") as stream:
+  with urllib.request.urlopen(asset_url, timeout=30) as response, path.open("xb") as stream:
         value = response.read(size + 1)
         stream.write(value)
 except (OSError, urllib.error.URLError) as error:
     raise SystemExit(
-        f"agents-live: could not download {expected_url}; check proxy and TLS "
+        f"agents-live: could not download {asset_url}; check proxy and TLS "
         f"settings; no package-index fallback was used: {error}")
 actual = hashlib.sha256(value).hexdigest()
 if len(value) != size or actual != digest[7:]:

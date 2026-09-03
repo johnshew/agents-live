@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"agents_live-(?P<version>[^-]+)-py3-none-any\.whl\Z")
@@ -55,7 +56,8 @@ def _metadata(version: str, assets: dict[str, bytes], base: str) -> bytes:
             {
                 "name": name,
                 "state": "uploaded",
-                "browser_download_url": f"{base}/download/v{version}/{name}",
+                "browser_download_url": quote(
+                    f"{base}/download/v{version}/{name}", safe=":/"),
                 "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
                 "size": len(content),
             }
@@ -69,12 +71,13 @@ def _server(version: str, assets: dict[str, bytes]):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             base = f"http://127.0.0.1:{self.server.server_port}"
-            if self.path in ("/releases/latest", f"/releases/tags/v{version}"):
+            path = unquote(self.path)
+            if path in ("/releases/latest", f"/releases/tags/v{version}"):
                 content = _metadata(version, assets, base)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-            elif self.path.startswith(f"/download/v{version}/"):
-                name = self.path.rsplit("/", 1)[-1]
+            elif path.startswith(f"/download/v{version}/"):
+                name = path.rsplit("/", 1)[-1]
                 content = assets.get(name, b"")
                 self.send_response(200 if name in assets else 404)
                 self.send_header("Content-Type", "application/octet-stream")

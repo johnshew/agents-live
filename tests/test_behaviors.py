@@ -2668,6 +2668,10 @@ class TestInstallationGenerations(unittest.TestCase):
         """A bake is opt-in and cannot be confused with a stable release."""
         version = "6.7.0.dev0+g7b01b2d"
         name = f"agents_live-{version}-py3-none-any.whl"
+        artifact_url = (
+            "https://github.com/johnshew/agents-live/releases/download/"
+            f"v{version}/{name}"
+        ).replace("+", "%2B")
         metadata = {
             "tag_name": f"v{version}",
             "draft": False,
@@ -2675,10 +2679,7 @@ class TestInstallationGenerations(unittest.TestCase):
             "assets": [{
                 "name": name,
                 "state": "uploaded",
-                "browser_download_url": (
-                    "https://github.com/johnshew/agents-live/releases/"
-                    f"download/v{version}/{name}"
-                ),
+                "browser_download_url": artifact_url,
                 "digest": f"sha256:{'0' * 64}",
                 "size": 1,
             }],
@@ -2701,6 +2702,7 @@ class TestInstallationGenerations(unittest.TestCase):
         artifact = deploy.release_artifact.resolve(
             version, opener=lambda *_args, **_kwargs: Response(True))
         self.assertEqual(version, artifact.version)
+        self.assertEqual(artifact_url, artifact.url)
         with self.assertRaises(deploy.release_artifact.ReleaseArtifactError):
             deploy.release_artifact.resolve(
                 version, opener=lambda *_args, **_kwargs: Response(False))
