@@ -38,7 +38,8 @@ function Get-ReleaseAsset($Release, [string]$Name, [string]$ResolvedVersion) {
     }
     $asset = $matches[0]
     $expectedUrl = "$downloadRoot/v$ResolvedVersion/$Name"
-    if ($asset.state -ne 'uploaded' -or $asset.browser_download_url -ne $expectedUrl -or
+    $assetUrl = [Uri]::UnescapeDataString([string]$asset.browser_download_url)
+    if ($asset.state -ne 'uploaded' -or $assetUrl -ne $expectedUrl -or
         $asset.digest -notmatch '^sha256:[0-9a-f]{64}$' -or [long]$asset.size -le 0) {
         throw "Release v$ResolvedVersion has incomplete or invalid provenance for $Name."
     }

@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: accept GitHub's encoded asset URLs for commit-qualified bake versions.
+  Bootstrap provenance still requires the exact configured repository, tag,
+  filename, size, and digest after decoding URL path characters such as `+`.
 - fix: retain self-managed generation identity through POSIX interpreter links.
   Bootstrap finalization and installation health checks recognize a virtual
   environment whose Python executable links to the host interpreter.
