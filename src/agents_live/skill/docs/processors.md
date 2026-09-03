@@ -1,7 +1,7 @@
 ---
 title: Writing a processor
 description: The contract between Agents Live and a pre- or post-processor
-ms.date: 2026-08-18
+ms.date: 2026-08-30
 ms.topic: reference
 ---
 
@@ -71,6 +71,19 @@ default. That is the whole of class 0, and the same program still runs by hand:
 uv run scripts/email_audit.py --account team-inbox
 uv run scripts/email_audit.py --account team-inbox | uv run scripts/apply.py
 ```
+
+To reproduce what Agents Live would hand one step, inspect it without starting
+the processor or provider:
+
+```bash
+agents-live context email-audit --role pre
+agents-live context email-audit --role post --json
+```
+
+The preview names the same command line, working directory, environment, and
+ephemeral channel paths as a run, but it does not materialize those paths. A
+post-processor's future stdin is unavailable. Pipeline mode is rejected because
+its MCP endpoint and credentials exist only while a run is active.
 
 ## Class 1: Agents Live aware
 
@@ -439,9 +452,12 @@ Windows caps a command line at 32767 characters, roughly 64 times smaller than
 a typical Linux `ARG_MAX`, so a prompt passed as an argument is the one handoff
 with a hard limit. Agents Live delivers the prompt by whatever route the
 provider supports for large input. Claude Code takes it on stdin, capped at
-10 MB, which is what a run uses. Copilot CLI accepts a piped prompt only when
-`-p` is omitted, and offers no `--prompt-file`, so its prompt is still an
-argument and still bounded by the host: that gap is
+10 MB, which is what a run uses. Copilot CLI offers no documented stdin or
+`--prompt-file` non-interactive contract. Omitting `-p` under the unattended
+adapter flags enters its interactive alternate-screen UI rather than returning
+the requested JSON stream. Its prompt therefore remains an argument and is
+still bounded by the host; Agents Live detects that overflow before spawning
+the child and reports the prompt size. The provider gap is tracked in
 [#374](https://github.com/johnshew/agents-live/issues/374).
 
 Everything else already streams: stdin, stdout, and the log sink are pipes or
@@ -504,10 +520,13 @@ invoked or what it reads and writes.
 | Post-processor stdin | The model's output | The snapshot of `result-path` |
 
 In `plan` mode the same rigor is available without the MCP:
-`agents-live.output-schema` validates the value extracted from the model's
-reply, and `agents-live.output-path-roots` rejects any `path` in it that
-escapes the directories you named. The model proposes; your post-processor
-disposes.
+`agents-live.output-schema` asks Claude to produce a schema-validated value
+and then validates that value again before continuing. Copilot has no
+supported schema-output option, so its final answer is parsed for JSON and
+validated locally. Definitions without a schema also use local extraction
+when another output policy needs a JSON value. In every case,
+`agents-live.output-path-roots` rejects any `path` that escapes the directories
+you named. The model proposes; your post-processor disposes.
 
 Both are tool policy and deterministic mediation, not an operating system
 sandbox. Processors run with the local account's permissions, and what else a

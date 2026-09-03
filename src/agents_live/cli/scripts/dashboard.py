@@ -42,7 +42,7 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 PACKAGE_PARENT = SCRIPTS_DIR.parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_PARENT))
+    sys.path.append(str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
 from agents_live import agent, obs, paths, preflight, runtime, state  # noqa: E402
 from agents_live.cli import agent_view, lifecycle  # noqa: E402

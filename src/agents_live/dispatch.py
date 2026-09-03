@@ -302,7 +302,7 @@ def _run(
         and spec.execution.transcript
     ):
         transcript = _write_transcript(
-            spec, run_id, attempt, raw, interpreted.transcript)
+            spec, run_id, attempt, launch, raw, interpreted.transcript)
         interpreted = replace(interpreted, transcript=str(transcript))
     return interpreted
 
@@ -333,7 +333,7 @@ def _signals(spec, step: Step, scratch: Path | None) -> agent.StepSignals:
     return agent.StepSignals(control, output)
 
 
-def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):
+def _write_transcript(spec, run_id: str, attempt: int, launch, raw, provider_ref):
     from .paths import repo_state_dir
     directory = repo_state_dir(spec.root) / "runs" / spec.name
     directory.mkdir(parents=True, exist_ok=True)
@@ -344,6 +344,8 @@ def _write_transcript(spec, run_id: str, attempt: int, raw, provider_ref):
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump({
                 "argv": list(raw.argv),
+                "prompt": launch.prompt,
+                "provider": launch.provider,
                 "provider_transcript": provider_ref,
                 "returncode": raw.returncode,
                 "stderr": raw.stderr,
@@ -376,6 +378,13 @@ def _finish(
             structured=value if present else None,
             result_status="published" if present else "not_published",
         )
+    model_called = Step.AGENT in results
+    transcript_state = (
+        "no_model_call" if not model_called
+        else "available" if result.transcript
+        else "disabled" if spec.execution and not spec.execution.transcript
+        else "missing"
+    )
     obs.record(events, obs.create(
         "run",
         result.status,
@@ -387,7 +396,11 @@ def _finish(
         message=_recorded(result),
         transcript=result.transcript,
         usage=result.usage,
-        attributes=_firing_attributes(firing),
+        attributes=(
+            *_firing_attributes(firing),
+            ("model_called", model_called),
+            ("transcript_state", transcript_state),
+        ),
     ))
     return result
 
@@ -427,7 +440,11 @@ def _failure(
     obs.record(events, obs.create(
         "run", "failed", repository=firing.root, agent=firing.agent_id,
         run_id=run_id, origin=firing.origin, category=category, message=message,
-        attributes=_firing_attributes(firing)))
+        attributes=(
+            *_firing_attributes(firing),
+            ("model_called", False),
+            ("transcript_state", "no_model_call"),
+        )))
     return result
 
 

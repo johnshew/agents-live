@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from ... import plugins, preflight, runtime
+from ... import deploy, plugins, preflight, runtime
 from ...obs import admin as adminlog
 from ...legacy import migrate as legacy_migration
 from ...runtime.hosts.processes import watchers_on_host
@@ -33,6 +34,45 @@ def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
             [uv, "tool", "uninstall", "agents-live"], environment):
         return False
     print("Uninstall will complete after this command exits")
+    return True
+
+
+def _remove_command_exposure(root: Path) -> None:
+    """Remove only PATH entries and symlinks that point at this install root."""
+    hostruntime.remove_user_path_directory(deploy.layout.command_root(root))
+    link_root = Path.home() / ".local" / "bin"
+    for name in ("agents-live", "al"):
+        link = link_root / name
+        try:
+            if link.is_symlink() and link.resolve() == deploy.layout.command_path(
+                    name, root).resolve():
+                link.unlink()
+        except OSError:
+            continue
+
+
+def _remove_self_managed(root: Path) -> bool:
+    """Remove the owned root now, or queue removal after Windows exits."""
+    _remove_command_exposure(root)
+    if hostruntime.id() != hostruntime.WINDOWS:
+        shutil.rmtree(root)
+        print(f"Removed self-managed installation: {root}")
+        return True
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if powershell is None:
+        return False
+    escaped = str(root).replace("'", "''")
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        f"Remove-Item -LiteralPath '{escaped}' -Recurse -Force",
+    ]
+    if not runtime.current().supervisor.defer_until_environment_exits(
+            command, root):
+        return False
+    print("Self-managed uninstall will complete after this command exits")
     return True
 
 
@@ -115,6 +155,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
+    installation = deploy.ownership.describe()
+    refusal = deploy.ownership.refusal(installation, action="uninstall")
+    if installation.contested and refusal is not None:
+        preflight.emit_failure("uninstall", refusal)
+        return 1
     environment = plugins.tool_environment()
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
@@ -127,14 +172,16 @@ def main(argv: list[str] | None = None) -> int:
             "runtime artifacts remain installed; stop them and run "
             "uninstall again")
         return 1
-    try:
-        uv = find_uv()
-    except FileNotFoundError:
-        preflight.emit_failure(
-            "uninstall",
-            "uv was not found; restore or install uv before uninstalling "
-            "agents-live")
-        return 1
+    uv = None
+    if not installation.self_managed:
+        try:
+            uv = find_uv()
+        except FileNotFoundError:
+            preflight.emit_failure(
+                "uninstall",
+                "uv was not found; restore or install uv before uninstalling "
+                "agents-live")
+            return 1
     runtime_id = hostruntime.id()
     if runtime_id == hostruntime.WSL:
         try:
@@ -157,7 +204,9 @@ def main(argv: list[str] | None = None) -> int:
         # A hard dependency here would make uninstall impossible off WSL.
         print("no cross-host integrations to remove; uninstalling the tool")
     deferred = False
-    if environment is not None and runtime_id == hostruntime.WINDOWS:
+    if (not installation.self_managed and environment is not None
+            and runtime_id == hostruntime.WINDOWS):
+        assert uv is not None
         if not _handoff_windows_uninstall(uv, environment):
             preflight.emit_failure(
                 "uninstall",
@@ -173,9 +222,20 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"warning: could not remove shell completions: {exc}",
               file=sys.stderr)
+    if installation.self_managed:
+        if not _remove_self_managed(installation.root):
+            preflight.emit_failure(
+                "uninstall",
+                "the Windows uninstall helper could not start; the "
+                "self-managed installation remains installed")
+            return 1
+        adminlog.record(
+            "uninstall", status="ok", deferred=runtime_id == hostruntime.WINDOWS)
+        return 0
     if deferred:
         adminlog.record("uninstall", status="ok", deferred=True)
         return 0
+    assert uv is not None
     completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)
     adminlog.record("uninstall",
                     status="ok" if not completed.returncode else "error",

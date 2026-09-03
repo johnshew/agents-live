@@ -13,6 +13,7 @@ permissions: {}
 
 jobs:
   resolve:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,6 +57,8 @@ jobs:
           gh release download "$TAG"
           --pattern '*.whl'
           --pattern '*.tar.gz'
+          --pattern 'install.ps1'
+          --pattern 'install.sh'
           --pattern 'SHA256SUMS-*'
           --dir dist
         env:

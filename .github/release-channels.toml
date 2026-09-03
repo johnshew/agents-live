@@ -7,22 +7,29 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "bake/v6.6.0-local"
-version = "6.6.0"
+branch = "bake/v6.7.0-local"
+version = "6.7.0"
 promotes_to = "release"
-deployed_version = "6.6.0.dev0+gccbe4a0a"
-deployed_commit = "ccbe4a0abc3ab29f7cb8b1ea538f49da07ecabbf"
-validated_on = "2026-08-29"
+deployed_version = "6.7.0.dev0+gf9a295f7"
+deployed_commit = "f9a295f7467a9d27987739d200d7cae45ad1ac14"
+validated_on = "2026-08-30"
 
 [bake.issues]
-delivered = [400, 401, 402, 403, 404, 406, 419, 421]
-partial = [334, 388, 395]
-deferred = [405, 422, 423, 424, 426]
-promotion_decision = []
+delivered = []
+partial = [334, 374, 388, 426]
+deferred = [105]
+promotion_decision = [334, 374, 376, 379, 395, 405, 422, 423, 424, 426]
 
 [bake.recommendations]
-overall = "The planned v6.6 work is complete in bake and the newest runtime has passed source, packaged, and installed tests. Open the pull request to main."
-"334" = "Include the safer side-by-side installation work already completed and tested for v6.6.0. Do not switch existing users to it in this release; that change needs separate migration testing."
-"388" = "Include the additive discovery and cross-repository resolution work already completed for v6.6.0. Keep authoritative roots, default-repository removal, and the init/registration clean break for the planned major release."
-"395" = "Include the download and security checks already completed and tested for v6.6.0. Do not add the public install scripts in this release; they depend on the later migration work in #334."
-testing = "The exact installed bake passed the Ubuntu and Windows source matrix, packaged dashboard journeys, repository-qualified aggregate actions, repeated Windows client resets, and a terminal Windows self-upgrade handoff on 2026-08-29."
+overall = "Keep testing in bake while the August work selected for v6.7 is completed, with verified installers and release-time reduction first."
+"334" = "Complete only the stable-launcher and migration ownership needed by the verified installer; keep broader generation cleanup separately reviewable."
+"374" = "Finish or explicitly narrow Copilot prompt transport after a supported large-prompt Windows test; retain the completed Claude path."
+"376" = "Use Claude schema-validated output and preserve a documented fallback for providers without an equivalent."
+"379" = "Add a read-only processor context command with human and JSON output before restoring documentation claims."
+"395" = "Deliver verified Windows and POSIX bootstrap packages backed by official GitHub release artifacts and the generation layout."
+"405" = "Add provider-neutral transcript discovery and bounded rendering without exposing runtime-private paths as a contract."
+"422" = "Unify the dashboard over one all-repositories snapshot before changing its health and continuity behavior."
+"423" = "Make dashboard health, eligibility, and activity use canonical CLI and observability semantics after the unified snapshot lands."
+"424" = "Prove refresh continuity, reconnect, accessibility, and scale after the unified and truthful dashboard slices land."
+"426" = "Shorten local and CI feedback by reusing environments and one digest-addressed wheel while preserving every distinct release gate."
+testing = "The installed test version is 6.7.0.dev0+gf9a295f7 from the current bake branch; cross-platform CI and all-repository doctor passed."

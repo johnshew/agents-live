@@ -23,7 +23,10 @@ NETWORK_TIMEOUT = 30
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
 _STABLE_VERSION = re.compile(
-    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?\Z")
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+_RELEASE_VERSION = re.compile(
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:(?:a|b|rc)\d+|\.dev\d+)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _DOWNLOAD_HOSTS = {
     "github.com",
@@ -91,19 +94,15 @@ def _read_metadata(url: str, *, opener: Callable[..., Any]) -> dict[str, Any]:
     return document
 
 
-def resolve(
-    version: str | None = None,
-    *,
-    opener: Callable[..., Any] = urllib.request.urlopen,
-) -> ReleaseArtifact:
-    """Resolve one stable release wheel and its GitHub-recorded digest."""
+def _release(version: str | None, *, opener: Callable[..., Any]
+             ) -> tuple[str, dict[str, Any]]:
     if version is None:
         metadata_url = f"{API_ROOT}/latest"
     else:
         version = layout.generation_name(version)
-        if _STABLE_VERSION.fullmatch(version) is None:
+        if _RELEASE_VERSION.fullmatch(version) is None:
             raise ReleaseArtifactError(
-                f"'{version}' is not an exact stable release version")
+                f"'{version}' is not an exact release version")
         metadata_url = f"{API_ROOT}/tags/v{quote(version, safe='')}"
 
     document = _read_metadata(metadata_url, opener=opener)
@@ -111,16 +110,29 @@ def resolve(
     if not isinstance(tag, str) or not tag.startswith("v"):
         raise ReleaseArtifactError("GitHub release metadata has no version tag")
     resolved = tag[1:]
-    if _STABLE_VERSION.fullmatch(resolved) is None:
+    if _RELEASE_VERSION.fullmatch(resolved) is None:
         raise ReleaseArtifactError(
-            f"GitHub release tag {tag!r} is not a stable release version")
+            f"GitHub release tag {tag!r} is not a release version")
     if version is not None and resolved != version:
         raise ReleaseArtifactError(
             f"GitHub returned release {resolved}, expected exactly {version}")
-    if document.get("draft") is not False or document.get("prerelease") is not False:
-        raise ReleaseArtifactError(f"GitHub release v{resolved} is not stable")
+    prerelease = _STABLE_VERSION.fullmatch(resolved) is None
+    if (
+        document.get("draft") is not False
+        or document.get("prerelease") is not prerelease
+        or version is None and prerelease
+    ):
+        expected = "prerelease" if prerelease else "stable"
+        raise ReleaseArtifactError(
+            f"GitHub release v{resolved} is not a published {expected} release")
 
-    name = f"agents_live-{resolved}-py3-none-any.whl"
+    return resolved, document
+
+
+def _asset(resolved: str, document: dict[str, Any], name: str
+           ) -> ReleaseArtifact:
+    if not name or Path(name).name != name:
+        raise ReleaseArtifactError(f"invalid release asset name: {name!r}")
     assets = document.get("assets")
     if not isinstance(assets, list):
         raise ReleaseArtifactError(
@@ -153,6 +165,49 @@ def resolve(
         resolved, name, expected_url, digest.removeprefix("sha256:"), size)
 
 
+def resolve_asset(
+    name: str,
+    version: str | None = None,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> ReleaseArtifact:
+    """Resolve one named release asset and its GitHub-recorded digest."""
+    resolved, document = _release(version, opener=opener)
+    return _asset(resolved, document, name)
+
+
+def resolve(
+    version: str | None = None,
+    *,
+    opener: Callable[..., Any] = urllib.request.urlopen,
+) -> ReleaseArtifact:
+    """Resolve one stable or explicitly requested prerelease wheel."""
+    resolved, document = _release(version, opener=opener)
+    return _asset(
+        resolved, document, f"agents_live-{resolved}-py3-none-any.whl")
+
+
+def verify_file(artifact: ReleaseArtifact, path: Path) -> None:
+    """Fail unless a local file is exactly the authenticated release asset."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ReleaseArtifactError(
+            f"could not read {artifact.name}: {exc}") from exc
+    if size != artifact.size:
+        raise ReleaseArtifactError(
+            f"{artifact.name} was {size} bytes, expected {artifact.size}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual != artifact.sha256:
+        raise ReleaseArtifactError(
+            f"{artifact.name} checksum mismatch: expected "
+            f"{artifact.sha256}, got {actual}")
+
+
 @contextmanager
 def verified_download(
     artifact: ReleaseArtifact,
@@ -179,14 +234,7 @@ def verified_download(
                             f"{artifact.name} exceeded its recorded size")
                     digest.update(block)
                     stream.write(block)
-        if size != artifact.size:
-            raise ReleaseArtifactError(
-                f"{artifact.name} was {size} bytes, expected {artifact.size}")
-        actual = digest.hexdigest()
-        if actual != artifact.sha256:
-            raise ReleaseArtifactError(
-                f"{artifact.name} checksum mismatch: expected "
-                f"{artifact.sha256}, got {actual}")
+        verify_file(artifact, destination)
         yield destination
     finally:
         shutil.rmtree(staging, ignore_errors=True)

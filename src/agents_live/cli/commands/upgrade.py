@@ -6,13 +6,16 @@ never as a standalone ``uv run --script`` target.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
+import zipfile
+from email.parser import Parser
 from pathlib import Path
 
-from ... import __version__, agent, paths, plugins, preflight, runtime
+from ... import __version__, agent, deploy, paths, plugins, preflight, runtime
 from ...obs import admin as adminlog
 from ...legacy import migrate as legacy_migration
 from ...runtime.hosts import system as hostruntime
@@ -21,7 +24,7 @@ from ...runtime.spawn import cli_executable_path, find_uv
 from ...state import registry as repos
 from .. import lifecycle, package_index, update_check, upgrade_handoff
 from ..scripts import dashboards
-from . import init
+from . import init, install_generation, install_release
 
 
 def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
@@ -91,6 +94,67 @@ def _install_command(uv: str, source: Path | None) -> list[str]:
         return [uv, "tool", "upgrade", "agents-live"]
     return [uv, "tool", "install", "--force",
             "--reinstall-package", "agents-live", str(source)]
+
+
+def _wheel_identity(wheel: Path) -> tuple[str, str]:
+    """Return the exact Agents Live version and digest carried by a wheel."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_files = [
+                name for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")]
+            if len(metadata_files) != 1:
+                raise ValueError("wheel does not contain exactly one METADATA file")
+            metadata = Parser().parsestr(
+                archive.read(metadata_files[0]).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"could not read wheel metadata: {exc}") from exc
+    if metadata.get("Name", "").lower().replace("_", "-") != "agents-live":
+        raise ValueError("wheel metadata does not identify agents-live")
+    version = deploy.layout.generation_name(metadata.get("Version", ""))
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    return version, digest
+
+
+def _upgrade_self_managed(
+    source: Path | None,
+) -> int:
+    """Activate a new immutable generation through the stable current path."""
+    if source is None:
+        return install_release.main(["--activate"])
+    if not source.is_file() or source.suffix.lower() != ".whl":
+        preflight.emit_failure(
+            "upgrade",
+            "a self-managed `upgrade --from` requires a built wheel; run "
+            "`uv build --wheel` and pass the resulting .whl",
+            code="invalid_arguments",
+        )
+        return 1
+    try:
+        version, digest = _wheel_identity(source)
+        provenance = deploy.generation.Provenance(
+            "local-artifact", source.name, digest)
+        try:
+            built = deploy.generation.load(version)
+        except deploy.generation.GenerationError:
+            target = deploy.layout.generation_dir(version)
+            if target.exists() or target.is_symlink():
+                raise
+            built = install_generation.install(
+                version, source=source, provenance=provenance)
+        else:
+            if built.provenance != provenance:
+                raise deploy.generation.GenerationError(
+                    f"generation {version} is already installed from different "
+                    "artifact bytes and will not be overwritten")
+            install_generation.validate(built)
+        install_generation.activate_generation(built)
+        deploy.ownership.write_record(deploy.ownership.SELF)
+    except (OSError, ValueError, deploy.generation.GenerationError) as exc:
+        preflight.emit_failure("upgrade", str(exc))
+        return 1
+    print(f"Activated self-managed generation {version} from {source}")
+    return 0
 
 
 def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
@@ -475,12 +539,13 @@ def _report_stale_watchers(
                     "60 seconds when already idle)", file=sys.stderr)
 
 
-def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
+def _refresh_with_installed_cli(*, refresh_skills: bool,
+                                executable: Path | None = None) -> int:
     # cli_executable_path prefers the entry point beside the interpreter (the
     # uv tool env), so a freshly installed shim is found even when
     # ~/.local/bin is not on PATH yet.
     try:
-        executable = str(cli_executable_path())
+        executable_path = executable or cli_executable_path()
     except RuntimeError as exc:
         detail = f"agents-live executable not found after runtime upgrade: {exc}"
         if refresh_skills:
@@ -491,7 +556,7 @@ def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
         return 0
     try:
         completion_status = subprocess.run(
-            [executable, "completions", "--update"], check=False,
+            [str(executable_path), "completions", "--update"], check=False,
         ).returncode
     except OSError as exc:
         completion_status = None
@@ -504,7 +569,7 @@ def _refresh_with_installed_cli(*, refresh_skills: bool) -> int:
         return 0
     try:
         return subprocess.run(
-            [executable, "upgrade", "--skills-only"], check=False,
+            [str(executable_path), "upgrade", "--skills-only"], check=False,
         ).returncode
     except OSError as exc:
         preflight.emit_failure("upgrade", f"skill refresh failed: {exc}")
@@ -554,7 +619,14 @@ def main() -> int:
             return 1
         source = source.resolve()
 
-    if source is None and not args.skills_only and package_index.configured():
+    installation = deploy.ownership.describe()
+    ownership_refusal = deploy.ownership.refusal(installation)
+    if installation.contested and ownership_refusal is not None:
+        preflight.emit_failure("upgrade", ownership_refusal)
+        return 1
+
+    if (source is None and not args.skills_only
+            and not installation.self_managed and package_index.configured()):
         cached = update_check.cached_result() or {}
         index = package_index.check(
             __version__, latest=cached.get("latest_version"))
@@ -602,6 +674,15 @@ def main() -> int:
                 preflight.emit_failure("upgrade", error,
                                        code="upgrade_preflight_failed")
             return 1
+        if installation.self_managed:
+            runtime_status = _upgrade_self_managed(source)
+            if runtime_status != 0:
+                return runtime_status
+            stable_command = deploy.layout.command_path("agents-live")
+            return _refresh_with_installed_cli(
+                refresh_skills=not args.runtime_only,
+                executable=stable_command,
+            )
         deferred = _handoff_windows_upgrade(
             source, runtime_only=args.runtime_only)
         if deferred is not None:

@@ -106,6 +106,18 @@ def _issue_rows(
             rows.append(
                 f"| {_link(repository, 'issues', number)} | {issue['title']} | "
                 f"{label} | {issue['state'].lower()} | {decision} |")
+    for number in configured.get("promotion_decision", []):
+        if number in assigned:
+            continue
+        issue = _json(
+            "gh", "issue", "view", str(number), "--json",
+            "number,title,state,url")
+        assigned.add(number)
+        decision = "required" if issue["state"] == "OPEN" else "no"
+        rows.append(
+            f"| {_link(repository, 'issues', number)} | {issue['title']} | "
+            "Awaiting promotion decision | "
+            f"{issue['state'].lower()} | {decision} |")
     return rows, assigned
 
 
@@ -177,6 +189,12 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     unassigned = [item for item in recent_open if item["number"] not in assigned]
 
     deployed_sha = bake["deployed_commit"]
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{deployed_sha}^{{commit}}"],
+        cwd=ROOT, check=False, capture_output=True,
+    ).returncode != 0:
+        raise ReportError(
+            f"deployed bake commit does not resolve: {deployed_sha}")
     deployed_in_bake = subprocess.run(
         ["git", "merge-base", "--is-ancestor", deployed_sha, bake_ref],
         cwd=ROOT, check=False).returncode == 0

@@ -427,13 +427,41 @@ def _installation_check() -> dict[str, object]:
             "check": "installation", "ok": False,
             "detail": f"installation model could not be inspected: {exc}",
         }
-    damaged = installation.pointer_state in (
-        deploy.pointer.UNREADABLE, deploy.pointer.MALFORMED,
-        deploy.pointer.UNSUPPORTED)
+    damaged = installation.pointer_state == deploy.pointer.INVALID
+    detail = installation.summary()
+    generation_damaged = False
+    if installation.self_managed and not damaged and not installation.contested:
+        missing_commands = [
+            path.name for path in (
+                deploy.layout.command_path(name, installation.root)
+                for name in ("agents-live", "al"))
+            if not path.is_file()
+        ]
+        try:
+            if installation.active_generation is None:
+                raise deploy.generation.GenerationError(
+                    "no active generation is recorded")
+            deploy.generation.load(
+                installation.active_generation, root=installation.root)
+            if (deploy.layout.current_path(installation.root).resolve()
+                    != deploy.layout.generation_dir(
+                        installation.active_generation, installation.root).resolve()):
+                raise deploy.generation.GenerationError(
+                    "current does not select the recorded active generation")
+        except (OSError, ValueError, deploy.generation.GenerationError) as exc:
+            generation_damaged = True
+            detail = f"{detail}; active generation is damaged: {exc}"
+        if missing_commands:
+            generation_damaged = True
+            detail = (
+                f"{detail}; missing stable command(s): "
+                f"{', '.join(missing_commands)}")
+        elif not generation_damaged:
+            detail = f"{detail}; current selection and generation record are valid"
     return {
         "check": "installation",
-        "ok": not (damaged or installation.contested),
-        "detail": installation.summary(),
+        "ok": not (damaged or generation_damaged or installation.contested),
+        "detail": detail,
     }
 
 

@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -140,6 +141,118 @@ def user_data_base() -> Path:
             return Path(local)
         return Path.home() / "AppData" / "Local"
     return Path.home() / ".local" / "share"
+
+
+def replace_directory_link(current: Path, target: Path, *, root: Path) -> None:
+    """Point *current* at *target* with this host's directory-link primitive."""
+    if not _IS_WINDOWS:
+        temporary = current.with_name(f".{current.name}.{uuid.uuid4().hex}.tmp")
+        temporary.symlink_to(target.relative_to(root), target_is_directory=True)
+        try:
+            os.replace(temporary, current)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return
+
+    previous = current.resolve() if current.exists() else None
+    if current.exists():
+        os.rmdir(current)
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(current), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return
+    if previous is not None:
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(current),
+             str(previous)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    detail = completed.stderr.strip() or completed.stdout.strip()
+    raise OSError(detail or "Windows could not create the directory junction")
+
+
+def remove_directory_link(path: Path) -> None:
+    """Remove a directory link without touching the directory it targets."""
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        os.rmdir(path)
+
+
+def expose_user_path_directory(directory: Path) -> None:
+    """Persist one command directory on the current user's PATH."""
+    command_root = str(directory)
+    if _IS_WINDOWS:
+        import winreg
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            try:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                value, kind = "", winreg.REG_EXPAND_SZ
+            entries = [entry for entry in str(value).split(";") if entry]
+            normalized = os.path.normcase(os.path.normpath(command_root))
+            retained = [
+                entry for entry in entries
+                if os.path.normcase(os.path.normpath(entry)) != normalized
+            ]
+            updated = [command_root, *retained]
+            if updated != entries:
+                winreg.SetValueEx(
+                    key, "Path", 0, kind, ";".join(updated))
+        return
+
+    profile = Path.home() / ".profile"
+    line = f'export PATH="{command_root}:$PATH"'
+    try:
+        existing = profile.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing = ""
+    if line not in existing.splitlines():
+        with profile.open("a", encoding="utf-8", newline="\n") as stream:
+            if existing and not existing.endswith("\n"):
+                stream.write("\n")
+            stream.write(f"\n# Added by Agents Live\n{line}\n")
+
+
+def remove_user_path_directory(directory: Path) -> None:
+    """Remove a command directory previously persisted on the user's PATH."""
+    command_root = str(directory)
+    if _IS_WINDOWS:
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, "Environment", 0,
+                    winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+                value, kind = winreg.QueryValueEx(key, "Path")
+                entries = [entry for entry in str(value).split(";") if entry]
+                normalized = os.path.normcase(os.path.normpath(command_root))
+                retained = [
+                    entry for entry in entries
+                    if os.path.normcase(os.path.normpath(entry)) != normalized
+                ]
+                if retained != entries:
+                    winreg.SetValueEx(key, "Path", 0, kind, ";".join(retained))
+        except (FileNotFoundError, OSError):
+            pass
+        return
+
+    profile = Path.home() / ".profile"
+    line = f'export PATH="{command_root}:$PATH"'
+    try:
+        lines = profile.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    retained = [value for value in lines if value != line]
+    if retained != lines:
+        profile.write_text("\n".join(retained).rstrip() + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

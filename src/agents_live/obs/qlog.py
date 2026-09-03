@@ -73,7 +73,7 @@ import duckdb
 # absolute: a flat re-entry re-imports the package from outside and breaks it.
 PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_PARENT))
+    sys.path.append(str(PACKAGE_PARENT))
 from agents_live import preflight  # noqa: E402
 from agents_live.obs import query  # noqa: E402
 from agents_live.paths import (  # noqa: E402
@@ -238,7 +238,10 @@ def build_view(
     # to VARCHAR so SELECTs are safe.
     raw_cols = con.sql("DESCRIBE _log_raw").fetchall()
     raw_names = {name for name, *_ in raw_cols}
-    canonical = {"ts", "agent_name", "phase", "status", "trigger", "log_schema"}
+    canonical = {
+        "ts", "agent_name", "phase", "status", "trigger", "log_schema",
+        "has_transcript",
+    }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:
         if name in canonical:
@@ -292,6 +295,9 @@ def build_view(
         )
     else:
         projections.append("NULL AS _files")
+    projections.append(
+        f"({source('transcript')} IS NOT NULL) AS has_transcript"
+    )
 
     # Backfill the standard columns the CLI references (default --columns
     # and the --errors / --slow queries). When the unioned logs happen to
@@ -300,10 +306,10 @@ def build_view(
     # naming it raises a Binder Error. Project a typed NULL for each
     # standard column not already present so queries always bind.
     present = set(raw_names)
-    present.add("_files")  # derived above
+    present.update(("_files", "has_transcript"))  # derived above
     STANDARD_COLUMNS = (
-        "ts", "agent_name", "phase", "status", "trigger", "level",
-        "message", "error_category", "traceback", "duration_s",
+        "ts", "run_id", "agent_name", "phase", "status", "trigger", "level",
+        "message", "error_category", "traceback", "duration_s", "transcript",
     )
     for col in STANDARD_COLUMNS:
         if col not in present:
@@ -448,7 +454,7 @@ def main() -> int:
                     dest="limit",
                     help="max rows (default 200; 0=unlimited). "
                          "Aliases: -n, --tail")
-    ap.add_argument("--columns", default="ts,_src,agent_name,phase,status,trigger,duration_s,message",
+    ap.add_argument("--columns", default="ts,_src,run_id,agent_name,phase,status,trigger,duration_s,has_transcript,message",
                     help="comma-separated columns to show")
     ap.add_argument("--order-by", dest="order_by", default="ts",
                     help="column to order by (default: ts)")

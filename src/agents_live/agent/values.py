@@ -177,6 +177,7 @@ class ResolvedSpec:
     provider: str
     model: str | None
     effort: str | None
+    output_schema: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,7 @@ class Launch:
     use_pty: bool = False
     filters_tui_noise: bool = False
     provider: str | None = None
+    prompt: str | None = None
 
 
 @dataclass(frozen=True)

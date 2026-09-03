@@ -5,15 +5,13 @@ The layout is the one #334 describes:
     <installation root>/
         versions/<generation>/   a complete environment, never rewritten
         versions/.staging-<id>/  an incomplete one, safe to delete
-        bin/                     the stable launchers, on PATH
-        current.json             the pointer naming the active generation
+        current/                 link to the active generation
         owner.json               which channel owns this installation
 
 Two properties decide whether the model works, and both live here.
 
-The pointer is data, not an executable. Flipping it rewrites
-``current.json`` and nothing else, so no running image has to be
-replaced and Windows has nothing to lock (#231).
+The pointer is a directory link, not an executable. Flipping it never
+rewrites a running image, so Windows has nothing to lock (#231).
 
 A generation directory is named, never derived from unvalidated input. A
 name that could climb out of ``versions/`` would let a staged generation
@@ -38,17 +36,11 @@ from ..runtime.hosts import system as hostruntime
 ENV_INSTALL_ROOT = "AGENTS_LIVE_INSTALL_ROOT"
 
 GENERATIONS = "versions"
-LAUNCHERS = "bin"
-POINTER = "current.json"
+CURRENT = "current"
 OWNERSHIP = "owner.json"
 GENERATION_RECORD = "generation.json"
 DEPLOYMENT_LOCK = ".deployment.lock"
 STAGING_PREFIX = ".staging-"
-
-#: The entry points a stable launcher must answer for. ``al`` is the same
-#: runtime under a shorter name (#368), so it resolves through the same
-#: pointer rather than pinning a generation of its own.
-LAUNCHER_NAMES = ("agents-live", "al")
 
 # A generation name reaches the filesystem, so it is validated against
 # what a version may contain rather than against what a path may not.
@@ -119,15 +111,20 @@ def is_staging(name: str) -> bool:
     return name.startswith(STAGING_PREFIX)
 
 
-def pointer_path(root: Path | None = None) -> Path:
-    """The generation pointer: the one file an activation writes."""
-    return (root or installation_root()) / POINTER
+def current_path(root: Path | None = None) -> Path:
+    """The stable directory link through which commands enter the runtime."""
+    return (root or installation_root()) / CURRENT
+
+
+def command_root(root: Path | None = None) -> Path:
+    """The stable directory placed on PATH for generated console scripts."""
+    return hostruntime.executable_dir(current_path(root))
 
 
 def ownership_path(root: Path | None = None) -> Path:
     """Where this installation records which channel owns it.
 
-    Beside the pointer, not in machine-local state: an installation that
+    Beside the selection, not in machine-local state: an installation that
     is deleted, copied, or restored takes the answer with it, and a
     command can read both facts from the tree it is about to change.
     """
@@ -144,26 +141,12 @@ def generation_record_path(version: str, root: Path | None = None) -> Path:
     return generation_dir(version, root) / GENERATION_RECORD
 
 
-def launcher_root(root: Path | None = None) -> Path:
-    """The directory an operator puts on PATH, and never has to change."""
-    return (root or installation_root()) / LAUNCHERS
-
-
-def launcher_path(name: str = "agents-live", root: Path | None = None) -> Path:
-    """The stable launcher for *name*.
-
-    Named with the host's own executable suffix. On Windows that
-    excludes a ``.cmd`` or ``.bat`` shim by construction, which matters
-    beyond taste: pinned scheduler and crontab command paths refuse a
-    batch shim (see ``hostruntime.pin_executable``), so a launcher that
-    scheduled work cannot pin is not a launcher. Which native
-    trampoline provides it is still open in #334.
-    """
-    if name not in LAUNCHER_NAMES:
+def command_path(name: str = "agents-live", root: Path | None = None) -> Path:
+    """The stable path to a generated console entry point."""
+    if name not in ("agents-live", "al"):
         raise LayoutError(
-            f"'{name}' is not an Agents Live launcher; expected one of "
-            f"{', '.join(LAUNCHER_NAMES)}")
-    return launcher_root(root) / hostruntime.executable_filename(name)
+            f"'{name}' is not an Agents Live command; expected agents-live or al")
+    return command_root(root) / hostruntime.executable_filename(name)
 
 
 def installed_generations(root: Path | None = None) -> tuple[str, ...]:
@@ -191,7 +174,8 @@ def generation_of(path: Path | str, root: Path | None = None) -> str | None:
     pointer moves on.
     """
     try:
-        candidate = Path(path).resolve()
+        supplied = Path(path)
+        candidate = supplied.parent.resolve() / supplied.name
         generations = generations_root(root).resolve()
     except OSError:
         return None

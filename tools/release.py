@@ -36,6 +36,14 @@ CHANGELOG_URL = (
     "src/agents_live/skill/docs/changelog.md"
 )
 RELEASE_FILES = (PYPROJECT, *VERSION_FILES, CHANGELOG)
+BOOTSTRAP_ASSETS = (
+    "install.ps1",
+    "install.sh",
+)
+BOOTSTRAP_BUILD_INPUTS = (
+    ROOT / "install.ps1",
+    ROOT / "install.sh",
+)
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
@@ -47,8 +55,8 @@ BREAKING_RE = re.compile(r"(?m)^\s*BREAKING CHANGE:\s*")
 # Rows are ordered by what the change is, breaking first; anything with an
 # unrecognised prefix sorts last rather than failing the release.
 TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore")
-ACCEPTANCE_SCHEMA = 1
-PREPARATION_SCHEMA = 1
+ACCEPTANCE_SCHEMA = 2
+PREPARATION_SCHEMA = 2
 CHECKPOINT_SCHEMA = 1
 QUEUED_UPGRADE_RE = re.compile(
     r"Upgrade queued as (?P<operation>[0-9a-f]+); "
@@ -571,6 +579,11 @@ def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
     preserved_wheel = destination / wheel.name
     shutil.copy2(wheel, preserved_wheel)
     shutil.copy2(sdist, destination / sdist.name)
+    for name in BOOTSTRAP_ASSETS:
+        source = ROOT / "dist" / name
+        if not source.is_file():
+            raise ReleaseError(f"prepared bootstrap asset is missing: dist/{name}")
+        shutil.copy2(source, destination / name)
     return preserved_wheel
 
 
@@ -580,6 +593,14 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _evidence_identity() -> dict[str, str]:
+    return {
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0],
+        "workflow_sha256": _sha256(ROOT / ".github" / "workflows" / "test.yml"),
+    }
 
 
 def _acceptance_path(version: str) -> Path:
@@ -619,6 +640,16 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     if not sdist.is_file():
         raise ReleaseError(
             f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+    installers = []
+    for name in BOOTSTRAP_ASSETS:
+        path = wheel.parent / name
+        if not path.is_file():
+            raise ReleaseError(
+                f"prepared bootstrap asset is missing: {path.relative_to(ROOT)}")
+        installers.append({
+            "path": path.relative_to(ROOT).as_posix(),
+            "sha256": _sha256(path),
+        })
     return {
         "version": version,
         "tag": f"v{version}",
@@ -629,6 +660,7 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
         "wheel_sha256": _sha256(wheel),
         "sdist": sdist.relative_to(ROOT).as_posix(),
         "sdist_sha256": _sha256(sdist),
+        "installers": installers,
     }
 
 
@@ -640,7 +672,7 @@ def _write_preparation(version: str, wheel: Path) -> Path:
         "prepared": True,
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         **_release_identity(version, wheel),
-        "platform": sys.platform,
+        **_evidence_identity(),
         "gates": _gate_commands(),
     }
     temporary = destination.with_suffix(".tmp")
@@ -662,6 +694,7 @@ def _check_preparation(version: str) -> dict:
         "schema": PREPARATION_SCHEMA,
         "prepared": True,
         **_release_identity(version, wheel),
+        **_evidence_identity(),
         "gates": _gate_commands(),
     }
     mismatched = [
@@ -684,14 +717,31 @@ def _write_artifact_manifest(version: str, preparation: dict) -> Path:
     ):
         path = Path(str(preparation[path_key]))
         lines.append(f"{preparation[hash_key]}  {path.name}")
+    for installer in preparation["installers"]:
+        path = Path(str(installer["path"]))
+        lines.append(f"{installer['sha256']}  {path.name}")
     destination.write_text("\n".join(lines) + "\n", encoding="ascii")
     return destination
 
 
 def _installed_cli() -> str:
+    explicit_root = os.environ.get("AGENTS_LIVE_INSTALL_ROOT", "").strip()
+    if explicit_root:
+        install_root = Path(explicit_root).expanduser()
+    elif os.name == "nt":
+        install_root = Path(os.environ.get(
+            "LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "agents-live"
+    else:
+        install_root = Path(os.environ.get(
+            "XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agents-live"
+    filename = "agents-live.exe" if os.name == "nt" else "agents-live"
+    command_dir = "Scripts" if os.name == "nt" else "bin"
+    self_managed = install_root / "current" / command_dir / filename
+    if self_managed.is_file():
+        return str(self_managed.resolve())
+
     tool_root = Path(_run(["uv", "tool", "dir"], capture=True))
     environment = tool_root / "agents-live"
-    filename = "agents-live.exe" if os.name == "nt" else "agents-live"
     candidates = (
         environment / "Scripts" / filename,
         environment / "bin" / filename,
@@ -699,8 +749,8 @@ def _installed_cli() -> str:
     executable = next((path for path in candidates if path.is_file()), None)
     if executable is None:
         raise ReleaseError(
-            "the uv-managed agents-live launcher is required for candidate "
-            f"acceptance under {environment}")
+            "an active self-managed or uv-managed agents-live command is "
+            "required for candidate acceptance")
     return str(executable.resolve())
 
 
@@ -716,7 +766,8 @@ def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def _installed_version() -> str:
     completed = _installed_run(["--version"])
     match = re.fullmatch(
-        r"agents-live (\d+\.\d+\.\d+)(?: \(channel: [a-z]+\))?\s*",
+        r"agents-live ([0-9][0-9A-Za-z.+-]*)"
+        r"(?: \(channel: [a-z]+(?:, commit: [0-9a-f]+)?\))?\s*",
         completed.stdout,
     )
     if completed.returncode != 0 or match is None:
@@ -972,7 +1023,7 @@ def _write_candidate_acceptance(
         "wheel": wheel.relative_to(ROOT).as_posix(),
         "wheel_sha256": _sha256(wheel),
         "repo": str(repo),
-        "platform": sys.platform,
+        **_evidence_identity(),
         "operation_id": operation_id,
         "operational": True,
         "operational_agent": operational_agent,
@@ -1009,6 +1060,7 @@ def _check_candidate_acceptance(version: str) -> dict:
         "commit": _git("rev-parse", "HEAD"),
         "wheel": wheel.relative_to(ROOT).as_posix(),
         "wheel_sha256": _sha256(wheel),
+        **_evidence_identity(),
     }
     mismatched = [key for key, value in expected.items()
                   if receipt.get(key) != value]
@@ -1115,7 +1167,7 @@ def _build_release_artifacts() -> None:
         ])
         source = temporary / "source"
         shutil.unpack_archive(archive, source, filter="data")
-        for path in RELEASE_FILES:
+        for path in (*RELEASE_FILES, *BOOTSTRAP_BUILD_INPUTS):
             relative = path.relative_to(ROOT)
             destination = source / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1123,6 +1175,8 @@ def _build_release_artifacts() -> None:
         _run([
             "uv", "build", "--out-dir", str(ROOT / "dist"), str(source),
         ])
+        for name in ("install.ps1", "install.sh"):
+            shutil.copy2(source / name, ROOT / "dist" / name)
 
 
 def _gate_commands() -> list[list[str]]:
@@ -1140,9 +1194,9 @@ def _gate_commands() -> list[list[str]]:
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_smoke.py"],
-        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+        ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_seams.py"],
-        ["uv", "run", "--with-editable", ".", "--with", "duckdb", "--script",
+        ["uv", "run", "--with-editable", ".", "--script",
          "tests/test_behaviors.py"],
         _smoketest_command(),
         ["uv", "run", "--script", "tools/release.py", "--build-artifacts"],
@@ -1293,6 +1347,19 @@ def _run_operational_acceptance(
     if preflight:
         command.append("--preflight")
     _run(command)
+
+
+def candidate_preflight(repo: Path, agent_id: str, cost_agent: str) -> None:
+    """Reject live-host acceptance blockers before release preparation."""
+    _require_tools()
+    root = repo.expanduser().resolve()
+    if not root.is_dir():
+        raise ReleaseError(f"candidate test repository does not exist: {root}")
+    _run_operational_acceptance(root, agent_id, cost_agent, preflight=True)
+    print(
+        "Candidate preflight passed; the selected agents, browser, dashboard "
+        "state, ownership, watcher residency, and repository health are ready."
+    )
 
 
 def _write_acceptance_checkpoint(
@@ -1565,6 +1632,7 @@ def publish() -> None:
     accepted_artifacts = (
         Path(str(preparation["wheel"])),
         Path(str(preparation["sdist"])),
+        *(Path(str(asset["path"])) for asset in preparation["installers"]),
     )
     if needs_push:
         _run([
@@ -1607,6 +1675,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Reinstall and verify the prepared candidate before publication",
     )
     parser.add_argument(
+        "--candidate-preflight",
+        action="store_true",
+        help="Check live candidate prerequisites before release preparation",
+    )
+    parser.add_argument(
         "--repo",
         type=Path,
         help="Live repository used by --accept-candidate",
@@ -1646,25 +1719,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     selected = sum((args.dry_run, args.prepare, args.publish,
-                    args.accept_candidate, args.gates, args.build_artifacts,
-                    args.notes is not None))
+                    args.accept_candidate, args.candidate_preflight,
+                    args.gates, args.build_artifacts, args.notes is not None))
     if selected != 1:
         parser.error(
-            "choose exactly one of --dry-run, --prepare, --accept-candidate, "
-            "--publish, --gates, --build-artifacts, or --notes")
+            "choose exactly one of --dry-run, --prepare, "
+            "--candidate-preflight, --accept-candidate, --publish, --gates, "
+            "--build-artifacts, or --notes")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
-    if args.accept_candidate and (
+    if (args.accept_candidate or args.candidate_preflight) and (
             args.repo is None or not args.agent or not args.cost_agent):
         parser.error(
-            "--accept-candidate requires --repo, --agent, and --cost-agent")
+            "candidate preflight and acceptance require --repo, --agent, "
+            "and --cost-agent")
     if (args.repo is not None or args.agent is not None
             or args.cost_agent is not None or args.resume) \
-            and not args.accept_candidate:
+            and not (args.accept_candidate or args.candidate_preflight):
         parser.error(
             "--repo, --agent, --cost-agent, and --resume apply only to "
-            "--accept-candidate")
-    if (args.publish or args.accept_candidate or args.gates or args.notes) \
+            "candidate preflight or acceptance")
+    if args.resume and not args.accept_candidate:
+        parser.error("--resume applies only to --accept-candidate")
+    if (args.publish or args.accept_candidate or args.candidate_preflight
+            or args.gates or args.notes) \
             and args.bump != "patch":
         parser.error(
             "--bump applies only to --dry-run and --prepare")
@@ -1673,6 +1751,11 @@ def main(argv: list[str] | None = None) -> int:
             preview(args.bump)
         elif args.prepare:
             prepare(args.bump)
+        elif args.candidate_preflight:
+            assert args.repo is not None
+            assert args.agent is not None
+            assert args.cost_agent is not None
+            candidate_preflight(args.repo, args.agent, args.cost_agent)
         elif args.accept_candidate:
             assert args.repo is not None
             assert args.agent is not None

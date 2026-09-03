@@ -49,6 +49,11 @@ uv run --with-editable . agents-live --help
 uv run --script tools/pre-release-audit.py
 ```
 
+The `dev` dependency group supplies test-only dependencies such as DuckDB to
+all `uv run` commands in this checkout. Do not add per-command `--with` flags
+for dependencies already declared there; doing so creates separate ephemeral
+environments and lengthens the edit loop.
+
 ## Source checkout and installed tool
 
 See [testing.md](testing.md) for the full source, wheel, and installed-tool
@@ -62,23 +67,22 @@ uv run --with-editable . agents-live --repo ~/repos/<target-project> dashboard -
 ```
 
 These commands execute the current checkout without replacing the user-level
-tool. From another repository, bare `agents-live` executes the version
-installed by uv:
+tool. From another repository, bare `agents-live` executes the self-managed
+version selected by the stable `current` path:
 
 ```bash
 agents-live --repo ~/repos/<target-project> doctor
-uv tool list
+agents-live --version
 agents-live upgrade
 ```
 
-`uv tool list` reports the installed version. `agents-live upgrade` reinstalls
-the latest stable uv-managed runtime and refreshes managed payloads in the
-current initialized project and registered repositories. To restore a normal
-PyPI installation after experimenting with `uv tool install --editable .`, run:
-
-```bash
-uv tool install --force agents-live
-```
+`agents-live --version` reports the selected release or commit-suffixed bake.
+Self-managed installation retains complete versions side by side under
+`versions/`; `current` selects one. `agents-live upgrade` installs and selects
+the latest stable generation, includes plugin wheels declared by registered
+repositories before sealing it, and converges host integrations through the
+selected version. Local bake deployment uses the full commit-bearing package
+version, so repeated bakes on the same release line do not collide.
 
 Use `agents-live --repo <project> upgrade` to upgrade the runtime and refresh
 that project's installed skill payload. `agents-live --repo <project> doctor`

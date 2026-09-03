@@ -62,14 +62,14 @@ tested for factual wording when an association cannot be inferred.
 Run the portable suite and release gates:
 
 ```bash
-uv run --with-editable . --with duckdb python -m unittest discover -s tests -v
+uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
 uv run --script tools/pre-release-audit.py
 uv build
 ```
 
 CI runs the same suites one file at a time
-(`uv run --with-editable . --script tests/<file>.py`), adding `--with duckdb`
+(`uv run --with-editable . --script tests/<file>.py`)
 so the query tool is started rather than skipped. Reproduce that form when a
 failure appears only in CI.
 
@@ -78,6 +78,15 @@ groups. Documentation-only changes retain the Linux export audit and required
 job contexts but skip source suites and artifact startup. Ordinary `main` pushes
 do not repeat a PR's identical matrix; the publish workflow verifies the exact
 release commit on both hosts.
+For code changes, the three source suites run as independent jobs on each host
+while Linux builds the complete wheel, source distribution, and bootstrap
+scripts in parallel. Both hosts verify the wheel's recorded
+SHA-256, run packaged dashboard readiness against those exact bytes, and run
+the platform bootstrap twice from a clean temporary root with Python indexes
+disabled for Agents Live. The bootstrap gate verifies provenance, activation,
+the stable current command, ownership, exact version, and idempotency. The
+aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain the
+stable required checks and fail unless every selected job succeeds.
 Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
 single host needs to be isolated. The publish workflow calls the same workflow
 against the resolved release commit and cannot publish until both hosts pass.
@@ -109,7 +118,7 @@ Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
 or initialize agents in `~/repos/<target-project>` unless that operational change is part
 of the test.
 
-## Deploy current main locally
+## Deploy the current bake locally
 
 Use the focused local deployment workflow after pull requests have merged:
 
@@ -117,12 +126,16 @@ Use the focused local deployment workflow after pull requests have merged:
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
 
-The command requires clean `main`, fast-forwards it to `origin/main`, and
-prepares one commit-and-digest-addressed wheel. It runs the built-wheel
+The command requires the clean bake branch configured in
+`.github/release-channels.toml`, fast-forwards it from `origin`, and prepares
+one commit-and-digest-addressed development wheel. The archived build copy is
+stamped as `<target>.dev0+g<commit>` without changing tracked release versions.
+It runs the built-wheel
 dashboard readiness gate in normal and development modes, then records the
 validated commit, artifact digest, and exact gate list. A later deployment of
-the same commit reuses that preparation evidence; a changed commit, wheel, or
-gate list invalidates it mechanically.
+the same commit reuses that preparation evidence; a changed commit, wheel,
+platform, Python version, Test workflow, or gate list invalidates it
+mechanically.
 
 Before replacement, the workflow snapshots release-owned all-repository status
 and doctor contracts plus the selected repository's started watchers. It stops

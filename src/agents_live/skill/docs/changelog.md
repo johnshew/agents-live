@@ -11,6 +11,60 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain self-managed generation identity through POSIX interpreter links.
+  Bootstrap finalization and installation health checks recognize a virtual
+  environment whose Python executable links to the host interpreter.
+- fix: make GitHub bake releases explicitly installable without publishing them to PyPI.
+  Exact prerelease versions pass the same release-metadata and artifact-digest
+  checks as stable versions, while latest-version resolution remains stable-only
+  and the package publication workflow ignores prerelease events.
+- feat: install verified releases through first-party Windows and POSIX bootstraps. (#395)
+  Exact or latest-stable assets are authenticated against GitHub release
+  metadata, installed as immutable versions, activated through one stable
+  `current` directory link, and accepted from clean Windows and Linux roots
+  without resolving Agents Live through a configured package index. Existing
+  uv installs migrate under explicit ownership rules; upgrade, doctor, and
+  uninstall now honor the self-managed generation layout. Full PEP 440
+  versions, including commit-suffixed bakes, coexist in the version store;
+  registered-repository plugins are installed before a generation is sealed,
+  and selecting one converges host integrations through that version.
+- feat: preview the complete processor run context without executing it. (#379)
+  `agents-live context` renders the selected agent's resolved environment and
+  processor inputs as text or JSON so definitions can be checked before a run.
+- feat: enforce declared structured output schemas through Claude. (#376)
+  Claude receives the resolved JSON schema natively and returns its
+  `structured_output`; all providers retain local validation and categorize
+  schema rejection consistently.
+- feat: retrieve provider-neutral run transcripts from managed storage. (#405)
+  `agents-live logs transcript` selects by run or agent, normalizes Claude and
+  Copilot envelopes, reports exact transcript state, supports bounded summaries
+  and batch filters, and confines raw reads to managed run paths.
+- fix: preserve the verified Copilot prompt transport contract. (#374)
+  Copilot remains on the non-interactive `-p` path because its current CLI
+  enters the interactive interface when the prompt is supplied only on stdin.
+- fix: deploy local bake artifacts from the configured bake branch. (#426)
+  Local deployment now stamps only the archived build copy with a
+  commit-qualified development version, preserving tracked stable versions
+  while making the installed bake channel and source commit explicit. Release
+  checks parse and verify that full development identity after installation.
+- feat: preflight live candidate prerequisites before release preparation. (#426)
+  Release operators can check selected agents, browser launch, managed-dashboard
+  state, repository health, ownership, watcher residency, and watched paths
+  before spending time on build and packaging gates.
+- perf: reuse one declared development environment across release test suites. (#426)
+  DuckDB remains outside runtime dependencies while local and CI test commands
+  avoid resolving separate ad hoc environments for each suite.
+- perf: parallelize source suites and exact-wheel readiness in CI. (#426)
+  Stable Linux and Windows checks now aggregate independent source, build, and
+  packaged-dashboard jobs while both hosts verify and run one Linux-built wheel.
+- fix: reject release evidence from a different execution identity. (#426)
+  Preparation and installed-candidate receipts now bind platform, Python
+  version, Test workflow digest, candidate commit, artifact digests, and the
+  exact gate list before publication can reuse them.
+- fix: stop current managed dashboards before local bake replacement. (#426)
+  Local deployment recognizes both URL-bearing and legacy dashboard list rows,
+  preserving each repository and port while releasing the installed runtime.
+
 ## 6.6.0 - 2026-08-30
 
 - fix: require watcher residency only on the runtime that owns the agent.

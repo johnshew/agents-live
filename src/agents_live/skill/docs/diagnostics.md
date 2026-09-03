@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-23
+ms.date: 2026-08-30
 ms.topic: troubleshooting
 ---
 
@@ -25,23 +25,22 @@ and `agents-live doctor --repair` to apply it.
 
 ## Native Windows first run
 
-Install one provider CLI and uv through WinGet. Native provider packages avoid
+Install one provider CLI through WinGet. Native provider packages avoid
 the `.cmd` and `.ps1` shims that unattended dispatch intentionally refuses:
 
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
-winget install --id=astral-sh.uv -e
 ```
 
-Open a new PowerShell session after WinGet changes PATH. Install Agents Live,
-update PATH for future shells, and invoke the installed executable by its
-absolute uv bin path in the current shell:
+Run the official release bootstrap. It installs uv if needed, verifies the
+wheel against GitHub's recorded size and SHA-256 digest, installs it into its
+version directory, and invokes the generated command under `current` without
+waiting for PATH refresh:
 
 ```powershell
-uv tool install agents-live
-uv tool update-shell
-$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
 & $agentsLive --repo C:\path\to\repository init
 & $agentsLive --repo C:\path\to\repository doctor
 ```
@@ -67,7 +66,10 @@ Inside WSL, test the WSL network path separately:
 curl --head https://files.pythonhosted.org
 ```
 
-If the request fails with a TLS handshake alert and the Microsoft package
+The bootstrap reports GitHub metadata and asset proxy/TLS failures explicitly
+and never falls back to a Python index for Agents Live. Dependencies installed
+inside the verified generation still use uv's configured index. If that
+dependency request fails with a TLS handshake alert and the Microsoft package
 proxy is available, configure uv through its user-level `uv.toml`. Use
 `%APPDATA%\uv\uv.toml` on native Windows and `~/.config/uv/uv.toml` inside
 WSL. Windows and WSL are separate runtimes; configure each one independently.
@@ -159,6 +161,14 @@ the upgrade. Current plugin entry points are installed with the candidate
 runtime in an isolated environment and must load with the expected provider or
 ownership protocol. Migrate or repair unsafe inputs, then run the command
 again.
+
+Self-managed versions remain under the installation root rather than replacing
+one environment in place. The complete PEP 440 version is the directory name;
+local bake versions include their commit suffix and can coexist with other
+bakes from the same release line. Selection changes only `current`, then runs
+automatic maintenance through the selected command. A dispatch that had already
+started can finish on its original immutable version while new dispatches and
+converged watchers use the selected version.
 
 ### Validate a local wheel through the proxy
 
@@ -338,6 +348,36 @@ Never inspect runtime log files by hand. Use `agents-live logs` and
 `agents-live logs timeline`; they correlate versioned event records and
 provider transcripts.
 
+## Run transcripts
+
+Default `agents-live logs` output includes `run_id` and `has_transcript` so a
+recorded conversation is discoverable without querying the log schema. Read
+one run by its exact ID, or select recent runs for an agent:
+
+```bash
+agents-live logs transcript <run-id>
+agents-live logs transcript --agent link-check --last 3 --summary
+agents-live logs transcript --agent link-check --since 2h --errors --summary
+agents-live logs transcript <run-id> --json
+```
+
+The default rendering shows normalized user and assistant turns plus tool
+calls. `--json` returns the same provider-neutral fields in a `transcripts`
+array. `--summary` limits the prompt and final text to 6,000 characters each
+and lists at most 100 tool names. Use `--raw` with one run ID only when the
+normalized view omits provider detail needed for diagnosis.
+
+`transcript_state` distinguishes `available`, `no_model_call`, `disabled`,
+`missing`, `corrupt`, `invalid_path`, and `unknown`. `unknown` is retained for
+older records whose null transcript field did not say whether a model ran. A
+transcript can become `missing` after retention removes its artifact while an
+older archived event remains queryable. `invalid_path` means a log row points
+outside the repository's managed run storage; the command refuses to read it.
+
+Transcript paths, envelope fields, and provider output formats are private
+runtime details. The normalized CLI fields are the supported retrieval
+contract; neither readable nor JSON output exposes the storage path.
+
 ## Log and run-output retention
 
 Automatic maintenance applies a 30-day retention period by default. Configure a
@@ -383,7 +423,10 @@ failures.
 
 Failure categories include `state_unavailable`, `agent_invalid`, `timeout`,
 `cli_crash`, `pre_processor_crash`, `post_processor_crash`,
-`empty_output`, `output_parse_error`, and `agent_output_invalid`.
+`empty_output`, `output_parse_error`, `output_schema_rejected`, and
+`agent_output_invalid`. `output_schema_rejected` means the provider refused
+the declared JSON Schema before running; an output value that fails local
+schema validation is `agent_output_invalid`.
 
 ## WSL liveness
 

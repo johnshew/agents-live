@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-08-28
+ms.date: 2026-08-30
 ms.topic: reference
 ---
 
@@ -59,7 +59,10 @@ In PowerShell a double-quoted string expands `$name` and treats a backtick as
 an escape, so single quotes are the safe default for anything containing them.
 In Bash the equivalent trap is `$` and backticks inside double quotes. Either
 way, `--prompt-file` avoids the question entirely and is the better choice for
-more than a sentence.
+more than a sentence. It does not bypass a provider transport limit: Copilot
+still requires the resolved prompt in `-p`, so an oversized native Windows
+prompt fails before spawn with its measured size. Claude receives the resolved
+prompt on stdin and does not share that command-line limit.
 
 `-o/--option` passes values to the processors. The presence of `=` is the whole
 grammar: `-o dry-run` is a flag and `-o account=team-inbox` carries a value.
@@ -76,6 +79,24 @@ retain the existing envelope and do not emit `result_status`.
 
 Installed schedule and watcher artifacts use hidden origin and artifact-marker
 flags. They are runtime contracts, not author-facing options.
+
+### `context`
+
+Prints the resolved command line, working directory, and environment for one
+run step without executing it.
+
+```bash
+agents-live context link-check --role pre
+agents-live context link-check --role agent --json
+agents-live context link-check --changed-files '["docs/index.md"]' \
+  -p "Focus on authentication" -o dry-run
+```
+
+The command accepts the same invocation instructions, changed files, and
+processor options as `run`. It names the step's control, log, and output paths
+but does not create them. A post-processor preview cannot know its future stdin,
+so `stdin_available` is false. Pipeline contexts are available only while the
+run-scoped MCP server exists and are rejected by this read-only preview.
 
 ### `start`
 
@@ -162,7 +183,11 @@ that ran the agent.
   maintenance once and checks again. The command exits nonzero unless a current
   healthy record exists after that attempt. It checks only the runtime where it
   runs.
-- `logs` and `logs timeline` query local event records.
+- `logs` and `logs timeline` query local event records. Default log columns
+  include `run_id` and `has_transcript`. `logs transcript RUN_ID` renders one
+  provider-neutral conversation; `--agent NAME --last N` selects recent runs,
+  `--summary` bounds prompt and final text, `--json` returns normalized data,
+  and `--raw` prints one private provider envelope for deep diagnosis.
 - `lock PATH [--timeout SECONDS] -- COMMAND [ARGS...]` runs one command while
   holding the same cross-platform advisory lock used by Agents Live. It opens
   the lock file in append mode so another contender cannot replace the locked
@@ -173,6 +198,18 @@ that ran the agent.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload. An installed
+  self-managed runtime resolves and verifies the official latest stable release,
+  stages it beside the active generation, and switches the `current` link;
+  `--from <wheel>` uses the same generation builder for candidate acceptance.
+  The full PEP 440 version names the directory, including a local commit suffix
+  for a bake, so repeated builds on one release line do not collide. Before
+  sealing, the builder validates all registered repositories and installs their
+  declared plugin wheels into the candidate. Version directories are retained.
+  After `current` moves, the selected version runs host maintenance to converge
+  native triggers and still-started watchers; running processes may finish on
+  the prior generation without blocking activation. A uv-managed runtime
+  retains the existing uv upgrade behavior during migration.
+  An installed
   native Windows tool queues runtime replacement until the invoking process
   exits. Installed-tool watchers keep started intent unchanged, finish any
   active dispatch, quiesce at their next idle check, and are restored by
@@ -186,7 +223,10 @@ that ran the agent.
   A scan covers every effective discovery root except unclaimed standard
   client skill roots. A repository can opt a client root into migration by
   naming it in `agent_directories`.
-- `uninstall` removes host integration and the uv-managed tool. If a watcher
+- `uninstall` removes host integration and whichever installation owns the
+  running command. A self-managed install removes its generation root and
+  installer-added PATH exposure; a uv-managed install asks uv to remove its
+  tool. If a watcher
   from that installation does not stop within the grace period, the command
   exits nonzero before host cleanup and names the processes to stop. On native
   Windows, a successful command queues final tool removal until its own
@@ -230,13 +270,15 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+command      ::= context | run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+context      ::= "context" ( NAME | "--name" NAME ) [ "--role" ( "pre" | "agent" | "post" ) ] [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ]
 run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
-logs         ::= "logs" ( logs_query | "timeline" timeline_args )
+logs         ::= "logs" ( logs_query | "transcript" transcript_args | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
+transcript_args ::= [ RUN_ID ] [ "--agent" VALUE ] [ "--last" VALUE ] [ "--since" VALUE ] [ "--errors" ] [ "--summary" ] [ "--raw" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
@@ -245,7 +287,7 @@ init         ::= "init" [ "--repo" VALUE ]
 upgrade      ::= "upgrade" [ "--from" VALUE ]
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
-repos        ::= "repos" ( "list" | "add" PATH | "default" REPO | "remove" REPO )
+repos        ::= "repos" ( "list" | "add" PATH | "default" [ REPO ] [ "--clear" ] | "remove" REPO )
 ownership    ::= "ownership" ( "status" | "enable" )
 completions  ::= "completions" ( "bash" | "zsh" | "powershell" | "--update" )
 dashboard    ::= "dashboard" ( dashboard_query | "list" | "stop" stop_args )
@@ -257,11 +299,13 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
+| context | in-process | registry |  | yes |  | yes | --name, --role, --changed-files, -p, --prompt, --prompt-file, -o, --option | Inspect what one run step would receive. |
 | run | in-process | required |  | yes |  | yes | --name, --changed-files, -p, --prompt, --prompt-file, -o, --option, --quiet | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --transfer-here, --transfer-to | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
 | status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
+| logs transcript | subprocess | registry |  | yes |  |  | --agent, --last, --since, --errors, --summary, --raw | Read a normalized run conversation. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
@@ -273,7 +317,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |
 | repos add | in-process | none |  |  |  |  |  | Register a repository. |
-| repos default | in-process | none |  |  |  |  |  | Set the fallback repository. |
+| repos default | in-process | none |  |  |  |  | --clear | Set or clear the fallback repository. |
 | repos remove | in-process | none |  |  |  |  |  | Remove a registered repository. |
 | ownership | in-process | required |  | yes |  |  |  | Manage optional cross-machine ownership. |
 | ownership status | in-process | required |  | yes |  |  |  | Report local, registry enabled, or unavailable state. |

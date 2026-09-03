@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
-from ... import deploy
+from ... import deploy, plugins
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
+from ...state import registry as repos
 
 
 def _run(command: list[str], *, step: str, capture: bool = False) -> str:
@@ -32,7 +35,13 @@ def _interpreter(environment: Path) -> Path:
     )
 
 
-def _populate(uv: str, source: Path | None, version: str, staging: Path) -> None:
+def _populate(
+    uv: str,
+    source: Path | None,
+    version: str,
+    staging: Path,
+    requirements: Sequence[Path] = (),
+) -> None:
     _run(
         [
             uv,
@@ -55,8 +64,33 @@ def _populate(uv: str, source: Path | None, version: str, staging: Path) -> None
             "--reinstall-package",
             "agents-live",
             requirement,
+            *(str(path) for path in requirements),
         ],
         step="installing agents-live",
+    )
+
+
+def _plugin_requirements() -> tuple[Path, ...]:
+    roots = [Path(value) for _alias, value, error in repos.entries() if not error]
+    errors = plugins.validation_errors(roots)
+    if errors:
+        raise deploy.generation.GenerationError("; ".join(errors))
+    declarations = plugins.union(roots, require_exists=True)
+    return tuple(declaration.path for declaration in declarations.values())
+
+
+def install_declared_plugins(environment: Path) -> None:
+    """Install every registered repository's plugin before sealing."""
+    requirements = _plugin_requirements()
+    if not requirements:
+        return
+    _run(
+        [
+            find_uv(), "pip", "install", "--python",
+            str(_interpreter(environment)),
+            *(str(path) for path in requirements),
+        ],
+        step="installing declared plugins",
     )
 
 
@@ -95,16 +129,32 @@ def install(
 ) -> deploy.generation.Generation:
     """Build an exact generation through the shared uv-backed seam."""
     uv = find_uv()
+    requirements = _plugin_requirements()
     built = deploy.generation.build(
         version,
         root=root,
-        populate=lambda staging: _populate(uv, source, version, staging),
+        populate=lambda staging: _populate(
+            uv, source, version, staging, requirements),
         validate=lambda staging: _validate(version, staging),
         provenance=provenance,
     )
     if activate:
-        deploy.generation.activate(built, root=root)
+        activate_generation(built, root=root)
     return built
+
+
+def activate_generation(
+    generation: deploy.generation.Generation,
+    *,
+    root: Path | None = None,
+) -> None:
+    """Select a generation and converge the host through that version."""
+    deploy.generation.activate(generation, root=root)
+    selected = executable(generation)
+    _run(
+        [str(selected), "internal", "maintain"],
+        step=f"converging generation {generation.name}",
+    )
 
 
 def executable(generation: deploy.generation.Generation) -> Path:
@@ -112,6 +162,15 @@ def executable(generation: deploy.generation.Generation) -> Path:
     return (
         hostruntime.executable_dir(generation.path)
         / hostruntime.executable_filename("agents-live")
+    )
+
+
+def local_provenance(source: Path) -> deploy.generation.Provenance:
+    """Return stable provenance for one immutable local wheel."""
+    return deploy.generation.Provenance(
+        "local-artifact",
+        source.name,
+        hashlib.sha256(source.read_bytes()).hexdigest(),
     )
 
 
@@ -133,6 +192,18 @@ def validate(generation: deploy.generation.Generation) -> None:
     _validate(generation.name, generation.path)
 
 
+def validate_environment(version: str, environment: Path) -> None:
+    """Validate a dedicated environment before it is sealed as immutable."""
+    launcher = (
+        hostruntime.executable_dir(environment)
+        / hostruntime.executable_filename("agents-live")
+    )
+    if not launcher.is_file():
+        raise deploy.generation.GenerationError(
+            f"generation {version} is damaged: missing launcher")
+    _validate(version, environment)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and optionally activate one self-managed generation")
@@ -151,6 +222,11 @@ def main() -> int:
             source=source,
             root=args.install_root,
             activate=args.activate,
+            provenance=(
+                local_provenance(source)
+                if source is not None and source.is_file()
+                else None
+            ),
         )
     except (FileNotFoundError, OSError, ValueError,
             deploy.generation.GenerationError) as exc:

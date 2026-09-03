@@ -124,6 +124,7 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         provider.name,
         selector.model,
         selector.effort,
+        _resolved_output_schema(spec),
     )
     launch = provider.prepare(resolved, ctx.request)
     return Launch(
@@ -135,6 +136,7 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         launch.use_pty,
         launch.filters_tui_noise,
         launch.provider,
+        launch.prompt,
     )
 
 
@@ -293,6 +295,8 @@ def _skip_on_stdout(text: str) -> bool:
 def _agent_failure_category(raw: RawOutput) -> str:
     if raw.returncode != 0:
         text = f"{raw.stderr}\n{raw.stdout}".casefold()
+        if "json-schema" in text and "invalid" in text:
+            return "output_schema_rejected"
         if any(phrase in text for phrase in (
             "unexpected value",
             "unexpected argument",
@@ -408,6 +412,18 @@ def _last_balanced_value(text: str):
 
 
 def _validate_schema(spec: AgentSpec, value: object) -> str | None:
+    schema = _resolved_output_schema(spec)
+    if schema is None:
+        return None
+    import jsonschema
+    try:
+        jsonschema.validate(value, schema)
+    except jsonschema.ValidationError as exc:
+        return f"output does not conform at {exc.json_path}: {exc.validator} failed"
+    return None
+
+
+def _resolved_output_schema(spec: AgentSpec) -> dict | None:
     declared = _config(spec).output_schema
     if declared is None:
         return None
@@ -421,12 +437,9 @@ def _validate_schema(spec: AgentSpec, value: object) -> str | None:
     import jsonschema
     try:
         jsonschema.validators.validator_for(schema).check_schema(schema)
-        jsonschema.validate(value, schema)
     except jsonschema.SchemaError as exc:
         raise DefinitionError(f"output schema is invalid: {exc.message}") from exc
-    except jsonschema.ValidationError as exc:
-        return f"output does not conform at {exc.json_path}: {exc.validator} failed"
-    return None
+    return schema
 
 
 def _validate_paths(spec: AgentSpec, value: object) -> str | None:

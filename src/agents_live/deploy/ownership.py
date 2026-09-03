@@ -178,7 +178,7 @@ def describe(executable: Path | str | None = None,
     """
     target = Path(executable if executable is not None else sys.executable)
     install_root = root or layout.installation_root()
-    pointer, state, _ = pointer_module.status(layout.pointer_path(install_root))
+    pointer, state, _ = pointer_module.status(layout.current_path(install_root))
     return classify(
         target,
         root=install_root,

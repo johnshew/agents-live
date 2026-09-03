@@ -84,6 +84,7 @@ artifacts use hidden internal commands and are not a user-facing contract.
 |---------|---------|
 | `create <description>` | Create a standard agent definition with Agents Live fields *(agent-led; generates files -- see [docs/commands.md](docs/commands.md))* |
 | `run <name>` | `agents-live run <name>` |
+| `context <name>` | `agents-live context <name> [--role pre|agent|post] [--json]` *(read-only processor/provider invocation preview)* |
 | `start <name>` | `agents-live start <name>` |
 | `start --all [--dry-run]` | `agents-live start --all [--dry-run]` |
 | `stop <name>` | `agents-live stop <name>` |
@@ -111,7 +112,10 @@ server.
 
 **Smoketest and commands that mutate native host triggers require `requestUnsandboxedExecution: true`.**
 
-**Bootstrap: if `uv` is missing (every command above needs it), install it first with `curl -LsSf https://astral.sh/uv/install.sh | sh`.**
+**Bootstrap:** use the verified `install.ps1` or `install.sh` asset from the
+latest official GitHub release. The scripts install uv when needed, authenticate
+the exact release assets, and print a stable executable path that works without
+refreshing the current shell. See [docs/commands.md](docs/commands.md).
 
 ## Automatic-maintenance health gate
 
