@@ -174,7 +174,8 @@ def generation_of(path: Path | str, root: Path | None = None) -> str | None:
     pointer moves on.
     """
     try:
-        candidate = Path(path).resolve()
+        supplied = Path(path)
+        candidate = supplied.parent.resolve() / supplied.name
         generations = generations_root(root).resolve()
     except OSError:
         return None
