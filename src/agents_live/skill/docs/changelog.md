@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain self-managed generation identity through POSIX interpreter links.
+  Bootstrap finalization and installation health checks recognize a virtual
+  environment whose Python executable links to the host interpreter.
 - fix: make GitHub bake releases explicitly installable without publishing them to PyPI.
   Exact prerelease versions pass the same release-metadata and artifact-digest
   checks as stable versions, while latest-version resolution remains stable-only
