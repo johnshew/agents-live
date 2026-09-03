@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: make GitHub bake releases explicitly installable without publishing them to PyPI.
+  Exact prerelease versions pass the same release-metadata and artifact-digest
+  checks as stable versions, while latest-version resolution remains stable-only
+  and the package publication workflow ignores prerelease events.
 - feat: install verified releases through first-party Windows and POSIX bootstraps. (#395)
   Exact or latest-stable assets are authenticated against GitHub release
   metadata, installed as immutable versions, activated through one stable
