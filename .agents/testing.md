@@ -152,6 +152,44 @@ Prepared releases still require the complete preparation gates and
 `tools/release.py --accept-candidate`; their release receipts and resumable
 acceptance checkpoints remain authoritative.
 
+## Validate a published bake
+
+A published bake is a GitHub prerelease used to move already-validated bytes
+to another machine. It is distinct from both local bake deployment and a
+stable PyPI release. Install it through the public bootstrap with the complete
+commit-qualified version, then validate the stable generation path rather than
+an editable checkout or uv tool environment:
+
+```powershell
+$version = "<complete-commit-qualified-version>"
+$tag = [Uri]::EscapeDataString("v$version")
+$installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
+  -OutFile $installer
+& $installer $version
+
+$agentsLive = Join-Path $env:LOCALAPPDATA `
+  "agents-live\current\Scripts\agents-live.exe"
+& $agentsLive --version
+& $agentsLive doctor --all-repos
+& $agentsLive status --all-repos
+```
+
+The reported version must equal the requested version exactly. Check resident
+watchers as processes as well as started intent; after migration they must run
+from the selected generation. A one-shot invocation already in progress may
+finish from its immutable prior version. Do not remove its old runtime until
+the process exits.
+
+On Windows, test command discovery in a newly opened PowerShell session. An
+activated virtual environment captures its own PATH. Deactivating one that was
+opened before installation can restore that stale snapshot even though the
+persisted user PATH is correct. Diagnose with the absolute `current` command
+above and compare `$env:Path` with
+`[Environment]::GetEnvironmentVariable("Path", "User")`; do not reinstall a
+healthy generation to repair one stale shell.
+
 ## Validate the built wheel
 
 Build, select the wheel for the current version, and run it in uv's isolated

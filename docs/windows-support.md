@@ -1,7 +1,7 @@
 ---
 title: Native Windows Support
 description: Current native Windows host architecture, security model, and operational boundaries
-ms.date: 2026-08-20
+ms.date: 2026-09-03
 ms.topic: concept
 ---
 
@@ -122,6 +122,60 @@ generated host identity, not display names.
 Persisted actions use absolute executable and repository paths. Common code
 uses `pathlib`; Windows command-line comparison uses `PureWindowsPath` so
 results do not depend on which platform runs a test.
+
+## Release installation
+
+The public PowerShell bootstrap installs authenticated GitHub release bytes
+under `%LOCALAPPDATA%\agents-live\versions\<complete-version>` and selects one
+generation through the `current` junction. Omitting the version selects the
+latest stable release. A prerelease must always be requested by its complete
+commit-qualified version:
+
+```powershell
+$version = "<complete-commit-qualified-version>"
+$tag = [Uri]::EscapeDataString("v$version")
+$installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
+  -OutFile $installer
+& $installer $version
+
+$agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
+$agentsLive = Join-Path $agentsLiveBin "agents-live.exe"
+& $agentsLive --version
+& $agentsLive doctor --all-repos
+& $agentsLive status --all-repos
+```
+
+`EscapeDataString` encodes the `+` in a PEP 440 local version as `%2B` for the
+direct GitHub URL. The positional installer argument remains the original,
+unencoded version. The bootstrap verifies release metadata, asset size, and
+SHA-256 before activation and does not fall back to a Python package index.
+
+An uncontested uv-managed installation is retired only after the new
+generation is active. Let one-shot work already using the old immutable
+runtime finish. Started watchers should converge to the selected generation;
+if a resident watcher remains on the old executable, cycle only that agent
+through public `stop` and `start` commands using the absolute `current`
+executable. Never delete a runtime while a process still uses it.
+
+The installer updates the persisted user PATH, but it cannot rewrite PATH in
+every open PowerShell process. An activated virtual environment also restores
+the PATH snapshot it captured when `deactivate` runs. If bare `agents-live`
+is missing or reports an old version while the absolute command above is
+healthy, open a new terminal or refresh only the current process:
+
+```powershell
+$agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
+$env:Path = "$agentsLiveBin;$env:Path"
+Get-Command agents-live -All
+agents-live --version
+```
+
+Confirm the persisted user PATH independently with
+`[Environment]::GetEnvironmentVariable("Path", "User")`. Its first Agents Live
+entry should be `current\Scripts`; temporary bootstrap test roots and obsolete
+uv shims must not precede it.
 
 ## Validation
 

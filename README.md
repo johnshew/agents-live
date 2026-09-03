@@ -145,6 +145,27 @@ uv and an active generation both claim ownership is refused with corrective
 guidance. Network, proxy, TLS, missing-digest, size, and checksum failures stop
 without a package-index or stale-cache fallback.
 
+Install a published Windows bake by its complete commit-qualified version:
+
+```powershell
+$version = "<complete-commit-qualified-version>"
+$tag = [Uri]::EscapeDataString("v$version")
+$installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
+  -OutFile $installer
+& $installer $version
+
+$agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
+& (Join-Path $agentsLiveBin "agents-live.exe") --version
+```
+
+GitHub direct URLs encode the version's `+` as `%2B`; the installer argument
+does not. The installer updates the persisted user PATH, but an already-open
+or activated PowerShell environment can retain an older PATH snapshot. Open a
+new terminal, or prepend `$agentsLiveBin` to `$env:Path` for the current
+process, before judging bare `agents-live` command resolution.
+
 Agents Live retains immutable versions side by side and selects one through the
 stable `current` path. Local bake versions include their commit suffix, so
 multiple builds from the same release line can coexist. Before a generation is

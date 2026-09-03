@@ -267,6 +267,82 @@ confirms consumer availability. If JSON succeeds while `uvx` reports that the
 version does not exist, allow the Simple API to propagate and retry the exact
 check. Do not republish or alter the tag.
 
+## Publish a bake for remote testing
+
+Use a GitHub prerelease only when another machine must install the exact bake
+that has already passed local deployment validation. This is distribution for
+testing, not stable promotion. It does not replace changelog review, candidate
+acceptance, or `tools/release.py` for the eventual stable release.
+
+The public bake identity is the complete commit-qualified PEP 440 version,
+such as `6.7.0.dev0+g<commit>`. Before publication, require all of the
+following:
+
+- the work is merged to a clean `main` synchronized with `origin/main`;
+- the version's `g<commit>` suffix names that exact commit;
+- source tests, smoketest, audit, build, dashboard readiness, and bootstrap
+  readiness passed for that commit;
+- the commit-qualified wheel was installed and accepted on a live host;
+- the annotated tag is `v<complete-version>` and targets that commit; and
+- the asset directory contains exactly one wheel, one source archive,
+  `install.ps1`, `install.sh`, and `SHA256SUMS-<complete-version>`.
+
+Build the source archive and copy the installers from a Git archive of the
+same commit used for the validated wheel. Stamp that archive with the same
+complete bake version; never edit tracked version files in the shared checkout
+to manufacture prerelease assets. Hash all four executable/package assets into
+the versioned manifest. Do not replace an existing tag or asset: a correction
+gets a new commit-qualified version and tag.
+
+After checking every manifest entry against its file, create a draft with the
+complete set so consumers cannot observe a release missing bootstrap assets:
+
+```powershell
+$repo = "johnshew/agents-live"
+$version = "<complete-commit-qualified-version>"
+$tag = "v$version"
+$commit = git rev-parse HEAD
+$assets = @(
+    "<artifact-directory>\agents_live-$version-py3-none-any.whl",
+    "<artifact-directory>\agents_live-$version.tar.gz",
+    "<artifact-directory>\install.ps1",
+    "<artifact-directory>\install.sh",
+    "<artifact-directory>\SHA256SUMS-$version"
+)
+
+git tag -a $tag $commit -m "agents-live $version bake"
+git push origin $tag
+gh release create $tag @assets --repo $repo --verify-tag `
+    --title "agents-live $version" --notes-file <notes-file> `
+  --prerelease --draft
+```
+
+The release notes must say that this is a bake, is not on PyPI, and give the
+exact-version installation command. If `gh release create` fails after the tag
+push, diagnose and resume against that immutable tag; do not delete or rewrite
+it. While the release is still a draft, verify all five asset names, positive
+sizes, GitHub digests, and manifest hashes. Publish only after those checks:
+
+```powershell
+gh release view $tag --repo $repo --json isDraft,isPrerelease,assets
+gh release edit $tag --repo $repo `
+  --draft=false --prerelease --latest=false
+```
+
+Then verify the final state:
+
+```powershell
+gh release view $tag --repo $repo `
+    --json tagName,isDraft,isPrerelease,name,publishedAt,url,assets
+gh api "repos/$repo/releases/tags/$tag"
+```
+
+Require `isDraft: false`, `isPrerelease: true`, and GitHub digest and positive
+size metadata for every asset. Confirm the stable release remains latest and
+that PyPI still reports the prior stable version. GitHub renders `+` as `%2B`
+in direct asset URLs; this is expected, and bootstrap compares the decoded URL
+to the exact tag identity.
+
 If a failure or interruption occurs before the release commit, the script
 restores every version file and clears its staged changes. A failure after the
 commit remains visible for recovery. Rerun `--publish --yes` if GitHub release

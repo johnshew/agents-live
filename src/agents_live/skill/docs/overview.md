@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-08-30
+ms.date: 2026-09-03
 ms.topic: overview
 ---
 
@@ -127,6 +127,29 @@ uncontested uv-managed installation and print the generated command under
 `doctor` validates the active generation, ownership record, and stable commands;
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
+
+For a published Windows bake, download and run the bootstrap with the complete
+commit-qualified version. URI-encode the tag in the direct GitHub URL while
+passing the original version to the script:
+
+```powershell
+$version = "<complete-commit-qualified-version>"
+$tag = [Uri]::EscapeDataString("v$version")
+$installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
+  -OutFile $installer
+& $installer $version
+
+$agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
+& (Join-Path $agentsLiveBin "agents-live.exe") --version
+```
+
+GitHub encodes a PEP 440 local-version `+` as `%2B`. An existing PowerShell or
+activated virtual environment may retain a PATH snapshot from before
+installation. Open a new terminal, or prepend `$agentsLiveBin` to `$env:Path`
+for that process, when the absolute `current` command is healthy but bare
+`agents-live` is missing or resolves an older version.
 
 The installation root is a local version store: complete PEP 440 versions are
 retained side by side and `current` selects one. Commit-suffixed bake versions

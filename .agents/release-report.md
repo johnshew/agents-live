@@ -12,7 +12,7 @@ pull request is never mistaken for a public release.
 
 | Channel | Branch | Version | Moves to |
 |---|---|---|---|
-| `bake` | `bake/v<version>-local` | Development version ending in `.dev`, with its commit ID | `release` by pull request to `main` |
+| `bake` | `bake/v<version>-local` | Development version ending in `.dev`, with its commit ID | Local deployment, optional GitHub prerelease, then `release` by pull request to `main` |
 | `release` | `main` plus immutable `v<version>` tag | Stable semantic version | GitHub Release, then verified PyPI publication |
 
 Feature and fix branches enter the lowest channel that needs the change. During
@@ -21,6 +21,13 @@ release channel only through one reviewable promotion pull request from bake to
 `main`. The official `release/v<version>-candidate` branch is a temporary branch
 created by `tools/release.py` after bake moves into a clean, up-to-date `main`;
 it is not a third channel.
+
+A bake may be published as a GitHub prerelease when another machine must test
+the exact validated bytes. This does not move the bake to the release channel:
+the tag retains its commit-qualified development version, the GitHub release
+is marked prerelease and not latest, and the PyPI workflow does not run. Record
+the public bake tag and tested version in the report. Stable promotion still
+uses the normal release preparation and acceptance workflow.
 
 GitHub closes linked issues only when commits reach the default branch. An open
 issue can therefore be `delivered` to bake without being released. Reports must

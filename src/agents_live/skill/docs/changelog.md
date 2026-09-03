@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-08-30
+ms.date: 2026-09-03
 ms.topic: reference
 ---
 
@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- docs: add the published-bake release and exact-version installation runbook.
+  Contributor and Windows guidance now distinguishes GitHub prereleases from
+  stable PyPI publication and covers URI-encoded tags, authenticated bootstrap,
+  uv migration, watcher convergence, and stale activated-shell PATH snapshots.
 - fix: accept GitHub's encoded asset URLs for commit-qualified bake versions.
   Bootstrap provenance still requires the exact configured repository, tag,
   filename, size, and digest after decoding URL path characters such as `+`.
