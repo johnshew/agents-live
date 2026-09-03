@@ -64,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             "Download a verified official release and build one generation"))
     parser.add_argument(
         "version", nargs="?",
-        help="Exact stable version; omit to select GitHub's latest stable release")
+        help=("Exact stable or prerelease version; omit to select GitHub's "
+              "latest stable release"))
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--activate", action="store_true")
     args = parser.parse_args(argv)

@@ -2663,6 +2663,48 @@ class TestInstallationGenerations(unittest.TestCase):
         )
         self.assertEqual([], list(self.root.glob(".artifact-*")))
 
+    def test_explicit_prerelease_authenticates_only_prerelease_metadata(
+            self) -> None:
+        """A bake is opt-in and cannot be confused with a stable release."""
+        version = "6.7.0.dev0+g7b01b2d"
+        name = f"agents_live-{version}-py3-none-any.whl"
+        metadata = {
+            "tag_name": f"v{version}",
+            "draft": False,
+            "prerelease": True,
+            "assets": [{
+                "name": name,
+                "state": "uploaded",
+                "browser_download_url": (
+                    "https://github.com/johnshew/agents-live/releases/"
+                    f"download/v{version}/{name}"
+                ),
+                "digest": f"sha256:{'0' * 64}",
+                "size": 1,
+            }],
+        }
+
+        class Response(io.BytesIO):
+            def __init__(self, prerelease: bool):
+                metadata["prerelease"] = prerelease
+                super().__init__(json.dumps(metadata).encode())
+
+            def geturl(self) -> str:
+                return "https://api.github.com/release"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        artifact = deploy.release_artifact.resolve(
+            version, opener=lambda *_args, **_kwargs: Response(True))
+        self.assertEqual(version, artifact.version)
+        with self.assertRaises(deploy.release_artifact.ReleaseArtifactError):
+            deploy.release_artifact.resolve(
+                version, opener=lambda *_args, **_kwargs: Response(False))
+
     def test_release_download_fails_closed_on_a_checksum_mismatch(self) -> None:
         """Corrupt bytes never reach uv or leave an installable partial artifact."""
         content = b"tampered"
@@ -3268,6 +3310,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
     def test_publish_uses_release_attached_accepted_artifacts(self) -> None:
         publish = self._workflow_text("publish.yml")
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' || "
+            "!github.event.release.prerelease",
+            publish,
+        )
         self.assertIn("gh release download", publish)
         self.assertIn("--pattern '*.whl'", publish)
         self.assertIn("--pattern '*.tar.gz'", publish)

@@ -120,8 +120,10 @@ agents-live doctor
 ```
 
 On native Windows, run the release `install.ps1` from PowerShell. Both scripts
-accept an exact stable version, migrate an uncontested uv-managed installation,
-and print the generated command under `current` that works immediately.
+accept an exact stable or prerelease version; prereleases require an explicit
+version while omission selects the latest stable release. They migrate an
+uncontested uv-managed installation and print the generated command under
+`current` that works immediately.
 `doctor` validates the active generation, ownership record, and stable commands;
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.

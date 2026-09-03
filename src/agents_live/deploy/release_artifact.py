@@ -23,7 +23,10 @@ NETWORK_TIMEOUT = 30
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
 _STABLE_VERSION = re.compile(
-    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z.-]+)?\Z")
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+_RELEASE_VERSION = re.compile(
+    r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:(?:a|b|rc)\d+|\.dev\d+)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _DOWNLOAD_HOSTS = {
     "github.com",
@@ -97,9 +100,9 @@ def _release(version: str | None, *, opener: Callable[..., Any]
         metadata_url = f"{API_ROOT}/latest"
     else:
         version = layout.generation_name(version)
-        if _STABLE_VERSION.fullmatch(version) is None:
+        if _RELEASE_VERSION.fullmatch(version) is None:
             raise ReleaseArtifactError(
-                f"'{version}' is not an exact stable release version")
+                f"'{version}' is not an exact release version")
         metadata_url = f"{API_ROOT}/tags/v{quote(version, safe='')}"
 
     document = _read_metadata(metadata_url, opener=opener)
@@ -107,14 +110,21 @@ def _release(version: str | None, *, opener: Callable[..., Any]
     if not isinstance(tag, str) or not tag.startswith("v"):
         raise ReleaseArtifactError("GitHub release metadata has no version tag")
     resolved = tag[1:]
-    if _STABLE_VERSION.fullmatch(resolved) is None:
+    if _RELEASE_VERSION.fullmatch(resolved) is None:
         raise ReleaseArtifactError(
-            f"GitHub release tag {tag!r} is not a stable release version")
+            f"GitHub release tag {tag!r} is not a release version")
     if version is not None and resolved != version:
         raise ReleaseArtifactError(
             f"GitHub returned release {resolved}, expected exactly {version}")
-    if document.get("draft") is not False or document.get("prerelease") is not False:
-        raise ReleaseArtifactError(f"GitHub release v{resolved} is not stable")
+    prerelease = _STABLE_VERSION.fullmatch(resolved) is None
+    if (
+        document.get("draft") is not False
+        or document.get("prerelease") is not prerelease
+        or version is None and prerelease
+    ):
+        expected = "prerelease" if prerelease else "stable"
+        raise ReleaseArtifactError(
+            f"GitHub release v{resolved} is not a published {expected} release")
 
     return resolved, document
 
@@ -171,7 +181,7 @@ def resolve(
     *,
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> ReleaseArtifact:
-    """Resolve one stable release wheel and its GitHub-recorded digest."""
+    """Resolve one stable or explicitly requested prerelease wheel."""
     resolved, document = _release(version, opener=opener)
     return _asset(
         resolved, document, f"agents_live-{resolved}-py3-none-any.whl")

@@ -62,19 +62,25 @@ function Save-VerifiedAsset($Asset, [string]$Destination) {
     }
 }
 
-if ($Version -and $Version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-    throw "'$Version' is not an exact stable release version."
+$stableVersion = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+$releaseVersion = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:(?:a|b|rc)[0-9]+|\.dev[0-9]+)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$'
+if ($Version -and $Version -notmatch $releaseVersion) {
+    throw "'$Version' is not an exact stable or prerelease version."
 }
 $metadataUrl = if ($Version) { "$apiRoot/tags/v$Version" } else { "$apiRoot/latest" }
 $release = Get-ReleaseJson $metadataUrl
 $resolved = [string]$release.tag_name
-if ($resolved -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
-    $release.draft -ne $false -or $release.prerelease -ne $false) {
-    throw "GitHub release metadata does not identify a stable release."
+if ($resolved -notmatch "^v$($releaseVersion.Substring(1))" -or $release.draft -ne $false) {
+    throw "GitHub release metadata does not identify a published release."
 }
 $resolved = $resolved.Substring(1)
 if ($Version -and $resolved -ne $Version) {
     throw "GitHub returned release $resolved, expected exactly $Version."
+}
+$expectsPrerelease = $Version -and $Version -notmatch $stableVersion
+if (($expectsPrerelease -and $release.prerelease -ne $true) -or
+    (-not $expectsPrerelease -and $release.prerelease -ne $false)) {
+    throw "GitHub release v$resolved has the wrong prerelease status."
 }
 
 $wheelName = "agents_live-$resolved-py3-none-any.whl"

@@ -4,7 +4,7 @@ set -eu
 version=${1:-}
 case "$version" in
   ""|[0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "agents-live: '$version' is not an exact stable release version" >&2; exit 1 ;;
+  *) echo "agents-live: '$version' is not an exact stable or prerelease version" >&2; exit 1 ;;
 esac
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/agents-live-install.XXXXXX")
@@ -49,6 +49,13 @@ download = os.environ.get(
     "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT",
     "https://github.com/johnshew/agents-live/releases/download",
 ).rstrip("/")
+stable_version = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+release_version = re.compile(
+  r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+  r"(?:(?:a|b|rc)\d+|\.dev\d+)?(?:\+[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?")
+if version and not release_version.fullmatch(version):
+  raise SystemExit(
+    f"agents-live: '{version}' is not an exact stable or prerelease version")
 url = f"{api}/tags/v{version}" if version else f"{api}/latest"
 request = urllib.request.Request(url, headers={
     "Accept": "application/vnd.github+json",
@@ -63,14 +70,18 @@ except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
         f"agents-live: could not retrieve release metadata; "
         f"check proxy and TLS settings: {error}")
 tag = release.get("tag_name", "")
-if (not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag)
-        or release.get("draft") is not False
-        or release.get("prerelease") is not False):
-    raise SystemExit("agents-live: release metadata is not stable")
+if (not tag.startswith("v")
+    or not release_version.fullmatch(tag[1:])
+    or release.get("draft") is not False):
+  raise SystemExit("agents-live: release metadata is not published")
 resolved = tag[1:]
 if version and resolved != version:
     raise SystemExit(
         f"agents-live: GitHub returned {resolved}, expected exactly {version}")
+expects_prerelease = bool(version and not stable_version.fullmatch(version))
+if release.get("prerelease") is not expects_prerelease:
+  raise SystemExit(
+    f"agents-live: release v{resolved} has the wrong prerelease status")
 name = f"agents_live-{resolved}-py3-none-any.whl"
 matches = [asset for asset in release.get("assets", [])
            if asset.get("name") == name]

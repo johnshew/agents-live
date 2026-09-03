@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"agents_live-(?P<version>[^-]+)-py3-none-any\.whl\Z")
+STABLE_VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 
 
 class ReadinessError(RuntimeError):
@@ -49,7 +50,7 @@ def _metadata(version: str, assets: dict[str, bytes], base: str) -> bytes:
     document = {
         "tag_name": f"v{version}",
         "draft": False,
-        "prerelease": False,
+        "prerelease": STABLE_VERSION.fullmatch(version) is None,
         "assets": [
             {
                 "name": name,

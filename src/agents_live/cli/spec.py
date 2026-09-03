@@ -319,7 +319,7 @@ COMMANDS = (
         "cli.commands.install_release", "in-process",
         root="none", hidden=True, update_notice=False,
         args=(
-            Arg(("version",), "Exact stable version; defaults to latest.",
+            Arg(("version",), "Exact stable or prerelease version; defaults to latest stable.",
                 kind="positional"),
             Arg(("--install-root",), "Override the installation root.",
                 kind="value"),

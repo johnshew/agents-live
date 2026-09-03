@@ -136,12 +136,14 @@ $agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-li
 & $agentsLive --repo C:\path\to\repository init
 ```
 
-Pass an exact stable version as the first script argument after downloading the
-installer when reproducibility requires pinning. Re-running the same version is
-idempotent. An existing uv-managed install is retired only after the generation
-is active; a host where uv and an active generation both claim ownership is
-refused with corrective guidance. Network, proxy, TLS, missing-digest, size,
-and checksum failures stop without a package-index or stale-cache fallback.
+Pass an exact stable or prerelease version as the first script argument after
+downloading the installer when reproducibility requires pinning. Prereleases
+must be selected explicitly; omitting the version always selects the latest
+stable release. Re-running the same version is idempotent. An existing
+uv-managed install is retired only after the generation is active; a host where
+uv and an active generation both claim ownership is refused with corrective
+guidance. Network, proxy, TLS, missing-digest, size, and checksum failures stop
+without a package-index or stale-cache fallback.
 
 Agents Live retains immutable versions side by side and selects one through the
 stable `current` path. Local bake versions include their commit suffix, so
