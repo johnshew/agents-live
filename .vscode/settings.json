@@ -1,0 +1,8 @@
+{
+  // agents-live installs itself as a command, so this checkout's editable
+  // .venv and the installed generation both answer to `agents-live`.
+  // Auto-activating the venv makes a terminal report the source version
+  // and hides which one you are talking to. `uv run --with-editable .`
+  // still uses .venv, so nothing in the documented workflow changes.
+  "python.terminal.activateEnvironment": false
+}
