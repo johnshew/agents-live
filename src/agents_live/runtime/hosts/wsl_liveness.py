@@ -78,6 +78,22 @@ def current_distro(distro: str | None = None) -> str:
 
 
 def stable_cli_path() -> Path:
+    """The command a five-minute task should name, across upgrades.
+
+    A self-managed installation answers through its `current` link, which
+    survives every generation change. `~/.local/bin/agents-live` is only
+    correct for an installation that put a shim there, so it is the
+    fallback rather than the answer: naming it unconditionally left the
+    task pointing at a path a generation install never creates.
+
+    Imported inside the function because `deploy` sits above this module
+    and imports the host runtime beside it.
+    """
+    from ...deploy import layout
+
+    stable = layout.command_path("agents-live")
+    if stable.exists():
+        return stable
     return Path.home() / ".local" / "bin" / "agents-live"
 
 

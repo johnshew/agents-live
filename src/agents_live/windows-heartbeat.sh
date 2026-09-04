@@ -4,9 +4,15 @@
 #
 # Compatibility wrapper for legacy scheduled tasks.
 #
-CLI="$HOME/.local/bin/agents-live"
+# A self-managed installation answers through its stable current link; a
+# uv-managed one put a shim in ~/.local/bin. Prefer the former, because a
+# generation install never creates the latter.
+CLI="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin/agents-live"
 if [[ ! -x "$CLI" ]]; then
-    echo "windows-heartbeat.sh: agents-live uv shim not found: $CLI" >&2
+    CLI="$HOME/.local/bin/agents-live"
+fi
+if [[ ! -x "$CLI" ]]; then
+    echo "windows-heartbeat.sh: no agents-live command found: $CLI" >&2
     exit 1
 fi
 # Always perform the actual heartbeat first: it has zero Windows-side

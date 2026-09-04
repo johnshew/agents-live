@@ -185,6 +185,18 @@ def remove_directory_link(path: Path) -> None:
         os.rmdir(path)
 
 
+#: Where a login shell and the two common interactive shells read PATH.
+#: ``.profile`` alone reaches neither a zsh user nor a non-login bash
+#: shell, which is how an installation lands and the command still is not
+#: found. Only files that already exist are appended to, except
+#: ``.profile``, which is created because POSIX login shells read it.
+_PROFILE_FILES = (".profile", ".bashrc", ".zshrc")
+
+
+def _path_export(directory: str) -> str:
+    return f'export PATH="{directory}:$PATH"'
+
+
 def expose_user_path_directory(directory: Path) -> None:
     """Persist one command directory on the current user's PATH."""
     command_root = str(directory)
@@ -208,17 +220,26 @@ def expose_user_path_directory(directory: Path) -> None:
                     key, "Path", 0, kind, ";".join(updated))
         return
 
-    profile = Path.home() / ".profile"
-    line = f'export PATH="{command_root}:$PATH"'
-    try:
-        existing = profile.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        existing = ""
-    if line not in existing.splitlines():
-        with profile.open("a", encoding="utf-8", newline="\n") as stream:
-            if existing and not existing.endswith("\n"):
-                stream.write("\n")
-            stream.write(f"\n# Added by Agents Live\n{line}\n")
+    line = _path_export(command_root)
+    for name in _PROFILE_FILES:
+        profile = Path.home() / name
+        try:
+            existing = profile.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            if name != ".profile":
+                continue
+            existing = ""
+        except OSError:
+            continue
+        if line in existing.splitlines():
+            continue
+        try:
+            with profile.open("a", encoding="utf-8", newline="\n") as stream:
+                if existing and not existing.endswith("\n"):
+                    stream.write("\n")
+                stream.write(f"\n# Added by Agents Live\n{line}\n")
+        except OSError:
+            continue
 
 
 def remove_user_path_directory(directory: Path) -> None:
@@ -244,15 +265,21 @@ def remove_user_path_directory(directory: Path) -> None:
             pass
         return
 
-    profile = Path.home() / ".profile"
-    line = f'export PATH="{command_root}:$PATH"'
-    try:
-        lines = profile.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return
-    retained = [value for value in lines if value != line]
-    if retained != lines:
-        profile.write_text("\n".join(retained).rstrip() + "\n", encoding="utf-8")
+    line = _path_export(command_root)
+    for name in _PROFILE_FILES:
+        profile = Path.home() / name
+        try:
+            lines = profile.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        retained = [value for value in lines if value != line]
+        if retained == lines:
+            continue
+        try:
+            profile.write_text(
+                "\n".join(retained).rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            continue
 
 
 # ---------------------------------------------------------------------------
