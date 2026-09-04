@@ -14,6 +14,19 @@ history is retained in the source repository.
 - fix: let fresh WSL bootstraps activate before repository initialization. (#443)
   Host liveness commands no longer require a project root, so a verified
   generation can stage its Windows heartbeat before `agents-live init`.
+- fix: make managed skill refresh transactional. (#442)
+  A failed replacement restores the complete previous payload instead of
+  leaving tracked files deleted, while repository-authored files remain
+  present across a successful refresh.
+- feat: manage installed generations through the public CLI. (#441)
+  Operators can list and activate retained versions, remove a chosen inactive
+  version, or collect older inactive versions while preserving the active,
+  held, and rollback generations.
+- feat: make immutable generations the only supported installation owner. (#334)
+  `agents-live upgrade` now builds and synchronously activates a complete
+  side-by-side generation. The uv-owned in-place upgrade, deferred Windows
+  handoff, quiescence protocol, and receipt-driven convergence are retired;
+  uv remains the generation environment builder and package transport.
 
 ## 6.7.0 - 2026-09-04
 
