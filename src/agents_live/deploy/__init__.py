@@ -3,13 +3,12 @@ selection, and the planning rules around them.
 
 This subsystem is the foundation described in #334 (step 1: installation
 root and stable launcher) with the vocabulary, failure semantics, and
-ownership rules from #369. Hidden integration seams can build and activate
-a generation, including from an authenticated official release artifact,
-but no public install, upgrade, or uninstall path uses them today. The
-runtime is still uv-managed and ``agents-live upgrade`` still runs
-``uv tool upgrade``.
+ownership rules from #369. Installation, upgrade, and uninstall all run
+through it: a self-managed installation builds a generation and activates
+it with one pointer write, and uv is the transport that fetches and
+verifies the first wheel rather than the manager of the runtime.
 
-What it does provide is the model those steps need, in a form that can be
+What it provides is the model those paths need, in a form that can be
 tested without a host:
 
 - :mod:`~agents_live.deploy.layout` computes where a self-managed
@@ -20,7 +19,7 @@ tested without a host:
 - :mod:`~agents_live.deploy.ownership` decides which channel owns the
   installation a command is running from, so a foreign owner can be
   reported before it can be raced.
-- :mod:`~agents_live.deploy.generation` stages, validates, and promotes a
+- :mod:`~agents_live.deploy.generation` populates and validates a
   generation before activation performs the single pointer write.
 - :mod:`~agents_live.deploy.release_artifact` resolves official GitHub release
   metadata and verifies exact wheel bytes before staging can execute them.

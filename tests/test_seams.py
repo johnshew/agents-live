@@ -3503,6 +3503,32 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
         self.assertEqual([60], source.timeouts)
         self.assertEqual([True], handoffs)
 
+    def test_self_managed_watcher_retires_when_the_generation_moves(self) -> None:
+        """A watcher cannot detect an upgrade from its own metadata.
+
+        A uv upgrade rewrites the environment the watcher is running in,
+        so its own distribution metadata reports the replacement. A
+        generation is immutable and never changes underneath the process
+        holding it, so that same question answers "current" forever and no
+        watcher ever hands off. Only the installation's active generation
+        moves.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(
+                    os.environ,
+                    {deploy.layout.ENV_INSTALL_ROOT: str(root)}):
+                loaded = deploy.layout.generation_dir(internal.__version__)
+                replacement = deploy.layout.generation_dir("9.9.9")
+                loaded.mkdir(parents=True)
+                replacement.mkdir(parents=True)
+                hostruntime.replace_directory_link(
+                    deploy.layout.current_path(), loaded, root=root)
+                self.assertTrue(internal._runtime_is_current())
+                hostruntime.replace_directory_link(
+                    deploy.layout.current_path(), replacement, root=root)
+                self.assertFalse(internal._runtime_is_current())
+
     def test_dispatch_budget_counts_atomically_and_recovers_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "budget.json"

@@ -13,7 +13,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from ... import __version__, agent, obs, paths, runtime
+from ... import __version__, agent, deploy, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...obs import retention
@@ -441,7 +441,23 @@ def _degradation_message(kind: str) -> str:
 
 
 def _runtime_is_current() -> bool:
-    """Whether this process loaded the version installed on disk."""
+    """Whether this process loaded the version installed on disk.
+
+    A self-managed installation activates each version in its own
+    generation directory, so this process's own distribution metadata
+    describes the generation it started from and never changes. Asking it
+    would report every watcher current forever and no watcher would ever
+    hand off. The installation's active generation is the one fact that
+    moves, and a generation is named for the version it contains.
+
+    A uv-managed installation has no generation to read: an upgrade
+    rewrites the shared environment underneath the running process, which
+    is exactly what its own distribution metadata then reports.
+    """
+    try:
+        return deploy.pointer.read().generation == __version__
+    except (deploy.pointer.PointerError, OSError):
+        pass
     try:
         return importlib.metadata.version("agents-live") == __version__
     except importlib.metadata.PackageNotFoundError:
