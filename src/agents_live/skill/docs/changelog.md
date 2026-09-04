@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: hand watchers off to a newly activated generation.
+  A watcher decided whether it was current by reading its own
+  distribution metadata. A uv upgrade rewrote the environment underneath
+  it, so that answer moved; a generation is immutable, so it never did,
+  and every watcher kept running the version it started with while the
+  upgrade reported success. Watchers now compare against the
+  installation's active generation.
+
 - fix: accept a synchronous self-managed candidate on Windows.
   Candidate acceptance waited for the durable helper result that only a
   uv-managed upgrade produces, so the generation model this release ships
