@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.7.0 - 2026-09-04
+
 - fix: hand watchers off to a newly activated generation.
   A watcher decided whether it was current by reading its own
   distribution metadata. A uv upgrade rewrote the environment underneath
