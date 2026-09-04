@@ -237,7 +237,7 @@ be present. The wheel contains only the installable package and its metadata.
 Show the installed version and run the same read-only checks consumers use:
 
 ```bash
-uv tool list
+agents-live generations list
 agents-live --repo ~/repos/<target-project> doctor
 agents-live --repo ~/repos/<target-project> status
 agents-live --repo ~/repos/<target-project> dashboard --help
@@ -247,24 +247,25 @@ Check PyPI and upgrade when a newer version is available:
 
 ```bash
 agents-live upgrade
-uv tool list
+agents-live generations list
 agents-live --repo ~/repos/<target-project> doctor
 ```
 
-`upgrade` reinstalls the latest stable uv-managed runtime, then refreshes
+`upgrade` installs the latest stable self-managed generation, activates it,
+then refreshes
 managed skill payloads in the current initialized project and every available
-registered repository. An explicit `--repo` limits refresh to one project;
-internal continuation controls isolate phases while replacing a running tool.
+registered repository. An explicit `--repo` limits refresh to one project.
 `init` retains its payload refresh behavior for first-time setup and
 compatibility. `doctor` reports a package and payload version mismatch. GitHub
 repository notifications can provide proactive release notices: select
 **Watch**, **Custom**, then **Releases**.
 
-If bare `agents-live` was installed editable from this checkout, restore the
-normal PyPI tool before testing consumer behavior:
+If bare `agents-live` resolves to an editable or package-manager environment,
+run the verified bootstrap before testing consumer behavior:
 
 ```bash
-uv tool install --force agents-live
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 ```
 
 ## Validate a release candidate

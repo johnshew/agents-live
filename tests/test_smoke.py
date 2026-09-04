@@ -189,6 +189,37 @@ class TestSixRuntimeSmoke(SmokeRepository):
             (installed / ".gitignore").read_text(encoding="utf-8"),
         )
 
+    def test_skill_refresh_restores_the_previous_payload_when_promotion_fails(self) -> None:
+        self.assertEqual("installed", init.install_skill(self.root))
+        installed = self.root / ".claude" / "skills" / "agents-live"
+        original = {
+            relative: (installed / relative).read_bytes()
+            for relative in (".gitignore", "SKILL.md", "VERSION")
+        }
+        (installed / "VERSION").write_text("0.0.0\n", encoding="utf-8")
+        original["VERSION"] = (installed / "VERSION").read_bytes()
+        (installed / "custom.txt").write_text("keep me\n", encoding="utf-8")
+
+        real_rename = Path.rename
+
+        def fail_staging_promotion(path: Path, target: Path) -> Path:
+            if path.name.startswith(".agents-live-staging-"):
+                raise PermissionError("injected promotion failure")
+            return real_rename(path, target)
+
+        with mock.patch.object(Path, "rename", autospec=True, side_effect=fail_staging_promotion):
+            with self.assertRaisesRegex(PermissionError, "injected promotion failure"):
+                init.install_skill(self.root)
+
+        for relative, content in original.items():
+            self.assertEqual(content, (installed / relative).read_bytes(), relative)
+        self.assertTrue((installed / "docs").is_dir())
+        self.assertTrue((installed / "templates").is_dir())
+        self.assertEqual(
+            "keep me\n",
+            (installed / "custom.txt").read_text(encoding="utf-8"),
+        )
+
     def test_managed_skill_ignore_is_local_and_index_safe(self) -> None:
         subprocess.run(
             ["git", "init", "--quiet"],

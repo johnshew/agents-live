@@ -123,9 +123,6 @@ class LocalProcesses:
     ) -> ProcessRef:
         return ProcessRef(pid, time.time(), image, role, key, fingerprint)
 
-    def defer_until_environment_exits(self, *_args, **_kwargs) -> None:
-        return None
-
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
             return

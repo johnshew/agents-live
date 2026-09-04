@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -58,10 +57,6 @@ TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore
 ACCEPTANCE_SCHEMA = 2
 PREPARATION_SCHEMA = 2
 CHECKPOINT_SCHEMA = 1
-QUEUED_UPGRADE_RE = re.compile(
-    r"Upgrade queued as (?P<operation>[0-9a-f]+); "
-    r"result: (?P<result>.+?); run `agents-live logs admin`"
-)
 
 
 class ReleaseError(RuntimeError):
@@ -742,34 +737,9 @@ def _installed_cli() -> str:
     self_managed = install_root / "current" / command_dir / filename
     if self_managed.is_file():
         return str(self_managed.resolve())
-
-    tool_root = Path(_run(["uv", "tool", "dir"], capture=True))
-    environment = tool_root / "agents-live"
-    candidates = (
-        environment / "Scripts" / filename,
-        environment / "bin" / filename,
-    )
-    executable = next((path for path in candidates if path.is_file()), None)
-    if executable is None:
-        raise ReleaseError(
-            "an active self-managed or uv-managed agents-live command is "
-            "required for candidate acceptance")
-    return str(executable.resolve())
-
-
-def _installed_is_self_managed() -> bool:
-    """Whether the installed command runs from a generation directory.
-
-    Only a uv-managed upgrade rewrites the running environment and has to
-    defer to a helper on Windows; a self-managed one builds a new
-    generation beside it and completes synchronously.
-    """
-    try:
-        generations = (_install_root() / "versions").resolve()
-        installed = Path(_installed_cli()).resolve()
-    except OSError:
-        return False
-    return generations in installed.parents
+    raise ReleaseError(
+        "an active self-managed agents-live command is required for "
+        "candidate acceptance")
 
 
 def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -897,125 +867,6 @@ def _started_watchers(payload: dict) -> tuple[tuple[str, str], ...]:
         for row in watched
         if row.get("is_owner") is True
     ))
-
-
-def _wait_for_upgrade_result(
-    result_path: Path, *, timeout_s: float = 900.0,
-) -> dict:
-    deadline = time.monotonic() + timeout_s
-    last: object = None
-    while time.monotonic() < deadline:
-        try:
-            last = json.loads(result_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            last = None
-        if isinstance(last, dict) and last.get("status") == "terminal":
-            return last
-        time.sleep(0.2)
-    raise ReleaseError(
-        f"candidate upgrade did not reach a terminal result within "
-        f"{timeout_s:.0f}s: {last!r}")
-
-
-def _candidate_events(operation_id: str) -> list[dict]:
-    if not re.fullmatch(r"[0-9a-f]+", operation_id):
-        raise ReleaseError("candidate upgrade returned an invalid operation ID")
-    sql = (
-        "select run_id, status, message, attributes from log "
-        f"where run_id = '{operation_id}' order by ts"
-    )
-    completed = _installed_run(
-        ["logs", "--all", "--sql", sql, "--format", "jsonl"])
-    if completed.returncode != 0:
-        raise ReleaseError(
-            "could not query candidate upgrade events: "
-            f"{completed.stderr.strip() or completed.stdout.strip()}")
-    try:
-        rows = [json.loads(line) for line in completed.stdout.splitlines() if line]
-    except json.JSONDecodeError as exc:
-        raise ReleaseError("candidate upgrade events were not valid JSONL") from exc
-    return [_decode_candidate_event(row) for row in rows]
-
-
-def _decode_candidate_event(row: dict) -> dict:
-    def scalar(value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        try:
-            return json.loads(value.replace("NULL", "null"))
-        except json.JSONDecodeError:
-            return value
-
-    event = dict(row)
-    values = event.pop("attributes", [])
-    if not isinstance(values, list):
-        return event
-    for value in values:
-        try:
-            pair = scalar(value)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(pair, list) and len(pair) == 2:
-            pair = [scalar(pair[0]), scalar(pair[1])]
-        if (
-            isinstance(pair, list)
-            and len(pair) == 2
-            and isinstance(pair[0], str)
-            and pair[0] not in event
-        ):
-            event[pair[0]] = pair[1]
-    return event
-
-
-def _verify_candidate_events(
-    events: list[dict], watchers: tuple[tuple[str, str], ...],
-) -> None:
-    def normalized_root(value: object) -> str:
-        path = str(Path(str(value)).resolve())
-        return path.casefold() if os.name == "nt" else path
-
-    def watcher_index(phase: str, root: str, watcher: str) -> int:
-        wanted_root = normalized_root(root)
-        for index, event in enumerate(events):
-            if (
-                event.get("status") == "ok"
-                and event.get("upgrade_phase") == phase
-                and event.get("watcher") == watcher
-                and normalized_root(event.get("root", "")) == wanted_root
-            ):
-                return index
-        raise ReleaseError(
-            f"candidate upgrade has no exact {phase} event for "
-            f"{watcher} in {root}")
-
-    plugin_indexes = [
-        index for index, event in enumerate(events)
-        if event.get("status") == "ok"
-        and (
-            event.get("operation") == "plugin-converge"
-            or event.get("message") in {
-                "plugin-converge", "plugins already converged"}
-        )
-    ]
-    terminal_indexes = [
-        index for index, event in enumerate(events)
-        if event.get("status") == "ok"
-        and event.get("message") == "deferred Windows upgrade completed"
-    ]
-    if not plugin_indexes:
-        raise ReleaseError("candidate upgrade has no successful plugin event")
-    if not terminal_indexes:
-        raise ReleaseError("candidate upgrade has no successful terminal event")
-    plugin_index = plugin_indexes[-1]
-    terminal_index = terminal_indexes[-1]
-    for root, watcher in watchers:
-        requested = watcher_index("quiesce-requested", root, watcher)
-        quiesced = watcher_index("quiesced", root, watcher)
-        restored = watcher_index("restore", root, watcher)
-        if not requested < quiesced < plugin_index < restored < terminal_index:
-            raise ReleaseError(
-                f"candidate upgrade lifecycle is out of order for "
-                f"{watcher} in {root}")
 
 
 def _write_candidate_acceptance(
@@ -1460,15 +1311,9 @@ def _check_acceptance_checkpoint(
         ):
             raise ReleaseError(
                 f"candidate checkpoint has a malformed watcher row: {row}")
-    operation_id = checkpoint.get("operation_id")
-    if operation_id is not None and (
-        not isinstance(operation_id, str)
-        or re.fullmatch(r"[0-9a-f]+", operation_id) is None
-    ):
-        raise ReleaseError("candidate checkpoint has an invalid operation ID")
-    if os.name == "nt" and operation_id is None:
+    if checkpoint.get("operation_id") is not None:
         raise ReleaseError(
-            "Windows candidate checkpoint has no deferred operation ID")
+            "candidate checkpoint has a retired deferred operation ID")
     return checkpoint
 
 
@@ -1569,7 +1414,6 @@ def accept_candidate(
             f"{root}")
     before_contract = _status_contract(before_status)
 
-    self_managed = _installed_is_self_managed()
     completed = _installed_run(
         ["--repo", str(root), "upgrade", "--from", str(wheel)])
     if completed.stdout:
@@ -1579,24 +1423,6 @@ def accept_candidate(
     if completed.returncode != 0:
         raise ReleaseError(
             f"candidate local-wheel upgrade exited {completed.returncode}")
-
-    operation_id: str | None = None
-    match = QUEUED_UPGRADE_RE.search(completed.stdout)
-    if match is not None:
-        operation_id = match.group("operation")
-        result = _wait_for_upgrade_result(Path(match.group("result").strip()))
-        if result.get("operation_id") != operation_id:
-            raise ReleaseError("candidate upgrade result has the wrong operation ID")
-        if result.get("exit_code") != 0:
-            raise ReleaseError(
-                f"candidate deferred upgrade exited {result.get('exit_code')}")
-    elif os.name == "nt" and not self_managed:
-        # A uv-managed Windows upgrade rewrites the running environment and
-        # must defer to a helper. A self-managed one builds a new generation
-        # beside the running one and completes synchronously, so there is no
-        # helper to wait for.
-        raise ReleaseError(
-            "Windows candidate upgrade did not queue a durable helper result")
 
     if _installed_version() != version:
         raise ReleaseError("installed version changed after same-wheel acceptance")
@@ -1611,14 +1437,12 @@ def accept_candidate(
     if _started_watchers(after_representative) != watchers:
         raise ReleaseError("candidate upgrade did not restore the started watchers")
 
-    if operation_id is not None:
-        _verify_candidate_events(_candidate_events(operation_id), watchers)
     _write_acceptance_checkpoint(
-        version, root, wheel, operation_id=operation_id,
+        version, root, wheel, operation_id=None,
         contract=before_contract, watchers=watchers,
         operational_agent=agent_id, cost_agent=cost_agent)
     receipt = _finish_operational_acceptance(
-        version, root, wheel, operation_id=operation_id,
+        version, root, wheel, operation_id=None,
         before_contract=before_contract, watchers=watchers,
         operational_agent=agent_id, cost_agent=cost_agent)
     _checkpoint_path(version).unlink(missing_ok=True)

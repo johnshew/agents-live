@@ -21,7 +21,7 @@ from ...runtime.hosts import filesystem as watchsource
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
 from ...state import registry as repos
-from .. import lifecycle, upgrade_handoff
+from .. import lifecycle
 
 
 _AGENT_FAILURE_THRESHOLD = 3
@@ -249,10 +249,6 @@ def _watch(
     watcher_id = args.name
 
     def should_continue() -> bool:
-        operation = upgrade_handoff.quiesce_operation(sys.executable)
-        if operation is not None:
-            retirement.update(reason="quiesce", operation=operation)
-            return False
         if not _runtime_is_current():
             retirement["reason"] = "replacement"
             return False
@@ -262,16 +258,6 @@ def _watch(
         if retirement["reason"] == "replacement":
             _restart_watcher(args, root, expression, metadata)
             return
-        if retirement["reason"] == "quiesce":
-            adminlog.record(
-                "upgrade-watchers",
-                status="ok",
-                upgrade_phase="quiesced",
-                correlation_id=retirement["operation"],
-                root=str(root),
-                watcher=args.name,
-                message=f"watcher '{args.name}' quiesced at idle boundary",
-            )
 
     def record(status: str, message: str, **fields: Any) -> None:
         _record_watcher_event(
@@ -450,9 +436,8 @@ def _runtime_is_current() -> bool:
     hand off. The installation's active generation is the one fact that
     moves, and a generation is named for the version it contains.
 
-    A uv-managed installation has no generation to read: an upgrade
-    rewrites the shared environment underneath the running process, which
-    is exactly what its own distribution metadata then reports.
+    An unmanaged command has no generation to read, so distribution metadata
+    remains the fallback outside the supported self-managed installation.
     """
     try:
         return deploy.pointer.read().generation == __version__

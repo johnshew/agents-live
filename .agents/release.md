@@ -169,15 +169,12 @@ uv run --script tools/release.py --accept-candidate \
 The first command bootstraps the candidate. The acceptance command then makes
 the installed candidate upgrade itself from the same wheel. It captures every
 registered repository's started and loadable state, requires a started watcher
-in the selected representative repository, waits for any deferred Windows
-helper without repeatedly launching the held executable, and requires:
+in the selected representative repository, and requires:
 
 - the same exact candidate version after replacement;
 - unchanged started and loadable state across all registered repositories;
 - healthy all-repository `doctor` results before and after;
-- restoration of every started watcher; and
-- correlated quiesce, plugin convergence, restoration, and terminal events on
-  deferred Windows upgrades.
+- restoration of every started watcher.
 
 Acceptance preflights the selected agents, absence of a managed dashboard, and
 a real headless browser launch before replacement. Every watcher counted in the
@@ -197,7 +194,7 @@ uv run --script tools/release.py --accept-candidate \
 ```
 
 After replacement succeeds, acceptance runs a full operational pass through
-the uv-managed candidate. Choose an agent whose immediate run is safe and
+the self-managed candidate. Choose an agent whose immediate run is safe and
 whose started state may be toggled temporarily. The pass exercises CLI
 `status`, `doctor`, `run`, `start`, `stop`, and log queries. It then launches
 the installed dashboard, drives its real browser UI, runs the dashboard health

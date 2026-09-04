@@ -157,13 +157,6 @@ class WindowsProcesses:
         return ProcessRef(
             pid, created_at, image, role, key, fingerprint)
 
-    def defer_until_environment_exits(
-        self, argv: Sequence[str], environment: Path | str, **kwargs,
-    ) -> ProcessRef | None:
-        from . import system as hostruntime
-        return hostruntime.defer_until_environment_exits(
-            argv, environment, supervisor=self, **kwargs)
-
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
             return

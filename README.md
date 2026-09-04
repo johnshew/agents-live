@@ -36,7 +36,8 @@ See [Installation](#installation) for required host tools and installation
 details.
 
 ```bash
-uv tool install agents-live
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 agents-live init
 agents-live start markdown-polisher
 ```
@@ -140,9 +141,8 @@ Pass an exact stable or prerelease version as the first script argument after
 downloading the installer when reproducibility requires pinning. Prereleases
 must be selected explicitly; omitting the version always selects the latest
 stable release. Re-running the same version is idempotent. An existing
-uv-managed install is retired only after the generation is active; a host where
-uv and an active generation both claim ownership is refused with corrective
-guidance. Network, proxy, TLS, missing-digest, size, and checksum failures stop
+legacy uv tool install is retired only after the generation is active.
+Network, proxy, TLS, missing-digest, size, and checksum failures stop
 without a package-index or stale-cache fallback.
 
 Install a published Windows bake by its complete commit-qualified version:
@@ -173,6 +173,10 @@ sealed, installation validates the registered repositories and installs every
 declared plugin wheel into that generation. Selecting a generation runs host
 maintenance through that selected version so native triggers and still-started
 watchers converge without rewriting another installed version.
+Use `agents-live generations list` to inspect installed versions,
+`generations activate VERSION` to roll back, `generations remove VERSION` to
+discard an inactive candidate, and `generations collect` to retain one rollback
+generation while removing older versions that no process is using.
 
 Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
 install. `init` prints the PowerShell completion script path and the exact line

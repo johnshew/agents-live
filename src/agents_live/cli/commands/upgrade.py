@@ -8,22 +8,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 import zipfile
 from email.parser import Parser
 from pathlib import Path
 
-from ... import __version__, agent, deploy, paths, plugins, preflight, runtime
-from ...obs import admin as adminlog
+from ... import __version__, agent, deploy, paths, plugins, preflight
 from ...legacy import migrate as legacy_migration
-from ...runtime.hosts import system as hostruntime
-from ...runtime.hosts.processes import watchers_on_host, within
-from ...runtime.spawn import cli_executable_path, find_uv
+from ...runtime.spawn import cli_executable_path
 from ...state import registry as repos
-from .. import lifecycle, package_index, update_check, upgrade_handoff
-from ..scripts import dashboards
+from .. import lifecycle
 from . import init, install_generation, install_release
 
 
@@ -71,29 +66,6 @@ def _migrate_triggers(root: Path) -> None:
     if completed.returncode != 0:
         raise OSError(
             f"trigger migration failed with exit {completed.returncode}")
-
-
-def _install_command(uv: str, source: Path | None) -> list[str]:
-    """The uv command that puts a new runtime in the tool environment.
-
-    Without a source this is the published package. With one it is a
-    local build - a project directory or a built artifact - which is the
-    only way to exercise the installed-tool leg of the testing boundary
-    without publishing first (#179). ``--force`` is required because the
-    tool is already installed; that is the whole point.
-
-    ``--force`` alone is not enough for a local source: uv will happily
-    reuse a cached build of the same directory, so an install can report
-    success having put the *previous* source on disk. Installing a stale
-    build is the one outcome this flag exists to rule out, so the local
-    path also asks for the package itself to be rebuilt. It is scoped to
-    ``agents-live`` rather than a blanket ``--reinstall`` so dependencies
-    stay cached and the install does not turn into a full re-download.
-    """
-    if source is None:
-        return [uv, "tool", "upgrade", "agents-live"]
-    return [uv, "tool", "install", "--force",
-            "--reinstall-package", "agents-live", str(source)]
 
 
 def _wheel_identity(wheel: Path) -> tuple[str, str]:
@@ -186,359 +158,6 @@ def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
     return tuple(dict.fromkeys(errors))
 
 
-def _holders(environment: Path, *, include_watchers: bool = True) -> list[str]:
-    """The long-lived agents-live processes running out of *environment*.
-
-    Watchers and dashboards outlive the command that started them and
-    hold the environment's files open. uv discovers that only part way
-    through rebuilding, which is how an upgrade removes a plugin and then
-    fails on the launcher, leaving neither the old nor the new state
-    (#231).
-
-    This process is deliberately not counted. It runs from the same
-    environment and cannot stop itself, and uv writes the launcher last,
-    so the launcher it holds is already covered by
-    :func:`plugins.only_the_launcher_failed`. Only processes an operator
-    can act on are named.
-    """
-    try:
-        held = {
-            pid for pid, command in hostruntime.process_command_lines()
-            if any(within(arg, environment)
-                   for arg in hostruntime.split_command_line(command))
-        }
-        watchers = (
-            watchers_on_host(under=environment) if include_watchers else [])
-    except OSError:
-        # An unreadable process table must not fail an upgrade that would
-        # otherwise work; uv still reports whatever it cannot replace.
-        return []
-    holders = [
-        f"watcher '{name}'{f' in {project}' if project else ''} (pid {pid})"
-        for pid, name, project in watchers
-    ] if include_watchers else []
-    holders += [
-        f"dashboard on port {entry['port']} (pid {entry['pid']})"
-        for entry in dashboards.running() if int(entry["pid"]) in held
-    ]
-    return sorted(holders)
-
-
-def _refuse_while_held(end: dict, *, allow_watchers: bool = False) -> bool:
-    """Whether processes hold the installation this upgrade would rewrite.
-
-    Only where the host locks a running image: POSIX replaces one without
-    complaint, so there is nothing to refuse, and stopping a watcher
-    there would cost more than it saves.
-    """
-    if not hostruntime.locks_running_image():
-        return False
-    # With nothing long-lived running, nothing can be holding the
-    # installation, and there is no reason to pay for `uv tool dir`.
-    if not _running_watchers() and not dashboards.running():
-        return False
-    environment = plugins.tool_environment()
-    if environment is None:
-        return False
-    if allow_watchers:
-        holders = [
-            f"dashboard on port {entry['port']} (pid {entry['pid']})"
-            for entry in dashboards.running()
-        ]
-    else:
-        holders = _holders(environment)
-    if not holders:
-        return False
-    end["status"] = "error"
-    end["level"] = "error"
-    end["held_by"] = len(holders)
-    end["message"] = "installation in use; nothing was changed"
-    if allow_watchers:
-        guidance = (
-            "Stop the managed dashboard and run upgrade again "
-            "(`agents-live dashboard stop --port <port>`)")
-    else:
-        guidance = (
-            "Stop them and run upgrade again (`agents-live --repo <path> "
-            "stop <name>`, `agents-live dashboard stop --port <port>`)")
-    preflight.emit_failure(
-        "upgrade",
-        "this installation is in use, so nothing was changed: "
-        f"{'; '.join(holders)}. {guidance}")
-    return True
-
-
-def _handoff_windows_upgrade(
-        source: Path | None, *, runtime_only: bool) -> int | None:
-    """Defer an installed Windows upgrade to an external uv environment.
-
-    uv removes the tool environment before rebuilding it. A process running
-    from that environment holds its interpreter open on Windows, so a direct
-    upgrade can remove the packages and then fail to remove ``Scripts``. The
-    deferred process runs this same command through isolated ``uv tool run``;
-    without ``--isolated``, uv can reuse the installed tool environment and
-    place the helper inside the directory it must rewrite.
-    """
-    if hostruntime.id() != hostruntime.WINDOWS:
-        return None
-    environment = plugins.tool_environment()
-    if (environment is None
-            or not within(sys.executable, environment)):
-        return None
-    try:
-        uv = find_uv()
-    except FileNotFoundError as exc:
-        preflight.emit_failure("upgrade", str(exc))
-        return 1
-    package = (str(source) if source is not None
-               else f"agents-live>={__version__}")
-    claim, existing = upgrade_handoff.claim(
-        environment, source=package, runtime_only=runtime_only)
-    if claim is None:
-        preflight.emit_failure(
-            "upgrade", f"a Windows upgrade is already queued ({existing}); "
-            "run `agents-live logs admin` for its outcome")
-        return 1
-    command = [uv, "tool", "run", "--isolated", "--refresh", "--from", package,
-               "agents-live", "upgrade", "--continuation-environment",
-               str(environment), "--upgrade-id", claim.operation_id]
-    if source is not None:
-        command.extend(["--from", str(source)])
-    if runtime_only:
-        command.append("--runtime-only")
-    with adminlog.operation(
-            "upgrade-runtime", version_before=__version__, source=package,
-            deferred=True, correlation_id=claim.operation_id) as end:
-        if _refuse_while_held(end, allow_watchers=True):
-            upgrade_handoff.abandon(claim)
-            return 1
-        helper = runtime.current().supervisor.defer_until_environment_exits(
-            command, environment, operation_id=claim.operation_id,
-            result_path=claim.result_path,
-            transcript_path=claim.transcript_path)
-        if helper is None:
-            upgrade_handoff.abandon(claim)
-            end["status"] = "error"
-            end["level"] = "error"
-            end["message"] = "Windows upgrade helper could not start"
-            preflight.emit_failure(
-                "upgrade", "nothing was changed because the Windows upgrade "
-                "helper could not start; run `uv tool run --from agents-live "
-                "agents-live upgrade` after this command exits")
-            return 1
-        upgrade_handoff.spawned(claim, helper)
-        try:
-            watchers = watchers_on_host(under=environment)
-            identities = upgrade_handoff.request_quiescence(claim, watchers)
-        except (OSError, RuntimeError, ValueError) as exc:
-            runtime.current().supervisor.terminate(helper)
-            upgrade_handoff.abandon(claim)
-            end["status"] = "error"
-            end["level"] = "error"
-            end["message"] = f"could not request watcher quiescence: {exc}"
-            preflight.emit_failure("upgrade", end["message"])
-            return 1
-        if identities:
-            end["quiesce_watchers"] = len(identities)
-        end["status"] = "deferred"
-        end["transcript"] = str(claim.transcript_path)
-        end["message"] = "upgrade queued until this process exits"
-    print(
-        f"Upgrade queued as {claim.operation_id}; "
-        f"result: {claim.result_path}; run `agents-live logs admin` "
-        "after this process exits to see its outcome"
-    )
-    return 0
-
-
-def _restore_quiesced_watchers(correlation_id: str) -> int:
-    try:
-        identities = upgrade_handoff.begin_restoration(correlation_id)
-    except RuntimeError as exc:
-        preflight.emit_failure("upgrade", str(exc))
-        return 1
-    if not identities:
-        return 0
-    named = ", ".join(
-        f"{name} ({project})" if project else name
-        for name, project in identities
-    )
-    try:
-        result = lifecycle.converge()
-    except lifecycle.CollectionUnavailable as exc:
-        detail = str(exc)
-    else:
-        if not result.failed and result.health.healthy:
-            for name, project in identities:
-                adminlog.record(
-                    "upgrade-watchers",
-                    status="ok",
-                    upgrade_phase="restore",
-                    correlation_id=correlation_id,
-                    watcher=name,
-                    root=project or "",
-                    watcher_count=len(identities),
-                    message=f"restored quiesced watcher: {name}",
-                )
-            return 0
-        detail = "; ".join(
-            f"{operation.key}: {error}"
-            for operation, error in result.failed
-        ) or "; ".join(result.health.detail) or "runtime health is degraded"
-    adminlog.record(
-        "upgrade-watchers",
-        status="error",
-        level="error",
-        upgrade_phase="restore",
-        correlation_id=correlation_id,
-        watchers=named,
-        watcher_count=len(identities),
-        message=f"could not restore quiesced watchers: {detail}",
-    )
-    preflight.emit_failure(
-        "upgrade",
-        f"runtime upgraded, but quiesced watchers were not restored: {detail}; "
-        "started intent is unchanged and automatic maintenance can retry",
-    )
-    return 1
-
-
-def _upgrade_runtime(roots: list[Path] | None = None,
-                     source: Path | None = None,
-                     receipt_environment: Path | None = None,
-                     correlation_id: str | None = None) -> int:
-    try:
-        uv = find_uv()
-    except FileNotFoundError as exc:
-        preflight.emit_failure("upgrade", str(exc))
-        return 1
-    with adminlog.operation("upgrade-runtime",
-                            version_before=__version__,
-                            source=str(source) if source else "pypi",
-                            correlation_id=correlation_id) as end:
-        if receipt_environment is None:
-            receipt_environment = plugins.tool_environment()
-        # Before uv is invoked at all: a rebuild it cannot finish leaves
-        # the environment neither on the old version nor the new (#231).
-        if _refuse_while_held(end):
-            return 1
-        # The upgrade rewrites this tool's own executables, and on
-        # Windows one of them is the running process.
-        launcher_before = plugins.launcher_stamp()
-        # Read before the install, so every process named afterwards
-        # demonstrably predates the runtime that replaced it (#188).
-        watchers_before = _running_watchers()
-        status = subprocess.run(
-            _install_command(uv, source), check=False,
-        ).returncode
-        kept_launcher = False
-        if status != 0:
-            if not plugins.only_the_launcher_failed(launcher_before):
-                end["status"] = "error"
-                end["level"] = "error"
-                end["message"] = f"uv install exited {status}"
-                return status
-            kept_launcher = True
-            end["launcher_replaced"] = False
-            end["message"] = (
-                f"uv install exited {status} after upgrading the runtime; "
-                f"the launcher was in use and was left in place")
-        _report_stale_watchers(watchers_before, end)
-        if kept_launcher:
-            _warn_launcher_kept()
-        try:
-            plugins.converge(
-                roots or [], trigger="upgrade", pin_primary=False,
-                receipt_environment=receipt_environment,
-                correlation_id=correlation_id)
-        except (OSError, ValueError, plugins.PluginError) as exc:
-            end["status"] = "error"
-            end["level"] = "error"
-            end["message"] = str(exc)
-            preflight.emit_failure("upgrade", str(exc))
-            return 1
-        end["version_after"] = plugins.installed_version()
-    return 0
-
-
-def _warn_launcher_kept() -> None:
-    """Say the runtime is upgraded but its launcher is the old file.
-
-    Worth saying rather than passing over in silence, because two
-    things outlive the upgrade. uv writes its receipt only after the
-    launcher lands, so its record of this tool still describes the
-    previous install. And processes already running keep the code they
-    started with regardless (#188).
-
-    The launcher itself does not carry the version. It selects an
-    interpreter and a module, both of which now resolve to the new
-    runtime, so keeping the old one costs nothing at the command line.
-    """
-    print("note: the runtime was upgraded, but its launcher was in use and "
-          "could not be replaced; the launcher does not carry the version, "
-          "so commands run the new runtime. uv's own record of this tool "
-          "stays on the previous install until an upgrade runs with no "
-          "agents-live process running",
-          file=sys.stderr)
-
-
-def _running_watchers() -> list[tuple[int, str, str | None]]:
-    """Every watcher on this host, or nothing if the host will not say."""
-    try:
-        return watchers_on_host()
-    except OSError:
-        # Enumeration is a courtesy here; an upgrade that worked must
-        # not fail over an unreadable process table.
-        return []
-
-
-def _report_stale_watchers(
-        before: list[tuple[int, str, str | None]], end: dict) -> None:
-    """Name watchers waiting to hand off from the version just replaced.
-
-    Replacing the runtime does not stop the processes already running
-    it, on any host. A running process has its code loaded and keeps
-    executing it however the files underneath change: on POSIX the
-    replaced file keeps its inode for as long as a process holds it, and
-    on Windows the executable a process is running cannot be replaced at
-    all while it runs, so uv rebuilds the environment around it. Either
-    way the upgrade reports success while every watcher that was running
-    carries on with the previous release, which is version skew with
-    nothing to connect it to its cause (#188).
-
-    Each watcher compares its loaded version with the installed distribution
-    at the top of its loop. It finishes any synchronous dispatch, stops its
-    change source, and starts the same marked subscription through the current
-    launcher. The upgrade reports the temporary skew; it never kills the
-    watcher mid-dispatch.
-
-    Reported per watcher rather than per process: one watcher is more
-    than one process on Windows (the shim executes an interpreter, which
-    is what the process table shows alongside it), and a count of
-    processes would overstate how many agents are affected.
-    """
-    stale: dict[tuple[str, str | None], list[int]] = {}
-    for pid, name, project in before:
-        if hostruntime.is_alive(pid):
-            stale.setdefault((name, project), []).append(pid)
-    end["stale_watchers"] = len(stale)
-    if not stale:
-        return
-    end["stale_watcher_agents"] = ", ".join(
-        sorted({name for name, _ in stale}))
-    print(f"note: {len(stale)} watcher(s) are finishing on the previous "
-          f"version and will restart themselves from the new runtime:",
-          file=sys.stderr)
-    for (name, project), pids in sorted(stale.items(),
-                                        key=lambda row: (row[0][0],
-                                                         min(row[1]))):
-        where = project if project else "project not named on the command line"
-        listed = ", ".join(str(pid) for pid in sorted(pids))
-        print(f"  {name} (pid {listed}, {where})", file=sys.stderr)
-        print("each watcher hands off at its next idle version check (within "
-                    "60 seconds when already idle)", file=sys.stderr)
-
-
 def _refresh_with_installed_cli(*, refresh_skills: bool,
                                 executable: Path | None = None) -> int:
     # cli_executable_path prefers the entry point beside the interpreter (the
@@ -596,11 +215,6 @@ def main() -> int:
         help="Install the runtime from a local project directory or built "
              "artifact instead of PyPI",
     )
-    parser.add_argument(
-        "--continuation-environment", type=Path,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument("--upgrade-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
     print(f"Installed agents-live version: {__version__}")
 
@@ -624,29 +238,6 @@ def main() -> int:
     if installation.contested and ownership_refusal is not None:
         preflight.emit_failure("upgrade", ownership_refusal)
         return 1
-
-    if (source is None and not args.skills_only
-            and not installation.self_managed and package_index.configured()):
-        cached = update_check.cached_result() or {}
-        index = package_index.check(
-            __version__, latest=cached.get("latest_version"))
-        if not index.ok:
-            preflight.emit_failure("upgrade", index.detail, code="package_index_stale")
-            return 1
-        print(index.detail)
-
-    continuation_environment = args.continuation_environment
-    if continuation_environment is not None:
-        installed_environment = plugins.tool_environment()
-        if (hostruntime.id() != hostruntime.WINDOWS
-                or installed_environment is None
-                or continuation_environment.resolve() != installed_environment.resolve()
-                or within(sys.executable, installed_environment)):
-            preflight.emit_failure(
-                "upgrade", "invalid internal Windows upgrade continuation",
-                code="invalid_arguments")
-            return 1
-        continuation_environment = installed_environment
 
     try:
         targets, errors = _targets()
@@ -674,39 +265,23 @@ def main() -> int:
                 preflight.emit_failure("upgrade", error,
                                        code="upgrade_preflight_failed")
             return 1
-        if installation.self_managed:
-            runtime_status = _upgrade_self_managed(source)
-            if runtime_status != 0:
-                return runtime_status
-            stable_command = deploy.layout.command_path("agents-live")
-            return _refresh_with_installed_cli(
-                refresh_skills=not args.runtime_only,
-                executable=stable_command,
+        if not installation.self_managed:
+            preflight.emit_failure(
+                "upgrade",
+                "upgrade requires a self-managed installation; install the "
+                "current release with the official bootstrap, then run the "
+                "stable agents-live command",
+                code="unsupported_installation",
             )
-        deferred = _handoff_windows_upgrade(
-            source, runtime_only=args.runtime_only)
-        if deferred is not None:
-            return deferred
-        runtime_options = {}
-        if continuation_environment is not None:
-            runtime_options["receipt_environment"] = continuation_environment
-            runtime_options["correlation_id"] = args.upgrade_id
-        runtime_status = _upgrade_runtime(
-            list(dict.fromkeys(target_roots)), source=source,
-            **runtime_options)
+            return 1
+        runtime_status = _upgrade_self_managed(source)
         if runtime_status != 0:
             return runtime_status
-        if args.upgrade_id and _restore_quiesced_watchers(args.upgrade_id) != 0:
-            return 1
-        if args.runtime_only:
-            return _refresh_with_installed_cli(refresh_skills=False)
-        # After the runtime upgrade this process is still the old
-        # version, so payload refresh must run in the freshly installed
-        # CLI. One child covers every target: its own `_targets()`
-        # resolves the current project and all registered repositories
-        # (and honors AGENTS_LIVE_REPO), so per-repo children would only
-        # multiply interpreter start-ups.
-        return _refresh_with_installed_cli(refresh_skills=True)
+        stable_command = deploy.layout.command_path("agents-live")
+        return _refresh_with_installed_cli(
+            refresh_skills=not args.runtime_only,
+            executable=stable_command,
+        )
 
     for error in errors:
         print(f"warning: skipping registered repo {error}", file=sys.stderr)

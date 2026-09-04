@@ -119,40 +119,22 @@ newer working installation with the older mirrored release. Keep public PyPI
 verification in the release workflow so the published consumer artifact is
 still tested independently of Microsoft infrastructure.
 
-### Diagnose a queued Windows upgrade
+### Diagnose a generation upgrade
 
-An installed native Windows tool cannot replace the interpreter from which
-the current command is running. `agents-live upgrade` therefore queues one
-external helper for that tool environment, prints its operation ID, and exits.
-It does not report the runtime replacement as complete at that point. A second
-upgrade for the same environment is refused while that helper is pending.
+`agents-live upgrade` builds and validates a complete generation beside the
+active one, then switches the stable `current` link. Running watchers do not
+block activation; they finish work on their immutable generation and restart
+from `current` at the next idle version check.
 
-Installed-tool watchers are not a blocker. The upgrade asks them to finish any
-active dispatch and exit at the next idle check without changing started state.
-The helper waits for the environment to become free, replaces the runtime, and
-runs ordinary convergence to restore every still-started watcher. Managed
-dashboards remain a fail-closed blocker because an interactive session cannot
-be quiesced and recreated transparently; stop the named dashboard and retry.
+Use `agents-live generations list` to compare installed and active versions.
+If activation selected an unsuitable release, run `agents-live generations
+activate VERSION` to select a retained validated generation. Use `generations
+remove VERSION` to discard an inactive candidate before rebuilding that exact
+version, or `generations collect` to remove older inactive and unheld versions.
 
-Run any Agents Live command after the helper finishes, then query the admin
-events:
-
-```powershell
-agents-live logs admin --since 30m --all `
-	--columns ts,run_id,status,message,exit_code,transcript
-```
-
-The quiesce, runtime replacement, plugin convergence, watcher restoration, and
-terminal events carry the printed correlation ID in `run_id`.
-A failed terminal event includes the helper exit code and the path to a bounded
-local transcript. If the helper exits without writing a terminal result, the
-next CLI invocation records that condition as an error and releases the
-pending slot.
-
-The helper bootstraps a runtime at least as new as the installed version. A
-lagging package proxy therefore produces a recorded failure rather than
-running older upgrade code or downgrading the tool. Use the local-wheel path
-below when the intended release is not yet available from the proxy.
+A package-manager or checkout command cannot replace itself. If `upgrade`
+reports an unsupported installation, run the verified release bootstrap once
+and continue through the stable command it prints.
 
 Before any runtime mutation, upgrade also inspects registered repositories and
 declared plugin wheels. Retired 5.x definitions, unavailable registered

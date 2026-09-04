@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from .. import paths
 from ..runtime.hosts import system as hostruntime
-from . import layout, ownership, pointer
+from . import layout, ownership, plan, pointer
 
 FORMAT = 1
 
@@ -232,3 +233,74 @@ def clear_activation(*, root: Path | None = None) -> None:
     """Remove the stable selection and its metadata without touching versions."""
     install_root = root or layout.installation_root()
     hostruntime.remove_directory_link(layout.current_path(install_root))
+
+
+def _remove_locked(name: str, *, root: Path) -> None:
+    target = load(name, root=root).path
+    retired = target.with_name(f".{target.name}.collecting-{uuid.uuid4().hex}")
+    target.rename(retired)
+    shutil.rmtree(retired)
+
+
+def remove(name: str, *, root: Path | None = None,
+           held: tuple[str, ...] = ()) -> None:
+    """Remove one inactive, unheld immutable generation."""
+    install_root = root or layout.installation_root()
+    generation_name = layout.generation_name(name)
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            active, state, detail = pointer.status(
+                layout.current_path(install_root))
+            if state not in (pointer.ACTIVE, pointer.MISSING):
+                raise GenerationError(f"removal refused because {detail}")
+            if active is not None and active.generation == generation_name:
+                raise GenerationError(
+                    f"generation {generation_name} is active and cannot be removed")
+            if held:
+                raise GenerationError(
+                    f"generation {generation_name} is in use by {', '.join(held)}")
+            _remove_locked(generation_name, root=install_root)
+    except hostruntime.LockBusy as exc:
+        raise GenerationError(
+            "another generation operation owns the installation lock") from exc
+    except OSError as exc:
+        raise GenerationError(
+            f"could not remove generation {generation_name}: {exc}") from exc
+
+
+def collect(*, root: Path | None = None,
+            held: dict[str, tuple[str, ...]] | None = None,
+            retain: int = plan.RETAINED_PREVIOUS) -> tuple[str, ...]:
+    """Remove superseded generations allowed by the retention policy."""
+    if retain < 0:
+        raise GenerationError("retained generation count cannot be negative")
+    install_root = root or layout.installation_root()
+    holding = held or {}
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            active, state, detail = pointer.status(
+                layout.current_path(install_root))
+            if state not in (pointer.ACTIVE, pointer.MISSING):
+                raise GenerationError(f"collection refused because {detail}")
+            names = layout.installed_generations(install_root)
+            ordered = tuple(sorted(
+                names,
+                key=lambda item: (load(item, root=install_root).validated, item),
+            ))
+            removable = plan.collectable(
+                names,
+                active=active.generation if active is not None else None,
+                held=holding,
+                order=ordered,
+                retain=retain,
+            )
+            for name in removable:
+                _remove_locked(name, root=install_root)
+            return removable
+    except hostruntime.LockBusy as exc:
+        raise GenerationError(
+            "another generation operation owns the installation lock") from exc
+    except OSError as exc:
+        raise GenerationError(f"could not collect generations: {exc}") from exc

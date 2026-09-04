@@ -32,7 +32,6 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -41,7 +40,6 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TypeVar
 
-from ..protocols import Supervisor
 from ..values import ProcessRef
 
 LINUX = "linux"
@@ -1261,98 +1259,19 @@ def spawn_detached(
     )
 
 
-def defer_until_environment_exits(
-    argv: Sequence[str], environment: Path | str, *,
-    supervisor: Supervisor | None = None,
-    operation_id: str | None = None,
-    result_path: Path | str | None = None,
-    transcript_path: Path | str | None = None,
-    transcript_limit: int = 65536,
-    wait_timeout_s: int = WAIT_FOR_ENVIRONMENT_S,
-) -> ProcessRef | None:
-    """Start *argv* after no process executes from *environment*.
-
-    Windows will not remove an executable while it is running. The helper
-    itself must therefore live outside the environment being removed. Other
-    hosts do not need this handoff and return ``None``.
-
-    The wait is bounded. An unbounded one kept the helper alive against a
-    process that never exits, and a live helper is what tells the handoff
-    its slot is still in use, so every later upgrade refused as already
-    queued. On expiry the helper runs nothing and reports a failure, which
-    releases the slot and leaves the installation untouched.
-    """
+def defer_remove_tree(root: Path | str, *,
+                      wait_timeout_s: int = WAIT_FOR_ENVIRONMENT_S) -> bool:
+    """Queue removal of a Windows installation after its processes exit."""
     if not _IS_WINDOWS:
-        return None
+        return False
     powershell = (shutil.which("powershell.exe")
                   or shutil.which("pwsh.exe"))
-    if powershell is None or not argv:
-        return None
-    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
-    escaped_environment = str(environment).replace("'", "''")
-    command = (
-        f"$program = {quote(argv[0])}; "
-        "$arguments = @(" + ", ".join(quote(value) for value in argv[1:])
-        + "); "
-    )
-    durable = all((operation_id, result_path, transcript_path))
-    if durable:
-        result = str(result_path).replace("'", "''")
-        transcript = str(transcript_path).replace("'", "''")
-        operation = str(operation_id).replace("'", "''")
-        Path(str(result_path)).parent.mkdir(parents=True, exist_ok=True)
-        durable_prefix = (
-            f"$result = '{result}'; $transcript = '{transcript}'; "
-            "$temporary = $result + '.' + $PID + '.tmp'; "
-            f"$operation = '{operation}'; "
-            "$helperStartedAt = ((Get-Process -Id $PID).StartTime."
-            "ToFileTimeUtc() / 10000000.0) - 11644473600.0; "
-            "$started = @{schema=1; operation_id=$operation; status='started'; "
-            "helper_pid=$PID; helper_started_at=$helperStartedAt} | "
-            "ConvertTo-Json -Compress; "
-            "[IO.File]::WriteAllText($temporary, $started, "
-            "[Text.UTF8Encoding]::new($false)); "
-            "Move-Item -LiteralPath $temporary -Destination $result -Force; "
-            "$code = 1; try { "
-        )
-        durable_suffix = (
-            "; if ($null -ne $LASTEXITCODE) { $code = [int]$LASTEXITCODE } "
-            "} catch { try { $_ | Out-File -FilePath $transcript -Append "
-            "-Encoding utf8 } catch {}; $code = 1 }; "
-            "try { if (Test-Path -PathType Leaf -LiteralPath $transcript) { "
-            "$utf8 = [Text.UTF8Encoding]::new($false); "
-            "$content = [IO.File]::ReadAllText($transcript); "
-            "$bytes = $utf8.GetBytes($content); "
-            f"if ($bytes.Length -gt {transcript_limit}) {{ "
-            f"$offset = $bytes.Length - {transcript_limit}; "
-            "while ($offset -lt $bytes.Length -and "
-            "($bytes[$offset] -band 0xC0) -eq 0x80) { $offset++ }; "
-            "$length = $bytes.Length - $offset; "
-            "$tail = [byte[]]::new($length); "
-            "[Array]::Copy($bytes, $offset, $tail, 0, $length); "
-            "[IO.File]::WriteAllBytes($transcript, $tail) "
-            "} else { [IO.File]::WriteAllBytes($transcript, $bytes) } } "
-            "} catch { $code = 1 }; "
-            "$finished = @{schema=1; operation_id=$operation; status='terminal'; "
-            "helper_pid=$PID; exit_code=$code} | ConvertTo-Json -Compress; "
-            "[IO.File]::WriteAllText($temporary, $finished, "
-            "[Text.UTF8Encoding]::new($false)); "
-            "Move-Item -LiteralPath $temporary -Destination $result -Force; "
-        )
-        invocation = (
-            f"{command}if ($timedOut) {{ throw \"the tool environment was "
-            f"still in use after {wait_timeout_s} seconds\" }}; "
-            "& $program @arguments *> $transcript"
-        )
-    else:
-        durable_prefix = durable_suffix = ""
-        invocation = (
-            f"{command}if ($timedOut) {{ exit 1 }}; & $program @arguments"
-        )
+    if powershell is None:
+        return False
+    escaped_root = str(root).replace("'", "''")
     script = (
-        f"$root = '{escaped_environment}'; "
+        f"$root = '{escaped_root}'; "
         f"$deadline = (Get-Date).AddSeconds({wait_timeout_s}); "
-        "$timedOut = $false; "
         "do { "
         "$running = @(Get-Process -ErrorAction SilentlyContinue | "
         "Where-Object { try { $_.Path -and "
@@ -1360,26 +1279,15 @@ def defer_until_environment_exits(
         "[System.StringComparison]::OrdinalIgnoreCase) } "
         "catch { $false } }); "
         "if ($running.Count) { "
-        "if ((Get-Date) -gt $deadline) { $timedOut = $true; break }; "
+        "if ((Get-Date) -gt $deadline) { exit 1 }; "
         "Start-Sleep -Milliseconds 100 } "
         "} while ($running.Count); "
-        f"{durable_prefix}{invocation}{durable_suffix}"
-        f"exit {'$code' if durable else '$LASTEXITCODE'}"
+        "Remove-Item -LiteralPath $root -Recurse -Force"
     )
     try:
-        process = spawn_detached(
+        spawn_detached(
             powershell_argv(powershell, script),
             stdin=subprocess.DEVNULL, stdout=None, stderr=None)
-        threading.Thread(
-            target=process.wait,
-            name=f"agents-live-upgrade-{process.pid}",
-            daemon=True,
-        ).start()
-        if supervisor is None:
-            from ..convergence import current
-            supervisor = current().supervisor
-        return supervisor.adopt(
-            process.pid, role="upgrade", key=operation_id or "",
-            image=Path(powershell).name)
+        return True
     except OSError:
-        return None
+        return False

@@ -43,11 +43,11 @@ refusal, and receipt-driven plugin convergence) has no analogue under
 generations, where a new version is built beside the running one and selected
 by moving a directory link.
 
-This is not a breaking change. The CLI surface is unchanged, the public
-bootstrap already migrates a uv-managed installation, and a plain
-`uv tool install agents-live` still yields a working command. The single
-degraded path is self-upgrade, which refuses with guidance pointing at the
-bootstrap. Retirement is tracked under
+This is not a breaking change for supported installations. The public
+bootstrap already migrates a legacy uv tool installation, and a command run
+from a package-manager environment refuses self-upgrade with guidance pointing
+at the bootstrap. The new `generations` command exposes selection, deliberate
+inactive-version removal, and policy-driven collection. Retirement is tracked under
 [#334](https://github.com/johnshew/agents-live/issues/334).
 
 ## 7.0: the definition-format boundary

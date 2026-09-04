@@ -428,7 +428,7 @@ def _supported(version: str | None) -> str:
         raise UnsupportedSchemaVersion(
             f"definition declares schema version {version}, but the installed "
             f"agents-live {__version__} implements version {SCHEMA_VERSION}; "
-            "upgrade with `uv tool upgrade agents-live`")
+            "upgrade with `agents-live upgrade`")
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise DefinitionError(
             'agents-live.schema-version must be quoted "2", or "1" for the '

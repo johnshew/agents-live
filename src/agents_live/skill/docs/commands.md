@@ -207,30 +207,27 @@ that ran the agent.
   declared plugin wheels into the candidate. Version directories are retained.
   After `current` moves, the selected version runs host maintenance to converge
   native triggers and still-started watchers; running processes may finish on
-  the prior generation without blocking activation. A uv-managed runtime
-  retains the existing uv upgrade behavior during migration.
-  An installed
-  native Windows tool queues runtime replacement until the invoking process
-  exits. Installed-tool watchers keep started intent unchanged, finish any
-  active dispatch, quiesce at their next idle check, and are restored by
-  ordinary convergence from the new runtime. A managed dashboard remains a
-  fail-closed blocker and must be stopped first. The command prints an
-  operation ID; use `agents-live logs admin` on the next invocation to inspect
-  the correlated quiesce, replacement, restoration, and terminal events.
+  the prior generation without blocking activation. A package-manager or
+  checkout command cannot replace itself; run the official bootstrap once to
+  establish the self-managed installation.
+- `generations list|activate|remove|collect` manages the immutable version
+  store. `activate VERSION` selects a validated installed generation for
+  rollback or recovery. `remove VERSION` deletes one inactive, unheld
+  generation. `collect [--retain N]` removes older inactive generations while
+  preserving the active generation, every generation still in use, and one
+  rollback generation by default.
 - `migrate [PATHS] [--dry-run] [--bundle]` is the one-shot 5.x converter. It
   rewrites `Agents/<name>.md` frontmatter in place, leaving processors where
   they are; `--bundle` converts to `<name>/SKILL.md` and copies them instead.
   A scan covers every effective discovery root except unclaimed standard
   client skill roots. A repository can opt a client root into migration by
   naming it in `agent_directories`.
-- `uninstall` removes host integration and whichever installation owns the
-  running command. A self-managed install removes its generation root and
-  installer-added PATH exposure; a uv-managed install asks uv to remove its
-  tool. If a watcher
+- `uninstall` removes host integration and the self-managed installation root,
+  including installer-added PATH exposure. If a watcher
   from that installation does not stop within the grace period, the command
   exits nonzero before host cleanup and names the processes to stop. On native
-  Windows, a successful command queues final tool removal until its own
-  processes exit; `uv tool list` can show the tool briefly afterward.
+  Windows, a successful command queues final tree removal until its own
+  processes exit.
 - `repos list|add|default|remove` manages the repository registry.
 - `completions bash|zsh|powershell|--update` emits shell completions.
 - `dashboard` opens the local operational UI and prints its clickable loopback

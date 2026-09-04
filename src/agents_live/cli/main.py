@@ -208,8 +208,6 @@ def main(argv: list[str] | None = None) -> int:
     # so a single emoji in a log line takes them down. `use_utf8_io`
     # also exports PYTHONUTF8 and switches the console itself (#241).
     system.use_utf8_io()
-    from . import upgrade_handoff
-    upgrade_handoff.reconcile()
     args = list(sys.argv[1:] if argv is None else argv)
     selected_repo: Path | None = None
     metadata: artifacts.InvocationMetadata | None = None
