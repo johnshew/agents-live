@@ -4033,6 +4033,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_run_operational_acceptance": operational,
                 "_write_acceptance_checkpoint": checkpoint,
                 "_write_candidate_acceptance": written,
+                # This case is the uv-managed one: it queues a helper and
+                # waits for its durable result.
+                "_installed_is_self_managed": lambda: False,
                 "os": fake_os,
             }):
                 accept(root, "sample-123", "cost-agent-456")
@@ -4781,6 +4784,32 @@ class TestCrossModuleAgreements(unittest.TestCase):
         ):
             self.assertIsNone(
                 upgrade_once(Path("C:/repo"), Path("candidate.whl")))
+
+    def test_release_accepts_a_synchronous_self_managed_candidate(self) -> None:
+        """Acceptance required evidence only a uv upgrade can produce.
+
+        A uv-managed Windows upgrade rewrites the running environment and
+        defers to a helper, so acceptance waited for that helper's durable
+        result. A self-managed upgrade builds a new generation beside the
+        running one and returns synchronously, which made the deployment
+        model this release ships unreleasable by its own tooling.
+        """
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        scope = release["_installed_is_self_managed"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation = root / "install" / "versions" / "6.7.0" / "bin"
+            with mock.patch.dict(scope, {
+                "_install_root": lambda: root / "install",
+                "_installed_cli": lambda: str(generation / "agents-live"),
+            }):
+                self.assertTrue(release["_installed_is_self_managed"]())
+            tool = root / "uv" / "tools" / "agents-live" / "bin"
+            with mock.patch.dict(scope, {
+                "_install_root": lambda: root / "install",
+                "_installed_cli": lambda: str(tool / "agents-live"),
+            }):
+                self.assertFalse(release["_installed_is_self_managed"]())
 
     def test_local_deploy_retries_one_failed_windows_upgrade(self) -> None:
         script = runpy.run_path(

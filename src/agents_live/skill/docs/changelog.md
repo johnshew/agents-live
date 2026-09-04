@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: accept a synchronous self-managed candidate on Windows.
+  Candidate acceptance waited for the durable helper result that only a
+  uv-managed upgrade produces, so the generation model this release ships
+  could not be accepted by its own release tooling.
+
 - fix: stop a throwaway install root from changing the user's PATH.
   The bootstrap readiness gate installs into a temporary directory and already
   asked for PATH to be left alone, but nothing honored the request. On POSIX a

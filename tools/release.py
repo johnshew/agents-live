@@ -724,16 +724,19 @@ def _write_artifact_manifest(version: str, preparation: dict) -> Path:
     return destination
 
 
-def _installed_cli() -> str:
+def _install_root() -> Path:
     explicit_root = os.environ.get("AGENTS_LIVE_INSTALL_ROOT", "").strip()
     if explicit_root:
-        install_root = Path(explicit_root).expanduser()
-    elif os.name == "nt":
-        install_root = Path(os.environ.get(
+        return Path(explicit_root).expanduser()
+    if os.name == "nt":
+        return Path(os.environ.get(
             "LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "agents-live"
-    else:
-        install_root = Path(os.environ.get(
-            "XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agents-live"
+    return Path(os.environ.get(
+        "XDG_DATA_HOME", Path.home() / ".local" / "share")) / "agents-live"
+
+
+def _installed_cli() -> str:
+    install_root = _install_root()
     filename = "agents-live.exe" if os.name == "nt" else "agents-live"
     command_dir = "Scripts" if os.name == "nt" else "bin"
     self_managed = install_root / "current" / command_dir / filename
@@ -752,6 +755,21 @@ def _installed_cli() -> str:
             "an active self-managed or uv-managed agents-live command is "
             "required for candidate acceptance")
     return str(executable.resolve())
+
+
+def _installed_is_self_managed() -> bool:
+    """Whether the installed command runs from a generation directory.
+
+    Only a uv-managed upgrade rewrites the running environment and has to
+    defer to a helper on Windows; a self-managed one builds a new
+    generation beside it and completes synchronously.
+    """
+    try:
+        generations = (_install_root() / "versions").resolve()
+        installed = Path(_installed_cli()).resolve()
+    except OSError:
+        return False
+    return generations in installed.parents
 
 
 def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1551,6 +1569,7 @@ def accept_candidate(
             f"{root}")
     before_contract = _status_contract(before_status)
 
+    self_managed = _installed_is_self_managed()
     completed = _installed_run(
         ["--repo", str(root), "upgrade", "--from", str(wheel)])
     if completed.stdout:
@@ -1571,7 +1590,11 @@ def accept_candidate(
         if result.get("exit_code") != 0:
             raise ReleaseError(
                 f"candidate deferred upgrade exited {result.get('exit_code')}")
-    elif os.name == "nt":
+    elif os.name == "nt" and not self_managed:
+        # A uv-managed Windows upgrade rewrites the running environment and
+        # must defer to a helper. A self-managed one builds a new generation
+        # beside the running one and completes synchronously, so there is no
+        # helper to wait for.
         raise ReleaseError(
             "Windows candidate upgrade did not queue a durable helper result")
 
