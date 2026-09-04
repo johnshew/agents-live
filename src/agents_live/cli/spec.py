@@ -324,6 +324,8 @@ COMMANDS = (
             Arg(("--install-root",), "Override the installation root.",
                 kind="value"),
             Arg(("--activate",), "Activate after validation."),
+            Arg(("--wheel",), "Build from an already authenticated wheel.",
+                kind="value", hidden=True),
         ),
     ),
     Cmd(
