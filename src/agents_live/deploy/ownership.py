@@ -13,8 +13,6 @@ disk, before it changes anything:
 ===============  ==============================================  ==========
 owner            evidence                                        upgrades by
 ===============  ==============================================  ==========
-``uv``           the running image sits in an environment with a  ``uv tool
-                 ``uv-receipt.toml`` beside it                    upgrade``
 ``agents-live``  the running image sits inside                    activating
                  ``<root>/versions/<generation>/``                a new
                                                                   generation
@@ -23,14 +21,9 @@ owner            evidence                                        upgrades by
                  has not been taught to record itself             it
 ===============  ==============================================  ==========
 
-Today every real installation reads as ``uv`` or ``unmanaged``, and that
-is correct: nothing writes a generation layout yet. The value of asking
-now is that ``doctor`` can report the answer, and that #334 step 2 has a
-detection rule to refuse on rather than one to invent under pressure.
-
-Detection is deliberately cheap and free of subprocesses. Asking uv
-where its tools live costs a process launch and can hang; a receipt file
-beside the running interpreter answers the same question from a stat.
+The self-managed generation layout is the only supported installation
+channel. Package-manager and checkout executions are unmanaged: they may
+inspect state, but they cannot replace or remove an installation.
 """
 from __future__ import annotations
 
@@ -41,26 +34,14 @@ from pathlib import Path
 from .. import paths
 from . import layout, pointer as pointer_module
 
-UV = "uv"
 SELF = "agents-live"
 UNMANAGED = "unmanaged"
 
-#: How each owner is named to an operator. "uv-managed" and
-#: "self-managed" are the two that can upgrade; "unmanaged" is the
-#: honest answer for a checkout or an ephemeral run.
+#: How each owner is named to an operator.
 LABELS = {
-    UV: "uv-managed",
     SELF: "self-managed",
     UNMANAGED: "unmanaged",
 }
-
-#: What uv writes at the root of a tool environment it installed.
-RECEIPT = "uv-receipt.toml"
-
-# The receipt sits at the environment root; the running image sits one
-# directory below it (`bin/` or `Scripts/`). Two levels is enough, and a
-# bounded walk cannot wander into an unrelated environment above.
-_RECEIPT_DEPTH = 3
 
 
 @dataclass(frozen=True)
@@ -98,24 +79,9 @@ class Installation:
         return f"{LABELS.get(self.owner, self.owner)}; {self.detail}"
 
 
-def has_receipt(executable: Path | str) -> bool:
-    """Whether *executable* runs from an environment uv installed."""
-    try:
-        candidate = Path(executable).resolve()
-    except OSError:
-        return False
-    for parent in list(candidate.parents)[:_RECEIPT_DEPTH]:
-        try:
-            if (parent / RECEIPT).is_file():
-                return True
-        except OSError:
-            return False
-    return False
-
-
 def classify(executable: Path | str, *, root: Path,
              pointer: pointer_module.Pointer | None, pointer_state: str,
-             uv_managed: bool, recorded_owner: str | None = None
+             recorded_owner: str | None = None
              ) -> Installation:
     """Decide the owner from evidence, without touching the host.
 
@@ -128,8 +94,6 @@ def classify(executable: Path | str, *, root: Path,
     generation = layout.generation_of(path, root)
     if generation is not None:
         owner = SELF
-    elif uv_managed:
-        owner = UV
     else:
         owner = UNMANAGED
     active = pointer.generation if pointer is not None else None
@@ -184,7 +148,6 @@ def describe(executable: Path | str | None = None,
         root=install_root,
         pointer=pointer,
         pointer_state=state,
-        uv_managed=has_receipt(target),
         recorded_owner=read_record(install_root),
     )
 
@@ -201,7 +164,7 @@ def read_record(root: Path | None = None) -> str | None:
 
 def write_record(owner: str, root: Path | None = None) -> None:
     """Record *owner* beside the pointer, atomically."""
-    if owner not in (UV, SELF, UNMANAGED):
+    if owner not in (SELF, UNMANAGED):
         raise ValueError(f"'{owner}' is not an installation owner")
     paths.atomic_write_text(layout.ownership_path(root), f"{owner}\n")
 

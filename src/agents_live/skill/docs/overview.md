@@ -121,9 +121,9 @@ agents-live doctor
 
 On native Windows, run the release `install.ps1` from PowerShell. Both scripts
 accept an exact stable or prerelease version; prereleases require an explicit
-version while omission selects the latest stable release. They migrate an
-uncontested uv-managed installation and print the generated command under
-`current` that works immediately.
+version while omission selects the latest stable release. They retire an
+uncontested legacy uv tool installation after activating the generation and
+print the generated command under `current` that works immediately.
 `doctor` validates the active generation, ownership record, and stable commands;
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
@@ -157,7 +157,10 @@ therefore coexist on the same release line. Each generation includes the valid
 plugin wheels declared by registered repositories before it is sealed. When a
 generation is selected, its own command converges native triggers and
 still-started watchers; work already running may finish on the immutable version
-where it began.
+where it began. Use `agents-live generations list` to inspect the store,
+`generations activate VERSION` to roll back, `generations remove VERSION` to
+discard an inactive candidate, and `generations collect` to retain the active
+version plus one rollback while removing older unheld versions.
 
 The package also installs `al` as an exact shorthand for `agents-live`, so
 `al status` and `agents-live status` are interchangeable. uv refuses the
@@ -174,17 +177,19 @@ positive integer in `.agents-live.toml` (or `[tool.agents-live]`) to change the
 repository policy. Rotated records remain available through `agents-live logs`
 until their retention boundary.
 
-On native Windows, install a provider CLI and uv through WinGet, open a new
-PowerShell session, then use the installed tool's absolute path until future
-shells receive uv's PATH update:
+On native Windows, install a provider CLI through WinGet, then run the verified
+PowerShell bootstrap. Use the installed tool's absolute path until future
+shells receive its PATH update:
 
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
-winget install --id=astral-sh.uv -e
-uv tool install agents-live
-uv tool update-shell
-$agentsLive = Join-Path (uv tool dir --bin) "agents-live.exe"
+$installer = Join-Path $env:TEMP "agents-live-install.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/latest/download/install.ps1" `
+  -OutFile $installer
+& $installer
+$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
 & $agentsLive --repo C:\path\to\repository init
 ```
 

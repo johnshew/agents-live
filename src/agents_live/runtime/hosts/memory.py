@@ -61,9 +61,6 @@ class MemorySupervisor:
         self.processes[key] = process
         return process
 
-    def defer_until_environment_exits(self, *_args, **_kwargs) -> None:
-        return None
-
     def alive(self, ref: ProcessRef) -> bool:
         return self.processes.get(ref.key) == ref
 

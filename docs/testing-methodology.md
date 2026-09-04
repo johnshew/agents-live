@@ -193,7 +193,7 @@ hashes must match the accepted candidate's release-attached manifest.
    the expected row, its state, and its Start and Stop availability, in normal
    and reload-worker modes.
 8. `tools/release.py --accept-candidate` - the exact locally tagged wheel is
-  installed into the uv-managed consumer tool and upgrades itself from that
+  installed into the self-managed consumer tool and upgrades itself from that
   wheel. All registered repository state and health are compared before and
   after. A safe selected agent is exercised through CLI and browser-driven
   dashboard health, Run, Start, and Stop actions. The dashboard Run must report
@@ -212,15 +212,15 @@ workflow cannot publish until both exact-SHA host jobs pass.
 ## Fast local deployment
 
 `tools/local-deploy.py --repo <live-repository>` composes the existing release
-boundaries into a repeatable fast path from merged `main` to the uv-managed
+boundaries into a repeatable fast path from merged `main` to the self-managed
 local tool. It is not another release gate and does not mint release evidence.
 
 The workflow records focused preparation evidence for the exact commit, wheel
 digest, and local gate list. Matching evidence can be reused on a later local
 deployment, following the same invalidation principle as release preparation:
 code, artifact, or validation-list drift forces preparation again. Replacement
-then reuses release-owned installed-tool, state-contract, watcher, Windows
-handoff, and correlated-event checks while adding dashboard stop and restart
+then reuses release-owned installed-tool, state-contract, and watcher checks
+while adding dashboard stop and restart
 around the installation. The final Git-local receipt identifies the deployed
 commit and immutable artifact.
 
@@ -237,7 +237,7 @@ at real scale. Before a release that touches those, exercise them on a host
 and record what was observed.
 
 Prepared releases enforce this through `tools/release.py --accept-candidate`.
-After the exact locally tagged wheel upgrades the uv-managed installed tool,
+After the exact locally tagged wheel upgrades the self-managed installed tool,
 the acceptance phase snapshots every registered repository and exercises a
 safe operator-selected agent through CLI status, doctor, run, start, stop, and
 timeline queries. It then launches the installed dashboard and uses a real
@@ -281,7 +281,7 @@ Release preparation creates an isolated candidate branch, local commit,
 annotated tag, wheel, source distribution, and preparation receipt. Nothing is
 public at that point. Stabilize that candidate using this loop:
 
-1. Install the exact local wheel into the uv-managed user tool.
+1. Install the exact local wheel into the self-managed user tool.
 2. Restore a healthy representative live repository and choose an agent whose
   immediate run is safe.
 3. Run enforced candidate acceptance. It performs a second same-wheel upgrade,

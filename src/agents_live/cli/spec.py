@@ -294,10 +294,27 @@ COMMANDS = (
             Arg(("--skills-only",), "Refresh only skill payloads.", hidden=True),
             Arg(("--from",), "Install the runtime from a local path "
                 "instead of PyPI.", kind="value"),
-            Arg(("--continuation-environment",), "Installed tool environment.",
-                kind="value", hidden=True),
-            Arg(("--upgrade-id",), "Deferred upgrade correlation identifier.",
-                kind="value", hidden=True),
+        ),
+    ),
+    Cmd(
+        "generations", "Manage installed runtime generations.",
+        "cli.commands.generations", "in-process", root="none", json=True,
+        update_notice=False, subcommand_required=True,
+        subcommands=(
+            Cmd("list", "List installed generations.",
+                "cli.commands.generations", "in-process", root="none"),
+            Cmd("activate", "Select an installed generation.",
+                "cli.commands.generations", "in-process", root="none",
+                args=(Arg(("version",), "Generation version.",
+                          kind="positional", required=True),)),
+            Cmd("remove", "Remove one inactive generation.",
+                "cli.commands.generations", "in-process", root="none",
+                args=(Arg(("version",), "Generation version.",
+                          kind="positional", required=True),)),
+            Cmd("collect", "Remove old inactive generations.",
+                "cli.commands.generations", "in-process", root="none",
+                args=(Arg(("--retain",), "Inactive generations to retain.",
+                          kind="value", default=1),)),
         ),
     ),
     Cmd(
@@ -345,8 +362,6 @@ COMMANDS = (
         args=(
             Arg(("--distro",), "Distribution name.", kind="value"),
             Arg(("--retain-state",), "Retain runtime state."),
-            Arg(("--owner",), "Which installation to remove when two answer.",
-                kind="value", choices=("agents-live", "uv")),
         ),
     ),
     Cmd(

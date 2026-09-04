@@ -1,4 +1,4 @@
-"""Remove host integrations before uninstalling the uv-managed tool."""
+"""Remove host integrations before uninstalling the self-managed runtime."""
 from __future__ import annotations
 
 import argparse
@@ -8,33 +8,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ... import deploy, plugins, preflight, runtime
+from ... import deploy, preflight, runtime
 from ...obs import admin as adminlog
 from ...legacy import migrate as legacy_migration
 from ...runtime.hosts.processes import watchers_on_host
 from ...runtime.hosts import wsl_liveness
 from ...runtime.hosts import system as hostruntime
-from ...runtime.spawn import find_uv
 from . import completions
 
 # Long enough for a watcher to finish the dispatch it is in, short enough
 # that an uninstall does not appear to hang.
 _WATCHER_GRACE_S = 5
-
-
-def _handoff_windows_uninstall(uv: str, environment: Path) -> bool:
-    """Run uv after every process executing from *environment* exits.
-
-    The console shim waits for this Python process, and both executables
-    live inside the directory uv removes. A helper from outside that
-    directory has to outlive both of them; waiting only for this PID races
-    the shim's own exit.
-    """
-    if not runtime.current().supervisor.defer_until_environment_exits(
-            [uv, "tool", "uninstall", "agents-live"], environment):
-        return False
-    print("Uninstall will complete after this command exits")
-    return True
 
 
 def _remove_command_exposure(root: Path) -> None:
@@ -58,19 +42,7 @@ def _remove_self_managed(root: Path) -> bool:
         shutil.rmtree(root)
         print(f"Removed self-managed installation: {root}")
         return True
-    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-    if powershell is None:
-        return False
-    escaped = str(root).replace("'", "''")
-    command = [
-        powershell,
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        f"Remove-Item -LiteralPath '{escaped}' -Recurse -Force",
-    ]
-    if not runtime.current().supervisor.defer_until_environment_exits(
-            command, root):
+    if not hostruntime.defer_remove_tree(root):
         return False
     print("Self-managed uninstall will complete after this command exits")
     return True
@@ -152,33 +124,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Uninstall agents-live safely")
     parser.add_argument("--distro")
     parser.add_argument("--retain-state", action="store_true")
-    parser.add_argument(
-        "--owner", choices=(deploy.ownership.SELF, deploy.ownership.UV),
-        help="Which installation to remove when two answer on this host")
     args = parser.parse_args(argv)
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
     installation = deploy.ownership.describe()
     refusal = deploy.ownership.refusal(installation, action="uninstall")
-    if installation.contested and refusal is not None and args.owner is None:
+    if refusal is not None:
         preflight.emit_failure(
             "uninstall",
-            f"{refusal}, or name the one to remove with "
-            f"`--owner {deploy.ownership.SELF}` or "
-            f"`--owner {deploy.ownership.UV}`")
+            refusal)
         return 1
-    # Naming an owner resolves the ambiguity the refusal reports; it does
-    # not invent one. Removing the generation layout is the self-managed
-    # branch below whether or not this process runs from it.
-    self_managed = (installation.self_managed
-                    if args.owner is None
-                    else args.owner == deploy.ownership.SELF)
-    # The tree this uninstall is about to remove. Watchers and scheduled
-    # triggers are addressed to it, so asking uv is only right when uv
-    # owns the installation; for a self-managed one uv answers about a
-    # tool that is not there, and the sweeps below silently do nothing.
-    environment = (installation.root if self_managed
-                   else plugins.tool_environment())
+    environment = installation.root
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
     survivors = _stop_own_watchers(environment)
@@ -190,16 +146,6 @@ def main(argv: list[str] | None = None) -> int:
             "runtime artifacts remain installed; stop them and run "
             "uninstall again")
         return 1
-    uv = None
-    if not self_managed:
-        try:
-            uv = find_uv()
-        except FileNotFoundError:
-            preflight.emit_failure(
-                "uninstall",
-                "uv was not found; restore or install uv before uninstalling "
-                "agents-live")
-            return 1
     runtime_id = hostruntime.id()
     if runtime_id == hostruntime.WSL:
         try:
@@ -221,17 +167,6 @@ def main(argv: list[str] | None = None) -> int:
         # runs its own triggers, which the loop removal below withdraws.
         # A hard dependency here would make uninstall impossible off WSL.
         print("no cross-host integrations to remove; uninstalling the tool")
-    deferred = False
-    if (not self_managed and environment is not None
-            and runtime_id == hostruntime.WINDOWS):
-        assert uv is not None
-        if not _handoff_windows_uninstall(uv, environment):
-            preflight.emit_failure(
-                "uninstall",
-                "the Windows uninstall helper could not start; runtime "
-                "artifacts remain installed")
-            return 1
-        deferred = True
     _sweep_runtime()
     _sweep_triggers(environment)
     try:
@@ -240,26 +175,15 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"warning: could not remove shell completions: {exc}",
               file=sys.stderr)
-    if self_managed:
-        if not _remove_self_managed(installation.root):
-            preflight.emit_failure(
-                "uninstall",
-                "the Windows uninstall helper could not start; the "
-                "self-managed installation remains installed")
-            return 1
-        adminlog.record(
-            "uninstall", status="ok", deferred=runtime_id == hostruntime.WINDOWS)
-        return 0
-    if deferred:
-        adminlog.record("uninstall", status="ok", deferred=True)
-        return 0
-    assert uv is not None
-    completed = subprocess.run([uv, "tool", "uninstall", "agents-live"], check=False)
-    adminlog.record("uninstall",
-                    status="ok" if not completed.returncode else "error",
-                    level=None if not completed.returncode else "error",
-                    exit_code=completed.returncode)
-    return completed.returncode
+    if not _remove_self_managed(installation.root):
+        preflight.emit_failure(
+            "uninstall",
+            "the Windows uninstall helper could not start; the "
+            "self-managed installation remains installed")
+        return 1
+    adminlog.record(
+        "uninstall", status="ok", deferred=runtime_id == hostruntime.WINDOWS)
+    return 0
 
 
 if __name__ == "__main__":

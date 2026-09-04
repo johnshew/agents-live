@@ -36,7 +36,6 @@ CHANNELS = ROOT / ".github" / "release-channels.toml"
 SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
-from agents_live import deploy as deployment  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.runtime.hosts.processes import watchers_on_host  # noqa: E402
 
@@ -420,44 +419,20 @@ def _restart_dashboards(dashboards: tuple[Dashboard, ...]) -> None:
         raise LocalDeployError(f"could not restore dashboards: {detail}")
 
 
-def _upgrade_once(repo: Path, wheel: Path) -> str | None:
-    self_managed = deployment.layout.generation_of(_installed_cli()) is not None
+def _upgrade_once(repo: Path, wheel: Path) -> None:
     completed = _installed_run(
         "--repo", str(repo), "upgrade", "--from", str(wheel))
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise LocalDeployError(f"local-wheel upgrade failed: {detail}")
-    match = RELEASE["QUEUED_UPGRADE_RE"].search(completed.stdout)
-    if match is None:
-        if os.name == "nt" and not self_managed:
-            raise LocalDeployError(
-                "Windows upgrade did not queue a durable helper result")
-        return None
-    operation_id = match.group("operation")
-    result = RELEASE["_wait_for_upgrade_result"](
-        Path(match.group("result").strip()))
-    if result.get("operation_id") != operation_id \
-            or result.get("exit_code") != 0:
-        raise LocalDeployError(f"deferred upgrade failed: {result}")
-    return operation_id
 
 
-def _upgrade(repo: Path, wheel: Path, digest: str) -> str | None:
-    attempts = 2 if os.name == "nt" else 1
-    for attempt in range(1, attempts + 1):
-        if RELEASE["_sha256"](wheel) != digest:
-            raise LocalDeployError("deployment wheel changed before replacement")
-        try:
-            operation_id = _upgrade_once(repo, wheel)
-        except (LocalDeployError, RELEASE_ERROR):
-            if attempt == attempts:
-                raise
-            _say("Windows upgrade failed; retrying once before dashboard restart")
-            continue
-        if RELEASE["_sha256"](wheel) != digest:
-            raise LocalDeployError("deployment wheel changed during replacement")
-        return operation_id
-    raise AssertionError("unreachable")
+def _upgrade(repo: Path, wheel: Path, digest: str) -> None:
+    if RELEASE["_sha256"](wheel) != digest:
+        raise LocalDeployError("deployment wheel changed before replacement")
+    _upgrade_once(repo, wheel)
+    if RELEASE["_sha256"](wheel) != digest:
+        raise LocalDeployError("deployment wheel changed during replacement")
 
 
 def _direct_url() -> Path:
@@ -485,43 +460,12 @@ def _direct_url() -> Path:
     return path.resolve()
 
 
-def _verify_upgrade_events(
-    operation_id: str,
-    local_watchers: tuple[tuple[str, str], ...],
-) -> None:
-    events = RELEASE["_candidate_events"](operation_id)
-    quiesced = tuple(sorted({
-        (str(event.get("root")), str(event.get("watcher")))
-        for event in events
-        if event.get("status") == "ok"
-        and event.get("upgrade_phase") == "quiesce-requested"
-        and isinstance(event.get("root"), str)
-        and event.get("root")
-        and isinstance(event.get("watcher"), str)
-        and event.get("watcher")
-    }))
-    def normalized(values: tuple[tuple[str, str], ...]) -> set[tuple[str, str]]:
-        return {
-            ((str(Path(root).resolve()).casefold() if os.name == "nt"
-              else str(Path(root).resolve())), watcher)
-            for root, watcher in values
-        }
-
-    if normalized(quiesced) != normalized(local_watchers):
-        raise LocalDeployError(
-            "upgrade lifecycle did not cover the exact local watcher set")
-    RELEASE["_verify_candidate_events"](events, local_watchers)
-
-
 def _postcheck(
-    repo: Path,
     wheel: Path,
     version: str,
     baseline: tuple[tuple[object, ...], ...],
     all_watchers: tuple[tuple[str, str], ...],
-    local_watchers: tuple[tuple[str, str], ...],
     dashboards: tuple[Dashboard, ...],
-    operation_id: str | None,
 ) -> None:
     with ThreadPoolExecutor(max_workers=3) as pool:
         status_future = pool.submit(RELEASE["_installed_all_json"], "status")
@@ -540,8 +484,6 @@ def _postcheck(
     })
     if current_watchers != all_watchers:
         raise LocalDeployError("deployment changed host-wide started watchers")
-    if operation_id is not None:
-        _verify_upgrade_events(operation_id, local_watchers)
     for dashboard in dashboards:
         _await_api_rows(dashboard.port)
 
@@ -611,18 +553,17 @@ def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
         for dashboard in dashboards:
             _stop_dashboard(dashboard)
             stopped.append(dashboard)
-        operation_id = _upgrade(root, wheel, digest)
+        _upgrade(root, wheel, digest)
         _restart_dashboards(tuple(stopped))
         _postcheck(
-            root, wheel, version, baseline, all_watchers, local_watchers,
-            tuple(stopped), operation_id)
+            wheel, version, baseline, all_watchers, tuple(stopped))
     except BaseException:
         with contextlib.suppress(Exception):
             _restart_dashboards(tuple(stopped))
         raise
     receipt = _write_receipt(
         commit=commit, version=version, previous_version=previous_version,
-        wheel=wheel, wheel_sha256=digest, operation_id=operation_id,
+        wheel=wheel, wheel_sha256=digest, operation_id=None,
         baseline=baseline, watchers=all_watchers, dashboards=tuple(stopped))
     _say(f"deployed {commit[:8]} from {wheel.name}")
     _say(f"receipt: {receipt}")

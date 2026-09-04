@@ -142,7 +142,7 @@ handler that continues after `ImportError` holds no lock at all.
   local tagged artifact; installed-candidate acceptance exercises that exact
   artifact against real host state; only a commit/tag/wheel-bound acceptance
   receipt authorizes publication.
-- Operational acceptance must use the uv-managed launcher and real CLI,
+- Operational acceptance must use the self-managed stable launcher and real CLI,
   serialization, browser, plugin, scheduler, logs, and health boundaries. A
   source import, mocked envelope, or HTTP bind alone cannot certify release
   behavior.

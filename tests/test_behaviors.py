@@ -36,7 +36,7 @@ from unittest import mock
 
 from agents_live import agent, deploy, obs, paths, plugins, runtime, state
 from agents_live.agent import port, providers
-from agents_live.cli import lifecycle, resolve, upgrade_handoff
+from agents_live.cli import lifecycle, resolve
 from agents_live.cli.commands import (
     doctor,
     install_generation,
@@ -2264,13 +2264,6 @@ class TestInstallationGenerations(unittest.TestCase):
         deploy.generation.activate(built)
         return built
 
-    def _uv_environment(self) -> Path:
-        environment = Path(self.temporary.name) / "uv-tools" / "agents-live"
-        (environment / "bin").mkdir(parents=True, exist_ok=True)
-        (environment / deploy.ownership.RECEIPT).write_text(
-            "[tool]\n", encoding="utf-8")
-        return environment / "bin" / "agents-live"
-
     def _package_wheel(self, version: str) -> Path:
         wheel = (
             Path(self.temporary.name)
@@ -2438,15 +2431,9 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(deploy.pointer.INVALID, state)
         self.assertNotIn("6.6.0", detail)
 
-    def test_the_running_image_decides_which_channel_owns_the_runtime(
+    def test_only_a_generation_image_owns_the_runtime(
             self) -> None:
-        """An upgrade replaces an artifact, so the artifact decides.
-
-        A recorded owner is a claim; what is executing is the fact. The
-        uv answer comes from a receipt beside the running image rather
-        than from asking uv, because a command that must report before
-        it acts cannot afford a subprocess that may hang.
-        """
+        """Package-manager and checkout processes cannot mutate an install."""
         generation = self._generation("6.5.0")
         deploy.generation._replace_current(generation, root=self.root)
 
@@ -2457,13 +2444,10 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertFalse(managed.stale)
         self.assertIsNone(deploy.ownership.refusal(managed))
 
-        uv_installed = deploy.ownership.describe(executable=self._uv_environment())
-        self.assertEqual(deploy.ownership.UV, uv_installed.owner)
-        self.assertIsNone(uv_installed.generation)
-
         elsewhere = deploy.ownership.describe(
             executable=Path(self.temporary.name) / "checkout" / "bin" / "python")
         self.assertEqual(deploy.ownership.UNMANAGED, elsewhere.owner)
+        self.assertIsNotNone(deploy.ownership.refusal(elsewhere))
 
     def test_a_second_owner_is_reported_before_two_channels_can_race(
             self) -> None:
@@ -2478,7 +2462,8 @@ class TestInstallationGenerations(unittest.TestCase):
         deploy.generation._replace_current(
             deploy.layout.generation_dir("6.5.0"), root=self.root)
 
-        contested = deploy.ownership.describe(executable=self._uv_environment())
+        contested = deploy.ownership.describe(
+            executable=Path(self.temporary.name) / "package-manager" / "python")
         self.assertTrue(contested.contested)
         self.assertIn("only one", contested.detail)
         self.assertIsNotNone(deploy.ownership.refusal(contested))
@@ -2995,6 +2980,34 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(
             (), deploy.plan.collectable(("6.6.0",), active="6.6.0"))
 
+    def test_generation_collection_removes_only_unheld_expired_versions(
+            self) -> None:
+        for name in ("6.3.0", "6.4.0", "6.5.0", "6.6.0"):
+            self._activate_generation(name)
+
+        removed = deploy.generation.collect(
+            held={"6.3.0": ("process 4242",)})
+
+        self.assertEqual(("6.4.0",), removed)
+        self.assertEqual(
+            ("6.3.0", "6.5.0", "6.6.0"),
+            deploy.layout.installed_generations(),
+        )
+
+    def test_generation_removal_refuses_active_or_held_versions(self) -> None:
+        self._activate_generation("6.5.0")
+        self._activate_generation("6.6.0")
+
+        with self.assertRaisesRegex(
+                deploy.generation.GenerationError, "active"):
+            deploy.generation.remove("6.6.0")
+        with self.assertRaisesRegex(
+                deploy.generation.GenerationError, "process 4242"):
+            deploy.generation.remove("6.5.0", held=("process 4242",))
+
+        deploy.generation.remove("6.5.0")
+        self.assertEqual(("6.6.0",), deploy.layout.installed_generations())
+
     def test_every_way_a_deployment_can_stop_half_way_has_an_answer(
             self) -> None:
         """#369 asks for the failure semantics, not a best effort.
@@ -3078,12 +3091,7 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_self_managed_uninstall_sweeps_the_owned_root(self) -> None:
-        """Watchers and triggers are addressed to the tree being removed.
-
-        Asking uv where the tool lives answers about an installation that
-        is not there, so the sweeps ran against nothing and left live
-        watchers and scheduled triggers behind for an operator to find.
-        """
+        """Watchers and triggers are addressed to the tree being removed."""
         self._activate_generation("9.7.6")
         deploy.ownership.write_record(deploy.ownership.SELF)
         installation = deploy.ownership.describe(
@@ -3097,8 +3105,6 @@ class TestInstallationGenerations(unittest.TestCase):
             mock.patch.object(
                 uninstall.deploy.ownership, "describe",
                 return_value=installation),
-            mock.patch.object(
-                uninstall.plugins, "tool_environment", return_value=None),
             mock.patch.object(
                 uninstall, "_stop_own_watchers",
                 side_effect=lambda environment: swept.append(environment) or []),
@@ -3943,128 +3949,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         release["ReleaseError"], "stale.*wheel_sha256"):
                     check("1.2.3")
 
-    def test_candidate_acceptance_reinstalls_and_preserves_live_state(self) -> None:
-        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
-        accept = release["accept_candidate"]
-        scope = accept.__globals__
-        status = {
-            "ok": True,
-            "agents": [{
-                "repository": "C:/repo",
-                "identifier": "sample-123",
-                "state": "started",
-                "loadable": True,
-                "execution": {"watch": "src/** debounce 1s"},
-                "is_owner": True,
-                "ownership_available": True,
-            }, {
-                "repository": "C:/repo",
-                "identifier": "remote-789",
-                "state": "started",
-                "loadable": True,
-                "execution": {"watch": "remote/** debounce 1s"},
-                "is_owner": False,
-                "ownership_available": True,
-            }],
-        }
-        all_status = {
-            "ok": True,
-            "repos": [
-                {"name": "selected", "path": "C:/repo", "ok": True,
-                 "result": status},
-                {"name": "other", "path": "C:/other", "ok": True,
-                 "result": {"ok": True, "agents": [{
-                     "repository": "C:/other",
-                     "identifier": "other-456",
-                     "state": "started",
-                     "loadable": True,
-                     "execution": {"watch": "docs/** debounce 1s"},
-                 }]}},
-            ],
-        }
-        doctor = {"ok": True, "checks": []}
-        completed = subprocess.CompletedProcess(
-            [], 0,
-            "Upgrade queued as abc123; result: C:/result.json; "
-            "run `agents-live logs admin` after this process exits\n",
-            "",
-        )
-        events = [
-            {"status": "ok", "upgrade_phase": "quiesce-requested",
-             "watcher": "sample-123", "root": "C:/repo"},
-            {"status": "ok", "upgrade_phase": "quiesced",
-             "watcher": "sample-123", "root": "C:/repo"},
-            {"status": "ok", "operation": "plugin-converge",
-             "message": "plugins already converged"},
-            {"status": "ok", "upgrade_phase": "restore",
-             "watcher": "sample-123", "root": "C:/repo"},
-            {"status": "ok", "message": "deferred Windows upgrade completed"},
-        ]
-        written = mock.Mock(return_value=Path("acceptance.json"))
-        checkpoint = mock.Mock(return_value=Path("checkpoint.json"))
-        operational = mock.Mock()
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            wheel = root / "candidate.whl"
-            wheel.write_bytes(b"wheel")
-            repo_results = iter((status, status, status))
-            all_results = iter((
-                all_status, doctor,
-                all_status, doctor,
-                all_status, doctor,
-            ))
-            fake_os = mock.Mock()
-            fake_os.name = "nt"
-            with mock.patch.dict(scope, {
-                "_require_tools": lambda: None,
-                "_current_version": lambda: "1.2.3",
-                "_check_publish_state": lambda _version: True,
-                "_check_preparation": lambda _version: {"prepared": True},
-                "_acceptance_path": lambda _version: root / "acceptance.json",
-                "_checkpoint_path": lambda _version: root / "checkpoint.json",
-                "_candidate_wheel": lambda _version: wheel,
-                "_installed_version": mock.Mock(side_effect=("1.2.3", "1.2.3")),
-                "_installed_json": lambda _repo, _command: next(repo_results),
-                "_installed_all_json": lambda _command: next(all_results),
-                "_installed_run": mock.Mock(return_value=completed),
-                "_wait_for_upgrade_result": lambda _path: {
-                    "status": "terminal", "operation_id": "abc123", "exit_code": 0},
-                "_candidate_events": lambda _operation: events,
-                "_run_operational_acceptance": operational,
-                "_write_acceptance_checkpoint": checkpoint,
-                "_write_candidate_acceptance": written,
-                # This case is the uv-managed one: it queues a helper and
-                # waits for its durable result.
-                "_installed_is_self_managed": lambda: False,
-                "os": fake_os,
-            }):
-                accept(root, "sample-123", "cost-agent-456")
-            written.assert_called_once_with(
-                "1.2.3", root.resolve(), wheel,
-                operation_id="abc123",
-                watchers=(("C:/repo", "sample-123"),),
-                operational_agent="sample-123",
-                cost_agent="cost-agent-456")
-            self.assertEqual([
-                mock.call(
-                    root.resolve(), "sample-123", "cost-agent-456",
-                    preflight=True),
-                mock.call(root.resolve(), "sample-123", "cost-agent-456"),
-            ], operational.call_args_list)
-            checkpoint.assert_called_once_with(
-                "1.2.3", root.resolve(), wheel,
-                operation_id="abc123",
-                contract=(
-                    ("C:/other", "other-456", "started", True),
-                    ("C:/repo", "remote-789", "started", True),
-                    ("C:/repo", "sample-123", "started", True),
-                ),
-                watchers=(("C:/repo", "sample-123"),),
-                operational_agent="sample-123",
-                cost_agent="cost-agent-456")
-            self.assertFalse((root / "acceptance.json").exists())
-            self.assertFalse((root / "checkpoint.json").exists())
-
     def test_candidate_status_contract_rejects_malformed_rows(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         contract = release["_status_contract"]
@@ -4128,7 +4012,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_installed_version": lambda: "1.2.3",
                 "_run_operational_acceptance": mock.Mock(),
                 "_check_acceptance_checkpoint": lambda *_args: {
-                    "operation_id": "abc123",
+                    "operation_id": None,
                     "contract": [["C:/repo", "sample-123", "started", True]],
                     "watchers": [["C:/repo", "sample-123"]],
                 },
@@ -4142,7 +4026,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             replacement.assert_not_called()
             finish.assert_called_once_with(
                 "1.2.3", root.resolve(), wheel,
-                operation_id="abc123",
+                operation_id=None,
                 before_contract=(
                     ("C:/repo", "sample-123", "started", True),),
                 watchers=(("C:/repo", "sample-123"),),
@@ -4177,7 +4061,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_installed_version": lambda: "1.2.3",
                 "_run_operational_acceptance": operational,
                 "_check_acceptance_checkpoint": lambda *_args: {
-                    "operation_id": "abc123",
+                    "operation_id": None,
                     "contract": [["C:/repo", "sample-123", "started", True]],
                     "watchers": [["C:/repo", "sample-123"]],
                 },
@@ -4212,7 +4096,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     release["ReleaseError"], "representative watchers"):
                 finish(
                     "1.2.3", Path("C:/repo"), Path("candidate.whl"),
-                    operation_id="abc123",
+                    operation_id=None,
                     before_contract=(
                         ("C:/repo", "sample-123", "started", True),),
                     watchers=(("C:/repo", "sample-123"),),
@@ -4267,6 +4151,18 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         check(
                             "1.2.3", root, wheel,
                             "sample-123", "cost-agent-456")
+                payload = {
+                    **base,
+                    "contract": [["C:/repo", "sample-123", "started", True]],
+                    "watchers": [["C:/repo", "sample-123"]],
+                    "operation_id": "abc123",
+                }
+                checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        release["ReleaseError"], "retired deferred"):
+                    check(
+                        "1.2.3", root, wheel,
+                        "sample-123", "cost-agent-456")
 
     def test_failed_candidate_rerun_invalidates_previous_receipt(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -4630,8 +4526,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "_started_watchers": watcher_contract,
         }):
             postcheck(
-                Path("C:/repo"), Path("wheel.whl"), "1.2.3", baseline,
-                (("C:/repo", "sample-123"),), (), (), None)
+                Path("wheel.whl"), "1.2.3", baseline,
+                (("C:/repo", "sample-123"),), ())
         contract.assert_called_once_with(status)
         watcher_contract.assert_called_once_with({"agents": []})
 
@@ -4654,35 +4550,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
             (repository, "other-456"),
             (repository, "sample-123"),
         })
-
-    def test_local_deploy_verifies_events_for_local_watchers_only(self) -> None:
-        script = runpy.run_path(
-            str(REPOSITORY / "tools" / "local-deploy.py"))
-        verify = script["_verify_upgrade_events"]
-        scope = verify.__globals__
-        events = [{
-            "status": "ok",
-            "upgrade_phase": "quiesce-requested",
-            "root": "C:/repo",
-            "watcher": "local-123",
-        }]
-        ordered = mock.Mock()
-        baseline = (("C:/repo", "local-123"),)
-        with mock.patch.dict(scope["RELEASE"], {
-            "_candidate_events": lambda _operation: events,
-            "_verify_candidate_events": ordered,
-        }):
-            verify("abc123", baseline)
-            ordered.assert_called_once_with(
-                events, (("C:/repo", "local-123"),))
-            events[0]["watcher"] = "unexpected-789"
-            with self.assertRaisesRegex(
-                    script["LocalDeployError"], "exact local watcher"):
-                verify("abc123", baseline)
-            events.clear()
-            with self.assertRaisesRegex(
-                    script["LocalDeployError"], "exact local watcher"):
-                verify("abc123", baseline)
 
     def test_local_deploy_waits_through_transient_empty_dashboard_rows(
             self) -> None:
@@ -4750,14 +4617,17 @@ class TestCrossModuleAgreements(unittest.TestCase):
         upgrade = script["_upgrade"]
         scope = upgrade.__globals__
         digests = iter(("digest", "changed"))
+        upgrade_once = mock.Mock(return_value=None)
         with mock.patch.dict(scope["RELEASE"], {
             "_sha256": lambda _wheel: next(digests),
         }), mock.patch.dict(scope, {
-            "_upgrade_once": mock.Mock(return_value="operation"),
+            "_upgrade_once": upgrade_once,
         }):
             with self.assertRaisesRegex(
                     script["LocalDeployError"], "changed during replacement"):
                 upgrade(Path("C:/repo"), Path("wheel.whl"), "digest")
+        upgrade_once.assert_called_once_with(
+            Path("C:/repo"), Path("wheel.whl"))
 
     def test_local_deploy_accepts_synchronous_self_managed_windows_upgrade(
             self) -> None:
@@ -4770,68 +4640,17 @@ class TestCrossModuleAgreements(unittest.TestCase):
         windows.name = "nt"
         completed = subprocess.CompletedProcess(
             [], 0, "Activated self-managed generation 6.7.0\n", "")
-        with (
-            mock.patch.dict(scope, {
-                "os": windows,
-                "_installed_cli": lambda: Path("generation/agents-live.exe"),
-                "_installed_run": lambda *_args: completed,
-            }),
-            mock.patch.object(
-                scope["deployment"].layout,
-                "generation_of",
-                return_value="6.7.0",
-            ),
-        ):
-            self.assertIsNone(
-                upgrade_once(Path("C:/repo"), Path("candidate.whl")))
-
-    def test_release_accepts_a_synchronous_self_managed_candidate(self) -> None:
-        """Acceptance required evidence only a uv upgrade can produce.
-
-        A uv-managed Windows upgrade rewrites the running environment and
-        defers to a helper, so acceptance waited for that helper's durable
-        result. A self-managed upgrade builds a new generation beside the
-        running one and returns synchronously, which made the deployment
-        model this release ships unreleasable by its own tooling.
-        """
-        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
-        scope = release["_installed_is_self_managed"].__globals__
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            generation = root / "install" / "versions" / "6.7.0" / "bin"
-            with mock.patch.dict(scope, {
-                "_install_root": lambda: root / "install",
-                "_installed_cli": lambda: str(generation / "agents-live"),
-            }):
-                self.assertTrue(release["_installed_is_self_managed"]())
-            tool = root / "uv" / "tools" / "agents-live" / "bin"
-            with mock.patch.dict(scope, {
-                "_install_root": lambda: root / "install",
-                "_installed_cli": lambda: str(tool / "agents-live"),
-            }):
-                self.assertFalse(release["_installed_is_self_managed"]())
-
-    def test_local_deploy_retries_one_failed_windows_upgrade(self) -> None:
-        script = runpy.run_path(
-            str(REPOSITORY / "tools" / "local-deploy.py"))
-        upgrade = script["_upgrade"]
-        scope = upgrade.__globals__
-        attempts = mock.Mock(side_effect=(
-            script["LocalDeployError"]("launcher held"),
-            "operation-2",
-        ))
-        windows = mock.Mock()
-        windows.name = "nt"
+        installed_run = mock.Mock(return_value=completed)
         with mock.patch.dict(scope, {
             "os": windows,
-            "_upgrade_once": attempts,
-        }), mock.patch.dict(scope["RELEASE"], {
-            "_sha256": lambda _wheel: "digest",
+            "_installed_cli": lambda: Path("generation/agents-live.exe"),
+            "_installed_run": installed_run,
         }):
-            self.assertEqual(
-                "operation-2",
-                upgrade(Path("C:/repo"), Path("wheel.whl"), "digest"))
-        self.assertEqual(2, attempts.call_count)
+            self.assertIsNone(
+                upgrade_once(Path("C:/repo"), Path("candidate.whl")))
+        installed_run.assert_called_once_with(
+            "--repo", str(Path("C:/repo")), "upgrade", "--from",
+            str(Path("candidate.whl")))
 
     def test_operational_preflight_checks_browser_dashboard_and_agents(
             self) -> None:
@@ -5795,116 +5614,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     scope["os"].environ,
                     {"AGENTS_LIVE_INSTALL_ROOT": str(install_root)}):
                 self.assertEqual(str(managed.resolve()), installed_cli())
-
-    def test_candidate_acceptance_falls_back_to_the_uv_tool(self) -> None:
-        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
-        installed_cli = release["_installed_cli"]
-        scope = installed_cli.__globals__
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            environment = root / "agents-live"
-            directory = environment / (
-                "Scripts" if os.name == "nt" else "bin")
-            directory.mkdir(parents=True)
-            filename = "agents-live.exe" if os.name == "nt" else "agents-live"
-            managed = directory / filename
-            managed.write_text("managed", encoding="utf-8")
-            with (
-                mock.patch.dict(scope["os"].environ, {
-                    "AGENTS_LIVE_INSTALL_ROOT": str(root / "absent"),
-                }),
-                mock.patch.dict(scope, {
-                    "_run": lambda *_args, **_kwargs: str(root),
-                }),
-            ):
-                self.assertEqual(str(managed.resolve()), installed_cli())
-
-    def test_candidate_event_order_and_identity_are_exact(self) -> None:
-        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
-        verify = release["_verify_candidate_events"]
-        watchers = (("C:/repo", "sample"),)
-        valid = [
-            {"status": "ok", "upgrade_phase": "quiesce-requested",
-             "watcher": "sample", "root": "C:/repo"},
-            {"status": "ok", "upgrade_phase": "quiesced",
-             "watcher": "sample", "root": "C:/repo"},
-            {"status": "ok", "operation": "plugin-converge"},
-            {"status": "ok", "upgrade_phase": "restore",
-             "watcher": "sample", "root": "C:/repo"},
-            {"status": "ok", "message": "deferred Windows upgrade completed"},
-        ]
-        verify(valid, watchers)
-        with self.assertRaisesRegex(
-                release["ReleaseError"], "out of order"):
-            verify([valid[0], valid[1], valid[3], valid[2], valid[4]], watchers)
-        prefix_only = [dict(item) for item in valid]
-        for item in prefix_only:
-            if item.get("watcher") == "sample":
-                item["watcher"] = "sample-other"
-        with self.assertRaisesRegex(
-                release["ReleaseError"], "no exact"):
-            verify(prefix_only, watchers)
-        wrong_root = [dict(item) for item in valid]
-        for item in wrong_root:
-            if item.get("root") == "C:/repo":
-                item["root"] = "C:/other"
-        with self.assertRaisesRegex(
-                release["ReleaseError"], "no exact"):
-            verify(wrong_root, watchers)
-
-    def test_candidate_event_query_decodes_real_duckdb_attributes(self) -> None:
-        try:
-            import duckdb  # noqa: F401
-        except ImportError:
-            self.skipTest("duckdb is not installed")
-        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
-        decode = release["_decode_candidate_event"]
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "admin.log"
-            with mock.patch.object(obs.admin, "log_path", return_value=path):
-                obs.admin.record(
-                    "upgrade-watchers",
-                    status="ok",
-                    correlation_id="upgrade-operation",
-                    upgrade_phase="quiesced",
-                    watcher="sample-123",
-                    root="C:/repo",
-                    message="watcher quiesced",
-                )
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(qlog.__file__).resolve()),
-                    "--log",
-                    str(path),
-                    "--sql",
-                    "select run_id, status, message, attributes from log "
-                    "where run_id = 'upgrade-operation' order by ts",
-                    "--format",
-                    "jsonl",
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env={
-                    **os.environ,
-                    "AGENTS_LIVE_REPO": str(Path(temporary).resolve()),
-                },
-                check=False,
-            )
-            self.assertEqual(0, completed.returncode, completed.stderr)
-            serialized = [
-                json.loads(line) for line in completed.stdout.splitlines()
-                if line.strip()
-            ]
-            self.assertIsInstance(serialized[0]["attributes"], list)
-            rows = [decode(row) for row in serialized]
-        self.assertEqual(1, len(rows))
-        self.assertEqual("upgrade-watchers", rows[0]["operation"])
-        self.assertEqual("quiesced", rows[0]["upgrade_phase"])
-        self.assertEqual("sample-123", rows[0]["watcher"])
-        self.assertEqual("C:/repo", rows[0]["root"])
 
     def test_release_blob_validation_applies_git_clean_filters(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))

@@ -5,7 +5,8 @@
 # Compatibility wrapper for legacy scheduled tasks.
 #
 # A self-managed installation answers through its stable current link; a
-# uv-managed one put a shim in ~/.local/bin. Prefer the former, because a
+# legacy package-manager install put a shim in ~/.local/bin. Prefer the former,
+# because a
 # generation install never creates the latter.
 CLI="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin/agents-live"
 if [[ ! -x "$CLI" ]]; then

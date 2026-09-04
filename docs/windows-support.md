@@ -152,7 +152,7 @@ direct GitHub URL. The positional installer argument remains the original,
 unencoded version. The bootstrap verifies release metadata, asset size, and
 SHA-256 before activation and does not fall back to a Python package index.
 
-An uncontested uv-managed installation is retired only after the new
+An uncontested legacy uv tool installation is retired only after the new
 generation is active. Let one-shot work already using the old immutable
 runtime finish. Started watchers should converge to the selected generation;
 if a resident watcher remains on the old executable, cycle only that agent
