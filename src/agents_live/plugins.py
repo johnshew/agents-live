@@ -1,225 +1,132 @@
-"""Project-declared plugin inspection and uv tool-environment convergence."""
+"""Project-declared plugins, loaded from source against a seam protocol.
+
+A plugin is a Python module or package inside the repository that
+declares it. It is imported directly and its exposed objects are handed
+to the seam; nothing is installed.
+
+The declaration format already forbade everything installation bought:
+:func:`paths.validated_plugins` rejects an absolute path and any path
+resolving outside the declaring repository, so a plugin could never come
+from a package index. See docs/decisions/plugin-loading.md.
+
+Loading never raises. A plugin that cannot be found, hashed, imported, or
+recognized is recorded as a failure and reported by ``doctor``; one bad
+plugin must not take down every command, including ``--help``.
+"""
 from __future__ import annotations
 
-import configparser
 import hashlib
 import importlib.metadata
+import importlib.util
 import re
-import subprocess
 import sys
 import tomllib
-import zipfile
-from dataclasses import dataclass, replace
-from email.parser import BytesParser
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import __version__, paths
+from . import paths
 from .agent import providers as provider_plugins
-from .obs import admin as adminlog
-from .runtime.hosts import system as hostruntime
-from .runtime.hosts.processes import within
-from .runtime.spawn import find_uv
 from .state import ownership
 
-# Kernel extension points a declared distribution must provide. Each seam
-# owns its own group name, so validating one group while another is read
-# cannot happen (a provider plugin was silently never discovered).
-ENTRY_POINT_GROUPS = frozenset({
-    provider_plugins.ENTRY_POINT_GROUP,
-    ownership.ENTRY_POINT_GROUP,
-})
-# 5.x adapter plugins named this group. Recognised only to say so; the
-# diagnostic expires with the rest of the 5.x support in 7.0.
-RETIRED_ENTRY_POINT_GROUPS = frozenset({"agents_live.agents"})
-_COMPATIBILITY_PROBE_TIMEOUT_S = 120
-_COMPATIBILITY_PROBE = r"""
-import importlib.metadata
-import sys
+#: What a loaded module may expose, and which seam each attribute feeds.
+PROVIDER_ATTRS = ("PROVIDERS", "PROVIDER")
+OWNERSHIP_ATTR = "OWNERSHIP_REGISTRY"
 
-from agents_live.agent import providers as provider_registry
+#: Modules are registered in ``sys.modules`` because dataclasses,
+#: pickling, and ``typing.get_type_hints`` resolve through it. The key is
+#: namespaced rather than the file's own name: two repositories may each
+#: declare ``plugin.py``, and pytest documents exactly this collision for
+#: ``conftest.py`` files that are not inside a package.
+_MODULE_PREFIX = "agents_live._plugins"
 
-PROVIDERS = "agents_live.providers"
-OWNERSHIP = "agents_live.ownership"
-
-for distribution_name in sys.argv[1:]:
-    distribution = importlib.metadata.distribution(distribution_name)
-    supported = [
-        entry_point for entry_point in distribution.entry_points
-        if entry_point.group == PROVIDERS
-        or (entry_point.group == OWNERSHIP and entry_point.name == "registry")
-    ]
-    if not supported:
-        raise RuntimeError(
-            f"{distribution_name} exposes no supported agents-live entry points")
-    for entry_point in supported:
-        try:
-            if entry_point.group == PROVIDERS:
-                # Importing the candidate registry above discovers and
-                # registers every provider entry point with the exact runtime
-                # semantics normal command startup uses.
-                continue
-            else:
-                loaded = entry_point.load()
-                for method in (
-                    "registry_file_exists", "load_owners", "set_owner",
-                    "remove_owner",
-                ):
-                    if not callable(getattr(loaded, method, None)):
-                        raise TypeError(f"ownership backend {method} must be callable")
-        except Exception as exc:
-            raise RuntimeError(
-                f"{distribution_name} entry point "
-                f"{entry_point.group}:{entry_point.name} failed: {exc}") from exc
-"""
+# PEP 723 inline metadata. Formally a script format; a plugin is imported
+# rather than run, so the header is read as an advisory declaration and
+# nothing is ever installed from it.
+_PEP723 = re.compile(
+    r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
+_REQUIREMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class PluginError(RuntimeError):
-    """A plugin declaration cannot be safely resolved or installed."""
+    """A plugin declaration cannot be safely resolved or loaded."""
 
 
 @dataclass(frozen=True)
 class Plugin:
-    """Resolved declaration; version is unknown while its wheel is absent."""
+    """One declaration, resolved against the repository that made it."""
+
     name: str
     path: Path
     sha256: str | None
-    version: str | None
-    metadata_error: str | None = None
+    root: Path
+
+    @property
+    def module_name(self) -> str:
+        """The ``sys.modules`` key this plugin is registered under."""
+        stem = re.sub(r"[^A-Za-z0-9_]", "_", self.name)
+        digest = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:8]
+        return f"{_MODULE_PREFIX}.{digest}_{stem}"
+
+    @property
+    def entry_file(self) -> Path:
+        """The file the import machinery executes for this plugin."""
+        return self.path / "__init__.py" if self.path.is_dir() else self.path
 
 
 @dataclass(frozen=True)
-class ReceiptRequirement:
-    value: str
-    editable: bool = False
+class Loaded:
+    """What one declaration contributed, or why it contributed nothing."""
+
+    plugin: Plugin
+    ok: bool
+    detail: str
 
 
-def _canonical(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _wheel_identity(path: Path) -> tuple[str, str]:
-    try:
-        with zipfile.ZipFile(path) as wheel:
-            metadata_names = [
-                name for name in wheel.namelist()
-                if name.endswith(".dist-info/METADATA")
-            ]
-            if len(metadata_names) != 1:
-                raise PluginError(
-                    f"plugin wheel must contain exactly one METADATA file: {path}")
-            metadata = BytesParser().parsebytes(wheel.read(metadata_names[0]))
-    except (OSError, zipfile.BadZipFile, KeyError) as exc:
-        raise PluginError(f"plugin wheel is unreadable: {path}: {exc}") from exc
-    name, version = metadata.get("Name"), metadata.get("Version")
-    if not name or not version:
-        raise PluginError(f"plugin wheel has incomplete metadata: {path}")
-    return name, version
-
-
-_sha256_cache: dict[tuple[str, int, int], str] = {}
-
-
-def _sha256(path: Path) -> str:
-    """Digest of *path*, memoized per process on (path, size, mtime) so
-    one command never hashes the same unchanged wheel twice."""
-    stat = path.stat()
-    key = (str(path), stat.st_size, stat.st_mtime_ns)
-    digest = _sha256_cache.get(key)
-    if digest is None:
-        with path.open("rb") as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        _sha256_cache[key] = digest
-    return digest
-
-
-def declared(root: Path, *, require_exists: bool = False) -> dict[str, Plugin]:
-    """Resolve declarations, retaining configured names for absent wheels."""
+def declared(root: Path, *, require_exists: bool = True) -> dict[str, Plugin]:
+    """Resolve one repository's declarations without importing them."""
     declarations = paths.validated_plugins(
         root, paths.load_config(root).get("plugins", {}),
         require_exists=require_exists)
-    result = {}
-    for configured_name, declaration in declarations.items():
-        wheel_name = configured_name
-        version = None
-        metadata_error = None
-        if declaration["path"].is_file():
-            try:
-                wheel_name, version = _wheel_identity(declaration["path"])
-                if _canonical(configured_name) != _canonical(wheel_name):
-                    raise PluginError(
-                        f"plugin {configured_name!r} wheel declares distribution "
-                        f"{wheel_name!r}: {declaration['path']}")
-            except PluginError as exc:
-                if require_exists:
-                    raise
-                wheel_name = configured_name
-                version = None
-                metadata_error = str(exc)
-        key = _canonical(configured_name)
-        result[key] = Plugin(
-            name=wheel_name,
-            path=declaration["path"],
-            sha256=declaration["sha256"],
-            version=version,
-            metadata_error=metadata_error,
-        )
-    return result
+    return {
+        name: Plugin(name, declaration["path"], declaration["sha256"], root)
+        for name, declaration in declarations.items()
+    }
 
 
-def union(roots: list[Path], *, require_exists: bool = False) -> dict[str, Plugin]:
-    """Combine declarations, preferring available wheel metadata."""
-    result = {}
+def union(roots: list[Path], *, require_exists: bool = True
+          ) -> dict[str, Plugin]:
+    """Combine declarations across repositories; first declaration wins.
+
+    Two repositories naming the same plugin is not worth refusing over:
+    each loads under its own module key, and the seam registry rejects a
+    genuine duplicate registration itself.
+    """
+    result: dict[str, Plugin] = {}
     for root in roots:
-        for key, plugin in declared(
+        for name, plugin in declared(
                 root, require_exists=require_exists).items():
-            previous = result.get(key)
-            if previous is not None:
-                if (
-                    previous.sha256 is not None
-                    and plugin.sha256 is not None
-                    and previous.sha256.lower() != plugin.sha256.lower()
-                ):
-                    raise PluginError(
-                        f"conflicting sha256 declarations for plugin "
-                        f"{plugin.name!r}: {previous.path} and {plugin.path}")
-                merged_sha256 = previous.sha256 or plugin.sha256
-                if previous.version is None and plugin.version is None:
-                    selected = (
-                        plugin
-                        if not previous.path.is_file() and plugin.path.is_file()
-                        else previous
-                    )
-                    result[key] = replace(selected, sha256=merged_sha256)
-                    continue
-                if previous.version is None:
-                    result[key] = replace(plugin, sha256=merged_sha256)
-                    continue
-                if plugin.version is None:
-                    result[key] = replace(previous, sha256=merged_sha256)
-                    continue
-                try:
-                    same_artifact = (
-                        previous.version == plugin.version
-                        and _sha256(previous.path) == _sha256(plugin.path)
-                    )
-                except OSError as exc:
-                    raise PluginError(
-                        f"cannot compare plugin declarations: {exc}") from exc
-                if not same_artifact:
-                    raise PluginError(
-                        f"conflicting declarations for plugin {plugin.name!r}: "
-                        f"{previous.path} and {plugin.path}")
-                result[key] = replace(previous, sha256=merged_sha256)
-                continue
-            result[key] = plugin
+            result.setdefault(name, plugin)
     return result
 
 
-def _integrity_error(plugin: Plugin) -> str | None:
+def _digest(path: Path) -> str:
+    """SHA-256 of a file, or of a directory's sorted relative contents."""
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    running = hashlib.sha256()
+    for item in sorted(item for item in path.rglob("*") if item.is_file()):
+        running.update(
+            str(item.relative_to(path)).replace("\\", "/").encode("utf-8"))
+        running.update(item.read_bytes())
+    return running.hexdigest()
+
+
+def integrity_error(plugin: Plugin) -> str | None:
+    """Whether the declared digest still matches what is on disk."""
     if plugin.sha256 is None:
         return None
     try:
-        actual = _sha256(plugin.path)
+        actual = _digest(plugin.path)
     except OSError as exc:
         return f"cannot hash {plugin.path}: {exc}"
     if actual.lower() != plugin.sha256.lower():
@@ -227,441 +134,181 @@ def _integrity_error(plugin: Plugin) -> str | None:
     return None
 
 
-def inspect(plugin: Plugin) -> tuple[bool, str]:
-    if plugin.path.is_file():
-        integrity_error = _integrity_error(plugin)
-        if integrity_error:
-            return False, integrity_error
-    return _installed_state(plugin)
-
-
-def _retired_groups_in_wheel(plugin: Plugin) -> list[str]:
-    """Retired entry-point groups a wheel declares, read without installing."""
+def requirements(source: Path) -> tuple[str, ...]:
+    """Distribution names a plugin's PEP 723 header declares, if any."""
     try:
-        with zipfile.ZipFile(plugin.path) as archive:
-            names = [
-                name for name in archive.namelist()
-                if name.endswith(".dist-info/entry_points.txt")]
-            if not names:
-                return []
-            parser = configparser.ConfigParser()
-            parser.read_string(archive.read(names[0]).decode("utf-8"))
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile,
-            UnicodeDecodeError, configparser.Error):
-        # Unreadable metadata is the installed-state check's problem.
-        return []
-    return sorted(set(parser.sections()) & RETIRED_ENTRY_POINT_GROUPS)
-
-
-def _installed_state(plugin: Plugin) -> tuple[bool, str]:
-    """Installed-environment convergence, without artifact integrity."""
-    try:
-        distribution = importlib.metadata.distribution(plugin.name)
-    except importlib.metadata.PackageNotFoundError:
-        return False, f"distribution {plugin.name} is not installed"
-    if plugin.version is not None and distribution.version != plugin.version:
-        return False, (
-            f"installed version {distribution.version}, declared wheel "
-            f"version {plugin.version}")
-    # Checked before the recognised groups: a distribution declaring both a
-    # retired and a current group would otherwise validate on the current one
-    # while the retired half is silently never loaded.
-    retired = sorted({
-        ep.group for ep in distribution.entry_points
-        if ep.group in RETIRED_ENTRY_POINT_GROUPS})
-    if retired:
-        return False, (
-            f"declares retired entry-point group {', '.join(retired)}; "
-            f"port it to {provider_plugins.ENTRY_POINT_GROUP} and "
-            "the 6.0 provider protocol")
-    entry_points = [
-        ep for ep in distribution.entry_points if ep.group in ENTRY_POINT_GROUPS
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ()
+    blocks = [
+        match for match in _PEP723.finditer(text)
+        if match.group("type") == "script"
     ]
-    if not entry_points:
-        return False, "distribution exposes no agents-live entry points"
-    for entry_point in entry_points:
+    if len(blocks) != 1:
+        return ()
+    content = "".join(
+        line[2:] if line.startswith("# ") else line[1:]
+        for line in blocks[0].group("content").splitlines(keepends=True))
+    try:
+        document = tomllib.loads(content)
+    except (ValueError, TypeError):
+        return ()
+    declared_requirements = document.get("dependencies")
+    if not isinstance(declared_requirements, list):
+        return ()
+    names = []
+    for item in declared_requirements:
+        if not isinstance(item, str):
+            continue
+        match = _REQUIREMENT_NAME.match(item.strip())
+        if match:
+            names.append(match.group(0))
+    return tuple(names)
+
+
+def missing_requirements(plugin: Plugin) -> tuple[str, ...]:
+    """Declared distributions this runtime cannot supply.
+
+    Names only. A plugin runs inside the Agents Live runtime and may use
+    only that runtime's dependencies, so the useful answer is "absent",
+    not "slightly wrong version". Nothing is installed to satisfy this.
+    """
+    absent = []
+    for name in requirements(plugin.entry_file):
         try:
-            entry_point.load()
+            importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            absent.append(name)
+        except (OSError, ValueError):
+            continue
+    return tuple(absent)
+
+
+def _import(plugin: Plugin):
+    """Import a plugin's module under its namespaced key."""
+    entry = plugin.entry_file
+    if not entry.is_file():
+        raise PluginError(f"{plugin.path} is not a module or package")
+    existing = sys.modules.get(plugin.module_name)
+    if existing is not None:
+        return existing
+    locations = [str(plugin.path)] if plugin.path.is_dir() else None
+    spec = importlib.util.spec_from_file_location(
+        plugin.module_name, entry, submodule_search_locations=locations)
+    if spec is None or spec.loader is None:
+        raise PluginError(f"cannot import {entry}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[plugin.module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        del sys.modules[plugin.module_name]
+        raise
+    return module
+
+
+def _attach(module) -> str:
+    """Hand a loaded module's exposed objects to the seams they name."""
+    attached = []
+    providers = None
+    for attribute in PROVIDER_ATTRS:
+        if hasattr(module, attribute):
+            providers = getattr(module, attribute)
+            break
+    if providers is not None:
+        candidates = (
+            providers if isinstance(providers, (list, tuple)) else [providers])
+        for candidate in candidates:
+            provider_plugins.register(candidate)
+            attached.append(f"provider {candidate.name}")
+    registry = getattr(module, OWNERSHIP_ATTR, None)
+    if registry is not None:
+        ownership.use_backend(registry)
+        attached.append("ownership registry")
+    if not attached:
+        raise PluginError(
+            f"exposes none of {', '.join((*PROVIDER_ATTRS, OWNERSHIP_ATTR))}")
+    return ", ".join(attached)
+
+
+def load(roots: list[Path]) -> tuple[Loaded, ...]:
+    """Load every declared plugin, recording failures rather than raising.
+
+    Idempotent: a module already in ``sys.modules`` under its namespaced
+    key is reused, and the seam registries accept the same object twice.
+    Repositories are resolved independently so one malformed declaration
+    cannot hide healthy plugins from another repository.
+    """
+    results: list[Loaded] = []
+    declarations: list[Plugin] = []
+    for root in roots:
+        try:
+            declarations.extend(
+                declared(root, require_exists=False).values())
+        except (OSError, ValueError, PluginError) as exc:
+            results.append(Loaded(
+                Plugin("<declarations>", Path(), None, root),
+                False, str(exc)))
+    for plugin in declarations:
+        if not plugin.entry_file.is_file():
+            results.append(Loaded(
+                plugin, False, f"{plugin.path} is not a module or package"))
+            continue
+        broken = integrity_error(plugin)
+        if broken:
+            results.append(Loaded(plugin, False, broken))
+            continue
+        absent = missing_requirements(plugin)
+        if absent:
+            results.append(Loaded(
+                plugin, False,
+                f"declares {', '.join(absent)}, which this runtime does not "
+                "provide"))
+            continue
+        try:
+            detail = _attach(_import(plugin))
         except Exception as exc:
-            return False, (
-                f"entry point {entry_point.group}:{entry_point.name} failed: {exc}")
-    return True, (
-        f"version {distribution.version}; entry points "
-        + ", ".join(f"{ep.group}:{ep.name}" for ep in entry_points))
+            results.append(Loaded(plugin, False, f"{type(exc).__name__}: {exc}"))
+            continue
+        results.append(Loaded(plugin, True, detail))
+    return tuple(results)
 
 
-def checks(root: Path, *, require_exists: bool = True) -> list[tuple[str, bool, str]]:
-    declarations = declared(root, require_exists=require_exists)
-    invalid = next(
-        (plugin.metadata_error for plugin in declarations.values()
-         if plugin.metadata_error),
-        None,
-    )
-    if invalid:
-        raise PluginError(invalid)
-    return [
-        (plugin.name, *inspect(plugin))
-        for plugin in declarations.values()
-    ]
+def checks(root: Path, *, require_exists: bool = True
+           ) -> list[tuple[str, bool, str]]:
+    """Per-plugin health for one repository, for ``doctor``."""
+    return [(item.plugin.name, item.ok, item.detail) for item in load([root])]
 
 
 def validation_errors(roots: list[Path]) -> tuple[str, ...]:
-    """Problems that make declared plugin artifacts unsafe to install."""
-    try:
-        declarations = union(roots, require_exists=False)
-    except (OSError, ValueError, PluginError) as exc:
-        return (str(exc),)
-    errors = []
-    for plugin in declarations.values():
-        if plugin.metadata_error:
-            errors.append(plugin.metadata_error)
-            continue
-        if not plugin.path.is_file():
-            errors.append(
-                f"plugin {plugin.name!r} wheel does not exist: {plugin.path}")
-            continue
-        integrity_error = _integrity_error(plugin)
-        if integrity_error:
-            errors.append(f"plugin {plugin.name!r}: {integrity_error}")
-            continue
-        retired = _retired_groups_in_wheel(plugin)
-        if retired:
-            errors.append(
-                f"plugin {plugin.name!r} declares retired entry-point group "
-                f"{', '.join(retired)} and cannot run under this release; "
-                f"update the declaration in .agents-live.toml to a wheel "
-                f"ported to {provider_plugins.ENTRY_POINT_GROUP}")
-    return tuple(errors)
+    """Declarations that cannot load, as operator-readable messages."""
+    return tuple(
+        f"plugin {item.plugin.name!r}: {item.detail}"
+        for item in load(roots) if not item.ok)
 
 
-def compatibility_errors(
-        roots: list[Path], *, runtime_requirement: str) -> tuple[str, ...]:
-    """Declared plugins that cannot load with the candidate runtime."""
-    errors = validation_errors(roots)
-    if errors:
-        return errors
-    try:
-        declarations = union(roots, require_exists=True)
-    except (OSError, ValueError, PluginError) as exc:
-        return (str(exc),)
-    if not declarations:
-        return ()
-    try:
-        uv = find_uv()
-        command = [
-            uv, "run", "--isolated", "--no-project", "--quiet", "--refresh",
-            "--with", runtime_requirement,
-        ]
-        for plugin in declarations.values():
-            command.extend(["--with", str(plugin.path)])
-        command.extend([
-            "python", "-c", _COMPATIBILITY_PROBE,
-            *(plugin.name for plugin in declarations.values()),
-        ])
-        completed = subprocess.run(
-            command, capture_output=True, **hostruntime.CHILD_TEXT,
-            check=False, timeout=_COMPATIBILITY_PROBE_TIMEOUT_S)
-    except FileNotFoundError as exc:
-        return (str(exc),)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return (f"plugin compatibility probe failed: {exc}",)
-    if completed.returncode == 0:
-        return ()
-    output = (completed.stderr or completed.stdout).strip()
-    detail = output.splitlines()[-1] if output else "no diagnostic output"
-    return (f"plugin compatibility probe failed: {detail}",)
+def compatibility_errors(roots: list[Path], *, runtime_requirement: str
+                         ) -> tuple[str, ...]:
+    """Declared plugins that cannot load under this runtime.
 
-
-def _receipt_path(environment: Path | None = None) -> Path | None:
-    candidate = Path(environment or sys.prefix) / "uv-receipt.toml"
-    return candidate if candidate.is_file() else None
-
-
-def _receipt_requirement(requirement: dict) -> str:
-    """Reconstruct a uv receipt requirement as a PEP 508/path argument."""
-    for field in ("path", "directory", "url"):
-        if field in requirement:
-            return str(requirement[field])
-    name = requirement.get("name")
-    if not isinstance(name, str):
-        raise PluginError("uv receipt contains a requirement without a name")
-    if "git" in requirement:
-        return f"{name} @ git+{requirement['git']}"
-    extras = requirement.get("extras", [])
-    if extras:
-        name += "[" + ",".join(extras) + "]"
-    name += str(requirement.get("specifier", ""))
-    marker = requirement.get("marker")
-    if marker:
-        name += f"; {marker}"
-    return name
-
-
-def _pinned_primary(
-        requirement: dict, parsed: ReceiptRequirement) -> ReceiptRequirement:
-    """Pin an unconstrained ``agents-live`` requirement to the running version.
-
-    The uv receipt records the tool as a bare name, so ``uv tool install
-    --force agents-live`` resolves to whatever is newest on PyPI: convergence
-    would silently upgrade the kernel as a side effect of installing a plugin.
-    Convergence changes plugins; `agents-live upgrade` changes versions.
-    A requirement that already names a source or a specifier is left alone.
+    Source plugins load in this interpreter, so the candidate runtime is
+    the one already running and there is nothing to probe in a
+    subprocess.
     """
-    if parsed.editable or any(
-            field in requirement
-            for field in ("path", "directory", "url", "git")):
-        return parsed
-    if requirement.get("specifier") or requirement.get("marker"):
-        return parsed
-    return replace(parsed, value=f"{parsed.value}=={__version__}")
-
-
-def _receipt_requirements(*, pin_primary: bool = True,
-                          environment: Path | None = None) -> tuple[
-        ReceiptRequirement, dict[str, ReceiptRequirement]]:
-    receipt = _receipt_path(environment)
-    if receipt is None:
-        searched = Path(environment or sys.prefix)
-        raise PluginError(
-            "plugin convergence requires an uv tool installation of agents-live; "
-            f"no uv receipt was found in {searched}. Deactivate any active "
-            "virtualenv so the uv-managed agents-live command is used, then retry")
-    try:
-        with receipt.open("rb") as handle:
-            requirements = tomllib.load(handle)["tool"]["requirements"]
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise PluginError(f"uv tool receipt is unreadable: {receipt}: {exc}") from exc
-    except (KeyError, TypeError) as exc:
-        raise PluginError(
-            f"uv tool receipt has no valid tool.requirements table: {receipt}") from exc
-    result = {}
-    primary = None
-    for requirement in requirements:
-        name = requirement.get("name")
-        if not isinstance(name, str):
-            raise PluginError(f"uv tool receipt has an invalid requirement: {receipt}")
-        parsed = ReceiptRequirement(
-            _receipt_requirement(requirement),
-            editable=bool(requirement.get("editable", False)),
-        )
-        if _canonical(name) == "agents-live":
-            primary = (
-                _pinned_primary(requirement, parsed) if pin_primary else parsed)
-        else:
-            result[_canonical(name)] = parsed
-    if primary is None:
-        raise PluginError(
-            f"uv tool receipt has no agents-live requirement: {receipt}")
-    return primary, result
-
-
-# ---------------------------------------------------------------------------
-# Replacing our own executable while one of them is running
-# ---------------------------------------------------------------------------
-
-# What a uv tool install writes for this package. uv copies entry points
-# on Windows rather than symlinking them, so the same executable exists
-# in the tool environment and in uv's executable directory, and both are
-# rewritten by an install or an upgrade.
-_SHIM_NAME = hostruntime.executable_filename("agents-live")
-
-# Long enough for a cold uv to answer, short enough that a command
-# blocked on it does not look hung.
-_TOOL_DIR_TIMEOUT_S = 15
-
-
-def tool_environment() -> Path | None:
-    """Where uv keeps this tool, or ``None`` if it will not say.
-
-    Asked of uv rather than derived from ``sys.prefix``: a command can be
-    run from an ephemeral ``uvx`` environment or from a checkout, neither
-    of which is the installation it is about to change.
-    """
-    try:
-        uv = find_uv()
-        completed = subprocess.run(
-            [uv, "tool", "dir"], capture_output=True, **hostruntime.CHILD_TEXT,
-            check=True, timeout=_TOOL_DIR_TIMEOUT_S)
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    environment = Path(completed.stdout.strip()) / "agents-live"
-    return environment if environment.is_dir() else None
-
-
-def _refuse_active_environment(environment: Path | None) -> None:
-    if not hostruntime.locks_running_image():
-        return
-    if environment is None:
-        raise PluginError(
-            "plugin convergence cannot identify the Windows tool environment; "
-            "nothing was changed")
-    active = within(sys.executable, environment)
-    if not active:
-        try:
-            processes = hostruntime.process_command_lines()
-            if not processes:
-                raise PluginError(
-                    "plugin convergence cannot verify that the Windows tool "
-                    "environment is idle; nothing was changed")
-            active = any(
-                any(within(argument, environment) for argument in
-                    hostruntime.split_command_line(command))
-                for _, command in processes
-            )
-        except PluginError:
-            raise
-        except OSError as exc:
-            raise PluginError(
-                "plugin convergence cannot verify that the Windows tool "
-                f"environment is idle: {exc}; nothing was changed") from exc
-    if active:
-        raise PluginError(
-            "plugin convergence refused to rewrite the active tool environment; "
-            "nothing was changed. Stop Agents Live watchers and dashboards, then "
-            f"retry from an external runtime (`uv tool run --from "
-            f"agents-live=={__version__} agents-live --repo <path> init`)")
-
-
-def converge(roots: list[Path], *, trigger: str = "unspecified",
-             pin_primary: bool = True,
-             receipt_environment: Path | None = None,
-             correlation_id: str | None = None) -> bool:
-    """Converge the host-global uv tool environment.
-
-    Return True when plugins were installed and False when already converged.
-
-    ``pin_primary`` keeps convergence from moving the agents-live version;
-    only ``upgrade``, which has just resolved a new release on purpose, passes
-    False.
-    """
-    declarations = union(roots, require_exists=False)
-    # Pending detection deliberately skips artifact hashing: when every
-    # plugin is installed at its declared version there is nothing to
-    # install, so the wheels are not consumed and re-verifying them on
-    # every activation buys nothing (doctor still surfaces mismatches).
-    pending = {
-        key: plugin for key, plugin in declarations.items()
-        if not _installed_state(plugin)[0]
-    }
-    if not pending:
-        if correlation_id is not None:
-            adminlog.record(
-                "plugin-converge",
-                status="ok",
-                correlation_id=correlation_id,
-                trigger=trigger,
-                changed=False,
-                pending=[],
-                message="plugins already converged",
-            )
-        return False
-    validation = validation_errors(roots)
-    if validation:
-        raise PluginError(validation[0])
-    if receipt_environment is None and hostruntime.locks_running_image():
-        receipt_environment = tool_environment()
-    _refuse_active_environment(receipt_environment)
-    primary, requirements = _receipt_requirements(
-        pin_primary=pin_primary, environment=receipt_environment)
-    requirements.update({
-        key: ReceiptRequirement(str(plugin.path))
-        for key, plugin in declarations.items()
-    })
-    try:
-        uv = find_uv()
-    except FileNotFoundError as exc:
-        raise PluginError(str(exc)) from exc
-    command = [uv, "tool", "install", "--force"]
-    if primary.editable:
-        command.append("--editable")
-    command.append(primary.value)
-    for requirement in requirements.values():
-        # uv distinguishes the positional tool's --editable flag from the
-        # --with-editable option used for co-installed requirements.
-        flag = "--with-editable" if requirement.editable else "--with"
-        command.extend([flag, requirement.value])
-    with adminlog.operation(
-            "plugin-converge",
-            correlation_id=correlation_id,
-            trigger=trigger,
-            version_before=__version__,
-            primary=primary.value,
-            plugins=sorted(
-                f"{plugin.name}=={plugin.version}" if plugin.version
-                else plugin.name for plugin in declarations.values()),
-            pending=sorted(plugin.name for plugin in pending.values()),
-    ) as end:
-        launcher_before = launcher_stamp()
-        completed = subprocess.run(command, check=False)
-        if (completed.returncode
-                and not only_the_launcher_failed(launcher_before)):
-            raise PluginError(
-                f"plugin convergence failed with exit code {completed.returncode}; "
-                "run `agents-live upgrade` to retry")
-        end["version_after"] = installed_version()
-        end["changed"] = True
-    return True
-
-
-def launcher_stamp() -> int | None:
-    """The generated launcher's modification time, or None if absent.
-
-    Recorded before an install so :func:`only_the_launcher_failed` can
-    compare the launcher against itself. A wall-clock reading cannot
-    serve here: on Windows a file's timestamp comes from the coarse
-    system clock while ``time.time()`` reads the precise one, so a
-    launcher written in the same tick as the reading can carry a stamp
-    fractionally behind it and be mistaken for one uv never touched.
-    """
-    try:
-        return (hostruntime.executable_dir() / _SHIM_NAME).stat().st_mtime_ns
-    except OSError:
-        return None
-
-
-def only_the_launcher_failed(before: int | None) -> bool:
-    """Whether a failed install still left the environment upgraded.
-
-    uv builds the environment first and installs the launchers last, so
-    a launcher it cannot replace fails the command over an environment
-    that is already correct. Windows holds a lock on the launcher while
-    any agents-live process runs, including the one doing the install,
-    which makes that the ordinary outcome on a host that is running
-    agents rather than a rare one (#179).
-
-    Windows is also the only place that conclusion is safe to draw.
-    Replacing a running executable is unremarkable on POSIX, so a
-    failed install there has some other cause and keeps its exit code.
-    Excusing it would trade a loud failure for a silent one.
-
-    What is left is measured rather than read out of uv's message,
-    which is not an interface. uv builds the environment, generates the
-    launcher inside it, and only then publishes that launcher to the
-    directory on PATH, so a launcher that changed during this install
-    places the failure at the last step and proves everything before it
-    finished. The check fails safe, because an install that stopped
-    earlier leaves the generated launcher exactly as it was.
-
-    The environment's own files are not evidence here: convergence
-    installs a plugin beside a runtime that is already satisfied, so uv
-    has no reason to rewrite the runtime, and its timestamp says
-    nothing about whether this install got anywhere.
-    """
-    if not hostruntime.locks_running_image():
-        return False
-    after = launcher_stamp()
-    return after is not None and after != before
+    return validation_errors(roots)
 
 
 def installed_version() -> str:
-    """The agents-live version present in the tool environment right now.
+    """The agents-live version present in this environment right now.
 
     Read back from installed metadata rather than assumed: after a
-    convergence or upgrade the running process still holds the old code, so
-    ``__version__`` reports the version that started the command, not the one
-    left behind on disk.
+    generation switch the running process still holds the old code, so
+    ``__version__`` reports the version that started the command, not the
+    one that is now selected.
     """
     try:
         return importlib.metadata.version("agents-live")
     except importlib.metadata.PackageNotFoundError:
+        from . import __version__
+
         return __version__

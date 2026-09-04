@@ -226,10 +226,10 @@ uv run --script tools/release.py --publish --yes
 Publication validates the two receipts instead of rerunning identical local
 gates. It requires the tagged release commit to be exactly one commit ahead of
 `origin/main`, atomically pushes candidate `HEAD` to `main` with the tag, and
-creates the GitHub release. The release body starts with
-one first-line summary per changelog entry and a link to the full changelog at
-the release tag, followed by GitHub's generated notes (merged pull requests and
-the compare link).
+creates the GitHub release. The release body includes version-specific Linux,
+WSL, and Windows quick-install commands, one first-line summary per changelog
+entry, and a link to the full changelog at the release tag, followed by GitHub's
+generated notes (merged pull requests and the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
 which resolves the release tag to one commit, runs the Test workflow against

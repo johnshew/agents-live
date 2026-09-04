@@ -11,12 +11,22 @@ from ...state import registry
 
 
 def _converge_registered(root: Path) -> None:
+    """Report a declaration that will not load, without installing anything.
+
+    A source plugin is picked up at runtime by every generation, so
+    registering a repository has nothing to install; what is worth saying
+    now is whether what it declares can actually load.
+    """
     try:
-        if plugins.converge([root], trigger="repos-register"):
-            print("Converged declared plugins in the agents-live tool environment")
+        for problem in plugins.validation_errors([root]):
+            print(
+                f"warning: {problem}; "
+                "run `agents-live doctor` for details",
+                file=sys.stderr,
+            )
     except (OSError, ValueError, plugins.PluginError) as exc:
         print(
-            f"warning: declared plugins could not be installed: {exc}; "
+            f"warning: declared plugins could not be read: {exc}; "
             "run `agents-live doctor` for details",
             file=sys.stderr,
         )

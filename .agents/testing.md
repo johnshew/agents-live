@@ -167,7 +167,7 @@ $installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
 Invoke-WebRequest `
   "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
   -OutFile $installer
-& $installer $version
+& $installer
 
 $agentsLive = Join-Path $env:LOCALAPPDATA `
   "agents-live\current\Scripts\agents-live.exe"

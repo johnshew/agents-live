@@ -273,11 +273,14 @@ def main() -> int:
             plugin_roots.append(target)
         plugin_roots.extend(
             Path(value) for _, value, error in repos.entries() if error is None)
-        if plugins.converge(
-                list(dict.fromkeys(plugin_roots)), trigger="init"):
-            print("Converged declared plugins in the agents-live tool environment")
+        # Source plugins load at runtime, so there is nothing to install
+        # here. Reporting a declaration that cannot load is still worth
+        # doing while the operator is looking at the command that made it.
+        broken = plugins.validation_errors(list(dict.fromkeys(plugin_roots)))
+        for problem in broken:
+            print(f"warning: {problem}", file=sys.stderr)
     except (OSError, ValueError, plugins.PluginError) as exc:
-        preflight.emit_failure("init", f"plugin convergence failed: {exc}")
+        preflight.emit_failure("init", f"plugin declarations are invalid: {exc}")
         return 1
 
     try:

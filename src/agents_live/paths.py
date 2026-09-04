@@ -399,7 +399,12 @@ def load_config(root: Path | None = None) -> dict:
 
 def validated_plugins(root: Path, values: object, *,
                       require_exists: bool = True) -> dict[str, dict[str, object]]:
-    """Validate and resolve project-declared plugin wheels."""
+    """Validate and resolve project-declared plugin sources.
+
+    A plugin is a module or package inside the declaring repository. The
+    containment rules are the point: a path that escaped the repository
+    would let a declaration reach code the repository does not own.
+    """
     if not isinstance(values, dict):
         raise ValueError("plugins must be a table")
     base = root.resolve()
@@ -425,10 +430,21 @@ def validated_plugins(root: Path, values: object, *,
         except ValueError as exc:
             raise ValueError(
                 f"plugin {name!r} path escapes the repository: {value}") from exc
-        if require_exists and not resolved.is_file():
-            raise ValueError(f"plugin {name!r} wheel does not exist: {value}")
-        if resolved.suffix != ".whl":
-            raise ValueError(f"plugin {name!r} path must name a .whl file: {value}")
+        if resolved.suffix == ".whl":
+            raise ValueError(
+                f"plugin {name!r} names a wheel: {value}. Plugins are loaded "
+                "from source since 6.8; point path at the module or package "
+                "directory instead")
+        if require_exists and not (resolved.is_file() or resolved.is_dir()):
+            raise ValueError(
+                f"plugin {name!r} source does not exist: {value}")
+        if resolved.is_file() and resolved.suffix != ".py":
+            raise ValueError(
+                f"plugin {name!r} path must name a .py file or a package "
+                f"directory: {value}")
+        if resolved.is_dir() and not (resolved / "__init__.py").is_file():
+            raise ValueError(
+                f"plugin {name!r} package has no __init__.py: {value}")
         digest = declaration.get("sha256")
         if digest is not None and (
                 not isinstance(digest, str) or not _SHA256.fullmatch(digest)):

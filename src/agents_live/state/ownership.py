@@ -19,9 +19,7 @@ The REGISTRY IMPLEMENTATION is not part of the public kernel (proposal
 §3.9: the public default is local-only). Registry operations dispatch to
 a backend resolved in this order:
 
-1. the ``agents_live.ownership`` entry-point group, name ``registry``
-   (the private plugin installed alongside the ``agents-live`` package
-   via ``uv tool install agents-live --with <plugin>``);
+1. ``OWNERSHIP_REGISTRY`` exposed by a declared source plugin;
 2. flat sibling import of ``ownership_registry`` (this repository's
    pre-flip deployment, where scripts run from the checkout).
 
@@ -159,35 +157,42 @@ def local_only(root: Path | None = None) -> bool:
 # Backend resolution
 # ---------------------------------------------------------------------------
 
+def use_backend(backend) -> None:
+    """Install the registry backend a loaded plugin supplies.
+
+    Called by the plugin loader rather than discovered here: a plugin is
+    a source module now, so there is no installed distribution to read an
+    entry point from. Validated on arrival, because a backend that fails
+    later fails inside an ownership decision.
+    """
+    for method in ("registry_file_exists", "load_owners", "set_owner",
+                   "remove_owner"):
+        if not callable(getattr(backend, method, None)):
+            raise OwnershipUnavailableError(
+                f"ownership registry backend must provide callable {method}")
+    global _backend_cache, _backend_resolved
+    _backend_cache = backend
+    _backend_resolved = True
+
+
 def _backend():
     """The registry backend, or None when none is installed.
 
-    Entry point first (installed plugin), then flat sibling import (this
-    repo pre-flip). A broken INSTALLED plugin raises - a deployment that
-    installed multi-host support must never silently fall back. Only a
-    genuinely absent backend resolves to None."""
+    A plugin-supplied backend is installed through :func:`use_backend`.
+    Otherwise the flat sibling module is tried, which is how this repo
+    runs before the private backend is declared. Only a genuinely absent
+    backend resolves to None."""
     global _backend_cache, _backend_resolved
     if _backend_resolved:
         return _backend_cache
     backend = None
-    from importlib.metadata import entry_points
-    for ep in entry_points(group=ENTRY_POINT_GROUP):
-        if ep.name == "registry":
-            try:
-                backend = ep.load()
-            except Exception as exc:
-                raise OwnershipUnavailableError(
-                    f"ownership registry backend {ep.value!r} failed to "
-                    f"load: {exc}") from exc
-            break
-    if backend is None:
-        try:
-            import importlib
-            backend = importlib.import_module(_BACKEND_MODULE)
-        except ModuleNotFoundError as exc:
-            if exc.name != _BACKEND_MODULE:
-                raise
-            backend = None
+    try:
+        import importlib
+        backend = importlib.import_module(_BACKEND_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name != _BACKEND_MODULE:
+            raise
+        backend = None
     _backend_cache = backend
     _backend_resolved = True
     return backend
@@ -198,8 +203,8 @@ def _require_backend():
     if backend is None:
         raise OwnershipUnavailableError(
             "no ownership registry backend installed (multi-host ownership "
-            f"is a private plugin exposing the '{ENTRY_POINT_GROUP}' "
-            "entry point; the public kernel is local-only)")
+            "is a declared source plugin exposing OWNERSHIP_REGISTRY; "
+            "the public kernel is local-only)")
     return backend
 
 

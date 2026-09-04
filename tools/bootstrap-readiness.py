@@ -40,7 +40,7 @@ def _run(argv: list[str], *, environment: dict[str, str]) -> str:
 
 
 def _assets(wheel: Path) -> dict[str, bytes]:
-    paths = [wheel, ROOT / "install.ps1", ROOT / "install.sh"]
+    paths = [wheel, wheel.parent / "install.ps1", wheel.parent / "install.sh"]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
         raise ReadinessError("missing bootstrap assets: " + ", ".join(missing))
@@ -132,12 +132,16 @@ def main() -> int:
             environment = {
                 **os.environ,
                 "AGENTS_LIVE_INSTALL_ROOT": str(install_root),
+                "AGENTS_LIVE_REPO": "",
                 "AGENTS_LIVE_RELEASE_API": (
                     f"http://127.0.0.1:{server.server_port}/releases"),
                 "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": (
                     f"http://127.0.0.1:{server.server_port}/download"),
                 "AGENTS_LIVE_NO_PATH_UPDATE": "1",
                 "HOME": str(root / "home"),
+                "USERPROFILE": str(root / "home"),
+                "APPDATA": str(root / "appdata"),
+                "LOCALAPPDATA": str(root / "localappdata"),
                 "UV_TOOL_DIR": str(root / "uv-tools"),
                 "UV_CACHE_DIR": str(root / "uv-cache"),
                 "UV_NO_INDEX": "1",
@@ -145,13 +149,13 @@ def main() -> int:
             }
             if os.name == "nt":
                 command = [
-                    "pwsh", "-NoProfile", "-File", str(ROOT / "install.ps1"),
-                    "-Version", version,
+                    "pwsh", "-NoProfile", "-File",
+                    str(wheel.parent / "install.ps1"),
                 ]
                 command_path = install_root / "current" / "Scripts" / "agents-live.exe"
             else:
                 (root / "home").mkdir()
-                command = ["sh", str(ROOT / "install.sh"), version]
+                command = ["sh", str(wheel.parent / "install.sh")]
                 command_path = install_root / "current" / "bin" / "agents-live"
             first = _run(command, environment=environment)
             second = _run(command, environment=environment)

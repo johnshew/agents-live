@@ -1192,6 +1192,31 @@ class TestReleaseTool(unittest.TestCase):
         self.assertIn("could not be associated", stderr.getvalue())
         self.assertNotIn("has no changelog entry", stderr.getvalue())
 
+    def test_release_notes_include_parameter_free_quick_install_commands(
+            self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        release = runpy.run_path(str(root / "tools" / "release.py"))
+        build_notes = release["_release_notes"]
+        entry = mock.Mock(summary="Ship the release", issues=(), migration=None)
+        with mock.patch.dict(build_notes.__globals__, {
+            "_version_notes": lambda _version: "notes",
+            "_changelog_entries": lambda _notes, _version: [entry],
+            "_previous_tag": lambda _tag: "v6.7.0",
+            "_merged_pulls": lambda _base, _tag: {},
+            "_entry_rank": lambda _entry: 1,
+        }):
+            notes = build_notes("6.8.0")
+
+        root_url = (
+            "https://github.com/johnshew/agents-live/"
+            "releases/download/v6.8.0")
+        self.assertIn("## Quick install", notes)
+        self.assertIn(f"curl --proto '=https' --tlsv1.2 -LsSf "
+                      f"{root_url}/install.sh | sh", notes)
+        self.assertIn(f"irm {root_url}/install.ps1 | iex", notes)
+        self.assertNotIn("install.sh 6.8.0", notes)
+        self.assertNotIn("install.ps1 6.8.0", notes)
+
 
 class TestRuntimeCore(unittest.TestCase):
     def test_ownership_backend_receives_the_repository_root(self) -> None:
@@ -1218,35 +1243,22 @@ class TestRuntimeCore(unittest.TestCase):
         backend.set_owner.assert_called_once_with("sample", "*", root=root)
         backend.remove_owner.assert_called_once_with("sample", root=root)
 
-    def test_missing_ownership_backend_reports_the_required_entry_point(self) -> None:
+    def test_missing_ownership_backend_reports_the_required_source_export(self) -> None:
         with (
             mock.patch.object(ownership, "mode", return_value="registry"),
             mock.patch.object(ownership, "_backend", return_value=None),
             self.assertRaisesRegex(
                 ownership.OwnershipUnavailableError,
-                "agents_live.ownership",
+                "OWNERSHIP_REGISTRY",
             ),
         ):
             ownership.load_owners()
 
-    def test_broken_ownership_backend_reports_as_unavailable(self) -> None:
-        entry = mock.Mock()
-        entry.name = "registry"
-        entry.value = "broken_plugin.registry"
-        entry.load.side_effect = ModuleNotFoundError(
-            "No module named 'agents_live.ownership'",
-            name="agents_live.ownership",
-        )
-        with (
-            mock.patch("importlib.metadata.entry_points", return_value=[entry]),
-            mock.patch.object(ownership, "_backend_resolved", False),
-            mock.patch.object(ownership, "_backend_cache", None),
-            self.assertRaisesRegex(
+    def test_broken_source_ownership_backend_is_refused_on_attachment(self) -> None:
+        with self.assertRaisesRegex(
                 ownership.OwnershipUnavailableError,
-                "broken_plugin.registry.*agents_live.ownership",
-            ),
-        ):
-            ownership.registry_available()
+                "must provide callable registry_file_exists"):
+            ownership.use_backend(object())
 
     def test_cli_entry_exports_utf8_to_subprocess_subcommands(self) -> None:
         # The subprocess-dispatched subcommands (logs, timeline, dashboard)
@@ -1460,6 +1472,9 @@ class TestRuntimeCore(unittest.TestCase):
                     internal.paths, "health_beacon_path", return_value=beacon),
                 mock.patch.object(
                     internal.paths, "resolve_root", side_effect=ValueError),
+                mock.patch.object(
+                    internal.repos, "load",
+                    return_value={"repos": {}, "default_repo": None}),
                 mock.patch.object(obs.admin, "log_path", return_value=log),
             ):
                 self.assertEqual(
@@ -1515,6 +1530,9 @@ class TestRuntimeCore(unittest.TestCase):
                             collected, Exception) else None),
                         return_value=(None if isinstance(
                             collected, Exception) else collected)),
+                    mock.patch.object(
+                        internal.repos, "load",
+                        return_value={"repos": {}, "default_repo": None}),
                     mock.patch.object(obs.admin, "log_path", return_value=log),
                 ):
                     self.assertEqual(1, internal.main(["maintain", "--quiet"]))
@@ -1568,6 +1586,9 @@ class TestRuntimeCore(unittest.TestCase):
                     internal.paths, "health_beacon_path", return_value=beacon),
                 mock.patch.object(
                     internal.paths, "resolve_root", return_value=root),
+                mock.patch.object(
+                    internal.repos, "load",
+                    return_value={"repos": {}, "default_repo": None}),
             ):
                 self.assertEqual(0, internal.main(["maintain", "--quiet"]))
                 original = beacon.read_text(encoding="utf-8")
@@ -1602,6 +1623,9 @@ class TestRuntimeCore(unittest.TestCase):
                     internal.paths, "health_beacon_path", return_value=beacon),
                 mock.patch.object(
                     internal.paths, "resolve_root", return_value=root),
+                mock.patch.object(
+                    internal.repos, "load",
+                    return_value={"repos": {}, "default_repo": None}),
             ):
                 self.assertEqual(0, internal.main(["maintain", "--quiet"]))
             payload = json.loads(beacon.read_text(encoding="utf-8"))
@@ -1667,6 +1691,9 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.patch.object(
                     internal.paths, "repo_state_dir", return_value=state_dir),
                 mock.patch.object(internal.paths, "resolve_root", return_value=root),
+                mock.patch.object(
+                    internal.repos, "load",
+                    return_value={"repos": {}, "default_repo": None}),
             ):
                 self.assertEqual(0, internal.main(["maintain", "--quiet"]))
 
@@ -2623,11 +2650,10 @@ class TestStartedState(TempRepository):
         with self.assertRaisesRegex(agent.DefinitionError, "retired"):
             agent.load("broken", root=self.root)
 
-    def test_failed_init_registers_nothing(self) -> None:
+    def test_invalid_plugin_declarations_register_nothing(self) -> None:
         """A host-mutating command that cannot finish must not half-finish.
 
-        Plugin convergence is the step most likely to fail, so it runs
-        before the registry is touched rather than after it.
+        Plugin declarations are validated before the registry is touched.
         """
         project = self.root / "candidate"
         (project / "Agents").mkdir(parents=True)
@@ -2639,14 +2665,14 @@ class TestStartedState(TempRepository):
             mock.patch.dict(
                 os.environ, {"AGENTS_LIVE_INIT_REPO": str(project)}),
             mock.patch.object(
-                init.plugins, "converge",
-                side_effect=plugins.PluginError("declared wheel is unreachable")),
+                init.plugins, "validation_errors",
+                side_effect=ValueError("plugin declaration is malformed")),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
             code = init.main()
         self.assertEqual(1, code)
-        self.assertIn("plugin convergence failed", stderr.getvalue())
+        self.assertIn("plugin declarations are invalid", stderr.getvalue())
         after = repos.load()
         self.assertEqual({}, after["repos"], "a failed init registered a repository")
         self.assertIsNone(after["default_repo"])
@@ -2664,7 +2690,8 @@ class TestStartedState(TempRepository):
             mock.patch.dict(
                 os.environ, {"AGENTS_LIVE_INIT_REPO": str(project)}),
             mock.patch.object(init.paths, "global_root", return_value=global_root),
-            mock.patch.object(init.plugins, "converge", return_value=False),
+            mock.patch.object(
+                init.plugins, "validation_errors", return_value=()),
             mock.patch.object(init, "initialize", return_value=True),
             mock.patch.object(init.repos, "ensure_default"),
             mock.patch.object(init, "install_skill", return_value=None),
@@ -5413,94 +5440,41 @@ class TestArchitectureFitness(unittest.TestCase):
         resolve_root.assert_not_called()
         install.assert_called_once_with("Example")
 
-    def test_plugin_validation_accepts_exactly_the_groups_that_are_read(self) -> None:
-        """A seam that validates one group and reads another connects nothing.
-
-        A provider plugin declaring the retired group passed validation and
-        was then never discovered, so a selector naming it failed at dispatch
-        as an unknown provider.
-        """
-        self.assertEqual(
-            {providers.ENTRY_POINT_GROUP, ownership.ENTRY_POINT_GROUP},
-            set(plugins.ENTRY_POINT_GROUPS),
-        )
-        self.assertNotIn(
-            "agents_live.agents", plugins.ENTRY_POINT_GROUPS)
-        self.assertIn("agents_live.agents", plugins.RETIRED_ENTRY_POINT_GROUPS)
-
-    def test_a_retired_plugin_group_is_refused_even_beside_a_current_one(self) -> None:
-        """Half-recognising a plugin is worse than refusing it.
-
-        A 5.x distribution typically declares both an adapter and an
-        ownership backend. Validating on the half that still exists left
-        the other silently undiscovered, surfacing much later as an
-        unknown provider at dispatch.
-        """
-        declaration = plugins.Plugin(
-            name="example-plugin", path=Path("."), sha256=None, version=None)
-
-        class Entry:
-            def __init__(self, group: str) -> None:
-                self.group, self.name = group, "example"
-
-            def load(self):
-                return object()
-
-        class Distribution:
-            version = "1.0.0"
-
-            def __init__(self, groups):
-                self.entry_points = [Entry(group) for group in groups]
-
-        shapes = {
-            ("agents_live.agents",): False,
-            ("agents_live.agents", "agents_live.ownership"): False,
-            ("agents_live.providers", "agents_live.ownership"): True,
-            ("console_scripts",): False,
-        }
-        for groups, expected in shapes.items():
-            with self.subTest(groups=groups):
-                with mock.patch.object(
-                    importlib.metadata, "distribution",
-                    return_value=Distribution(groups),
-                ):
-                    ok, detail = plugins._installed_state(declaration)
-                self.assertEqual(expected, ok, detail)
-                if "agents_live.agents" in groups:
-                    self.assertIn("retired", detail)
-                    self.assertIn(providers.ENTRY_POINT_GROUP, detail)
-
-    def test_a_retired_wheel_is_refused_before_it_is_installed(self) -> None:
-        """Installing a plugin the release cannot load is worse than refusing.
-
-        The installed one crashes every command that imports the legacy
-        adapters, including the upgrade that would replace it, and it stays
-        pending forever so convergence reinstalls it on each run.
-        """
+    def test_a_plugin_wheel_names_the_68_source_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            directory = root / "Agents" / "plugins"
-            directory.mkdir(parents=True)
-            wheel = directory / "example_plugin-1.0-py3-none-any.whl"
-            with zipfile.ZipFile(wheel, "w") as archive:
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/entry_points.txt",
-                    "[agents_live.agents]\nexample = example_plugin:register\n")
-            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            wheel = root / "example_plugin-1.0-py3-none-any.whl"
+            wheel.write_bytes(b"wheel")
             (root / ".agents-live.toml").write_text(
                 "[plugins.example-plugin]\n"
-                f'path = "Agents/plugins/{wheel.name}"\n'
-                f'sha256 = "{digest}"\n',
+                f'path = "{wheel.name}"\n',
                 encoding="utf-8",
             )
+            errors = plugins.validation_errors([root])
+        self.assertEqual(1, len(errors))
+        self.assertIn("loaded from source since 6.8", errors[0])
 
-            with self.assertRaises(plugins.PluginError) as caught:
-                plugins.converge([root], trigger="test")
-        self.assertIn("retired", str(caught.exception))
-        self.assertIn(providers.ENTRY_POINT_GROUP, str(caught.exception))
+    def test_a_source_package_can_use_relative_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            package = root / "plugin_package"
+            package.mkdir()
+            package.joinpath("values.py").write_text(
+                "NAME = 'relative-provider'\n", encoding="utf-8")
+            package.joinpath("__init__.py").write_text(
+                "from .values import NAME\n"
+                "PROVIDER = type('Provider', (), {'name': NAME})()\n",
+                encoding="utf-8")
+            (root / ".agents-live.toml").write_text(
+                "[plugins.example]\npath = 'plugin_package'\n",
+                encoding="utf-8")
+            declaration = plugins.declared(root)["example"]
+            with mock.patch.object(providers, "register") as register:
+                loaded = plugins.load([root])
+
+        self.assertTrue(loaded[0].ok, loaded[0].detail)
+        self.assertIn(declaration.module_name, sys.modules)
+        self.assertEqual("relative-provider", register.call_args.args[0].name)
 
     def test_upgrade_preflight_refuses_a_retired_definition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -5526,17 +5500,11 @@ class TestArchitectureFitness(unittest.TestCase):
                 self.assertEqual(1, upgrade.main())
         self.assertIn("retired 5.x fields", stderr.getvalue())
 
-    def test_upgrade_preflight_refuses_a_retired_plugin_wheel(self) -> None:
+    def test_upgrade_preflight_refuses_a_plugin_wheel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             wheel = root / "example_plugin-1.0-py3-none-any.whl"
-            with zipfile.ZipFile(wheel, "w") as archive:
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/entry_points.txt",
-                    "[agents_live.agents]\nexample = example_plugin:register\n")
+            wheel.write_bytes(b"wheel")
             (root / ".agents-live.toml").write_text(
                 "[plugins.example-plugin]\n"
                 f'path = "{wheel.name}"\n',
@@ -5554,86 +5522,32 @@ class TestArchitectureFitness(unittest.TestCase):
                 contextlib.redirect_stderr(stderr),
             ):
                 self.assertEqual(1, upgrade.main())
-        self.assertIn("retired entry-point group", stderr.getvalue())
+        self.assertIn("loaded from source since 6.8", stderr.getvalue())
 
-    def test_plugin_probe_rejects_a_current_entry_point_that_cannot_load(
-            self) -> None:
+    def test_upgrade_preflight_refuses_invalid_source_exports(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            wheel = Path(temporary) / "example_plugin-1.0-py3-none-any.whl"
-            with zipfile.ZipFile(wheel, "w") as archive:
-                archive.writestr(
-                    "example_plugin/__init__.py", "import agents_live.ownership\n")
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/METADATA",
-                    "Metadata-Version: 2.1\nName: example-plugin\nVersion: 1.0\n")
-                archive.writestr(
-                    "example_plugin-1.0.dist-info/entry_points.txt",
-                    "[agents_live.providers]\nexample = example_plugin:PROVIDER\n")
-            script = (
-                "import sys; "
-                f"sys.path.insert(0, {str(wheel)!r}); "
-                f"exec({plugins._COMPATIBILITY_PROBE!r})")
-            completed = subprocess.run(
-                [sys.executable, "-c", script, "example-plugin"],
-                capture_output=True, text=True, check=False)
-        self.assertNotEqual(0, completed.returncode)
-        self.assertIn("agents_live.ownership", completed.stderr)
+            root = Path(temporary).resolve()
+            (root / "plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (root / ".agents-live.toml").write_text(
+                "[plugins.example]\npath = 'plugin.py'\n", encoding="utf-8")
+            errors = plugins.compatibility_errors(
+                [root], runtime_requirement="candidate.whl")
+        self.assertEqual(1, len(errors))
+        self.assertIn("exposes none of", errors[0])
 
-    def test_plugin_probe_uses_provider_registration_invariants(self) -> None:
-        source = (
-            "class Provider:\n"
-            "    models = None\n"
-            "    efforts = frozenset()\n"
-            "    def prepare(self, spec, request): pass\n"
-            "    def parse(self, raw): pass\n"
-            "PROVIDER = Provider()\n")
-        for provider_name, expected in (
-            ("", "provider name must not be empty"),
-            ("fake", "provider 'fake' is already registered"),
-        ):
-            with self.subTest(provider_name=provider_name):
-                with tempfile.TemporaryDirectory() as temporary:
-                    wheel = Path(temporary) / "probe_plugin-1.0-py3-none-any.whl"
-                    with zipfile.ZipFile(wheel, "w") as archive:
-                        archive.writestr(
-                            "probe_plugin/__init__.py",
-                            f"{source}PROVIDER.name = {provider_name!r}\n")
-                        archive.writestr(
-                            "probe_plugin-1.0.dist-info/METADATA",
-                            "Metadata-Version: 2.1\n"
-                            "Name: probe-plugin\nVersion: 1.0\n")
-                        archive.writestr(
-                            "probe_plugin-1.0.dist-info/entry_points.txt",
-                            "[agents_live.providers]\n"
-                            "probe = probe_plugin:PROVIDER\n")
-                    script = (
-                        "import sys; "
-                        f"sys.path.insert(0, {str(wheel)!r}); "
-                        f"exec({plugins._COMPATIBILITY_PROBE!r})")
-                    completed = subprocess.run(
-                        [sys.executable, "-c", script, "probe-plugin"],
-                        capture_output=True, text=True, check=False)
-                self.assertNotEqual(0, completed.returncode)
-                self.assertIn(expected, completed.stderr)
-
-    def test_upgrade_plugin_probe_uses_the_candidate_runtime(self) -> None:
-        plugin = plugins.Plugin(
-            name="example-plugin", path=Path("example.whl"),
-            sha256=None, version="1.0")
-        completed = mock.Mock(returncode=0, stdout="", stderr="")
+    def test_cli_help_and_usage_errors_do_not_load_plugins(self) -> None:
+        cli = importlib.import_module("agents_live.cli.main")
         with (
-            mock.patch.object(plugins, "validation_errors", return_value=()),
-            mock.patch.object(plugins, "union", return_value={"example": plugin}),
-            mock.patch.object(plugins, "find_uv", return_value="uv"),
-            mock.patch.object(
-                plugins.subprocess, "run", return_value=completed) as run_probe,
+            mock.patch.object(cli, "_load_declared_plugins") as load_plugins,
+            mock.patch.object(cli.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
         ):
-            self.assertEqual((), plugins.compatibility_errors(
-                [Path("project")], runtime_requirement="candidate.whl"))
-        command = run_probe.call_args.args[0]
-        self.assertIn(
-            ["--with", "candidate.whl", "--with", "example.whl"],
-            [command[index:index + 4] for index in range(len(command) - 3)])
+            help_code = cli.main(["--help"])
+            usage_code = cli.main(["not-a-command"])
+        self.assertEqual(0, help_code)
+        self.assertEqual(2, usage_code)
+        load_plugins.assert_not_called()
 
     def test_pipeline_package_does_not_shadow_the_mcp_dependency(self) -> None:
         """A same-named sibling module breaks a script run standalone.

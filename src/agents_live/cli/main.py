@@ -126,6 +126,33 @@ def _consume_project_argument(command: Cmd, argv: list[str]) -> tuple[str | None
     return None, argv
 
 
+def _load_declared_plugins() -> None:
+    """Attach every registered repository's declared plugins to the seams.
+
+    After argument validation and before dispatch, so a broken plugin
+    cannot take down `--help` or a usage error. Failures are recorded by
+    the loader and reported by `doctor`; a provider that never registered
+    surfaces at selection time as an unknown provider, which names the
+    agent the operator asked for.
+    """
+    from .. import plugins
+    from ..state import registry as repos
+
+    roots = []
+    selected = os.environ.get(state.ENV_VAR, "").strip()
+    if selected:
+        roots.append(Path(selected))
+    try:
+        roots.extend(
+            Path(value) for _alias, value, error in repos.entries() if not error)
+    except (OSError, ValueError):
+        # An unreadable registry is the registry check's problem to
+        # report; it must not stop the command that would report it.
+        pass
+    if roots:
+        plugins.load(list(dict.fromkeys(roots)))
+
+
 def _finish(code: int, command: Cmd | None, rest: list[str],
             *, json_mode: bool) -> int:
     if (
@@ -431,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
 
     rest = _apply_name_sugar(command.name_sugar, rest)
+
+    _load_declared_plugins()
 
     if command.dispatch == "subprocess":
         active = command

@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-version=${1:-}
+embedded_version=""
+version=${1:-$embedded_version}
 case "$version" in
   ""|[0-9]*.[0-9]*.[0-9]*) ;;
   *) echo "agents-live: '$version' is not an exact stable or prerelease version" >&2; exit 1 ;;
