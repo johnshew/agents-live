@@ -32,11 +32,12 @@ function Get-ReleaseJson([string]$Url) {
 }
 
 function Get-ReleaseAsset($Release, [string]$Name, [string]$ResolvedVersion) {
-    $matches = @($Release.assets | Where-Object { $_.name -eq $Name })
-    if ($matches.Count -ne 1) {
+    # Not $matches: that name is PowerShell's automatic match variable.
+    $candidates = @($Release.assets | Where-Object { $_.name -eq $Name })
+    if ($candidates.Count -ne 1) {
         throw "Release v$ResolvedVersion does not contain exactly one $Name asset."
     }
-    $asset = $matches[0]
+    $asset = $candidates[0]
     $expectedUrl = "$downloadRoot/v$ResolvedVersion/$Name"
     $assetUrl = [Uri]::UnescapeDataString([string]$asset.browser_download_url)
     if ($asset.state -ne 'uploaded' -or $assetUrl -ne $expectedUrl -or

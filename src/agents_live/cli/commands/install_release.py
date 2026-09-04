@@ -98,8 +98,6 @@ def main(argv: list[str] | None = None) -> int:
             deploy.release_artifact.verify_file(artifact, wheel)
         else:
             artifact = deploy.release_artifact.resolve(args.version)
-            if wheel is not None:
-                deploy.release_artifact.verify_file(artifact, wheel)
         provenance = deploy.generation.Provenance(
             "github-release", artifact.name, artifact.sha256)
         installed = False
@@ -145,14 +143,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.activate:
             install_generation.activate_generation(built, root=root)
             deploy.ownership.write_record(deploy.ownership.SELF, root=root)
-            if migrate_uv:
-                try:
+            install_root = root or deploy.layout.installation_root()
+            # PATH exposure first: it is reversible, and retiring the uv
+            # tool is not. A failure after uv is gone would leave a host
+            # with no agents-live command at all.
+            try:
+                _expose_command_root(install_root)
+                if migrate_uv:
                     _retire_uv_tool(uv)
-                except Exception:
-                    deploy.generation.clear_activation(root=root)
-                    deploy.layout.ownership_path(root).unlink(missing_ok=True)
-                    raise
-            _expose_command_root(root or deploy.layout.installation_root())
+            except Exception:
+                hostruntime.remove_user_path_directory(
+                    deploy.layout.command_root(install_root))
+                deploy.generation.clear_activation(root=root)
+                deploy.layout.ownership_path(root).unlink(missing_ok=True)
+                raise
             action = "already installed and activated" if installed \
                 else "built and activated"
     except (

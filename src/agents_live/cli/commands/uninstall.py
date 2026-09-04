@@ -160,7 +160,12 @@ def main(argv: list[str] | None = None) -> int:
     if installation.contested and refusal is not None:
         preflight.emit_failure("uninstall", refusal)
         return 1
-    environment = plugins.tool_environment()
+    # The tree this uninstall is about to remove. Watchers and scheduled
+    # triggers are addressed to it, so asking uv is only right when uv
+    # owns the installation; for a self-managed one uv answers about a
+    # tool that is not there, and the sweeps below silently do nothing.
+    environment = (installation.root if installation.self_managed
+                   else plugins.tool_environment())
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
     survivors = _stop_own_watchers(environment)

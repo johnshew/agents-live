@@ -84,6 +84,32 @@ _ISOLATED_HOMES = {
 }
 
 
+# The installation root is host-global and is read before anything a test
+# arranges: on a developer machine that already runs a self-managed
+# installation, the ownership refusal answers first and tests that never
+# mention deployment fail. Isolate it for the whole module; classes that
+# arrange their own root still override this one.
+_INSTALL_ROOT: tempfile.TemporaryDirectory | None = None
+_PREVIOUS_INSTALL_ROOT: str | None = None
+
+
+def setUpModule() -> None:
+    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT
+    _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
+    _INSTALL_ROOT = tempfile.TemporaryDirectory()
+    os.environ[deploy.layout.ENV_INSTALL_ROOT] = str(
+        Path(_INSTALL_ROOT.name) / "install")
+
+
+def tearDownModule() -> None:
+    if _PREVIOUS_INSTALL_ROOT is None:
+        os.environ.pop(deploy.layout.ENV_INSTALL_ROOT, None)
+    else:
+        os.environ[deploy.layout.ENV_INSTALL_ROOT] = _PREVIOUS_INSTALL_ROOT
+    if _INSTALL_ROOT is not None:
+        _INSTALL_ROOT.cleanup()
+
+
 class TempRepository(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

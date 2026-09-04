@@ -71,6 +71,33 @@ _ISOLATED_HOMES = {
     "XDG_CONFIG_HOME": "config",
 }
 
+
+# The installation root is host-global and is read before anything a test
+# arranges: on a developer machine that already runs a self-managed
+# installation, the ownership refusal answers first and tests that never
+# mention deployment fail. Isolate it for the whole module; classes that
+# arrange their own root still override this one.
+_INSTALL_ROOT: tempfile.TemporaryDirectory | None = None
+_PREVIOUS_INSTALL_ROOT: str | None = None
+
+
+def setUpModule() -> None:
+    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT
+    _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
+    _INSTALL_ROOT = tempfile.TemporaryDirectory()
+    os.environ[deploy.layout.ENV_INSTALL_ROOT] = str(
+        Path(_INSTALL_ROOT.name) / "install")
+
+
+def tearDownModule() -> None:
+    if _PREVIOUS_INSTALL_ROOT is None:
+        os.environ.pop(deploy.layout.ENV_INSTALL_ROOT, None)
+    else:
+        os.environ[deploy.layout.ENV_INSTALL_ROOT] = _PREVIOUS_INSTALL_ROOT
+    if _INSTALL_ROOT is not None:
+        _INSTALL_ROOT.cleanup()
+
+
 PROVIDER_SPEND: dict[str, str | None] = {
     "claude": '{"result": "done", "total_cost_usd": 0.42}',
     "copilot": '{"type": "session.usage_checkpoint", '
@@ -3064,6 +3091,45 @@ class TestInstallationGenerations(unittest.TestCase):
             self.assertTrue(uninstall._remove_self_managed(self.root))
 
         self.assertFalse(self.root.exists())
+
+    def test_self_managed_uninstall_sweeps_the_owned_root(self) -> None:
+        """Watchers and triggers are addressed to the tree being removed.
+
+        Asking uv where the tool lives answers about an installation that
+        is not there, so the sweeps ran against nothing and left live
+        watchers and scheduled triggers behind for an operator to find.
+        """
+        self._activate_generation("9.7.6")
+        deploy.ownership.write_record(deploy.ownership.SELF)
+        installation = deploy.ownership.describe(
+            executable=self.root / "versions" / "9.7.6" / "bin" / "python")
+        swept: list[Path | None] = []
+        host = mock.Mock()
+        host.supervisor.owned.return_value = []
+        host.trigger_store.clear.return_value = 0
+
+        with (
+            mock.patch.object(
+                uninstall.deploy.ownership, "describe",
+                return_value=installation),
+            mock.patch.object(
+                uninstall.plugins, "tool_environment", return_value=None),
+            mock.patch.object(
+                uninstall, "_stop_own_watchers",
+                side_effect=lambda environment: swept.append(environment) or []),
+            mock.patch.object(
+                uninstall, "_sweep_triggers",
+                side_effect=swept.append),
+            mock.patch.object(uninstall.runtime, "current", return_value=host),
+            mock.patch.object(uninstall.completions, "remove", return_value=[]),
+            mock.patch.object(
+                uninstall.hostruntime, "id", return_value=hostruntime.LINUX),
+            mock.patch.object(
+                uninstall, "_remove_self_managed", return_value=True),
+        ):
+            self.assertEqual(0, uninstall.main([]))
+
+        self.assertEqual([self.root, self.root], swept)
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
