@@ -124,35 +124,27 @@ if ! result=$("$uv" run --no-project --python 3.12 \
 fi
 resolved=$(printf '%s\n' "$result" | sed -n '1p')
 wheel=$(printf '%s\n' "$result" | sed -n '2p')
-wheel_sha256=$(printf '%s\n' "$result" | sed -n '3p')
 [ -n "$resolved" ] && [ -f "$wheel" ] || {
   echo "agents-live: verified release download returned no wheel" >&2
   exit 1
 }
 
 root=${AGENTS_LIVE_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/agents-live}
-versions="$root/versions"
-target="$versions/$resolved"
-if [ ! -d "$target" ]; then
-  staging="$versions/.staging-$resolved"
-  rm -rf "$staging"
-  mkdir -p "$versions"
-  "$uv" venv --relocatable --python 3.12 "$staging"
-  "$uv" pip install --python "$staging/bin/python3" \
-    --reinstall-package agents-live "$wheel"
-  "$staging/bin/python3" -I -c \
-    "from agents_live import __version__; assert __version__ == '$resolved'"
-  mv "$staging" "$target"
+
+# The bootstrap authenticates bytes and hands them to the package. It does
+# not know the installation layout: the wheel's own install-release builds,
+# validates, seals, and activates the generation.
+"$uv" tool run --isolated --from "$wheel" \
+  agents-live install-release "$resolved" \
+    --install-root "$root" --activate --wheel "$wheel"
+
+# Only after the new installation answers: a uv-managed one would otherwise
+# keep answering to agents-live on PATH alongside it.
+if "$uv" tool list 2>/dev/null | grep -q '^agents-live '; then
+  "$uv" tool uninstall agents-live >/dev/null 2>&1 || true
 fi
 
-AGENTS_LIVE_BOOTSTRAP_WHEEL="$wheel" \
-AGENTS_LIVE_BOOTSTRAP_WHEEL_SHA256="$wheel_sha256" \
-AGENTS_LIVE_BOOTSTRAP_MIGRATE_UV=1 \
-  "$target/bin/agents-live" install-release "$resolved" \
-    --install-root "$root" --activate
-
 bin="$root/current/bin"
-PATH="$bin:$PATH"
-export PATH
 "$bin/agents-live" --version
 printf 'Agents Live is ready: %s\n' "$bin/agents-live"
+echo "Open a new shell to pick it up on PATH, or run: export PATH=\"$bin:\$PATH\""

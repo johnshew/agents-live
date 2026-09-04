@@ -116,35 +116,25 @@ try {
     } else {
         Join-Path $env:LOCALAPPDATA 'agents-live'
     }
-    $versions = Join-Path $installRoot 'versions'
-    $target = Join-Path $versions $resolved
-    if (-not (Test-Path -LiteralPath $target)) {
-        $staging = Join-Path $versions ".staging-$resolved"
-        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Path $versions -Force | Out-Null
-        & $uvCommand.Source venv --relocatable --python 3.12 $staging
-        if ($LASTEXITCODE -ne 0) { throw 'Could not create the dedicated Agents Live environment.' }
-        $python = Join-Path $staging 'Scripts\python.exe'
-        & $uvCommand.Source pip install --python $python --reinstall-package agents-live $wheel
-        if ($LASTEXITCODE -ne 0) { throw 'Could not install Agents Live into its dedicated environment.' }
-        & $python -I -c "from agents_live import __version__; assert __version__ == '$resolved'"
-        if ($LASTEXITCODE -ne 0) { throw 'The dedicated environment reported the wrong version.' }
-        Move-Item -LiteralPath $staging -Destination $target
-    }
-
-    $env:AGENTS_LIVE_BOOTSTRAP_WHEEL = $wheel
-    $env:AGENTS_LIVE_BOOTSTRAP_WHEEL_SHA256 = $wheelAsset.digest.Substring(7)
-    $env:AGENTS_LIVE_BOOTSTRAP_MIGRATE_UV = '1'
-    $executable = Join-Path $target 'Scripts\agents-live.exe'
-    & $executable install-release $resolved --install-root $installRoot --activate
+    # The bootstrap authenticates bytes and hands them to the package. It does
+    # not know the installation layout: the wheel's own install-release builds,
+    # validates, seals, and activates the generation.
+    & $uvCommand.Source tool run --isolated --from $wheel `
+        agents-live install-release $resolved `
+        --install-root $installRoot --activate --wheel $wheel
     if ($LASTEXITCODE -ne 0) { throw "Agents Live installation failed with exit code $LASTEXITCODE." }
+
+    # Only after the new installation answers: a uv-managed one would otherwise
+    # keep answering to agents-live on PATH alongside it.
+    $uvTools = & $uvCommand.Source tool list 2>$null
+    if ($uvTools -and ($uvTools | Where-Object { $_ -match '^agents-live\s' })) {
+        & $uvCommand.Source tool uninstall agents-live 2>$null | Out-Null
+    }
     $executable = Join-Path $installRoot 'current\Scripts\agents-live.exe'
     & $executable --version
     if ($LASTEXITCODE -ne 0) { throw "Installed command failed: $executable" }
     Write-Output "Agents Live is ready: $executable"
+    Write-Output "Open a new terminal to pick it up on PATH."
 } finally {
-    Remove-Item Env:AGENTS_LIVE_BOOTSTRAP_WHEEL -ErrorAction SilentlyContinue
-    Remove-Item Env:AGENTS_LIVE_BOOTSTRAP_WHEEL_SHA256 -ErrorAction SilentlyContinue
-    Remove-Item Env:AGENTS_LIVE_BOOTSTRAP_MIGRATE_UV -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }

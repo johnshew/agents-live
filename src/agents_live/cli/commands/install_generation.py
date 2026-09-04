@@ -39,7 +39,7 @@ def _populate(
     uv: str,
     source: Path | None,
     version: str,
-    staging: Path,
+    target: Path,
     requirements: Sequence[Path] = (),
 ) -> None:
     _run(
@@ -49,7 +49,7 @@ def _populate(
             "--relocatable",
             "--python",
             sys.executable,
-            str(staging),
+            str(target),
         ],
         step="creating the generation environment",
     )
@@ -60,7 +60,7 @@ def _populate(
             "pip",
             "install",
             "--python",
-            str(_interpreter(staging)),
+            str(_interpreter(target)),
             "--reinstall-package",
             "agents-live",
             requirement,
@@ -79,23 +79,8 @@ def _plugin_requirements() -> tuple[Path, ...]:
     return tuple(declaration.path for declaration in declarations.values())
 
 
-def install_declared_plugins(environment: Path) -> None:
-    """Install every registered repository's plugin before sealing."""
-    requirements = _plugin_requirements()
-    if not requirements:
-        return
-    _run(
-        [
-            find_uv(), "pip", "install", "--python",
-            str(_interpreter(environment)),
-            *(str(path) for path in requirements),
-        ],
-        step="installing declared plugins",
-    )
-
-
-def _validate(version: str, staging: Path) -> None:
-    interpreter = str(_interpreter(staging))
+def _validate(version: str, environment: Path) -> None:
+    interpreter = str(_interpreter(environment))
     installed = _run(
         [
             interpreter,
@@ -111,12 +96,12 @@ def _validate(version: str, staging: Path) -> None:
             f"installed package reports version {installed!r}, expected {version!r}")
     help_text = _run(
         [interpreter, "-I", "-m", "agents_live.cli", "--help"],
-        step="starting the staged CLI",
+        step="starting the built CLI",
         capture=True,
     )
     if "agents-live" not in help_text:
         raise deploy.generation.GenerationError(
-            "staged CLI help did not identify agents-live")
+            "built CLI help did not identify agents-live")
 
 
 def install(
@@ -133,9 +118,9 @@ def install(
     built = deploy.generation.build(
         version,
         root=root,
-        populate=lambda staging: _populate(
-            uv, source, version, staging, requirements),
-        validate=lambda staging: _validate(version, staging),
+        populate=lambda target: _populate(
+            uv, source, version, target, requirements),
+        validate=lambda target: _validate(version, target),
         provenance=provenance,
     )
     if activate:
@@ -190,18 +175,6 @@ def validate(generation: deploy.generation.Generation) -> None:
             f"generation {generation.name} is damaged: missing "
             f"{', '.join(missing)}")
     _validate(generation.name, generation.path)
-
-
-def validate_environment(version: str, environment: Path) -> None:
-    """Validate a dedicated environment before it is sealed as immutable."""
-    launcher = (
-        hostruntime.executable_dir(environment)
-        / hostruntime.executable_filename("agents-live")
-    )
-    if not launcher.is_file():
-        raise deploy.generation.GenerationError(
-            f"generation {version} is damaged: missing launcher")
-    _validate(version, environment)
 
 
 def main() -> int:

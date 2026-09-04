@@ -173,7 +173,7 @@ def main() -> int:
                 raise ReadinessError("bootstrap did not adopt installation ownership")
             generations = [
                 path.name for path in (install_root / "versions").iterdir()
-                if path.is_dir() and not path.name.startswith(".staging-")]
+                if path.is_dir() and (path / "generation.json").is_file()]
             if generations != [version]:
                 raise ReadinessError(
                     f"idempotent bootstrap left generations {generations}")

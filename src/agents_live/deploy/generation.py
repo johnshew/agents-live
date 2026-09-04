@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,7 +56,7 @@ def _validate_provenance(provenance: Provenance) -> None:
         raise GenerationError("artifact provenance is invalid")
 
 
-def _discard_staging(path: Path) -> None:
+def _discard(path: Path) -> None:
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         path.unlink()
     elif path.exists():
@@ -142,90 +141,36 @@ def build(
     root: Path | None = None,
     provenance: Provenance | None = None,
 ) -> Generation:
-    """Populate, validate, and promote an immutable generation.
+    """Populate, validate, and seal an immutable generation in place.
 
-    A failed populate or validation leaves only the recognizable staging
-    directory. The next attempt discards that directory before starting.
-    Neither path reads or writes the active pointer.
+    The record is written last, so a failed populate or validation leaves
+    an unsealed directory that no listing reports and no selection can
+    reach. The next attempt discards it and starts clean. Neither path
+    reads or writes the active pointer.
     """
     generation_name = layout.generation_name(name)
     if provenance is not None:
         _validate_provenance(provenance)
     install_root = root or layout.installation_root()
-    staging = layout.staging_dir(generation_name, install_root)
     target = layout.generation_dir(generation_name, install_root)
     install_root.mkdir(parents=True, exist_ok=True)
     try:
         with hostruntime.exclusive_lock(
                 layout.deployment_lock_path(install_root), blocking=False):
-            if target.exists():
+            if layout.is_sealed(target):
                 raise GenerationError(
                     f"generation {generation_name} is already installed and "
                     "will not be rewritten")
-            _discard_staging(staging)
+            _discard(target)
             try:
-                populate(staging)
+                populate(target)
             except Exception as exc:
                 raise GenerationError(
-                    f"could not stage generation {generation_name}: {exc}") from exc
-            if not staging.is_dir() or staging.is_symlink():
-                raise GenerationError(
-                    f"staging generation {generation_name} did not create a "
-                    "generation directory")
-            try:
-                validate(staging)
-            except Exception as exc:
-                raise GenerationError(
-                    f"generation {generation_name} failed validation: {exc}") from exc
-            generation = Generation(
-                generation_name,
-                target,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                provenance=provenance,
-            )
-            paths.atomic_write_text(
-                staging / layout.GENERATION_RECORD, _record(generation))
-            try:
-                paths.replace_when_windows_lets_go(staging, target)
-            except OSError as exc:
-                raise GenerationError(
-                    f"could not complete generation {generation_name}: {exc}") from exc
-            return generation
-    except hostruntime.LockBusy as exc:
-        raise GenerationError(
-            "another generation operation owns the installation lock") from exc
-
-
-def adopt(
-    name: str,
-    *,
-    validate: Callable[[Path], None],
-    root: Path | None = None,
-    provenance: Provenance | None = None,
-) -> Generation:
-    """Validate and seal a bootstrap-created dedicated environment.
-
-    The bootstrap promotes authenticated bytes before invoking the generated
-    command at its final absolute path. That command is the only process
-    allowed to turn the directory into a complete immutable generation.
-    """
-    generation_name = layout.generation_name(name)
-    if provenance is not None:
-        _validate_provenance(provenance)
-    install_root = root or layout.installation_root()
-    target = layout.generation_dir(generation_name, install_root)
-    if layout.generation_of(Path(sys.executable), install_root) != generation_name:
-        raise GenerationError(
-            f"generation {generation_name} can only be finalized by its own "
-            "dedicated runtime")
-    try:
-        with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                    f"could not build generation {generation_name}: {exc}") from exc
             if not target.is_dir() or target.is_symlink():
                 raise GenerationError(
-                    f"generation {generation_name} is not installed")
-            if (target / layout.GENERATION_RECORD).exists():
-                return load(generation_name, root=install_root)
+                    f"building generation {generation_name} did not create a "
+                    "generation directory")
             try:
                 validate(target)
             except Exception as exc:

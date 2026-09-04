@@ -2482,67 +2482,70 @@ class TestInstallationGenerations(unittest.TestCase):
 
     def test_failed_validation_leaves_the_active_generation_untouched(
             self) -> None:
-        """A broken candidate stays recognizable and inert beside the active."""
+        """A broken candidate stays inert and rebuildable beside the active.
+
+        The record, not the directory name, is what makes a generation
+        usable. An interrupted build therefore has to leave something that
+        no listing reports and the next attempt discards, or immutability
+        would refuse to rewrite it and wedge the version permanently.
+        """
         self._activate_generation("6.5.0")
 
-        def populate(staging: Path) -> None:
-            staging.mkdir(parents=True)
-            (staging / "runtime").write_text("candidate", encoding="utf-8")
+        def populate(target: Path) -> None:
+            target.mkdir(parents=True)
+            (target / "runtime").write_text("candidate", encoding="utf-8")
 
-        def reject(_staging: Path) -> None:
+        def reject(_target: Path) -> None:
             raise RuntimeError("smoke check failed")
 
         with self.assertRaises(deploy.generation.GenerationError) as failed:
             deploy.generation.build(
                 "6.6.0", populate=populate, validate=reject)
         self.assertIn("smoke check failed", str(failed.exception))
-        self.assertTrue(deploy.layout.staging_dir("6.6.0").is_dir())
-        self.assertFalse(deploy.layout.generation_dir("6.6.0").exists())
+        unsealed = deploy.layout.generation_dir("6.6.0")
+        self.assertTrue(unsealed.is_dir())
+        self.assertFalse(deploy.layout.is_sealed(unsealed))
+        self.assertNotIn("6.6.0", deploy.layout.installed_generations())
+        with self.assertRaises(deploy.generation.GenerationError):
+            deploy.generation.load("6.6.0")
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
 
-        def validate(staging: Path) -> None:
-            self.assertFalse((staging / "obsolete").exists())
+        def validate(target: Path) -> None:
+            self.assertFalse((target / "obsolete").exists())
             self.assertEqual(
                 "candidate",
-                (staging / "runtime").read_text(encoding="utf-8"),
+                (target / "runtime").read_text(encoding="utf-8"),
             )
 
-        (deploy.layout.staging_dir("6.6.0") / "obsolete").write_text(
+        (unsealed / "obsolete").write_text(
             "from failed attempt", encoding="utf-8")
         built = deploy.generation.build(
             "6.6.0", populate=populate, validate=validate)
         self.assertEqual(
             deploy.layout.generation_dir("6.6.0"), built.path)
-        self.assertFalse(deploy.layout.staging_dir("6.6.0").exists())
+        self.assertTrue(deploy.layout.is_sealed(built.path))
+        self.assertIn("6.6.0", deploy.layout.installed_generations())
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
 
         deploy.generation.activate(built)
         self.assertEqual("6.6.0", deploy.pointer.read().generation)
 
-    def test_generation_promotion_waits_out_a_transient_windows_hold(
-            self) -> None:
-        """Freshly executed generation files may remain briefly held on Windows."""
-        staging = deploy.layout.staging_dir("6.6.0")
-        real_replace = paths.os.replace
-        attempts = 0
+    def test_a_sealed_generation_is_never_rebuilt(self) -> None:
+        """Immutability keys on the record, so a sealed version is refused."""
+        built = deploy.generation.build(
+            "6.6.0",
+            populate=lambda path: path.mkdir(parents=True),
+            validate=lambda _path: None,
+        )
+        self.assertTrue(deploy.layout.is_sealed(built.path))
 
-        def held_once(source, destination):
-            nonlocal attempts
-            if Path(source) == staging and attempts == 0:
-                attempts += 1
-                raise PermissionError(13, "held")
-            return real_replace(source, destination)
-
-        with mock.patch.object(paths.os, "replace", side_effect=held_once):
-            built = deploy.generation.build(
+        with self.assertRaises(deploy.generation.GenerationError) as refused:
+            deploy.generation.build(
                 "6.6.0",
-                populate=lambda path: path.mkdir(parents=True),
+                populate=lambda path: path.mkdir(parents=True, exist_ok=True),
                 validate=lambda _path: None,
             )
-        self.assertEqual(1, attempts)
-        self.assertEqual(
-            deploy.layout.generation_dir("6.6.0"), built.path)
-        self.assertTrue(built.path.is_dir())
+        self.assertIn("already installed", str(refused.exception))
 
     def test_activation_refuses_unvalidated_or_damaged_installation_state(
             self) -> None:
@@ -2901,74 +2904,29 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
         download.assert_not_called()
 
-    def test_uv_migration_refuses_contested_ownership_before_resolution(
+    def test_failed_path_exposure_rolls_back_active_generation_ownership(
             self) -> None:
-        """A second owner cannot download, stage, or replace launchers."""
-        self._activate_generation("9.7.5")
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(install_release, "find_uv", return_value="uv"),
-            mock.patch.object(
-                install_release, "_uv_tool_installed", return_value=True),
-            mock.patch.object(deploy.release_artifact, "resolve") as resolve,
-            contextlib.redirect_stderr(stderr),
-        ):
-            with mock.patch.dict(
-                    os.environ, {install_release.ENV_MIGRATE_UV: "1"}):
-                code = install_release.main(["--activate"])
+        """Activation does not half-land when the host refuses PATH.
 
-        self.assertEqual(1, code)
-        self.assertIn("retire one owner", stderr.getvalue())
-        resolve.assert_not_called()
-        self.assertEqual("9.7.5", deploy.pointer.read().generation)
-
-    def test_failed_uv_retirement_rolls_back_active_generation_ownership(
-            self) -> None:
-        """Migration does not leave uv and the generation layout both active."""
+        Exposure is the last irreversible-looking step, and a host that
+        refuses it would otherwise leave a selected generation recorded
+        as self-managed but unreachable by name.
+        """
         version = "9.7.6"
         wheel = self._package_wheel(version)
-        digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
         with (
-            mock.patch.object(install_release, "find_uv", return_value="uv"),
             mock.patch.object(
-                install_release, "_uv_tool_installed", return_value=True),
-            mock.patch.object(
-                install_release, "_retire_uv_tool",
-                side_effect=deploy.generation.GenerationError("uv refused")),
-            mock.patch.dict(os.environ, {
-                install_release.ENV_WHEEL: str(wheel),
-                install_release.ENV_WHEEL_SHA256: digest,
-                install_release.ENV_MIGRATE_UV: "1",
-            }),
+                install_release, "_expose_command_root",
+                side_effect=OSError("registry refused")),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            code = install_release.main([version, "--activate"])
+            code = install_release.main(
+                [version, "--activate", "--wheel", str(wheel)])
 
         self.assertEqual(1, code)
         self.assertEqual(deploy.pointer.MISSING, deploy.pointer.status()[1])
         self.assertIsNone(deploy.ownership.read_record())
         self.assertEqual((version,), deploy.layout.installed_generations())
-
-    def test_uv_retirement_removes_only_its_agents_live_launchers(self) -> None:
-        """A held console shim must not outrank the selected generation."""
-        command_root = Path(self.temporary.name) / "uv-bin"
-        command_root.mkdir()
-        launchers = tuple(
-            command_root / hostruntime.executable_filename(name)
-            for name in ("agents-live", "al")
-        )
-        for launcher in (*launchers, command_root / "other.exe"):
-            launcher.write_bytes(b"launcher")
-        results = (
-            subprocess.CompletedProcess(
-                [], 0, str(command_root) + "\n", ""),
-            subprocess.CompletedProcess([], 0, "", ""),
-        )
-        with mock.patch.object(
-                install_release.subprocess, "run", side_effect=results):
-            install_release._retire_uv_tool("uv")
-        self.assertTrue(all(not launcher.exists() for launcher in launchers))
-        self.assertTrue((command_root / "other.exe").is_file())
 
     def test_processes_on_the_active_generation_do_not_block_an_upgrade(
             self) -> None:
