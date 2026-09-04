@@ -2341,6 +2341,33 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(str(command_root), written[0])
         self.assertEqual(1, written.count(str(command_root)))
 
+    def test_a_throwaway_install_root_never_touches_the_user_path(self) -> None:
+        """A gate that installs into a temp root must leave no residue.
+
+        POSIX contains a profile write by redirecting HOME. The Windows
+        environment lives in the registry, which no environment variable
+        redirects, so a readiness run left a permanent PATH entry pointing
+        at a deleted temporary directory until the contract it already
+        declared was actually honored.
+        """
+        command_root = Path("C:/Temp/throwaway/install/current/Scripts")
+        registry = mock.Mock()
+        registry.HKEY_CURRENT_USER = object()
+        registry.REG_EXPAND_SZ = 2
+
+        with (
+            mock.patch.object(hostruntime, "_IS_WINDOWS", True),
+            mock.patch.dict(sys.modules, {"winreg": registry}),
+            mock.patch.dict(
+                os.environ, {hostruntime.ENV_NO_PATH_UPDATE: "1"}),
+        ):
+            hostruntime.expose_user_path_directory(command_root)
+            hostruntime.remove_user_path_directory(command_root)
+
+        registry.CreateKey.assert_not_called()
+        registry.OpenKey.assert_not_called()
+        registry.SetValueEx.assert_not_called()
+
     def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
         """A staged generation writes wherever its name resolves.
 

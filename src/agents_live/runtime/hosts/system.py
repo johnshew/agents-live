@@ -192,6 +192,17 @@ def remove_directory_link(path: Path) -> None:
 #: ``.profile``, which is created because POSIX login shells read it.
 _PROFILE_FILES = (".profile", ".bashrc", ".zshrc")
 
+#: Set by a harness that installs into a throwaway root. POSIX contains a
+#: profile write by redirecting ``HOME``; the Windows environment lives in
+#: the registry, which no environment variable can redirect, so a test
+#: install would otherwise leave a permanent entry pointing at a deleted
+#: temporary directory.
+ENV_NO_PATH_UPDATE = "AGENTS_LIVE_NO_PATH_UPDATE"
+
+
+def _may_manage_user_path() -> bool:
+    return os.environ.get(ENV_NO_PATH_UPDATE, "").strip() != "1"
+
 
 def _path_export(directory: str) -> str:
     return f'export PATH="{directory}:$PATH"'
@@ -199,6 +210,8 @@ def _path_export(directory: str) -> str:
 
 def expose_user_path_directory(directory: Path) -> None:
     """Persist one command directory on the current user's PATH."""
+    if not _may_manage_user_path():
+        return
     command_root = str(directory)
     if _IS_WINDOWS:
         import winreg
@@ -244,6 +257,8 @@ def expose_user_path_directory(directory: Path) -> None:
 
 def remove_user_path_directory(directory: Path) -> None:
     """Remove a command directory previously persisted on the user's PATH."""
+    if not _may_manage_user_path():
+        return
     command_root = str(directory)
     if _IS_WINDOWS:
         try:

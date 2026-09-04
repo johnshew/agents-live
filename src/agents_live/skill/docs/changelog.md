@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: stop a throwaway install root from changing the user's PATH.
+  The bootstrap readiness gate installs into a temporary directory and already
+  asked for PATH to be left alone, but nothing honored the request. On POSIX a
+  redirected `HOME` contained the profile write; the Windows environment lives
+  in the registry, which no environment variable redirects, so each successful
+  run left a permanent PATH entry pointing at a deleted temporary directory.
 - fix: reach the stable command from every host integration.
   The WSL heartbeat task and `windows-heartbeat.sh` both named a
   `~/.local/bin` shim that a uv installation created and a generation
