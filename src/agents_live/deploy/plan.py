@@ -196,9 +196,9 @@ def collectable(generations: tuple[str, ...] | list[str], *,
 _RECOVERIES = {
     "staging": Recovery(
         "discard",
-        "an interrupted stage leaves only a .staging- directory; the active "
-        "generation was never touched, so the recovery is to delete it and "
-        "stage again"),
+        "an interrupted build leaves a directory with no validation record; "
+        "no listing reports it and nothing can select it, so the recovery is "
+        "to discard it and build again"),
     "staged": Recovery(
         "retry",
         "a complete but unvalidated generation is inert: nothing points at "

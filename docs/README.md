@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, and backlog
-ms.date: 2026-08-29
+ms.date: 2026-09-04
 ms.topic: overview
 ---
 
@@ -40,6 +40,12 @@ this directory is installed by `agents-live init` or `upgrade`.
 - [decisions/deployment-generations.md](decisions/deployment-generations.md) -
   why installation writes immutable version directories, selects one with a
   `current` directory link, and how each partial failure recovers.
+- [decisions/plugin-loading.md](decisions/plugin-loading.md) - why declared
+  plugins are source directories loaded dynamically against a protocol
+  instead of installed wheels discovered through entry points, and the
+  pytest, Home Assistant, and CPython precedent it rests on.
+- [compatibility-boundaries.md](compatibility-boundaries.md) - what the 6.8
+  and 7.0 boundaries each retire, and why they are separate releases.
 - [processor-contract.md](processor-contract.md) - why the processor contract
   is shaped the way it is, and which alternatives were rejected. The contract
   itself is specified in the skill payload.

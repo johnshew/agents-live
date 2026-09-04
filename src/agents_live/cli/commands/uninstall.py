@@ -152,19 +152,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Uninstall agents-live safely")
     parser.add_argument("--distro")
     parser.add_argument("--retain-state", action="store_true")
+    parser.add_argument(
+        "--owner", choices=(deploy.ownership.SELF, deploy.ownership.UV),
+        help="Which installation to remove when two answer on this host")
     args = parser.parse_args(argv)
     adminlog.record("uninstall", status="start",
                     retain_state=args.retain_state)
     installation = deploy.ownership.describe()
     refusal = deploy.ownership.refusal(installation, action="uninstall")
-    if installation.contested and refusal is not None:
-        preflight.emit_failure("uninstall", refusal)
+    if installation.contested and refusal is not None and args.owner is None:
+        preflight.emit_failure(
+            "uninstall",
+            f"{refusal}, or name the one to remove with "
+            f"`--owner {deploy.ownership.SELF}` or "
+            f"`--owner {deploy.ownership.UV}`")
         return 1
+    # Naming an owner resolves the ambiguity the refusal reports; it does
+    # not invent one. Removing the generation layout is the self-managed
+    # branch below whether or not this process runs from it.
+    self_managed = (installation.self_managed
+                    if args.owner is None
+                    else args.owner == deploy.ownership.SELF)
     # The tree this uninstall is about to remove. Watchers and scheduled
     # triggers are addressed to it, so asking uv is only right when uv
     # owns the installation; for a self-managed one uv answers about a
     # tool that is not there, and the sweeps below silently do nothing.
-    environment = (installation.root if installation.self_managed
+    environment = (installation.root if self_managed
                    else plugins.tool_environment())
     # Before any host cleanup: what this fails on has to leave a working
     # installation, not a stripped host and a half-removed tool (#219).
@@ -178,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             "uninstall again")
         return 1
     uv = None
-    if not installation.self_managed:
+    if not self_managed:
         try:
             uv = find_uv()
         except FileNotFoundError:
@@ -209,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         # A hard dependency here would make uninstall impossible off WSL.
         print("no cross-host integrations to remove; uninstalling the tool")
     deferred = False
-    if (not installation.self_managed and environment is not None
+    if (not self_managed and environment is not None
             and runtime_id == hostruntime.WINDOWS):
         assert uv is not None
         if not _handoff_windows_uninstall(uv, environment):
@@ -227,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"warning: could not remove shell completions: {exc}",
               file=sys.stderr)
-    if installation.self_managed:
+    if self_managed:
         if not _remove_self_managed(installation.root):
             preflight.emit_failure(
                 "uninstall",

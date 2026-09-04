@@ -211,16 +211,19 @@ def refusal(installation: Installation, *, action: str = "upgrade"
     """What a non-owning *action* must say, or ``None`` if it may proceed.
 
     The message names the owning channel, because "you do not own this"
-    is only useful next to what does. Nothing calls this to refuse yet:
-    upgrade stays uv-managed until #334 step 2, and this states the rule
-    that step enforces.
+    is only useful next to what does, and it names the command that does
+    own it. A refusal whose only remedy is filesystem surgery is one an
+    operator meets for the first time on a broken host.
     """
     if installation.contested:
         return (
             f"{action} refused: this host has both a "
             f"{LABELS.get(installation.owner, installation.owner)} "
             "installation and an active generation layout, and either could "
-            "replace the runtime. Retire one before continuing")
+            "replace the runtime. Run the same command through the "
+            f"self-managed installation ({layout.command_path(root=installation.root)}), "
+            f"which owns it, or retire that installation with "
+            f"`{layout.command_path(root=installation.root)} uninstall`")
     if installation.owner == UNMANAGED:
         return (
             f"{action} refused: this runtime was not installed by a channel "

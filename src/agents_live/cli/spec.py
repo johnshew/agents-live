@@ -324,6 +324,8 @@ COMMANDS = (
             Arg(("--install-root",), "Override the installation root.",
                 kind="value"),
             Arg(("--activate",), "Activate after validation."),
+            Arg(("--wheel",), "Build from an already authenticated wheel.",
+                kind="value", hidden=True),
         ),
     ),
     Cmd(
@@ -337,11 +339,14 @@ COMMANDS = (
         ),
     ),
     Cmd(
-        "uninstall", "Remove host integrations and the uv tool.", "cli.commands.uninstall",
+        "uninstall", "Remove host integrations and the installed runtime.",
+        "cli.commands.uninstall",
         "in-process", root="none",
         args=(
             Arg(("--distro",), "Distribution name.", kind="value"),
             Arg(("--retain-state",), "Retain runtime state."),
+            Arg(("--owner",), "Which installation to remove when two answer.",
+                kind="value", choices=("agents-live", "uv")),
         ),
     ),
     Cmd(

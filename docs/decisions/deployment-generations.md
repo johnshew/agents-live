@@ -1,7 +1,7 @@
 ---
 title: Generation-Based Deployment Decision
 description: Why installation writes immutable version directories and selects one with a current directory link
-ms.date: 2026-08-30
+ms.date: 2026-09-04
 ms.topic: concept
 ---
 
@@ -10,10 +10,10 @@ ms.topic: concept
 ## Status
 
 Implemented for self-managed installation. Public Windows and POSIX bootstrap
-scripts authenticate an official wheel, install it into its final versioned
-directory, and invoke that version's absolute `agents-live` command to finish
-initialization. The initialized version activates itself and exposes one stable
-command directory on PATH.
+scripts authenticate an official wheel and hand it to that wheel's own
+`install-release` command, which builds the versioned directory, validates it,
+seals it, and activates it. The initialized version exposes one stable command
+directory on PATH.
 
 This decision completes the installer architecture required by
 [#395](https://github.com/johnshew/agents-live/issues/395) and supplies the
@@ -37,7 +37,6 @@ An installation owns this layout:
 ```text
 <installation root>/
     versions/<version>/       complete immutable environment
-    versions/.staging-<id>/  incomplete environment
     current/                  link to the active version directory
     owner.json                installation owner
 ```
@@ -64,31 +63,70 @@ generation's files.
 
 ### Installation flow
 
-The public bootstrap is deliberately limited to transport and placement:
+The public bootstrap is deliberately limited to transport. It authenticates
+bytes and hands them to the package; it does not know the installation layout.
 
 1. Resolve an exact stable GitHub release, or the latest stable release.
 2. Verify the wheel's recorded size and SHA-256 digest before executing it.
-3. Create `versions/<version>` and install the wheel into that dedicated
-   environment.
-4. Invoke that directory's absolute `agents-live install-release` command.
+3. Run that wheel's own `agents-live install-release` through an ephemeral
+   `uv tool run --isolated --from <wheel>` environment, passing the verified
+   wheel path.
+4. After it succeeds, retire any uv-managed installation.
 
-The final dedicated version reads the registered repository set and validates
-every declared plugin wheel before sealing the generation. The core wheel and
-all accessible declared plugin wheels are installed together, so a selected
-generation never depends on mutating its environment later. An unavailable
-registered repository, missing or modified wheel, or incompatible plugin stops
-installation before activation.
+The bootstrap does not create `versions/`, does not name a staging directory,
+and does not promote anything. Every generation on every host is therefore
+built by one code path, whether it comes from bootstrap, upgrade, or a local
+bake. Before 6.8 the shell scripts laid out the generation themselves and the
+package sealed what they had built, which put the layout, the staging
+convention, and the promotion step into three places in two languages.
 
-The dedicated version then validates and seals itself, performs migration and
-cleanup, switches `current` to itself, records installation ownership, and
-ensures the stable command directory is on PATH. It refuses to initialize a
-different version directory. Bootstrap inputs cross this private boundary in
-environment variables; the public command grammar does not gain artifact
-transport flags.
+Step 3 is safe because `uv venv --python <interpreter>` resolves to that
+interpreter's *base* installation, not to the ephemeral environment invoking
+it. A generation built from the bootstrap environment therefore survives that
+environment's disposal.
+
+The verified wheel path crosses this private boundary as a suppressed
+`--wheel` flag on a hidden command. It is not part of the public command
+grammar, does not appear in generated help, completions, or the EBNF surface,
+and is passed rather than re-derived so that the generation is built from the
+exact bytes the bootstrap authenticated instead of a second download that
+could differ.
+
+Plugins are not installed into a generation. They are declared by registered
+repositories and loaded dynamically at runtime, so a generation never depends
+on mutating its environment later, and a generation installed before a plugin
+was declared still loads it. See
+[plugin-loading.md](plugin-loading.md).
+
+### Completeness is a record, not a name
+
+A generation directory is built in place at `versions/<version>/`. It is
+complete when it contains a valid `generation.json`, which is written last and
+written atomically.
+
+The alternative, used before 6.8, was to populate `versions/.staging-<version>/`
+and rename it into place on success. Both designs solve the same problem: a
+directory must never be mistaken for a usable generation while it is still
+being filled. Interrupt an in-place build with no completeness marker and the
+half-populated directory is reported as installed, can be selected, and,
+because immutability refuses to rewrite an installed generation, permanently
+blocks its own reinstallation.
+
+The record was chosen over the name prefix because it was already required.
+`load` already refuses a generation without a valid record, so the prefix was a
+second mechanism for a fact the design already recorded. Keying every
+completeness test on the record removes the prefix, the staging path helper,
+the staging discard step, and the promotion rename.
+
+The cost is that the directory no longer appears atomically; the invariant
+becomes that a directory is never trusted, only a record. The gain is that the
+promotion rename disappears, and with it the Windows retry loop that existed
+because antivirus and search indexers hold a freshly written directory open
+long enough to fail the rename.
 
 Repeating bootstrap for the same version is idempotent. A complete sealed
-version can be reused after validation. An incomplete staging directory is
-removed and recreated.
+version is reused after validation. A directory without a valid record is
+discarded and rebuilt.
 
 ### Activation
 
@@ -121,9 +159,8 @@ protocol without adding a second active-version record.
 | Interrupted state | Recovery |
 |---|---|
 | downloading | discard the temporary download and authenticate again |
-| staging | delete the `.staging-` directory and install again |
-| installed, not initialized | invoke that version's absolute command again |
-| initialized, not active | validate it and switch `current` |
+| populating | the directory has no valid record, so install again and it is discarded and rebuilt |
+| installed, not active | validate it and switch `current` |
 | missing or invalid `current` | report the damage and recreate the intended link; never guess |
 | activation failure | retain or restore the previous `current` target |
 | selected, convergence failed | keep the selected generation visible, report degraded host state, and rerun convergence after correcting the cause |

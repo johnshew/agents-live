@@ -4,7 +4,6 @@ The layout is the one #334 describes:
 
     <installation root>/
         versions/<generation>/   a complete environment, never rewritten
-        versions/.staging-<id>/  an incomplete one, safe to delete
         current/                 link to the active generation
         owner.json               which channel owns this installation
 
@@ -14,13 +13,16 @@ The pointer is a directory link, not an executable. Flipping it never
 rewrites a running image, so Windows has nothing to lock (#231).
 
 A generation directory is named, never derived from unvalidated input. A
-name that could climb out of ``versions/`` would let a staged generation
-write anywhere the installing user can, so names are validated before
-they reach the filesystem rather than after.
+name that could climb out of ``versions/`` would let a build write
+anywhere the installing user can, so names are validated before they
+reach the filesystem rather than after.
+
+A directory under ``versions/`` is not a generation until it holds a
+validation record. The record is written last, so an interrupted build
+leaves a directory that every listing here ignores.
 
 Nothing in this module creates or mutates a directory: it computes paths
-and refuses bad names. The install, upgrade, and collect steps that will
-use it are #334 steps 2 and 3.
+and refuses bad names.
 """
 from __future__ import annotations
 
@@ -40,7 +42,6 @@ CURRENT = "current"
 OWNERSHIP = "owner.json"
 GENERATION_RECORD = "generation.json"
 DEPLOYMENT_LOCK = ".deployment.lock"
-STAGING_PREFIX = ".staging-"
 
 # A generation name reaches the filesystem, so it is validated against
 # what a version may contain rather than against what a path may not.
@@ -96,21 +97,6 @@ def generation_dir(version: str, root: Path | None = None) -> Path:
     return generations_root(root) / generation_name(version)
 
 
-def staging_dir(version: str, root: Path | None = None) -> Path:
-    """Where a generation is built before it is complete.
-
-    The prefix marks it as incomplete for anything that lists the
-    generations, so an interrupted stage is recognizable rather than
-    indistinguishable from a generation that merely failed to run.
-    """
-    return generations_root(root) / f"{STAGING_PREFIX}{generation_name(version)}"
-
-
-def is_staging(name: str) -> bool:
-    """Whether a directory name is an incomplete generation."""
-    return name.startswith(STAGING_PREFIX)
-
-
 def current_path(root: Path | None = None) -> Path:
     """The stable directory link through which commands enter the runtime."""
     return (root or installation_root()) / CURRENT
@@ -149,8 +135,21 @@ def command_path(name: str = "agents-live", root: Path | None = None) -> Path:
     return command_root(root) / hostruntime.executable_filename(name)
 
 
+def is_sealed(path: Path) -> bool:
+    """Whether *path* holds a generation's validation record.
+
+    Presence only. Whether the record is well formed is
+    :func:`generation.load`'s question; this answers the cheaper one that
+    every listing and every rebuild decision needs first.
+    """
+    try:
+        return (path / GENERATION_RECORD).is_file()
+    except OSError:
+        return False
+
+
 def installed_generations(root: Path | None = None) -> tuple[str, ...]:
-    """Complete generations on disk, sorted, staging directories excluded.
+    """Complete generations on disk, sorted, unsealed directories excluded.
 
     An unreadable or absent ``versions/`` answers with nothing rather
     than raising: a host that has never used this model is the normal
@@ -159,7 +158,7 @@ def installed_generations(root: Path | None = None) -> tuple[str, ...]:
     try:
         entries = sorted(
             entry.name for entry in generations_root(root).iterdir()
-            if entry.is_dir() and not is_staging(entry.name))
+            if entry.is_dir() and is_sealed(entry))
     except OSError:
         return ()
     return tuple(entries)
@@ -181,6 +180,5 @@ def generation_of(path: Path | str, root: Path | None = None) -> str | None:
         return None
     for parent in (candidate, *candidate.parents):
         if parent.parent == generations:
-            name = parent.name
-            return None if is_staging(name) else name
+            return parent.name
     return None

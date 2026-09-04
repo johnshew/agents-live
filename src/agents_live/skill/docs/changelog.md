@@ -11,6 +11,31 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: reach the stable command from every host integration.
+  The WSL heartbeat task and `windows-heartbeat.sh` both named a
+  `~/.local/bin` shim that a uv installation created and a generation
+  installation never does, so a self-managed install left the five-minute task
+  pointing at a path that did not exist. Both now prefer the stable `current`
+  command and fall back to the shim.
+- fix: put the installed command on PATH for interactive shells.
+  POSIX exposure wrote only `~/.profile`, which reaches neither a zsh user nor
+  a non-login bash shell, so an installation could succeed and the command
+  still not be found. Both bootstrap scripts now also say how to reach it in
+  the current shell.
+- fix: give a contested-ownership refusal a way out.
+  `upgrade` and `uninstall` both declined while two installations could answer
+  to `agents-live`, and `uninstall` is the command that would clear it. The
+  refusal now names the stable executable that owns the installation, and
+  `uninstall --owner` resolves the ambiguity.
+- refactor: reduce the bootstrap to authenticated transport.
+  The Windows and POSIX scripts built the version directory themselves and the
+  package sealed what they had built, so the installation layout, the staging
+  convention, and the promotion step lived in three places in two languages.
+  Both scripts now hand the verified wheel to its own `install-release`, which
+  builds, validates, seals, and activates through the one code path every
+  install uses. An interrupted build is recognized by its missing validation
+  record instead of a directory-name prefix, which also removes the promotion
+  rename and its Windows retry loop.
 - fix: sweep the owned installation tree when uninstalling a self-managed
   install. Uninstall asked uv where the tool lived, which answers about an
   installation that is not there, so watchers kept running and scheduled
