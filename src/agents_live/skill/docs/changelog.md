@@ -42,13 +42,14 @@ history is retained in the source repository.
   install uses. An interrupted build is recognized by its missing validation
   record instead of a directory-name prefix, which also removes the promotion
   rename and its Windows retry loop.
-- fix: sweep the owned installation tree when uninstalling a self-managed
-  install. Uninstall asked uv where the tool lived, which answers about an
-  installation that is not there, so watchers kept running and scheduled
-  triggers kept firing at a removed command until an operator cleaned them up
-  by hand.
-- fix: put the stable command on PATH before retiring a migrated uv install, so
-  a failed migration cannot leave a host with no `agents-live` command.
+- fix: sweep the owned tree when uninstalling a self-managed installation.
+  Uninstall asked uv where the tool lived, which answers about an installation
+  that is not there, so watchers kept running and scheduled triggers kept
+  firing at a removed command until an operator cleaned them up by hand.
+- fix: expose the stable command before retiring a migrated uv installation.
+  A failed migration could otherwise leave a host with no `agents-live`
+  command at all, because retiring uv is irreversible and PATH exposure is
+  not.
 - docs: add the published-bake release and exact-version installation runbook.
   Contributor and Windows guidance now distinguishes GitHub prereleases from
   stable PyPI publication and covers URI-encoded tags, authenticated bootstrap,
