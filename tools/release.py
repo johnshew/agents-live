@@ -766,9 +766,10 @@ def _installed_is_self_managed() -> bool:
     """
     try:
         generations = (_install_root() / "versions").resolve()
+        installed = Path(_installed_cli()).resolve()
     except OSError:
         return False
-    return generations in Path(_installed_cli()).parents
+    return generations in installed.parents
 
 
 def _installed_run(argv: list[str]) -> subprocess.CompletedProcess[str]:

@@ -4796,19 +4796,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
         """
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         scope = release["_installed_is_self_managed"].__globals__
-        root = Path("C:/install")
-        with mock.patch.dict(scope, {
-            "_install_root": lambda: root,
-            "_installed_cli": lambda: str(
-                root / "versions" / "6.7.0" / "Scripts" / "agents-live.exe"),
-        }):
-            self.assertTrue(release["_installed_is_self_managed"]())
-        with mock.patch.dict(scope, {
-            "_install_root": lambda: root,
-            "_installed_cli": lambda: str(
-                Path("C:/uv/tools/agents-live/Scripts/agents-live.exe")),
-        }):
-            self.assertFalse(release["_installed_is_self_managed"]())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation = root / "install" / "versions" / "6.7.0" / "bin"
+            with mock.patch.dict(scope, {
+                "_install_root": lambda: root / "install",
+                "_installed_cli": lambda: str(generation / "agents-live"),
+            }):
+                self.assertTrue(release["_installed_is_self_managed"]())
+            tool = root / "uv" / "tools" / "agents-live" / "bin"
+            with mock.patch.dict(scope, {
+                "_install_root": lambda: root / "install",
+                "_installed_cli": lambda: str(tool / "agents-live"),
+            }):
+                self.assertFalse(release["_installed_is_self_managed"]())
 
     def test_local_deploy_retries_one_failed_windows_upgrade(self) -> None:
         script = runpy.run_path(
