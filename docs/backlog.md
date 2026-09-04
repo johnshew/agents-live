@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-08-14
+ms.date: 2026-09-04
 ms.topic: concept
 ---
 
@@ -134,10 +134,42 @@ directory link, and ownership-aware health checks. Public bootstrap installs
 authenticated release bytes into that model on Windows and POSIX without a
 custom launcher or package-index fallback for Agents Live.
 
-This cluster is currently tracked by [#334](https://github.com/johnshew/agents-live/issues/334)
-and [#395](https://github.com/johnshew/agents-live/issues/395), with follow-on
-work for migration and collector cleanup still attached to the same delivery
-line.
+The model landed in 6.7, and the 6.7 bake exposed the next problem: the model
+is simple, but the machinery around it is not. Release verification and
+generation construction were each implemented three times, once in
+`install.ps1`, once in the Python heredoc inside `install.sh`, and once in the
+package. A single defect in asset URL handling had to be fixed in all three.
+Removing that duplication, and retiring the uv ownership channel whose
+in-place rewrite semantics justify most of the surviving upgrade machinery, is
+what completes this cluster rather than extending it.
+
+The direction is that the bootstrap does transport and nothing else: verify
+bytes, stage a throwaway environment, and let the package build the real
+generation through the one code path every other install uses.
+
+This cluster is tracked by [#334](https://github.com/johnshew/agents-live/issues/334),
+building on the bootstrap delivered in
+[#395](https://github.com/johnshew/agents-live/issues/395).
+[compatibility-boundaries.md](compatibility-boundaries.md) records what the
+uv retirement does and does not break.
+
+## Extension seams
+
+A declared plugin extends one of two duck-typed protocols. Until 6.8 it
+reached them as an installed wheel discovered through entry points, which is
+the shape `uv tool install --with` made convenient rather than the shape the
+seams need. The declaration format has always required a repository-relative
+path inside the declaring repository, so a plugin could never come from a
+package index; the runtime was paying for packaged distribution to load a file
+whose path it already had.
+
+6.8 makes a plugin a source directory loaded dynamically against the protocol.
+pytest and Home Assistant are the grounding precedents, and they disagree in
+the one place that matters: whether the host installs a plugin's declared
+dependencies. Agents Live declares and verifies but does not install.
+
+[decisions/plugin-loading.md](decisions/plugin-loading.md) carries the
+decision, the precedent, and the alternatives rejected.
 
 ## Runtime repair and operational safety
 
