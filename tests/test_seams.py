@@ -6110,6 +6110,55 @@ class TestArchitectureFitness(unittest.TestCase):
         self.assertIn('"$CLI" internal install-liveness', wrapper)
         self.assertNotIn('"$CLI" heartbeat', wrapper)
 
+    def test_internal_liveness_runs_before_any_project_is_initialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {
+                **os.environ,
+                "HOME": str(root / "home"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+            }
+            environment.pop(state.ENV_VAR, None)
+            completed = subprocess.run(
+                [
+                    sys.executable, "-m", "agents_live.cli",
+                    "internal", "liveness",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+
+            self.assertEqual(
+                0, completed.returncode, completed.stdout + completed.stderr)
+            self.assertTrue(
+                (root / "state" / "agents-live" / "heartbeat.ok").is_file())
+
+    def test_install_liveness_is_host_scoped(self) -> None:
+        from agents_live.runtime.hosts import wsl_liveness
+
+        cli = importlib.import_module("agents_live.cli.main")
+        with (
+            mock.patch.object(sys, "argv", sys.argv.copy()),
+            mock.patch.object(upgrade_handoff, "reconcile"),
+            mock.patch.object(cli.state, "resolve_root") as resolve_root,
+            mock.patch.object(cli.update_check, "interactive", return_value=False),
+            mock.patch.object(wsl_liveness, "install") as install,
+        ):
+            code = cli.main([
+                "internal", "install-liveness", "--distro", "Example",
+            ])
+
+        self.assertEqual(0, code)
+        resolve_root.assert_not_called()
+        install.assert_called_once_with("Example")
+
     def test_plugin_validation_accepts_exactly_the_groups_that_are_read(self) -> None:
         """A seam that validates one group and reads another connects nothing.
 

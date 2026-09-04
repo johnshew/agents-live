@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-03
+ms.date: 2026-09-04
 ms.topic: reference
 ---
 
@@ -10,6 +10,10 @@ changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
+
+- fix: let fresh WSL bootstraps activate before repository initialization. (#443)
+  Host liveness commands no longer require a project root, so a verified
+  generation can stage its Windows heartbeat before `agents-live init`.
 
 ## 6.7.0 - 2026-09-04
 

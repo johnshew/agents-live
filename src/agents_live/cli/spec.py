@@ -145,11 +145,11 @@ COMMANDS = (
             ),
             Cmd(
                 "liveness", "Refresh host liveness.", "cli.commands.internal",
-                "in-process", hidden=True,
+                "in-process", root="none", hidden=True,
             ),
             Cmd(
                 "install-liveness", "Install WSL host liveness.",
-                "cli.commands.internal", "in-process", hidden=True,
+                "cli.commands.internal", "in-process", root="none", hidden=True,
                 args=(Arg(("--distro",), "WSL distribution.", kind="value"),),
             ),
             Cmd(
