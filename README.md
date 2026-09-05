@@ -32,20 +32,16 @@ list is present, process only those files.
 
 ## Quick start
 
-See [Installation](#installation) for required host tools and installation
-details.
+See [Installation](#installation) for required host tools and platform-specific
+instructions.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin:$PATH"
 agents-live init
 agents-live start markdown-polisher
 ```
-
-The package also installs `al` as an exact shorthand for `agents-live`, so
-`al status` and `agents-live status` are interchangeable. uv refuses the
-installation if an unrelated `al` executable already exists; remove or rename
-that executable before retrying rather than using `--force`.
 
 The watcher sleeps until a file changes, then runs the agent immediately with
 the changed paths. Add or edit a Markdown file under `docs/`, then open the
@@ -69,8 +65,8 @@ you already use, `uv`, and your host scheduler and file-watch facility.
 
 Cron-only agents have no persistent process. A file-watch agent uses one small
 local watcher. There are no externally reachable ports or databases. Custom
-post-processors and plugins may bring their own dependencies; Agents Live core does
-not require them.
+post-processors and plugins may bring their own dependencies; Agents Live core
+does not require them.
 
 ## Safe by default
 
@@ -91,96 +87,133 @@ same correction task through validated, deterministic write boundaries.
 
 ## Installation
 
-Install at least one supported provider CLI using its current official
-installer: [Claude Code](https://code.claude.com/docs/en/setup) or
-[GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started).
-The preferred fresh-install path is the verified release bootstrap. It installs
-[`uv`](https://docs.astral.sh/uv/getting-started/installation/) when needed,
-authenticates the exact Agents Live release assets against GitHub release
-metadata, stages and validates an immutable generation, and only then activates
-it. Omitting a version selects GitHub's latest stable release.
+Agents Live supports Linux, WSL, and native Windows. macOS is currently
+untested. First install and sign in to at least one supported provider CLI:
 
-On Debian or Ubuntu:
+- [Claude Code](https://code.claude.com/docs/en/setup)
+- [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started)
+
+The release installers fetch an authenticated wheel from GitHub, install
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/) if it is
+missing, and activate the new version only after validation succeeds. Python
+3.12 or newer is required; uv obtains a compatible interpreter when the host
+does not have one.
+
+### Linux and WSL
+
+On Debian, Ubuntu, or WSL, install the host tools used by schedules and file
+watchers, then run the latest stable installer:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-sudo apt install cron inotify-tools
+sudo apt-get update
+sudo apt-get install -y cron inotify-tools
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
-agents-live init
+
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin:$PATH"
+agents-live --repo /path/to/repository init
+agents-live --repo /path/to/repository doctor
 ```
 
-`cron` runs scheduled agents and automatic maintenance; `inotifywait` is only
-needed when definitions watch files or directories. On WSL, the first
-convergence stages and verifies Windows-side liveness before replacing an
-existing task, so scheduled runs do not require an open session.
+`cron` runs scheduled agents and automatic maintenance. `inotifywait` is only
+needed for file or directory watches. The installer adds the stable command
+directory to supported shell profiles; the `export` above makes it available
+to the current shell immediately.
 
-Automatic maintenance rotates framework logs and removes retained transcripts
-and processor output after 30 days by default. Set `retention_days` to a
-positive integer in `.agents-live.toml` (or `[tool.agents-live]`) to change the
-repository policy. Rotated records remain available through `agents-live logs`
-until their retention boundary.
+On WSL, use these Linux instructions inside the distribution. The first
+convergence also stages and verifies Windows-side liveness so scheduled work
+can wake the distribution without an open terminal.
 
-On Windows:
+### Windows
+
+Run PowerShell as your normal user. Install a provider CLI if one is not
+already available:
 
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
 ```
 
-Install the latest stable release. The final line prints and invokes the exact
-stable executable path, so the current shell does not depend on refreshed PATH:
+Download and run the latest stable installer, then initialize a repository
+through the absolute stable command so the current shell does not depend on a
+refreshed `PATH`:
 
 ```powershell
-irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+$installer = Join-Path $env:TEMP "agents-live-install.ps1"
+Invoke-WebRequest `
+  "https://github.com/johnshew/agents-live/releases/latest/download/install.ps1" `
+  -OutFile $installer
+& $installer
+
 $agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
 & $agentsLive --repo C:\path\to\repository init
+& $agentsLive --repo C:\path\to\repository doctor
 ```
 
-Pass an exact stable or prerelease version as the first script argument after
-downloading the installer when reproducibility requires pinning. Prereleases
-must be selected explicitly; omitting the version always selects the latest
-stable release. Re-running the same version is idempotent. An existing
-legacy uv tool install is retired only after the generation is active.
-Network, proxy, TLS, missing-digest, size, and checksum failures stop
-without a package-index or stale-cache fallback.
+The installer updates the user `PATH`; open a new terminal before relying on a
+bare `agents-live` command. `init` prints the generated PowerShell completion
+script path and the exact line to add to `$PROFILE`. Native Windows uses Task
+Scheduler and directory change notifications, so no separate scheduler or
+watcher package is required.
 
-Install a published Windows bake by its complete commit-qualified version:
+### Install an exact version
+
+Every installer asset attached to a release is stamped with that release's
+exact version. Download it from the version-specific release path to pin an
+installation without passing a separate argument. Prereleases are never
+selected through the `latest` path, and reinstalling the same version is safe.
+
+On Linux or WSL:
+
+```bash
+version="6.8.0"
+curl --proto '=https' --tlsv1.2 -LsSf \
+  "https://github.com/johnshew/agents-live/releases/download/v${version}/install.sh" \
+  | sh
+```
+
+On Windows:
 
 ```powershell
-$version = "<complete-commit-qualified-version>"
+$version = "6.8.0"
 $tag = [Uri]::EscapeDataString("v$version")
 $installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
 Invoke-WebRequest `
   "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
   -OutFile $installer
-& $installer $version
-
-$agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
-& (Join-Path $agentsLiveBin "agents-live.exe") --version
+& $installer
 ```
 
-GitHub direct URLs encode the version's `+` as `%2B`; the installer argument
-does not. The installer updates the persisted user PATH, but an already-open
-or activated PowerShell environment can retain an older PATH snapshot. Open a
-new terminal, or prepend `$agentsLiveBin` to `$env:Path` for the current
-process, before judging bare `agents-live` command resolution.
+Both installers authenticate the selected release through GitHub metadata and
+verify its asset size and SHA-256 digest. Network, proxy, TLS, provenance, and
+checksum failures stop without a package-index or stale-cache fallback.
+
+### Upgrade, roll back, and remove
 
 Agents Live retains immutable versions side by side and selects one through the
-stable `current` path. Local bake versions include their commit suffix, so
-multiple builds from the same release line can coexist. Before a generation is
-sealed, installation validates the registered repositories and installs every
-declared plugin wheel into that generation. Selecting a generation runs host
-maintenance through that selected version so native triggers and still-started
-watchers converge without rewriting another installed version.
-Use `agents-live generations list` to inspect installed versions,
-`generations activate VERSION` to roll back, `generations remove VERSION` to
-discard an inactive candidate, and `generations collect` to retain one rollback
-generation while removing older versions that no process is using.
+stable `current` path. Source plugins remain in their declaring repositories
+and load directly into the selected runtime; installation does not copy or
+install them into a generation.
 
-Windows uses Task Scheduler and a built-in watcher, so there is nothing more to
-install. `init` prints the PowerShell completion script path and the exact line
-to add to `$PROFILE`.
+```bash
+agents-live upgrade
+agents-live generations list
+agents-live generations activate VERSION
+agents-live uninstall
+```
+
+Selecting a generation converges native triggers and still-started watchers
+through that version. Work already running may finish on the immutable version
+where it began. Use `generations remove VERSION` to discard an inactive
+candidate, and `generations collect` to retain one rollback generation while
+removing older versions that no process is using.
+
+An existing legacy `uv tool` installation is removed only after the verified
+generation is active. The package also installs `al` as an exact shorthand for
+`agents-live`. If an unrelated `al` executable already exists, remove or rename
+it before installation rather than forcing replacement.
+
+### Existing repositories and diagnostics
 
 The installed `.claude/skills/agents-live/` payload is tool-managed and carries
 a directory-local `.gitignore`; project-authored sibling skills are unaffected.
@@ -189,11 +222,12 @@ For an existing repository that already tracks the payload, run
 `git add -f .claude/skills/agents-live/.gitignore`. Agents Live never changes the
 Git index itself.
 
-Note that macOS is untested.
-
 Run `agents-live doctor` to diagnose missing requirements and inspect
 configuration. Use `agents-live doctor --repair` to repair supported
-configuration issues.
+configuration issues. Automatic maintenance rotates framework logs and removes
+retained transcripts and processor output after 30 days by default. Set
+`retention_days` to a positive integer in `.agents-live.toml` (or
+`[tool.agents-live]`) to change that repository policy.
 
 ## Go further
 

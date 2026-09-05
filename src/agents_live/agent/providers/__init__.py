@@ -17,6 +17,10 @@ class Provider(Protocol):
 
 _providers: dict[str, Provider] = {}
 
+#: Retained so a 5.x plugin's entry point group can still be named in a
+#: diagnostic. Discovery no longer reads it: plugins are loaded from
+#: source by ``agents_live.plugins`` and handed here through
+#: :func:`register`. See docs/decisions/plugin-loading.md.
 ENTRY_POINT_GROUP = "agents_live.providers"
 
 
@@ -55,21 +59,5 @@ from .fake import FAKE
 register(CLAUDE)
 register(COPILOT)
 register(FAKE)
-
-
-def _discover() -> None:
-    from importlib.metadata import entry_points
-    for entry_point in entry_points(group=ENTRY_POINT_GROUP):
-        loaded = entry_point.load()
-        provider = (
-            loaded()
-            if isinstance(loaded, type)
-            or (callable(loaded) and not hasattr(loaded, "prepare"))
-            else loaded
-        )
-        register(provider)
-
-
-_discover()
 
 __all__ = ["ENTRY_POINT_GROUP", "Provider", "get", "names", "register"]

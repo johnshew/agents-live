@@ -426,109 +426,101 @@ class TestHostMaintenanceEntries(TempRepository):
 
 
 class TestPluginDeclarations(unittest.TestCase):
-    """Which declared plugin is safe to install.
+    """Declared source plugins load directly into the extension seams."""
 
-    Convergence installs what these functions approve, into the tool
-    environment that holds the runtime, and it runs unattended.
-    """
-
-    def _wheel(self, directory: Path, *, name: str = "example-plugin",
-               version: str = "1.0", group: str | None = None) -> Path:
-        stem = name.replace("-", "_")
-        wheel = directory / f"{stem}-{version}-py3-none-any.whl"
-        with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr(
-                f"{stem}-{version}.dist-info/METADATA",
-                f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
-            archive.writestr(
-                f"{stem}-{version}.dist-info/entry_points.txt",
-                f"[{group or providers.ENTRY_POINT_GROUP}]\n"
-                f"example = {stem}:PROVIDER\n")
-        return wheel
-
-    def _project(self, directory: Path, wheel: Path, *,
+    def _project(self, directory: Path, source: Path, *,
                  sha256: str | None = None, name: str = "example-plugin") -> Path:
         digest = f'sha256 = "{sha256}"\n' if sha256 else ""
         (directory / ".agents-live.toml").write_text(
             f"[plugins.{name}]\n"
-            f'path = "{wheel.name}"\n{digest}',
+            f'path = "{source.relative_to(directory).as_posix()}"\n{digest}',
             encoding="utf-8")
         return directory
 
-    def test_a_declaration_takes_its_identity_from_the_wheel(self) -> None:
+    def test_a_package_loads_providers_and_an_ownership_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            wheel = self._wheel(root, version="2.5")
-            self._project(root, wheel)
-            declared = plugins.declared(root, require_exists=True)
-        plugin = declared["example-plugin"]
-        self.assertEqual("example-plugin", plugin.name)
-        self.assertEqual("2.5", plugin.version)
+            package = root / "plugin_package"
+            package.mkdir()
+            package.joinpath("__init__.py").write_text(
+                "class Provider:\n"
+                "    name = 'source-provider'\n"
+                "    models = None\n"
+                "    efforts = frozenset()\n"
+                "    def prepare(self, spec, request): raise AssertionError\n"
+                "    def parse(self, raw): raise AssertionError\n"
+                "PROVIDERS = (Provider(),)\n"
+                "OWNERSHIP_REGISTRY = object()\n",
+                encoding="utf-8",
+            )
+            self._project(root, package)
+            with (
+                mock.patch.object(providers, "register") as register,
+                mock.patch.object(ownership, "use_backend") as use_backend,
+            ):
+                loaded = plugins.load([root])
 
-    def test_a_wheel_that_declares_another_distribution_is_refused(self) -> None:
-        """The configured name is what convergence installs and what the
-        receipt records; a wheel naming something else installs a
-        distribution nobody declared."""
+        self.assertEqual(1, len(loaded))
+        self.assertTrue(loaded[0].ok, loaded[0].detail)
+        register.assert_called_once()
+        self.assertEqual("source-provider", register.call_args.args[0].name)
+        use_backend.assert_called_once()
+
+    def test_a_wheel_declaration_names_the_source_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            wheel = self._wheel(root, name="other-plugin")
+            wheel = root / "example_plugin-1.0-py3-none-any.whl"
+            wheel.write_bytes(b"wheel")
             (root / ".agents-live.toml").write_text(
                 "[plugins.example-plugin]\n"
                 f'path = "{wheel.name}"\n',
                 encoding="utf-8")
-            with self.assertRaises(plugins.PluginError) as caught:
+            with self.assertRaises(ValueError) as caught:
                 plugins.declared(root, require_exists=True)
-        self.assertIn("other-plugin", str(caught.exception))
+        self.assertIn("loaded from source since 6.8", str(caught.exception))
 
-    def test_a_checksum_that_does_not_match_the_wheel_is_refused(self) -> None:
+    def test_a_checksum_that_does_not_match_source_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            wheel = self._wheel(root)
-            self._project(root, wheel, sha256="0" * 64)
+            source = root / "plugin.py"
+            source.write_text("PROVIDER = object()\n", encoding="utf-8")
+            self._project(root, source, sha256="0" * 64)
             errors = plugins.validation_errors([root])
         self.assertTrue(errors)
         self.assertTrue(any("sha256" in item for item in errors))
 
-    def test_two_projects_declaring_different_checksums_are_refused(self) -> None:
-        """Convergence installs one environment for every project on the
-        host, so two declarations of one plugin have to agree."""
+    def test_same_named_plugins_load_from_each_repository_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, \
                 tempfile.TemporaryDirectory() as second_dir:
             first = Path(first_dir).resolve()
             second = Path(second_dir).resolve()
-            self._project(first, self._wheel(first), sha256="a" * 64)
-            self._project(second, self._wheel(second), sha256="b" * 64)
-            with self.assertRaises(plugins.PluginError) as caught:
-                plugins.union([first, second])
-        self.assertIn("conflicting sha256", str(caught.exception))
-
-    def test_a_declaration_without_its_wheel_takes_metadata_from_the_one_present(self) -> None:
-        """One checkout can lag another. The union has to resolve to the
-        artifact that exists rather than refusing the pair."""
-        with tempfile.TemporaryDirectory() as present_dir, \
-                tempfile.TemporaryDirectory() as absent_dir:
-            present = Path(present_dir).resolve()
-            absent = Path(absent_dir).resolve()
-            wheel = self._wheel(present, version="3.1")
-            self._project(present, wheel)
-            (absent / ".agents-live.toml").write_text(
-                "[plugins.example-plugin]\n"
-                f'path = "{wheel.name}"\n',
+            first_source = first / "plugin.py"
+            second_source = second / "plugin.py"
+            first_source.write_text(
+                "PROVIDER = type('Provider', (), {'name': 'first'})()\n",
                 encoding="utf-8")
-            union = plugins.union([absent, present])
-        self.assertEqual("3.1", union["example-plugin"].version)
+            second_source.write_text(
+                "PROVIDER = type('Provider', (), {'name': 'second'})()\n",
+                encoding="utf-8")
+            self._project(first, first_source)
+            self._project(second, second_source)
+            first_plugin = plugins.declared(first)["example-plugin"]
+            second_plugin = plugins.declared(second)["example-plugin"]
+            with mock.patch.object(providers, "register") as register:
+                loaded = plugins.load([first, second])
+        self.assertNotEqual(first_plugin.module_name, second_plugin.module_name)
+        self.assertEqual([True, True], [item.ok for item in loaded])
+        self.assertEqual(
+            ["first", "second"],
+            [call.args[0].name for call in register.call_args_list])
 
-    def test_a_retired_group_is_refused_from_the_declaration_side(self) -> None:
-        """Detecting it only while validating what is installed leaves the
-        plugin permanently pending, so convergence reinstalls it every
-        run (#263)."""
+    def test_missing_source_is_a_load_failure_not_a_cli_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            wheel = self._wheel(root, group="agents_live.agents")
-            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-            self._project(root, wheel, sha256=digest)
+            self._project(root, root / "missing.py")
             errors = plugins.validation_errors([root])
-        self.assertTrue(any("retired" in item for item in errors))
+        self.assertEqual(1, len(errors))
+        self.assertIn("not a module or package", errors[0])
 
 
 class TestProviderRegistry(unittest.TestCase):
@@ -2039,7 +2031,7 @@ class TestOwnershipEnablement(TempRepository):
         with mock.patch.object(ownership, "_backend", return_value=None):
             code, _, err = self._run("enable")
         self.assertEqual(1, code)
-        self.assertIn(ownership.ENTRY_POINT_GROUP, err)
+        self.assertIn("OWNERSHIP_REGISTRY", err)
         self.assertEqual(original, config.read_text(encoding="utf-8"))
 
     def test_malformed_registry_refuses_before_rewriting_config(self) -> None:
@@ -2231,6 +2223,19 @@ class TestInstallationGenerations(unittest.TestCase):
     what is executing, a plan that never disturbs the active generation
     before the pointer moves, and a collector that keeps the rollback.
     """
+
+    def test_generation_population_installs_only_agents_live(self) -> None:
+        with (
+            mock.patch.object(install_generation, "_run") as run,
+            mock.patch.object(
+                install_generation, "_interpreter", return_value=Path("python")),
+        ):
+            install_generation._populate(
+                "uv", Path("candidate.whl"), "9.7.6", Path("generation"))
+
+        install = run.call_args_list[1].args[0]
+        self.assertEqual("candidate.whl", install[-1])
+        self.assertNotIn("--with", install)
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -3444,9 +3449,13 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "src/changelog.md"))
             bootstrap_inputs = tuple(root / name for name in (
                 "install.ps1", "install.sh"))
-            for path in (*release_files, *bootstrap_inputs):
+            for path in release_files:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("committed\n", encoding="utf-8")
+            bootstrap_inputs[0].write_text(
+                "$embeddedVersion = ''\n", encoding="utf-8")
+            bootstrap_inputs[1].write_text(
+                'embedded_version=""\n', encoding="utf-8")
             (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
             subprocess.run(
                 ["git", "add", "."], cwd=root, check=True)
@@ -3483,6 +3492,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "ROOT": root,
                 "RELEASE_FILES": release_files,
                 "BOOTSTRAP_BUILD_INPUTS": bootstrap_inputs,
+                "_current_version": lambda: "1.2.3",
                 "_run": run,
             }):
                 build()
@@ -3492,6 +3502,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "excluded": False,
                 "overlay": True,
             }, observed)
+            self.assertIn(
+                "$embeddedVersion = '1.2.3'",
+                (root / "dist" / "install.ps1").read_text(encoding="utf-8"))
+            self.assertIn(
+                'embedded_version="1.2.3"',
+                (root / "dist" / "install.sh").read_text(encoding="utf-8"))
 
     def test_release_prepare_revalidates_files_after_gates(self) -> None:
         """A gate-time editor save must not produce a partial release (#227)."""

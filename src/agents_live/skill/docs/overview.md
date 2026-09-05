@@ -119,18 +119,20 @@ agents-live init --repo /path/to/repository
 agents-live doctor
 ```
 
-On native Windows, run the release `install.ps1` from PowerShell. Both scripts
-accept an exact stable or prerelease version; prereleases require an explicit
-version while omission selects the latest stable release. They retire an
-uncontested legacy uv tool installation after activating the generation and
-print the generated command under `current` that works immediately.
+On native Windows, run the release `install.ps1` from PowerShell. Every
+published installer asset is stamped with its release version, so a script
+downloaded from a version-specific release path needs no version argument.
+The `latest` path selects the latest stable release. Both scripts install uv
+when needed, retire an uncontested legacy uv tool installation after activating
+the generation, and print the generated command under `current` that works
+immediately.
 `doctor` validates the active generation, ownership record, and stable commands;
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
 
 For a published Windows bake, download and run the bootstrap with the complete
-commit-qualified version. URI-encode the tag in the direct GitHub URL while
-passing the original version to the script:
+commit-qualified version. URI-encode the tag in the direct GitHub URL; the
+downloaded script already carries the original version:
 
 ```powershell
 $version = "<complete-commit-qualified-version>"
@@ -139,7 +141,7 @@ $installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
 Invoke-WebRequest `
   "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
   -OutFile $installer
-& $installer $version
+& $installer
 
 $agentsLiveBin = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts"
 & (Join-Path $agentsLiveBin "agents-live.exe") --version
@@ -153,11 +155,11 @@ for that process, when the absolute `current` command is healthy but bare
 
 The installation root is a local version store: complete PEP 440 versions are
 retained side by side and `current` selects one. Commit-suffixed bake versions
-therefore coexist on the same release line. Each generation includes the valid
-plugin wheels declared by registered repositories before it is sealed. When a
-generation is selected, its own command converges native triggers and
-still-started watchers; work already running may finish on the immutable version
-where it began. Use `agents-live generations list` to inspect the store,
+therefore coexist on the same release line. Source plugins remain in their
+declaring repositories and load directly into the selected runtime; they are
+not installed into a generation. When a generation is selected, its own command
+converges native triggers and still-started watchers; work already running may
+finish on the immutable version where it began. Use `agents-live generations list` to inspect the store,
 `generations activate VERSION` to roll back, `generations remove VERSION` to
 discard an inactive candidate, and `generations collect` to retain the active
 version plus one rollback while removing older unheld versions.

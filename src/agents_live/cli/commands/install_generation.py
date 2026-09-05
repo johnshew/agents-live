@@ -5,13 +5,11 @@ import argparse
 import hashlib
 import subprocess
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
-from ... import deploy, plugins
+from ... import deploy
 from ...runtime.hosts import system as hostruntime
 from ...runtime.spawn import find_uv
-from ...state import registry as repos
 
 
 def _run(command: list[str], *, step: str, capture: bool = False) -> str:
@@ -40,7 +38,6 @@ def _populate(
     source: Path | None,
     version: str,
     target: Path,
-    requirements: Sequence[Path] = (),
 ) -> None:
     _run(
         [
@@ -64,19 +61,9 @@ def _populate(
             "--reinstall-package",
             "agents-live",
             requirement,
-            *(str(path) for path in requirements),
         ],
         step="installing agents-live",
     )
-
-
-def _plugin_requirements() -> tuple[Path, ...]:
-    roots = [Path(value) for _alias, value, error in repos.entries() if not error]
-    errors = plugins.validation_errors(roots)
-    if errors:
-        raise deploy.generation.GenerationError("; ".join(errors))
-    declarations = plugins.union(roots, require_exists=True)
-    return tuple(declaration.path for declaration in declarations.values())
 
 
 def _validate(version: str, environment: Path) -> None:
@@ -114,12 +101,11 @@ def install(
 ) -> deploy.generation.Generation:
     """Build an exact generation through the shared uv-backed seam."""
     uv = find_uv()
-    requirements = _plugin_requirements()
     built = deploy.generation.build(
         version,
         root=root,
         populate=lambda target: _populate(
-            uv, source, version, target, requirements),
+            uv, source, version, target),
         validate=lambda target: _validate(version, target),
         provenance=provenance,
     )

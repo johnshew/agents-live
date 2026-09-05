@@ -43,6 +43,10 @@ BOOTSTRAP_BUILD_INPUTS = (
     ROOT / "install.ps1",
     ROOT / "install.sh",
 )
+BOOTSTRAP_VERSION_MARKERS = {
+    "install.ps1": "$embeddedVersion = ''",
+    "install.sh": 'embedded_version=""',
+}
 VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
@@ -362,6 +366,22 @@ def _release_notes(version: str) -> str:
     sections: list[str] = []
     if actions:
         sections.append("## Action required\n\n" + "\n\n".join(actions))
+    download_root = (
+        f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download/{tag}")
+    sections.append(textwrap.dedent(f"""\
+        ## Quick install
+
+        Linux and WSL:
+
+        ```bash
+        curl --proto '=https' --tlsv1.2 -LsSf {download_root}/install.sh | sh
+        ```
+
+        Windows PowerShell:
+
+        ```powershell
+        irm {download_root}/install.ps1 | iex
+        ```"""))
     ordered = [row for _, row in sorted(rows, key=lambda row: row[0])]
     sections.append("## Changes\n\n" + "\n".join(ordered))
     links = f"[Full changelog]({CHANGELOG_URL.format(tag=tag)})"
@@ -1044,8 +1064,17 @@ def _build_release_artifacts() -> None:
         _run([
             "uv", "build", "--out-dir", str(ROOT / "dist"), str(source),
         ])
-        for name in ("install.ps1", "install.sh"):
-            shutil.copy2(source / name, ROOT / "dist" / name)
+        version = _current_version()
+        for name in BOOTSTRAP_ASSETS:
+            content = (source / name).read_text(encoding="utf-8")
+            marker = BOOTSTRAP_VERSION_MARKERS[name]
+            if content.count(marker) != 1:
+                raise ReleaseError(
+                    f"{name} must contain exactly one release version marker")
+            assignment = marker.replace("''", f"'{version}'").replace(
+                '""', f'"{version}"')
+            (ROOT / "dist" / name).write_text(
+                content.replace(marker, assignment), encoding="utf-8")
 
 
 def _gate_commands() -> list[list[str]]:

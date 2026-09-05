@@ -7,6 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$embeddedVersion = ''
+if (-not $Version) { $Version = $embeddedVersion }
 
 $apiRoot = if ($env:AGENTS_LIVE_RELEASE_API) {
     $env:AGENTS_LIVE_RELEASE_API.TrimEnd('/')
