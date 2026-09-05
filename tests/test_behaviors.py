@@ -6086,6 +6086,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
             invalid.stderr,
         )
 
+    def test_dashboard_readiness_preserves_watcher_observation_truth(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        assert_row = readiness["_assert_row"]
+
+        for liveness, label in (
+                ("missing", "Watcher missing"),
+                ("unavailable", "Watcher unavailable")):
+            with self.subTest(liveness=liveness):
+                assert_row({"agents": [{
+                    "name": "readiness-agent",
+                    "state": "started",
+                    "can_pause": True,
+                    "can_activate": False,
+                    "watcher_liveness": liveness,
+                    "unhealthy": True,
+                    "health": f"Failing: newest run; {label}",
+                    "action_reasons": "Start: Already active; Claim: unavailable",
+                }]}, "packaged", started=True)
+
 
 class TestRepositoryDiscoveryRoots(TempRepository):
     """Which files in a repository are Agents Live agents (#388).

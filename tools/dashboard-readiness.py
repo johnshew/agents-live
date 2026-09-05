@@ -343,19 +343,24 @@ def _assert_row(payload: dict, mode: str, *, started: bool,
         raise ReadinessError(
             f"{mode}: can_activate is {row.get('can_activate')!r} for a "
             f"{expected_state} row")
-    if row.get("watcher_liveness") != "missing":
+    watcher_liveness = row.get("watcher_liveness")
+    watcher_health = {
+        "missing": "Watcher missing",
+        "unavailable": "Watcher unavailable",
+    }.get(watcher_liveness)
+    if watcher_health is None:
         raise ReadinessError(
             f"{mode}: started watcher liveness is "
-            f"{row.get('watcher_liveness')!r}, expected 'missing'")
+            f"{watcher_liveness!r}, expected 'missing' or 'unavailable'")
     if expect_failure and (
             not row.get("unhealthy")
             or "Failing: newest run" not in str(row.get("health", ""))):
         raise ReadinessError(
             f"{mode}: newest structured run failure is not visible: "
             f"{row.get('health')!r}")
-    if "Watcher missing" not in str(row.get("health", "")):
+    if watcher_health not in str(row.get("health", "")):
         raise ReadinessError(
-            f"{mode}: watcher intent masked missing liveness: "
+            f"{mode}: watcher intent masked {watcher_liveness} liveness: "
             f"{row.get('health')!r}")
     reasons = str(row.get("action_reasons", ""))
     if "Start: Already active" not in reasons or "Claim:" not in reasons:
