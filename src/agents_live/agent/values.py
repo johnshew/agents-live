@@ -188,6 +188,7 @@ class ProviderRuntime:
     mode: str
     mcps: tuple[McpServer, ...] = ()
     pipeline: PipelineEndpoint | None = None
+    output_schema: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -213,13 +214,15 @@ class ProviderCli:
 
     ``executable`` is ``None`` for a provider that launches no native
     CLI, and such a provider is never probed or offered installation
-    guidance. ``probe_argv`` carries the tokens that follow it for a
-    liveness check, so a nested command (``copilot help``) is describable
-    without a caller knowing the provider's name.
+    guidance. ``probe_argv`` carries the tokens that follow it for a liveness
+    check, so a nested command (``copilot help``) is describable without a
+    caller knowing the provider's name. ``help_argvs`` names every help surface
+    that documents options the provider emits.
     """
 
     executable: str | None = None
     probe_argv: tuple[str, ...] = ()
+    help_argvs: tuple[tuple[str, ...], ...] = (("--help",),)
     install_commands: tuple[tuple[str, str], ...] = ()
 
     def install_command(self, host: str) -> str | None:

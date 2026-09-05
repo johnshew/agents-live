@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-08-23
+ms.date: 2026-09-05
 ms.topic: reference
 ---
 
@@ -62,7 +62,7 @@ metadata:
 | `agents-live.timeout` | positive integer | Provider or processor timeout in seconds; `120` by default. |
 | `agents-live.pre-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.post-processor` | relative path | Optional, relative to the skill directory. |
-| `agents-live.output-schema` | JSON object or relative path | Optional JSON Schema for provider output. Claude enforces it during generation; other providers are validated after local JSON extraction. |
+| `agents-live.output-schema` | JSON object or relative path | Optional JSON Schema for provider output. Claude and Codex enforce it during generation; other providers are validated after local JSON extraction. |
 | `agents-live.output-max-bytes` | positive integer | Output size cap; 10 MiB by default. |
 | `agents-live.output-path-roots` | JSON string array | Optional repository-relative path allowlist. |
 | `agents-live.output-provenance` | `strict` | Optional strict whole-output JSON requirement. |
@@ -96,8 +96,8 @@ The Agents Live key can only narrow tools during an unattended run.
 Provider sessions do not implicitly run repository-controlled hooks, workspace
 MCP servers, or project extensions. Provider project instructions are also
 disabled so the definition body is the unattended instruction source. This
-policy is the same for Claude and Copilot and does not depend on whether either
-CLI has previously trusted the checkout. A repository MCP server runs only
+policy is the same for Claude, Copilot, and Codex and does not depend on whether
+a CLI has previously trusted the checkout. A repository MCP server runs only
 when its name appears in `agents-live.mcps`; a missing or malformed named
 server fails the run before the provider starts. Repository hooks and project
 extensions have no unattended opt-in surface.
@@ -109,6 +109,13 @@ mechanisms. Copilot uses a fresh run-scoped configuration home. Secure
 credential-store login continues to work; on a host without a credential
 store, supply `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` because
 credentials stored below the normal Copilot configuration home are not read.
+Codex reuses authentication from `CODEX_HOME` while `--ignore-user-config`
+suppresses user and repository configuration, instructions, hooks, rules, and
+undeclared MCP servers. Run `codex login status` to verify authentication.
+Selected Codex MCP servers reject literal `env`, `headers`, and `http_headers`
+values; use `env_vars`, `bearer_token_env_var`, or `env_http_headers` so only
+environment-variable names, rather than their credential values, enter the
+command line.
 
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired

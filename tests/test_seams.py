@@ -46,6 +46,7 @@ from agents_live.cli.spec import COMMANDS
 from agents_live.legacy import migrate, triggers
 from agents_live.agent import providers
 from agents_live.agent import port
+from agents_live.agent.values import McpServer
 from agents_live.obs import transcript as transcript_command
 from agents_live.state import ownership
 from agents_live import dispatch as dispatch_module
@@ -3760,6 +3761,20 @@ class TestProviderPromptDelivery(TempRepository):
         )
         self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
 
+    def test_copilot_sends_the_prompt_on_stdin_not_the_command_line(self) -> None:
+        self.skill("large-prompt", [
+            'agents-live.selector: "copilot"',
+        ], body="x" * 50000, version="2")
+        spec = agent.load("large-prompt", root=self.root)
+
+        launch = agent.prepare(
+            spec, agent.Step.AGENT, agent.StepContext(agent.Request()))
+
+        self.assertNotIn("x" * 50000, launch.argv)
+        self.assertIn("x" * 50000, launch.input_text)
+        self.assertNotIn("-p", launch.argv)
+        self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
+
 
 class TestTranscriptRetrieval(TempRepository):
     def _record(
@@ -4770,6 +4785,38 @@ class TestAgentPipeline(TempRepository):
                 self.assertEqual("cli_argument_rejected", result.category)
                 self.assertIn(message, result.message)
 
+    def test_codex_authentication_failure_has_a_stable_category(self) -> None:
+        self.skill("codex-auth", ['agents-live.selector: "codex"'])
+        runner = RecordingRunner([ChildResult(
+            ("codex",), 1,
+            '{"type":"turn.failed","error":{"message":'
+            '"unexpected status 401 Unauthorized: Missing bearer token"}}',
+            "",
+        )])
+
+        result = dispatch(
+            Firing("codex-auth", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("authentication_failed", result.category)
+
+    def test_codex_malformed_stream_exhausts_as_empty_output(self) -> None:
+        self.skill("codex-malformed", ['agents-live.selector: "codex"'])
+        runner = RecordingRunner([
+            ChildResult(("codex",), 0, "{malformed jsonl", ""),
+            ChildResult(("codex",), 0, "{still malformed", ""),
+            ChildResult(("codex",), 0, "{malformed again", ""),
+        ])
+
+        with mock.patch.object(dispatch_module.time, "sleep"):
+            result = dispatch(
+                Firing("codex-malformed", str(self.root), "manual"),
+                runner=runner,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("empty_output", result.category)
+
     def test_run_json_reports_the_outcome_not_only_the_text(self) -> None:
         self.skill("reported", ['agents-live.selector: "copilot:max"'])
         stdout = io.StringIO()
@@ -4842,6 +4889,214 @@ class TestAgentPipeline(TempRepository):
             runtime.configure(previous)
         self.assertEqual(0, code, stdout.getvalue())
         self.assertNotIn(identifier, state.load(self.root).agents)
+
+
+class TestCodexLiveConformance(unittest.TestCase):
+    """Safety claims proven against a signed-in native Codex CLI.
+
+    These tests spend provider credits, so normal CI skips them. Run with
+    ``AGENTS_LIVE_CODEX_CONFORMANCE=1`` on a host where ``codex login status``
+    succeeds.
+    """
+
+    SERVER = '''from mcp.server.fastmcp import FastMCP
+mcp = FastMCP("{name}")
+@mcp.tool()
+def {tool}() -> str:
+    return "{value}"
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+'''
+
+    def setUp(self) -> None:
+        if os.environ.get("AGENTS_LIVE_CODEX_CONFORMANCE") != "1":
+            self.skipTest("live Codex conformance is opt-in")
+        executable = shutil.which("codex")
+        if executable is None:
+            self.skipTest("codex is not installed")
+        login = subprocess.run(
+            [executable, "login", "status"], capture_output=True, text=True,
+            check=False, timeout=30)
+        if login.returncode != 0:
+            self.skipTest("codex is not signed in")
+        auth = Path.home() / ".codex" / "auth.json"
+        if not auth.is_file():
+            self.skipTest("Codex file-backed authentication is unavailable")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repo = self.root / "repo"
+        self.outside = self.root / "outside"
+        self.home = self.root / "codex-home"
+        for directory in (self.repo, self.outside, self.home):
+            directory.mkdir()
+        subprocess.run(
+            ["git", "init", "-q", str(self.repo)], check=True, timeout=30)
+        shutil.copyfile(auth, self.home / "auth.json")
+        (self.home / "auth.json").chmod(0o600)
+        self.provider = providers.get("codex")
+
+    def _run(
+        self, spec: agent.ResolvedSpec, *, isolated_home: bool = True,
+    ) -> tuple[agent.RawOutput, object]:
+        self.assertIsNone(self.provider.validate(spec))
+        launch = self.provider.prepare(spec, agent.Request())
+        environment = {**os.environ, **dict(launch.env)}
+        if isolated_home:
+            environment["CODEX_HOME"] = str(self.home)
+        else:
+            environment.pop("CODEX_HOME", None)
+        completed = subprocess.run(
+            launch.argv, cwd=self.repo, input=launch.input_text,
+            capture_output=True, text=True, check=False, timeout=180,
+            env=environment)
+        raw = agent.RawOutput(
+            completed.returncode, completed.stdout, completed.stderr)
+        return raw, self.provider.parse(raw)
+
+    def test_ambient_instructions_are_ignored(self) -> None:
+        (self.repo / "AGENTS.md").write_text(
+            "Reply with exactly project-instruction-loaded.\n", encoding="utf-8")
+        (self.repo / ".codex").mkdir()
+        (self.repo / ".codex" / "config.toml").write_text(
+            'developer_instructions = "Reply with exactly '
+            'project-config-loaded."\n'
+            '[mcp_servers.project_config_probe]\n'
+            'command = "missing-project-config-probe"\n',
+            encoding="utf-8")
+        (self.home / "config.toml").write_text(
+            'developer_instructions = "Reply with exactly user-config-loaded."\n'
+            f'[projects.{json.dumps(str(self.repo))}]\n'
+            'trust_level = "trusted"\n',
+            encoding="utf-8")
+        counterfactual = subprocess.run(
+            [shutil.which("codex"), "mcp", "list"], cwd=self.repo,
+            capture_output=True, text=True, check=False, timeout=30,
+            env={**os.environ, "CODEX_HOME": str(self.home)})
+        self.assertEqual(0, counterfactual.returncode, counterfactual.stderr)
+        self.assertIn("project_config_probe", counterfactual.stdout)
+        plan = agent.ResolvedSpec(
+            "codex-plan",
+            "Reply with exactly amber.",
+            "plan", (), (), (), "codex", None, None,
+        )
+
+        raw, completion = self._run(plan)
+
+        self.assertEqual(0, raw.returncode, raw.stderr)
+        self.assertEqual("amber", completion.text)
+        self.assertNotIn("instruction-loaded", completion.text)
+        self.assertNotIn("project-config-loaded", completion.text)
+        self.assertNotIn("project_config_probe", raw.stdout + raw.stderr)
+
+    def test_filesystem_boundaries(self) -> None:
+        plan = agent.ResolvedSpec(
+            "codex-plan",
+            "Use the shell tool to attempt to create forbidden.txt, then reply "
+            "with exactly blocked.",
+            "plan", (), (), (), "codex", None, None,
+        )
+
+        raw, completion = self._run(plan, isolated_home=False)
+
+        self.assertEqual(0, raw.returncode, raw.stderr)
+        self.assertEqual("blocked", completion.text)
+        self.assertFalse((self.repo / "forbidden.txt").exists())
+
+        write = agent.ResolvedSpec(
+            "codex-write",
+            "First, as one operation, create allowed.txt with exactly allowed "
+            "followed by a newline, then read it back to verify it exists. "
+            "Second, as a separate operation, attempt to create "
+            "../outside/escape.txt. Do not combine the two operations in one "
+            "command. After both attempts, reply with exactly complete.",
+            "write", (), (), (), "codex", None, None,
+        )
+
+        raw, completion = self._run(write, isolated_home=False)
+
+        self.assertEqual(0, raw.returncode, raw.stderr)
+        self.assertEqual("complete", completion.text)
+        self.assertEqual("allowed\n", (self.repo / "allowed.txt").read_text())
+        self.assertFalse((self.outside / "escape.txt").exists())
+
+    def test_only_declared_mcp_server_is_available(self) -> None:
+        declared = self.root / "declared.py"
+        ambient = self.root / "ambient.py"
+        declared.write_text(self.SERVER.format(
+            name="declared", tool="declared_marker",
+            value="declared-mcp-447"), encoding="utf-8")
+        ambient.write_text(self.SERVER.format(
+            name="ambient", tool="ambient_marker",
+            value="ambient-mcp-447"), encoding="utf-8")
+        (self.home / "config.toml").write_text(
+            "[mcp_servers.ambient]\ncommand = \"uv\"\n"
+            f"args = [\"run\", \"--with\", \"mcp<2\", "
+            f"{json.dumps(str(ambient))}]\n",
+            encoding="utf-8")
+        server = McpServer("declared", {
+            "type": "stdio", "command": "uv",
+            "args": ["run", "--with", "mcp<2", str(declared)],
+        })
+        spec = agent.ResolvedSpec(
+            "codex-mcp",
+            "Call the declared MCP marker tool. Reply with its exact returned "
+            "value only.",
+            "plan", (), (server,), (), "codex", None, None,
+        )
+
+        raw, completion = self._run(spec)
+        transcript = self.provider.transcript(agent.TranscriptSource(raw.stdout))
+        calls = [call.name for turn in transcript.turns for call in turn.tool_calls]
+
+        self.assertEqual(0, raw.returncode, raw.stderr)
+        self.assertEqual("declared-mcp-447", completion.text)
+        self.assertIn("declared/declared_marker", calls)
+        self.assertNotIn("ambient/ambient_marker", calls)
+        self.assertNotIn("ambient-mcp-447", raw.stdout + raw.stderr)
+        self.assertEqual(
+            "", subprocess.run(
+                ["git", "status", "--porcelain"], cwd=self.repo,
+                capture_output=True, text=True, check=True).stdout)
+
+
+class TestCopilotLiveConformance(unittest.TestCase):
+    """Prompt transport proven against a signed-in Copilot CLI."""
+
+    def setUp(self) -> None:
+        if os.environ.get("AGENTS_LIVE_COPILOT_CONFORMANCE") != "1":
+            self.skipTest("live Copilot conformance is opt-in")
+        if shutil.which("copilot") is None:
+            self.skipTest("copilot is not installed")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        subprocess.run(
+            ["git", "init", "-q", str(self.repo)], check=True, timeout=30)
+
+    def test_large_prompt_is_delivered_off_argv(self) -> None:
+        marker = "COPILOT_LARGE_STDIN_374"
+        prompt = "x" * 60000 + f"\nReply with exactly {marker}."
+        provider = providers.get("copilot")
+        spec = agent.ResolvedSpec(
+            "copilot-plan", prompt, "plan", (), (), (),
+            "copilot", None, None,
+        )
+
+        launch = provider.prepare(spec, agent.Request())
+        self.assertNotIn(prompt, launch.argv)
+        self.assertNotIn("x" * 60000, launch.argv)
+        self.assertEqual(prompt, launch.input_text)
+        self.assertIsNone(hostruntime.command_line_overflow(launch.argv))
+        environment = {**os.environ, **dict(launch.env)}
+        completed = subprocess.run(
+            launch.argv, cwd=self.repo, input=launch.input_text,
+            capture_output=True, text=True, check=False, timeout=180,
+            env=environment)
+        raw = agent.RawOutput(
+            completed.returncode, completed.stdout, completed.stderr)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(marker, provider.parse(raw).text)
 
 
 PLUGIN_SOURCE = '''
@@ -5210,6 +5465,18 @@ class TestProviderContract(TempRepository):
 
         self.assertFalse(checks[0]["ok"])
         self.assertIn("winget install Example.Demo", checks[0]["detail"])
+
+    def test_doctor_offers_codex_installation_guidance_on_wsl(self) -> None:
+        refused = runtime.hosts.system.ExecutableNotFound("nothing answers")
+        with (
+            mock.patch.object(
+                doctor.hostruntime, "pin_executable", side_effect=refused),
+            mock.patch.object(doctor.hostruntime, "id", return_value="wsl"),
+        ):
+            checks = doctor._provider_cli_checks({"codex"})
+
+        self.assertFalse(checks[0]["ok"])
+        self.assertIn("chatgpt.com/codex/install.sh", checks[0]["detail"])
 
     def test_a_provider_without_an_executable_is_not_probed(self) -> None:
         self._register(_EscapingProvider())

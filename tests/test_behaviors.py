@@ -107,6 +107,7 @@ def tearDownModule() -> None:
 
 PROVIDER_SPEND: dict[str, str | None] = {
     "claude": '{"result": "done", "total_cost_usd": 0.42}',
+    "codex": None,
     "copilot": '{"type": "session.usage_checkpoint", '
                '"data": {"totalNanoAiu": 42000000000}}',
     "fake": None,
@@ -538,8 +539,221 @@ class TestProviderRegistry(unittest.TestCase):
     """
 
     def test_the_public_providers_are_registered(self) -> None:
-        self.assertLessEqual({"claude", "copilot", "fake"},
+        self.assertLessEqual({"claude", "codex", "copilot", "fake"},
                              set(providers.names()))
+
+    def test_codex_declares_official_host_installers(self) -> None:
+        cli = providers.get("codex").cli
+
+        self.assertIn("codex/install.sh", cli.install_command("linux"))
+        self.assertIn("codex/install.sh", cli.install_command("wsl"))
+        self.assertIn("codex/install.ps1", cli.install_command("windows"))
+
+    def test_codex_uses_stdin_and_explicit_unattended_policy(self) -> None:
+        provider = providers.get("codex")
+        launch = provider.prepare(
+            agent.ResolvedSpec(
+                "codex-plan", "Inspect without editing.", "plan", (), (), (),
+                "codex", "gpt-5.5", "high",
+            ),
+            agent.Request(),
+        )
+
+        self.assertEqual("Inspect without editing.", launch.input_text)
+        self.assertNotIn("Inspect without editing.", launch.argv)
+        self.assertEqual("read-only", launch.argv[launch.argv.index("--sandbox") + 1])
+        self.assertEqual("never", launch.argv[launch.argv.index(
+            "--ask-for-approval") + 1])
+        for flag in ("--json", "--ephemeral", "--ignore-user-config",
+                     "--ignore-rules", "--strict-config"):
+            self.assertIn(flag, launch.argv)
+        self.assertIn('model_reasoning_effort="high"', launch.argv)
+        self.assertIn(
+            "sandbox_workspace_write.exclude_slash_tmp=true", launch.argv)
+        self.assertIn(
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true", launch.argv)
+
+    def test_codex_normalizes_documented_jsonl_events(self) -> None:
+        stream = "\n".join((
+            '{"type":"thread.started","thread_id":"thread-1"}',
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"id":"item-1",'
+            '"type":"agent_message","text":"done"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":10,'
+            '"cached_input_tokens":4,"output_tokens":2,'
+            '"reasoning_output_tokens":1}}',
+        ))
+
+        completion = providers.get("codex").parse(
+            agent.RawOutput(0, stream, ""))
+
+        self.assertEqual("done", completion.text)
+        self.assertEqual("thread-1", completion.transcript)
+        self.assertEqual({
+            "cached_input_tokens": "4",
+            "input_tokens": "10",
+            "output_tokens": "2",
+            "reasoning_output_tokens": "1",
+        }, dict(completion.usage))
+
+    def test_codex_normalizes_completed_tool_events(self) -> None:
+        stream = "\n".join((
+            '{"type":"item.completed","item":{"type":"mcp_tool_call",'
+            '"server":"declared","tool":"marker","arguments":{}}}',
+            '{"type":"item.completed","item":{"type":"command_execution",'
+            '"command":"git status"}}',
+            '{"type":"item.completed","item":{"type":"file_change",'
+            '"changes":[{"path":"result.txt"}]}}',
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"done"}}',
+        ))
+
+        transcript = providers.get("codex").transcript(
+            agent.TranscriptSource(stream))
+
+        self.assertEqual(
+            ["declared/marker", "shell", "write"],
+            [call.name for turn in transcript.turns
+             for call in turn.tool_calls],
+        )
+        self.assertEqual("done", transcript.final)
+
+    def test_codex_malformed_stream_is_not_successful_text(self) -> None:
+        completion = providers.get("codex").parse(
+            agent.RawOutput(0, "{malformed jsonl", ""))
+
+        self.assertEqual("", completion.text)
+        self.assertIsNone(completion.structured)
+
+    def test_codex_materializes_its_native_output_schema(self) -> None:
+        schema = {"type": "object", "required": ["summary"]}
+        provider = providers.get("codex")
+        artifact = provider.artifacts(agent.ProviderRuntime(
+            "plan", output_schema=schema))[0]
+        launch = provider.prepare(
+            agent.ResolvedSpec(
+                "codex-schema", "Summarize.", "plan", (), (), (
+                    ("AGENTS_LIVE_CODEX_OUTPUT_SCHEMA", "/run/schema.json"),
+                ), "codex", None, None, schema,
+            ),
+            agent.Request(),
+        )
+
+        self.assertEqual("codex-output-schema.json", artifact.relative_path)
+        self.assertEqual(schema, json.loads(artifact.text))
+        schema_index = launch.argv.index("--output-schema")
+        self.assertEqual("/run/schema.json", launch.argv[schema_index + 1])
+
+    def test_codex_rejects_tool_lists_it_cannot_enforce(self) -> None:
+        refusal = providers.get("codex").validate(agent.ResolvedSpec(
+            "codex-tools", "Inspect.", "plan", ("shell",), (), (),
+            "codex", None, None,
+        ))
+
+        self.assertEqual(
+            "provider codex does not support allow-tools", refusal)
+
+    def test_codex_renders_only_declared_mcp_servers(self) -> None:
+        provider = providers.get("codex")
+        servers = (
+            McpServer("local tool", {
+                "type": "stdio",
+                "command": "uv",
+                "args": ["run", "server.py"],
+                "env_vars": ["TOOL_TOKEN"],
+            }),
+            McpServer("remote", {
+                "type": "http",
+                "url": "https://example.invalid/mcp",
+                "env_http_headers": {"X-Region": "MCP_REGION"},
+                "bearer_token_env_var": "MCP_TOKEN",
+            }),
+        )
+        spec = agent.ResolvedSpec(
+            "codex-mcps", "Use the tools.", "plan", (), servers, (),
+            "codex", None, None,
+        )
+
+        self.assertIsNone(provider.validate(spec))
+        launch = provider.prepare(spec, agent.Request())
+        overrides = [
+            launch.argv[index + 1]
+            for index, value in enumerate(launch.argv[:-1])
+            if value == "--config"
+        ]
+
+        self.assertIn(
+            'mcp_servers."local tool".command="uv"', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".args=["run","server.py"]', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".env_vars=["TOOL_TOKEN"]', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".required=true', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".default_tools_approval_mode="approve"',
+            overrides,
+        )
+        self.assertIn(
+            'mcp_servers.remote.bearer_token_env_var="MCP_TOKEN"', overrides)
+        self.assertIn(
+            'mcp_servers.remote.env_http_headers={X-Region="MCP_REGION"}',
+            overrides,
+        )
+        self.assertFalse(any("undeclared" in value for value in overrides))
+
+    def test_codex_rejects_literal_mcp_secrets(self) -> None:
+        definitions = (
+            {"type": "stdio", "command": "tool", "env": {"TOKEN": "secret"}},
+            {"type": "http", "url": "https://example.invalid/mcp",
+             "headers": {"Authorization": "secret"}},
+            {"type": "http", "url": "https://example.invalid/mcp",
+             "http_headers": {"Authorization": "secret"}},
+        )
+
+        for definition in definitions:
+            with self.subTest(definition=definition):
+                refusal = providers.get("codex").validate(agent.ResolvedSpec(
+                    "codex-mcp", "Use the tool.", "plan", (),
+                    (McpServer("repo", definition),), (),
+                    "codex", None, None,
+                ))
+
+                self.assertIsNotNone(refusal)
+                self.assertNotIn("secret", refusal)
+
+    def test_codex_rejects_mcp_fields_it_cannot_translate(self) -> None:
+        refusal = providers.get("codex").validate(agent.ResolvedSpec(
+            "codex-mcp", "Use the tool.", "plan", (), (
+                McpServer("repo", {
+                    "type": "stdio", "command": "uv", "unsupported": True,
+                }),
+            ), (), "codex", None, None,
+        ))
+
+        self.assertEqual(
+            "MCP server repo has unsupported fields: unsupported", refusal)
+
+    def test_codex_classifies_jsonl_authentication_failures(self) -> None:
+        stdout = "\n".join((
+            '{"type":"thread.started","thread_id":"thread-1"}',
+            '{"type":"turn.failed","error":{"message":'
+            '"unexpected status 401 Unauthorized: Missing bearer token"}}',
+        ))
+
+        category = providers.get("codex").failure(
+            agent.RawOutput(1, stdout, ""))
+
+        self.assertEqual("authentication_failed", category)
+
+    def test_codex_classifies_other_failed_turns(self) -> None:
+        stdout = (
+            '{"type":"turn.failed","error":{"message":"model failed"}}')
+
+        category = providers.get("codex").failure(
+            agent.RawOutput(1, stdout, ""))
+
+        self.assertEqual("provider_turn_failed", category)
 
     def test_an_unknown_provider_fails_closed_and_names_what_is_installed(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -3386,9 +3600,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
             executable = shutil.which(argv[0])
             if executable is None:
                 continue  # the CLI this provider drives is not installed here
-            help_text = subprocess.run(
-                [executable, "--help"], capture_output=True, text=True,
-                check=False, timeout=120).stdout
+            help_text = "\n".join(
+                subprocess.run(
+                    [executable, *help_argv], capture_output=True, text=True,
+                    check=False, timeout=120).stdout
+                for help_argv in providers.get(name).cli.help_argvs
+            )
             if "--help" not in help_text:
                 continue  # the probe itself did not answer; prove nothing
             checked += 1
