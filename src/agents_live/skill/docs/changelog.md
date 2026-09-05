@@ -11,6 +11,15 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: make versioned release installers select their own exact version.
+  Linux, WSL, and Windows users can run the installer from a release-specific
+  URL without repeating the version as an argument. Release notes include both
+  platform commands, and the scripts still install uv when it is missing and
+  verify the release asset before activation.
+- feat: load repository plugins directly from source.
+  Plugin declarations now point to a repository-local `.py` module or package
+  directory exposing `PROVIDER`, `PROVIDERS`, or `OWNERSHIP_REGISTRY`. Replace
+  wheel paths and remove or update wheel-file checksums before upgrading.
 - fix: let fresh WSL bootstraps activate before repository initialization. (#443)
   Host liveness commands no longer require a project root, so a verified
   generation can stage its Windows heartbeat before `agents-live init`.
