@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-04
+ms.date: 2026-09-05
 ms.topic: reference
 ---
 
@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: load declared source plugins in the dashboard process.
+  Registry-owned agents retain their ownership state and lifecycle actions in
+  normal, all-repository, and development dashboards.
 - feat: make versioned release installers select their own exact version.
   Linux, WSL, and Windows users can run the installer from a release-specific
   URL without repeating the version as an argument. Release notes include both
