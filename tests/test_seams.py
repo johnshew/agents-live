@@ -4832,7 +4832,7 @@ class Provider:
     name = "contract-demo"
     cli = ProviderCli(
         executable=sys.executable,
-        probe_argv=("-m", "demo_cli", "--help"),
+        probe_argv=("-m", "json.tool", "--help"),
         install_commands=(("windows", "winget install Example.Demo"),),
     )
     capabilities = ProviderCapabilities(
@@ -5122,7 +5122,21 @@ class TestProviderContract(TempRepository):
 
         self.assertEqual(1, len(checks))
         self.assertTrue(checks[0]["ok"], checks[0])
-        self.assertIn("-m demo_cli --help", checks[0]["detail"])
+        self.assertIn("-m json.tool --help", checks[0]["detail"])
+
+    def test_a_cli_that_fails_its_own_probe_is_reported_unhealthy(self) -> None:
+        """A pinned executable is a file, not a working CLI."""
+        provider = self._plugin_provider()
+        provider.cli = agent.ProviderCli(
+            executable=sys.executable,
+            probe_argv=("-c", "raise SystemExit(3)"),
+            install_commands=(("windows", "winget install Example.Demo"),),
+        )
+
+        checks = doctor._provider_cli_checks({"contract-demo"})
+
+        self.assertFalse(checks[0]["ok"], checks[0])
+        self.assertIn("exited 3", checks[0]["detail"])
 
     def test_doctor_offers_the_install_command_the_provider_declares(
             self) -> None:

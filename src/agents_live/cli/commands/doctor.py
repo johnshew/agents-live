@@ -209,13 +209,40 @@ def _provider_cli_checks(names: set[str]) -> list[dict[str, object]]:
                 "detail": f"{exc}{remedy}",
             })
         else:
-            probe = " ".join((executable, *cli.probe_argv))
-            checks.append({
-                "check": f"provider CLI {name}",
-                "ok": True,
-                "detail": f"launchable executable: {executable}; probe: {probe}",
-            })
+            checks.append(_probe_check(name, executable, cli.probe_argv))
     return checks
+
+
+def _probe_check(
+        name: str, executable: str, probe_argv: tuple[str, ...],
+) -> dict[str, object]:
+    """Run the command the provider says proves its CLI answers.
+
+    A pinned executable is only a file. The provider names the arguments
+    that make it report itself, including a nested subcommand, so doctor
+    learns that the CLI is broken here rather than during a run.
+    """
+    argv = [executable, *probe_argv]
+    printable = " ".join(argv)
+    try:
+        probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "check": f"provider CLI {name}",
+            "ok": False,
+            "detail": f"`{printable}` did not answer: {exc}",
+        }
+    if probe.returncode != 0:
+        return {
+            "check": f"provider CLI {name}",
+            "ok": False,
+            "detail": f"`{printable}` exited {probe.returncode}",
+        }
+    return {
+        "check": f"provider CLI {name}",
+        "ok": True,
+        "detail": f"launchable executable: {executable}; probe: {printable}",
+    }
 
 
 def _quick() -> int:

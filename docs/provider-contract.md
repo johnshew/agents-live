@@ -38,7 +38,9 @@ neutral behavior. A provider overrides only what differs.
 
 **Identity and CLI metadata.** `name` is the selector. `cli` is a
 `ProviderCli` carrying the executable to probe, the arguments that make it
-report its own version, and per-host installation guidance. A provider with
+report itself, and per-host installation guidance. Doctor pins the executable
+and then runs those arguments, because a pinned executable is a file and not
+yet a working CLI. A provider with
 no executable of its own sets `executable` to `None` and is never probed nor
 offered an install command. The probe arguments are a tuple, so a CLI whose
 version lives behind a subcommand is described rather than special-cased.
