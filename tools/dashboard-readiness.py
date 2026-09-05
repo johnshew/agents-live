@@ -341,6 +341,7 @@ def _browser_executable() -> Path:
 
 
 def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
     all_repos = _api_all_repos(port)
@@ -353,81 +354,140 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
         try:
+            viewports = ((1280, 720), (1440, 900), (390, 844))
+            for width, height in viewports:
+                page = browser.new_page(viewport={"width": width, "height": height})
+                page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+                body = page.locator(".dashboard-body")
+                body.wait_for(state="visible")
+                groups = page.locator(".repository-group")
+                if groups.count() != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: rendered {groups.count()} "
+                        "repository groups")
+                heading = groups.locator(".repository-heading")
+                if str(directory) not in heading.inner_text():
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: repository path is absent")
+                if page.get_by_label("Search agents or repositories").count() != 1 \
+                        or page.get_by_role("button", name="Filters").count() != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: compact controls are absent")
+                if body.locator(
+                        ".host-service-panel, .repository-settings-panel").count():
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings consume the dashboard")
+                agent_box = page.locator(".agent-panel").bounding_box()
+                log_box = page.locator(".dashboard-log-panel").bounding_box()
+                if agent_box is None or log_box is None:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: inventory or log is absent")
+                if width >= 1280 and log_box["height"] < 140:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: log cannot show ten lines")
+                if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > height:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: operational regions overflow")
+                scope = page.get_by_label("Repository scope")
+                scope.click()
+                page.get_by_role("option", name=repository_name, exact=True).click()
+                page.get_by_text(
+                    f"{repository_name} | {directory}", exact=True).wait_for()
+                search = page.get_by_label("Search agents or repositories")
+                search.fill("readiness")
+                before = body.bounding_box()
+                page.get_by_role("button", name="Settings").click()
+                settings = page.locator(".dashboard-settings")
+                settings.wait_for(state="visible")
+                settings_box = settings.bounding_box()
+                if settings_box is None or abs(settings_box["x"]) > 1 \
+                        or abs(settings_box["y"]) > 1 \
+                        or abs(settings_box["width"] - width) > 1 \
+                        or abs(settings_box["height"] - height) > 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings is not full-screen")
+                if settings.get_attribute("aria-modal") != "true":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings lacks modal semantics")
+                settings.locator(".host-service-panel").wait_for()
+                repository_panel = settings.locator(".repository-settings-panel")
+                repository_panel.wait_for()
+                repository_text = repository_panel.inner_text()
+                for expected in (repository_name, str(directory), "Available",
+                                 "1 agent definition discovered",
+                                 "Default fallback"):
+                    if expected not in repository_text:
+                        raise ReadinessError(
+                            f"{mode} {width}x{height}: settings omitted {expected!r}")
+                if body.bounding_box() != before:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings resized the dashboard")
+                if page.evaluate(
+                        "document.documentElement.scrollWidth > window.innerWidth"):
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: page scrolls horizontally")
+                page.get_by_role("button", name="Close-settings").click()
+                settings.wait_for(state="hidden")
+                if search.input_value() != "readiness" or body.bounding_box() != before:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: closing settings lost context")
+                try:
+                    page.wait_for_function(
+                        "document.activeElement?.getAttribute('aria-label') === "
+                        "'Settings'",
+                        timeout=3000,
+                    )
+                except PlaywrightTimeoutError:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: focus did not return to Settings")
+                page.close()
+
+            empty = directory / "empty-repository"
+            (empty / "Agents").mkdir(parents=True, exist_ok=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            body = page.locator(".dashboard-body")
-            body.wait_for(state="visible")
-            groups = page.locator(".repository-group")
-            if groups.count() != 1:
-                raise ReadinessError(
-                    f"{mode}: operational page rendered {groups.count()} "
-                    "repository groups")
-            heading = groups.locator(".repository-heading")
-            if str(directory) not in heading.inner_text():
-                raise ReadinessError(
-                    f"{mode}: repository heading does not show its full path")
-            if page.get_by_text(
-                    "All registered repositories", exact=True).count() != 1:
-                raise ReadinessError(
-                    f"{mode}: default scope is not all registered repositories")
-            if page.get_by_label("Search agents or repositories").count() != 1 \
-                    or page.get_by_role("button", name="Filters").count() != 1:
-                raise ReadinessError(
-                    f"{mode}: compact search and filter controls are absent")
-            if body.locator(
-                    ".host-service-panel, .repository-settings-panel").count():
-                raise ReadinessError(
-                    f"{mode}: settings consume the operational viewport")
-            agent_box = page.locator(".agent-panel").bounding_box()
-            log_box = page.locator(".dashboard-log-panel").bounding_box()
-            if agent_box is None or log_box is None:
-                raise ReadinessError(
-                    f"{mode}: inventory or log is absent from the first viewport")
-            if log_box["height"] < 140:
-                raise ReadinessError(
-                    f"{mode}: log height {log_box['height']:.0f}px cannot show ten lines")
-            if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > 720:
-                raise ReadinessError(
-                    f"{mode}: inventory or log extends below the 1280x720 viewport")
-            if page.evaluate(
-                    "document.documentElement.scrollHeight > window.innerHeight"):
-                raise ReadinessError(
-                    f"{mode}: operational view requires page-level scrolling")
+            page.evaluate("window.__repositoryMutationAcceptance = 'retained'")
             scope = page.get_by_label("Repository scope")
             scope.click()
             page.get_by_role("option", name=repository_name, exact=True).click()
-            page.get_by_text(
-                f"{repository_name} | {directory}", exact=True).wait_for()
-            if page.locator(".repository-group").count() != 1:
-                raise ReadinessError(
-                    f"{mode}: repository focus replaced the operational page")
             page.get_by_role("button", name="Settings").click()
-            page.locator(".dashboard-settings .host-service-panel").wait_for()
-            page.locator(".dashboard-settings .repository-settings-panel").wait_for()
+            page.get_by_label("Repository path").fill(str(empty))
+            page.get_by_role("button", name="Register", exact=True).click()
+            page.get_by_role("status").get_by_text(
+                "Registered empty-repository successfully; discovered 0 agent "
+                f"definitions. The current view remains scoped to {repository_name}.",
+                exact=True,
+            ).wait_for()
+            if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
+                raise ReadinessError(f"{mode}: registration reloaded the page")
+            page.get_by_role("button", name="Close-settings").click()
+            scope.click()
+            page.get_by_role("option", name="empty-repository", exact=True).wait_for()
+            page.keyboard.press("Escape")
+            page.get_by_role("button", name="Settings").click()
+            empty_row = page.locator(".repository-setting-row").filter(
+                has=page.get_by_text("empty-repository", exact=True))
+            if "0 agent definitions discovered" not in empty_row.inner_text():
+                raise ReadinessError(f"{mode}: zero definitions is not explicit")
+            empty_row.get_by_role("button", name="Unregister").click()
+            confirmation = page.get_by_text(
+                "This removes only the registry entry.", exact=False)
+            confirmation.wait_for()
+            page.get_by_role("button", name="Unregister", exact=True).last.click()
+            page.get_by_role("status").get_by_text(
+                "Repository files, definitions, logs, triggers, and runtime "
+                "state were not deleted.", exact=False).wait_for()
+            if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
+                raise ReadinessError(f"{mode}: unregister reloaded the page")
+            page.get_by_role("button", name="Close-settings").click()
+            scope.click()
+            if page.get_by_role(
+                    "option", name="empty-repository", exact=True).count():
+                raise ReadinessError(f"{mode}: unregister did not refresh selector")
             page.close()
-            page = browser.new_page(viewport={"width": 390, "height": 844})
-            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            page.get_by_role("button", name="Settings").click()
-            page.wait_for_function("""
-                () => {
-                    const drawer = document.querySelector('.dashboard-settings');
-                    if (!drawer) return false;
-                    const box = drawer.getBoundingClientRect();
-                    return box.left >= 0 && box.right <= window.innerWidth;
-                }
-            """)
-            drawer_box = page.locator(".dashboard-settings").bounding_box()
-            if drawer_box is None or drawer_box["x"] < 0 \
-                    or drawer_box["x"] + drawer_box["width"] > 390:
-                raise ReadinessError(
-                    f"{mode}: settings drawer extends outside a mobile viewport")
-            if page.evaluate(
-                    "document.documentElement.scrollWidth > window.innerWidth"):
-                raise ReadinessError(
-                    f"{mode}: settings drawer creates horizontal page scrolling")
         finally:
             browser.close()
-    _say(f"{mode}: unified inventory and log fit the 1280x720 viewport")
+    _say(f"{mode}: settings overlay and repository refresh passed all viewports")
 
 
 def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:

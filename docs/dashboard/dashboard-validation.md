@@ -286,11 +286,20 @@ semantic command outcomes, and repository-qualified durable evidence. The v6.6
 bake is not complete until the installed test version passes this gate together
 with the #419 viewport recovery.
 
-### Deferred slice 1: Unify operational utility
+### Unified operational utility and repository settings
 
-Requires one default all-repositories page over a coherent snapshot, layout
-geometry, default grouping, visible logs, settings separation, and
-compact-filter acceptance from the installed artifact.
+Issue [#422](https://github.com/johnshew/agents-live/issues/422) requires one
+default all-repositories page over a coherent snapshot, layout geometry,
+default grouping, visible logs, settings separation, and compact-filter
+acceptance. Issue
+[#455](https://github.com/johnshew/agents-live/issues/455) adds real-browser
+acceptance for the settings modal and repository administration at 1280 x 720,
+1440 x 900, and 390 x 844. The gate verifies that settings does not resize the
+dashboard, closing restores context and focus, repository rows expose durable
+availability and discovery outcomes, and register/unregister refresh selectors
+and inventory without a document reload. Built-wheel and installed-tool
+evidence remain required by the release process; editable evidence alone does
+not satisfy those higher layers.
 
 ### Deferred slice 2: Complete read/write parity
 

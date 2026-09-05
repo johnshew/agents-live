@@ -5540,6 +5540,10 @@ class TestDashboardRepositorySurface(TempRepository):
         added = dashboard._repository_mutation(
             {"action": "add", "path": str(other)})
         self.assertTrue(added["ok"], added)
+        self.assertEqual("add", added["action"])
+        self.assertEqual("empty", added["repository"]["discovery_state"])
+        self.assertEqual(0, added["repository"]["agent_count"])
+        self.assertIn("0 agent definitions", added["message"])
         self.assertEqual({"other": str(other)}, repos.load()["repos"])
 
         selected = dashboard._repository_mutation(
@@ -5554,8 +5558,28 @@ class TestDashboardRepositorySurface(TempRepository):
         removed = dashboard._repository_mutation(
             {"action": "remove", "repo": "other"})
         self.assertTrue(removed["ok"], removed)
+        self.assertEqual("remove", removed["action"])
+        self.assertFalse(removed["repository"]["registered"])
+        self.assertIn("were not deleted", removed["message"])
         self.assertEqual({}, repos.load()["repos"])
         self.assertTrue(other.is_dir(), "unregistering must not delete files")
+
+    def test_dashboard_repository_rows_distinguish_discovery_failure(self) -> None:
+        dashboard = self._dashboard_module()
+        missing = self.root / "missing"
+        config = repos.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            f"[repos]\nmissing = {json.dumps(str(missing))}\n",
+            encoding="utf-8",
+        )
+
+        row = dashboard.repository_rows()[0]
+
+        self.assertFalse(row["available"])
+        self.assertEqual("failed", row["discovery_state"])
+        self.assertIsNone(row["agent_count"])
+        self.assertIn("not an existing directory", row["error"])
 
     def test_dashboard_all_repo_groups_use_the_shared_informational_rows(self) -> None:
         dashboard = self._dashboard_module()

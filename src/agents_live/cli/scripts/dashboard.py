@@ -108,6 +108,7 @@ STATE: dict = {
         "sort_by": "name",
         "descending": False,
     },
+    "repository_result": None,
     "health_check_running": False,
 }
 _SCAN_CACHE: tuple[
@@ -1522,7 +1523,7 @@ def host_service_panel() -> None:
         "stale": "text-orange-500",
         "missing": "text-red-400",
     }.get(service["state"], "text-gray-500")
-    with ui.card().classes("w-full host-service-panel"):
+    with ui.element("section").classes("settings-panel w-full host-service-panel"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
             with ui.column().classes("gap-1"):
                 ui.label("Host services").classes("text-base font-medium")
@@ -1556,16 +1557,51 @@ def repository_settings_panel() -> None:
 
     def announce(result: dict) -> None:
         if result.get("ok"):
-            _safe_ui(ui.notify, "Repository registry updated.", type="positive")
+            _safe_ui(ui.notify, result["message"], type="positive",
+                     multi_line=True)
         else:
             _safe_ui(ui.notify, result.get("error", "registry update failed"),
                      type="negative", multi_line=True)
         repository_settings_panel.refresh()
-        _safe_ui(ui.run_javascript, "window.location.reload()")
+        _refresh_views()
 
-    with ui.card().classes("w-full repository-settings-panel"):
-        ui.label("Repository settings").classes("text-base font-medium")
-        with ui.row().classes("w-full items-center gap-2"):
+    def confirm_unregister(row: dict) -> None:
+        with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
+            ui.label(f"Unregister {row['name']}?").classes(
+                "text-base font-medium")
+            ui.label(
+                "This removes only the registry entry. Repository files, "
+                "agent definitions, logs, triggers, and runtime state will "
+                "not be deleted."
+            ).classes("text-sm")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=confirmation.close).props(
+                    "flat no-caps")
+                ui.button(
+                    "Unregister",
+                    icon="link_off",
+                    on_click=lambda: (
+                        confirmation.close(),
+                        announce(_repository_mutation(
+                            {"action": "remove", "repo": row["name"]})),
+                    ),
+                ).props("color=negative unelevated no-caps autofocus")
+        confirmation.open()
+
+    with ui.element("section").classes(
+            "settings-panel w-full repository-settings-panel"):
+        ui.label("Repository administration").classes("text-base font-medium")
+        ui.label(
+            "The default repository controls fallback CLI resolution. "
+            "Changing it does not change the current dashboard view."
+        ).classes("text-xs text-gray-500")
+        result = STATE.get("repository_result")
+        if result:
+            result_class = "text-green-700" if result.get("ok") else "text-red-600"
+            ui.label(result.get("message") or result.get("error")).classes(
+                f"repository-result text-sm {result_class}").props(
+                    "role=status aria-live=polite")
+        with ui.row().classes("repository-register w-full items-center gap-2"):
             ui.input(
                 "Repository path", value="",
                 on_change=lambda event: new_path.update(value=event.value),
@@ -1582,34 +1618,42 @@ def repository_settings_panel() -> None:
                     _repository_mutation({"action": "clear-default"})),
             ).props("dense unelevated no-caps")
         for row in rows:
-            if row["default"] and not row["available"]:
-                state_label = "default, unavailable"
-            elif not row["available"]:
-                state_label = "unavailable"
-            elif row["default"]:
-                state_label = "default"
-            else:
-                state_label = "registered"
-            with ui.row().classes("w-full items-center gap-2 no-wrap"):
-                ui.label(row["name"]).classes("text-sm font-medium")
-                ui.label(state_label).classes("text-xs text-gray-500")
+            with ui.element("section").classes("repository-setting-row w-full"):
+                with ui.row().classes(
+                        "repository-setting-summary w-full items-center gap-2"):
+                    ui.label(row["name"]).classes("text-sm font-medium")
+                    ui.label(
+                        "Available" if row["available"] else "Unavailable"
+                    ).classes(
+                        "text-xs text-green-700" if row["available"]
+                        else "text-xs text-red-600")
+                    ui.label(
+                        "Default fallback" if row["default"] else "Not default"
+                    ).classes("text-xs text-gray-500")
+                    discovery = (
+                        "Discovery failed" if row["agent_count"] is None else
+                        f"{row['agent_count']} agent definition"
+                        f"{'s' if row['agent_count'] != 1 else ''} discovered"
+                    )
+                    ui.label(discovery).classes("text-xs text-gray-500")
                 ui.label(row["path"]).classes(
-                    "repository-path grow text-xs text-gray-500")
-                ui.button(
-                    "Set default",
-                    on_click=lambda name=row["name"]: announce(
-                        _repository_mutation(
-                            {"action": "set-default", "repo": name})),
-                ).props("dense flat no-caps").set_enabled(
-                    row["available"] and not row["default"])
-                ui.button(
-                    "Remove",
-                    on_click=lambda name=row["name"]: announce(
-                        _repository_mutation(
-                            {"action": "remove", "repo": name})),
-                ).props("dense flat no-caps")
-            if row["error"]:
-                ui.label(row["error"]).classes("text-xs text-red-500")
+                    "repository-setting-path text-xs text-gray-500")
+                if row["error"]:
+                    ui.label(row["error"]).classes("text-xs text-red-600")
+                with ui.row().classes("repository-setting-actions gap-2"):
+                    ui.button(
+                        "Set default",
+                        icon="home",
+                        on_click=lambda name=row["name"]: announce(
+                            _repository_mutation(
+                                {"action": "set-default", "repo": name})),
+                    ).props("dense flat no-caps").set_enabled(
+                        row["available"] and not row["default"])
+                    ui.button(
+                        "Unregister",
+                        icon="link_off",
+                        on_click=lambda selected=row: confirm_unregister(selected),
+                    ).props("dense flat no-caps color=negative")
 
 
 def _refresh_views() -> None:
@@ -1651,16 +1695,32 @@ def build_page() -> None:
 
 def repository_rows() -> list[dict]:
     current = repos.load()
-    return [
-        {
+    rows = []
+    for alias, path, error in repos.entries(current):
+        row = {
             "name": alias,
             "path": path,
             "default": alias == current["default_repo"],
             "available": error is None,
             "error": error,
+            "agent_count": None,
+            "discovery_state": "failed" if error else "empty",
+            "registered": True,
         }
-        for alias, path, error in repos.entries(current)
-    ]
+        if error is None:
+            try:
+                discovered = agent_view.repository_agents(
+                    Path(path), ownership_rate_limit_secs=10**9)
+                row["agent_count"] = len(discovered)
+                row["discovery_state"] = (
+                    "discovered" if discovered else "empty")
+            except (OSError, ValueError, agent.DefinitionError,
+                    state.StartedStateUnavailable) as exc:
+                row["available"] = False
+                row["error"] = str(exc)
+                row["discovery_state"] = "failed"
+        rows.append(row)
+    return rows
 
 
 @app.get("/api/repositories")
@@ -1677,6 +1737,8 @@ def _repository_mutation(payload: dict) -> dict:
     """Apply one registry mutation through the registry port."""
     action = str(payload.get("action", "")).strip()
     value = str(payload.get("path") or payload.get("repo") or "").strip()
+    before = repository_rows()
+    target = next((row for row in before if row["name"] == value), None)
     try:
         if action == "add":
             repo_commands._converge_registered(repos._add(value))
@@ -1689,9 +1751,54 @@ def _repository_mutation(payload: dict) -> dict:
         else:
             raise ValueError("unknown repository settings action")
     except (OSError, ValueError) as exc:
-        return {"ok": False, "error": str(exc),
+        return {"ok": False, "action": action, "error": str(exc),
                 "repositories": repository_rows()}
-    return {"ok": True, "repositories": repository_rows()}
+    rows = repository_rows()
+    if action == "add":
+        expected = Path(value).expanduser().resolve()
+        target = next(
+            (row for row in rows
+             if Path(row["path"]).expanduser().resolve() == expected), None)
+        if target is None:
+            raise RuntimeError("registered repository is absent from registry")
+        count = target["agent_count"]
+        if target["available"]:
+            message = (
+                f"Registered {target['name']} successfully; discovered "
+                f"{count} agent definition{'s' if count != 1 else ''}.")
+        else:
+            message = (
+                f"Registered {target['name']}, but discovery failed: "
+                f"{target['error']}")
+        current_scope = STATE["all_repos"].get("repo", "All")
+        if current_scope not in ("All", target["name"]):
+            message += f" The current view remains scoped to {current_scope}."
+    elif action == "remove":
+        if target is None:
+            raise RuntimeError("unregistered repository was absent from registry")
+        target = {**target, "registered": False, "default": False}
+        message = (
+            f"Unregistered {target['name']}. Repository files, definitions, "
+            "logs, triggers, and runtime state were not deleted.")
+    elif action == "set-default":
+        target = next((row for row in rows if row["name"] == value), None)
+        message = (
+            f"{value} is now the fallback repository. The current dashboard "
+            "view did not change.")
+    else:
+        target = None
+        message = (
+            "Cleared the fallback repository. The current dashboard view did "
+            "not change.")
+    result = {
+        "ok": True,
+        "action": action,
+        "message": message,
+        "repository": target,
+        "repositories": rows,
+    }
+    STATE["repository_result"] = result
+    return result
 
 
 def _all_repos_groups() -> list[dict]:
@@ -1855,8 +1962,15 @@ def _build_operational_page() -> None:
         ".dashboard-header{min-height:2.5rem}"
         ".dashboard-identity{min-width:0}"
         ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".dashboard-settings{padding:1rem}"
-        ".dashboard-settings-content{min-width:0}"
+        ".dashboard-settings .q-dialog__inner{padding:0}"
+        ".dashboard-settings-surface{min-width:0;overflow:auto;padding:1rem 1.25rem;"
+        "background:var(--q-background,#fff);border-radius:0}"
+        ".dashboard-settings-content{width:min(72rem,100%);margin:0 auto;min-width:0}"
+        ".settings-panel{display:grid;gap:.5rem;padding:1rem 0;border-top:1px solid "
+        "rgba(127,127,127,.25)}"
+        ".repository-setting-row{display:grid;gap:.35rem;padding:.75rem 0;"
+        "border-top:1px solid rgba(127,127,127,.25)}"
+        ".repository-setting-path{overflow-wrap:anywhere}"
         ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
         "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
         ".agent-panel{overflow:hidden;display:flex;flex-direction:column;border-top:1px solid "
@@ -1881,19 +1995,31 @@ def _build_operational_page() -> None:
         ".dashboard-scope{max-width:100%}"
         ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
         ".dashboard-body{grid-template-rows:minmax(15rem,1fr) minmax(9rem,.6fr)}"
+        ".dashboard-settings-surface{padding:.75rem}"
+        ".repository-register{align-items:stretch}"
+        ".repository-register .q-field{flex-basis:100%}"
+        ".repository-setting-summary{align-items:flex-start}"
         "}"
     )
 
-    with ui.right_drawer(value=False).classes(
-            "dashboard-settings").props("width=360 bordered") as settings_drawer:
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("Settings").classes("text-lg font-semibold")
-            ui.button(icon="close", on_click=settings_drawer.hide).props(
-                "flat round dense aria-label=Close")
-        with ui.column().classes(
-                "dashboard-settings-content w-full gap-4 no-wrap"):
-            host_service_panel()
-            repository_settings_panel()
+    with ui.dialog().classes("dashboard-settings").props(
+            "maximized aria-modal=true") as settings_dialog:
+        with ui.card().classes("dashboard-settings-surface w-full h-full").props(
+            "aria-labelledby=settings-title"):
+            with ui.column().classes(
+                    "dashboard-settings-content gap-4 no-wrap"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Settings").classes(
+                        "text-xl font-semibold").props("id=settings-title")
+                    ui.button(
+                        icon="close", on_click=settings_dialog.close
+                    ).props("flat round dense autofocus aria-label=Close-settings")
+                host_service_panel()
+                repository_settings_panel()
+    settings_dialog.on(
+        "hide", lambda: _safe_ui(
+            ui.run_javascript,
+            "document.querySelector('.settings-trigger')?.focus()"))
 
     with ui.row().classes(
             "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
@@ -1914,14 +2040,15 @@ def _build_operational_page() -> None:
                 "flat round dense aria-label=Run-health-check")
             ui.button(icon="refresh", on_click=_refresh_views).props(
                 "flat round dense aria-label=Refresh")
-            ui.button(icon="settings", on_click=settings_drawer.show).props(
-                "flat round dense aria-label=Settings")
+            ui.button(icon="settings", on_click=settings_dialog.open).classes(
+                "settings-trigger").props(
+                    "flat round dense aria-label=Settings")
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
         with ui.element("section").classes("agent-panel w-full min-h-0"):
             with ui.row().classes(
                     "agent-toolbar w-full items-center gap-2 no-wrap"):
-                ui.select(
+                repo_select = ui.select(
                     ["All", *repo_names], value=state_settings["repo"],
                     label="Repository scope",
                     on_change=lambda event: select_repo(event),
@@ -1998,7 +2125,7 @@ def _build_operational_page() -> None:
                     ui.label("No registered repositories.").classes(
                         "text-sm font-medium")
                     ui.button("Open settings", icon="settings",
-                              on_click=settings_drawer.show).props(
+                              on_click=settings_dialog.open).props(
                         "dense flat no-caps")
                 elif state_settings.get("grouped", True):
                     for group in visible_groups:
@@ -2061,7 +2188,13 @@ def _build_operational_page() -> None:
 
     def rebuild(*, announce: bool = True) -> None:
         nonlocal snapshot
+        repo_names = [row["name"] for row in repository_rows()]
+        if state_settings.get("repo") not in ["All", *repo_names]:
+            state_settings["repo"] = "All"
         snapshot = operational_snapshot()
+        repo_select.options = ["All", *repo_names]
+        repo_select.value = state_settings["repo"]
+        repo_select.update()
         STATE["last_refresh"] = datetime.now(timezone.utc)
         update_labels(snapshot)
         render_inventory(snapshot)

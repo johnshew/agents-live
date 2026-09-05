@@ -102,6 +102,23 @@ filters, focused scope without a second page, an always-visible ten-line log,
 and repository-qualified Run evidence. Canonical health, activity, and
 continuity semantics remain assigned to #423 and #424.
 
+[Issue #455](https://github.com/johnshew/agents-live/issues/455) completes the
+post-#422 repository-settings slice without adding another dashboard state
+model. Settings is a full-viewport modal over the operational page, so closing
+it restores the existing scope, filters, inventory, and activity context.
+Repository observations distinguish availability, discovery failure, and a
+successful zero-definition repository; registry mutations return a durable
+semantic result and refresh settings, selectors, and the shared operational
+snapshot without reloading the page. Unregister remains registry-only and
+requires an explicit non-deletion confirmation.
+
+Editable browser acceptance runs the ordinary and `--all-repos` launch forms
+at 1280 x 720, 1440 x 900, and 390 x 844. It asserts full-screen modal
+geometry, unchanged dashboard bounds, focus restoration, readable repository
+state, zero-definition registration outside the current view scope, live
+selector refresh, safe unregister feedback, and preservation of the browser
+document across both mutations.
+
 ### C. Make state explainable
 
 Implement [#423](https://github.com/johnshew/agents-live/issues/423). Derive
