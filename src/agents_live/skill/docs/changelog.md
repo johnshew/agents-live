@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.8.0 - 2026-09-04
+
 - fix: load declared source plugins in the dashboard process.
   Registry-owned agents retain their ownership state and lifecycle actions in
   normal, all-repository, and development dashboards.
