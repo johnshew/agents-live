@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-09-03
+ms.date: 2026-09-05
 ms.topic: overview
 ---
 
@@ -119,13 +119,19 @@ agents-live init --repo /path/to/repository
 agents-live doctor
 ```
 
+On Linux and WSL, the installer exposes `agents-live` and `al` through
+`~/.local/bin`. Open a new shell if that directory was not already on the
+current shell's `PATH`. Installation refuses to replace either name when it
+already exists there and does not point to the stable `current` command;
+remove or rename the conflicting command, then rerun the installer.
+
 On native Windows, run the release `install.ps1` from PowerShell. Every
 published installer asset is stamped with its release version, so a script
 downloaded from a version-specific release path needs no version argument.
 The `latest` path selects the latest stable release. Both scripts install uv
 when needed, retire an uncontested legacy uv tool installation after activating
-the generation, and print the generated command under `current` that works
-immediately.
+the generation, and expose the stable command. The Windows installer updates
+the current PowerShell process as well as the persistent user `PATH`.
 `doctor` validates the active generation, ownership record, and stable commands;
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
@@ -180,23 +186,14 @@ repository policy. Rotated records remain available through `agents-live logs`
 until their retention boundary.
 
 On native Windows, install a provider CLI through WinGet, then run the verified
-PowerShell bootstrap. Use the installed tool's absolute path until future
-shells receive its PATH update:
+PowerShell bootstrap:
 
 ```powershell
 winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
-$installer = Join-Path $env:TEMP "agents-live-install.ps1"
-Invoke-WebRequest `
-  "https://github.com/johnshew/agents-live/releases/latest/download/install.ps1" `
-  -OutFile $installer
-& $installer
-$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
-& $agentsLive --repo C:\path\to\repository init
+irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+agents-live --repo C:\path\to\repository init
 ```
-
-`init` prints the generated PowerShell completion path and the exact line to
-add to `$PROFILE`; Agents Live does not edit shell profiles itself.
 
 The installed `.claude/skills/agents-live/` payload is tool-managed and carries
 a directory-local `.gitignore`; project-authored sibling skills are unaffected.

@@ -14,6 +14,11 @@ history is retained in the source repository.
 - fix: enforce provider execution options consistently.
   Claude pipeline runs reject caller-supplied tools outside the pipeline, and
   Copilot runs pass their selected effort level to the CLI.
+- fix: make release installs immediately usable by command name.
+  Linux and WSL expose stable `agents-live` and `al` links through
+  `~/.local/bin`, refuse unrelated occupants without partially creating links,
+  and explain when a new shell is required. Windows adds the stable command to
+  the current PowerShell process as well as the persistent user `PATH`.
 - feat: make a provider integration self-contained. (#446)
   A provider now declares its CLI probe and installation guidance, the modes,
   models, efforts, and MCP transports it supports, the run-scoped files and

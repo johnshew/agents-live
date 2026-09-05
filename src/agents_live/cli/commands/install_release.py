@@ -13,8 +13,9 @@ from . import install_generation
 
 
 def _expose_command_root(root: Path) -> None:
-    """Add the stable current command directory to the user's PATH once."""
-    hostruntime.expose_user_path_directory(deploy.layout.command_root(root))
+    """Add the public command directory to the user's PATH once."""
+    hostruntime.expose_user_path_directory(
+        deploy.layout.public_command_root(root))
 
 
 def main(argv: list[str] | None = None) -> int:

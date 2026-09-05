@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-08-30
+ms.date: 2026-09-05
 ms.topic: troubleshooting
 ---
 
@@ -35,18 +35,15 @@ winget install Anthropic.ClaudeCode
 
 Run the official release bootstrap. It installs uv if needed, verifies the
 wheel against GitHub's recorded size and SHA-256 digest, installs it into its
-version directory, and invokes the generated command under `current` without
-waiting for PATH refresh:
+version directory, and exposes the stable command in the current PowerShell
+process and future sessions:
 
 ```powershell
 irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
-$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
-& $agentsLive --repo C:\path\to\repository init
-& $agentsLive --repo C:\path\to\repository doctor
+agents-live --repo C:\path\to\repository init
+agents-live --repo C:\path\to\repository doctor
 ```
 
-Follow the `$PROFILE` completion line printed by `init`, then open another
-PowerShell session. Agents Live never edits PowerShell profiles automatically.
 If `doctor` reports that only shims answer for a declared provider, install the
 native CLI shown in its remediation and rerun doctor.
 

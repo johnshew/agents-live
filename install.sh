@@ -131,6 +131,30 @@ wheel=$(printf '%s\n' "$result" | sed -n '2p')
 }
 
 root=${AGENTS_LIVE_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/agents-live}
+bin="$root/current/bin"
+link_root="$HOME/.local/bin"
+legacy_root=""
+if "$uv" tool list 2>/dev/null | grep -q '^agents-live '; then
+  legacy_root=$({ "$uv" tool dir 2>/dev/null || true; } | sed -n '1p')/agents-live
+fi
+
+# Refuse every foreign collision before activation, profile changes, or
+# retirement of an older uv-managed installation.
+for name in agents-live al; do
+  link="$link_root/$name"
+  target="$bin/$name"
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    existing=$(readlink -f "$link" 2>/dev/null || true)
+    expected=$(readlink -f "$target" 2>/dev/null || true)
+    case "$existing" in
+      "$expected") [ -n "$expected" ] && continue ;;
+      "$legacy_root"/*) [ -n "$legacy_root" ] && continue ;;
+    esac
+    echo "agents-live: cannot create $link because it already exists and does not point to $target" >&2
+    echo "Remove or rename the existing command, then run the installer again." >&2
+    exit 1
+  fi
+done
 
 # The bootstrap authenticates bytes and hands them to the package. It does
 # not know the installation layout: the wheel's own install-release builds,
@@ -142,10 +166,23 @@ root=${AGENTS_LIVE_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/agents-liv
 # Only after the new installation answers: a uv-managed one would otherwise
 # keep answering to agents-live on PATH alongside it.
 if "$uv" tool list 2>/dev/null | grep -q '^agents-live '; then
-  "$uv" tool uninstall agents-live >/dev/null 2>&1 || true
+  if ! "$uv" tool uninstall agents-live >/dev/null 2>&1; then
+    echo "agents-live: could not retire the existing uv tool installation" >&2
+    echo "The new version is installed but command links were not changed; resolve the uv tool installation and run this installer again." >&2
+    exit 1
+  fi
 fi
 
-bin="$root/current/bin"
 "$bin/agents-live" --version
-printf 'Agents Live is ready: %s\n' "$bin/agents-live"
-echo "Open a new shell to pick it up on PATH, or run: export PATH=\"$bin:\$PATH\""
+mkdir -p "$link_root"
+for name in agents-live al; do
+  link="$link_root/$name"
+  rm -f "$link"
+  ln -s "$bin/$name" "$link"
+done
+
+printf 'Agents Live is ready: %s\n' "$link_root/agents-live"
+case ":$PATH:" in
+  *:"$link_root":*) ;;
+  *) echo "Open a new shell before running agents-live; $link_root was added to your shell profiles." ;;
+esac

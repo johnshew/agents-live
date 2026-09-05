@@ -189,6 +189,7 @@ def remove_directory_link(path: Path) -> None:
 #: found. Only files that already exist are appended to, except
 #: ``.profile``, which is created because POSIX login shells read it.
 _PROFILE_FILES = (".profile", ".bashrc", ".zshrc")
+_PROFILE_MARKER = "# Added by Agents Live"
 
 #: Set by a harness that installs into a throwaway root. POSIX contains a
 #: profile write by redirecting ``HOME``; the Windows environment lives in
@@ -248,7 +249,7 @@ def expose_user_path_directory(directory: Path) -> None:
             with profile.open("a", encoding="utf-8", newline="\n") as stream:
                 if existing and not existing.endswith("\n"):
                     stream.write("\n")
-                stream.write(f"\n# Added by Agents Live\n{line}\n")
+                stream.write(f"\n{_PROFILE_MARKER}\n{line}\n")
         except OSError:
             continue
 
@@ -285,7 +286,16 @@ def remove_user_path_directory(directory: Path) -> None:
             lines = profile.read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
-        retained = [value for value in lines if value != line]
+        retained = []
+        index = 0
+        while index < len(lines):
+            if (lines[index] == _PROFILE_MARKER
+                    and index + 1 < len(lines)
+                    and lines[index + 1] == line):
+                index += 2
+                continue
+            retained.append(lines[index])
+            index += 1
         if retained == lines:
             continue
         try:

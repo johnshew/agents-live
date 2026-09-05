@@ -39,6 +39,16 @@ def _run(argv: list[str], *, environment: dict[str, str]) -> str:
     return completed.stdout
 
 
+def _run_failure(argv: list[str], *, environment: dict[str, str]) -> str:
+    completed = subprocess.run(
+        argv, cwd=ROOT, env=environment, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False)
+    if completed.returncode == 0:
+        raise ReadinessError(
+            f"{' '.join(argv)} unexpectedly succeeded:\n{completed.stdout}")
+    return completed.stdout + completed.stderr
+
+
 def _assets(wheel: Path) -> dict[str, bytes]:
     paths = [wheel, wheel.parent / "install.ps1", wheel.parent / "install.sh"]
     missing = [str(path) for path in paths if not path.is_file()]
@@ -137,7 +147,6 @@ def main() -> int:
                     f"http://127.0.0.1:{server.server_port}/releases"),
                 "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": (
                     f"http://127.0.0.1:{server.server_port}/download"),
-                "AGENTS_LIVE_NO_PATH_UPDATE": "1",
                 "HOME": str(root / "home"),
                 "USERPROFILE": str(root / "home"),
                 "APPDATA": str(root / "appdata"),
@@ -148,25 +157,69 @@ def main() -> int:
                 "UV_FIND_LINKS": str(wheelhouse),
             }
             if os.name == "nt":
+                environment["AGENTS_LIVE_NO_PATH_UPDATE"] = "1"
+                installer = str(wheel.parent / "install.ps1").replace("'", "''")
                 command = [
-                    "pwsh", "-NoProfile", "-File",
-                    str(wheel.parent / "install.ps1"),
+                    "pwsh", "-NoProfile", "-Command",
+                    f"& '{installer}'; agents-live --version",
                 ]
                 command_path = install_root / "current" / "Scripts" / "agents-live.exe"
             else:
                 (root / "home").mkdir()
+                link_root = root / "home" / ".local" / "bin"
+                environment["PATH"] = os.pathsep.join(
+                    (str(link_root), environment.get("PATH", "")))
                 command = ["sh", str(wheel.parent / "install.sh")]
                 command_path = install_root / "current" / "bin" / "agents-live"
+                link_root.mkdir(parents=True)
+                foreign = link_root / "al"
+                foreign.write_text("foreign command\n", encoding="utf-8")
+                refusal = _run_failure(command, environment=environment)
+                if "already exists and does not point" not in refusal:
+                    raise ReadinessError(
+                        "bootstrap collision refusal did not explain the conflict")
+                if foreign.read_text(encoding="utf-8") != "foreign command\n":
+                    raise ReadinessError("bootstrap replaced a foreign command")
+                if (link_root / "agents-live").exists():
+                    raise ReadinessError(
+                        "bootstrap partially exposed commands after a collision")
+                if install_root.exists():
+                    raise ReadinessError(
+                        "bootstrap changed the install root after a collision")
+                foreign.unlink()
             first = _run(command, environment=environment)
             second = _run(command, environment=environment)
             for output in (first, second):
                 if f"agents-live {version}" not in output:
                     raise ReadinessError(
                         "bootstrap did not report the installed exact version")
+                if os.name != "nt" and "Open a new shell" in output:
+                    raise ReadinessError(
+                        "bootstrap requested a restart when user bin was on PATH")
             installed = _run(
                 [str(command_path), "--version"], environment=environment)
             if f"agents-live {version}" not in installed:
                 raise ReadinessError("stable command returned the wrong version")
+            if os.name != "nt":
+                discovered = _run(
+                    ["agents-live", "--version"], environment=environment)
+                if f"agents-live {version}" not in discovered:
+                    raise ReadinessError(
+                        "bare command discovery returned the wrong version")
+                for name in ("agents-live", "al"):
+                    link = link_root / name
+                    expected = install_root / "current" / "bin" / name
+                    if not link.is_symlink() or link.resolve() != expected.resolve():
+                        raise ReadinessError(
+                            f"bootstrap did not expose the stable {name} command")
+                stale_environment = dict(environment)
+                stale_environment["PATH"] = os.pathsep.join(
+                    entry for entry in environment["PATH"].split(os.pathsep)
+                    if entry != str(link_root))
+                restart = _run(command, environment=stale_environment)
+                if "Open a new shell" not in restart:
+                    raise ReadinessError(
+                        "bootstrap did not explain stale-shell command discovery")
             if ((install_root / "current").resolve()
                     != (install_root / "versions" / version).resolve()):
                 raise ReadinessError("bootstrap activated the wrong generation")

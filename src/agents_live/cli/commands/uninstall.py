@@ -23,7 +23,10 @@ _WATCHER_GRACE_S = 5
 
 def _remove_command_exposure(root: Path) -> None:
     """Remove only PATH entries and symlinks that point at this install root."""
-    hostruntime.remove_user_path_directory(deploy.layout.command_root(root))
+    hostruntime.remove_user_path_directory(
+        deploy.layout.public_command_root(root))
+    if hostruntime.id() != hostruntime.WINDOWS:
+        hostruntime.remove_user_path_directory(deploy.layout.command_root(root))
     link_root = Path.home() / ".local" / "bin"
     for name in ("agents-live", "al"):
         link = link_root / name
