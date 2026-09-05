@@ -25,6 +25,12 @@ history is retained in the source repository.
   conformance test keep bulk prompts out of argv and remove the native Windows
   command-line ceiling; signed-in native Windows conformance remains a required
   6.9 candidate-acceptance check.
+- feat: make one dashboard the operational view for every registered repository. (#422, #423, #424, #455)
+  Repository groups, health, activity, and eligible actions now share one
+  coherent snapshot. Full-screen settings preserve the current investigation,
+  unavailable data remains explicit, and filters, selections, layout, and
+  activity position survive refresh and reconnect while rendering stays bounded
+  as repositories and agents grow.
 - fix: enforce provider execution options consistently.
   Claude pipeline runs reject caller-supplied tools outside the pipeline, and
   Copilot runs pass their selected effort level to the CLI.
