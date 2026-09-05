@@ -660,12 +660,12 @@ class TestProviderRegistry(unittest.TestCase):
                 "type": "stdio",
                 "command": "uv",
                 "args": ["run", "server.py"],
-                "env": {"TOOL_TOKEN": "opaque"},
+                "env_vars": ["TOOL_TOKEN"],
             }),
             McpServer("remote", {
                 "type": "http",
                 "url": "https://example.invalid/mcp",
-                "headers": {"X-Region": "test"},
+                "env_http_headers": {"X-Region": "MCP_REGION"},
                 "bearer_token_env_var": "MCP_TOKEN",
             }),
         )
@@ -687,6 +687,8 @@ class TestProviderRegistry(unittest.TestCase):
         self.assertIn(
             'mcp_servers."local tool".args=["run","server.py"]', overrides)
         self.assertIn(
+            'mcp_servers."local tool".env_vars=["TOOL_TOKEN"]', overrides)
+        self.assertIn(
             'mcp_servers."local tool".required=true', overrides)
         self.assertIn(
             'mcp_servers."local tool".default_tools_approval_mode="approve"',
@@ -694,7 +696,31 @@ class TestProviderRegistry(unittest.TestCase):
         )
         self.assertIn(
             'mcp_servers.remote.bearer_token_env_var="MCP_TOKEN"', overrides)
+        self.assertIn(
+            'mcp_servers.remote.env_http_headers={X-Region="MCP_REGION"}',
+            overrides,
+        )
         self.assertFalse(any("undeclared" in value for value in overrides))
+
+    def test_codex_rejects_literal_mcp_secrets(self) -> None:
+        definitions = (
+            {"type": "stdio", "command": "tool", "env": {"TOKEN": "secret"}},
+            {"type": "http", "url": "https://example.invalid/mcp",
+             "headers": {"Authorization": "secret"}},
+            {"type": "http", "url": "https://example.invalid/mcp",
+             "http_headers": {"Authorization": "secret"}},
+        )
+
+        for definition in definitions:
+            with self.subTest(definition=definition):
+                refusal = providers.get("codex").validate(agent.ResolvedSpec(
+                    "codex-mcp", "Use the tool.", "plan", (),
+                    (McpServer("repo", definition),), (),
+                    "codex", None, None,
+                ))
+
+                self.assertIsNotNone(refusal)
+                self.assertNotIn("secret", refusal)
 
     def test_codex_rejects_mcp_fields_it_cannot_translate(self) -> None:
         refusal = providers.get("codex").validate(agent.ResolvedSpec(

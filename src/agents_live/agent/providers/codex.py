@@ -234,26 +234,31 @@ def _mcp_error(name: str, definition: Mapping[str, object]) -> str | None:
     if transport in {None, "stdio", "local"}:
         if not isinstance(definition.get("command"), str):
             return f"{prefix} requires a string command"
-        allowed = {"type", "command", "args", "env", "cwd"}
+        if "env" in definition:
+            return f"{prefix} field env exposes literal values; use env_vars"
+        allowed = {"type", "command", "args", "env_vars", "cwd"}
     elif transport == "http":
         if not isinstance(definition.get("url"), str):
             return f"{prefix} requires a string url"
+        if "headers" in definition or "http_headers" in definition:
+            return (
+                f"{prefix} literal HTTP headers are not supported; "
+                "use env_http_headers")
         allowed = {
-            "type", "url", "bearer_token_env_var", "headers",
-            "http_headers", "env_http_headers",
+            "type", "url", "bearer_token_env_var", "env_http_headers",
         }
     else:
         return f"{prefix} uses unsupported transport {transport}"
     unknown = set(definition) - allowed
     if unknown:
         return f"{prefix} has unsupported fields: {', '.join(sorted(unknown))}"
-    for field in ("args",):
+    for field in ("args", "env_vars"):
         value = definition.get(field)
         if value is not None and (
                 not isinstance(value, list)
                 or not all(isinstance(item, str) for item in value)):
             return f"{prefix} field {field} must be an array of strings"
-    for field in ("env", "headers", "http_headers", "env_http_headers"):
+    for field in ("env_http_headers",):
         value = definition.get(field)
         if value is not None and (
                 not isinstance(value, dict)
@@ -275,14 +280,11 @@ def _mcp_argv(name: str, definition: Mapping[str, object]) -> tuple[str, ...]:
     ]
     if definition.get("type") in {None, "stdio", "local"}:
         values.append(("command", definition["command"]))
-        for field in ("args", "env", "cwd"):
+        for field in ("args", "env_vars", "cwd"):
             if field in definition:
                 values.append((field, definition[field]))
     else:
         values.append(("url", definition["url"]))
-        headers = definition.get("http_headers", definition.get("headers"))
-        if headers is not None:
-            values.append(("http_headers", headers))
         for field in ("bearer_token_env_var", "env_http_headers"):
             if field in definition:
                 values.append((field, definition[field]))

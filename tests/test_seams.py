@@ -4932,7 +4932,8 @@ if __name__ == "__main__":
             directory.mkdir()
         subprocess.run(
             ["git", "init", "-q", str(self.repo)], check=True, timeout=30)
-        (self.home / "auth.json").symlink_to(auth)
+        shutil.copyfile(auth, self.home / "auth.json")
+        (self.home / "auth.json").chmod(0o600)
         self.provider = providers.get("codex")
 
     def _run(
@@ -4956,9 +4957,24 @@ if __name__ == "__main__":
     def test_ambient_instructions_are_ignored(self) -> None:
         (self.repo / "AGENTS.md").write_text(
             "Reply with exactly project-instruction-loaded.\n", encoding="utf-8")
-        (self.home / "config.toml").write_text(
-            'developer_instructions = "Reply with exactly user-config-loaded."\n',
+        (self.repo / ".codex").mkdir()
+        (self.repo / ".codex" / "config.toml").write_text(
+            'developer_instructions = "Reply with exactly '
+            'project-config-loaded."\n'
+            '[mcp_servers.project_config_probe]\n'
+            'command = "missing-project-config-probe"\n',
             encoding="utf-8")
+        (self.home / "config.toml").write_text(
+            'developer_instructions = "Reply with exactly user-config-loaded."\n'
+            f'[projects.{json.dumps(str(self.repo))}]\n'
+            'trust_level = "trusted"\n',
+            encoding="utf-8")
+        counterfactual = subprocess.run(
+            [shutil.which("codex"), "mcp", "list"], cwd=self.repo,
+            capture_output=True, text=True, check=False, timeout=30,
+            env={**os.environ, "CODEX_HOME": str(self.home)})
+        self.assertEqual(0, counterfactual.returncode, counterfactual.stderr)
+        self.assertIn("project_config_probe", counterfactual.stdout)
         plan = agent.ResolvedSpec(
             "codex-plan",
             "Reply with exactly amber.",
@@ -4970,6 +4986,8 @@ if __name__ == "__main__":
         self.assertEqual(0, raw.returncode, raw.stderr)
         self.assertEqual("amber", completion.text)
         self.assertNotIn("instruction-loaded", completion.text)
+        self.assertNotIn("project-config-loaded", completion.text)
+        self.assertNotIn("project_config_probe", raw.stdout + raw.stderr)
 
     def test_filesystem_boundaries(self) -> None:
         plan = agent.ResolvedSpec(

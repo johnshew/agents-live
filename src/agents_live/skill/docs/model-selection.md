@@ -60,7 +60,10 @@ sandbox. Write runs use workspace-write with ambient `/tmp` and `$TMPDIR`
 write grants removed. Named stdio and streamable HTTP MCP servers are supported
 through `agents-live.mcps`; each selected server is required and pre-approved,
 while undeclared servers remain unavailable. Codex enforces declared output
-schemas during generation.
+schemas during generation. Codex MCP credentials must use environment-variable
+indirection: `env_vars` for stdio, or `bearer_token_env_var` and
+`env_http_headers` for HTTP. Literal MCP `env` and header values are rejected
+so secrets do not enter process arguments or transcripts.
 
 Codex does not currently support Agents Live `pipeline` mode or
 `agents-live.allow-tools`, because Codex CLI 0.153.4 does not expose the

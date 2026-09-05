@@ -112,6 +112,10 @@ credentials stored below the normal Copilot configuration home are not read.
 Codex reuses authentication from `CODEX_HOME` while `--ignore-user-config`
 suppresses user and repository configuration, instructions, hooks, rules, and
 undeclared MCP servers. Run `codex login status` to verify authentication.
+Selected Codex MCP servers reject literal `env`, `headers`, and `http_headers`
+values; use `env_vars`, `bearer_token_env_var`, or `env_http_headers` so only
+environment-variable names, rather than their credential values, enter the
+command line.
 
 The loader rejects duplicate keys, tabs, anchors, aliases, merge keys,
 explicit tags, byte-order marks, unknown top-level fields, and the retired
