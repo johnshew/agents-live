@@ -52,7 +52,8 @@ capability record that is empty or of the wrong type, so an integration
 cannot half-declare what it accepts.
 
 **Semantic validation.** `validate` receives the resolved specification and
-raises when the combination is unsupported. The defaults cover mode, model,
+returns a message naming what is unsupported, or `None` when the combination
+is accepted. The port turns a message into a `DefinitionError`. The defaults cover mode, model,
 effort, and transport. A provider adds the rules only it can state, such as
 Claude's plan-mode tool restriction or Copilot's pipeline allow-list.
 Validation runs in `prepare`, before any process is launched, so an
