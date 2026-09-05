@@ -79,14 +79,17 @@ _ISOLATED_HOMES = {
 # arrange their own root still override this one.
 _INSTALL_ROOT: tempfile.TemporaryDirectory | None = None
 _PREVIOUS_INSTALL_ROOT: str | None = None
+_PREVIOUS_CONFIG_HOME: str | None = None
 
 
 def setUpModule() -> None:
-    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT
+    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT, _PREVIOUS_CONFIG_HOME
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
+    _PREVIOUS_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME")
     _INSTALL_ROOT = tempfile.TemporaryDirectory()
-    os.environ[deploy.layout.ENV_INSTALL_ROOT] = str(
-        Path(_INSTALL_ROOT.name) / "install")
+    isolated_root = Path(_INSTALL_ROOT.name)
+    os.environ[deploy.layout.ENV_INSTALL_ROOT] = str(isolated_root / "install")
+    os.environ["XDG_CONFIG_HOME"] = str(isolated_root / "config")
 
 
 def tearDownModule() -> None:
@@ -94,6 +97,10 @@ def tearDownModule() -> None:
         os.environ.pop(deploy.layout.ENV_INSTALL_ROOT, None)
     else:
         os.environ[deploy.layout.ENV_INSTALL_ROOT] = _PREVIOUS_INSTALL_ROOT
+    if _PREVIOUS_CONFIG_HOME is None:
+        os.environ.pop("XDG_CONFIG_HOME", None)
+    else:
+        os.environ["XDG_CONFIG_HOME"] = _PREVIOUS_CONFIG_HOME
     if _INSTALL_ROOT is not None:
         _INSTALL_ROOT.cleanup()
 
