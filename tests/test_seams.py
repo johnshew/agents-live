@@ -1889,8 +1889,6 @@ class TestStartedState(TempRepository):
 
             def poll(self, _timeout: float | None) -> list[str]:
                 self.polls += 1
-                if self.polls == 2:
-                    time.sleep(0.01)
                 if self.polls == 1:
                     assert self._reporter is not None
                     self._reporter("queue-drop", {
@@ -1915,12 +1913,17 @@ class TestStartedState(TempRepository):
             self.assertEqual(1, firing.debounce_ms)
             return mock.Mock()
 
+        clock_values = iter((0.0,))
+
         with (
             mock.patch.object(internal.runtime, "current", return_value=host),
             mock.patch.object(internal, "dispatch", side_effect=fire),
             mock.patch.object(
                 internal, "_runtime_is_current", side_effect=(True, True, False)),
             mock.patch.object(internal, "_restart_watcher") as restart,
+            mock.patch(
+                "agents_live.runtime.watchloop.time.monotonic",
+                side_effect=lambda: next(clock_values, 0.01)),
         ):
             self.assertEqual(0, internal._watch(args))
 
