@@ -15,18 +15,17 @@ canonical in [dashboard-validation.md](dashboard-validation.md).
 
 ## Release context
 
-As of 2026-08-29:
+As of 2026-09-05:
 
-- v6.5.0 is the latest public release.
-- v6.6 is still being tested in the `bake/v6.6.0-local` branch. It has not
-  moved to `main` and is not an official release candidate.
-- The last installed v6.6 test version predates the dashboard viewport repair.
-- [#419](https://github.com/johnshew/agents-live/issues/419) is merged into
-  bake through [PR #420](https://github.com/johnshew/agents-live/pull/420),
-  restoring the current dashboard viewport.
-- [#421](https://github.com/johnshew/agents-live/issues/421) is the remaining
-  v6.6 dashboard work. After it merges, the resulting exact bake commit must be
-  built, installed locally, and validated before v6.6 moves to `main`.
+- v6.8.0 is the latest public release.
+- v6.9 combines provider completion with the dashboard cleanup tracked by
+  [#422](https://github.com/johnshew/agents-live/issues/422),
+  [#455](https://github.com/johnshew/agents-live/issues/455),
+  [#423](https://github.com/johnshew/agents-live/issues/423), and
+  [#424](https://github.com/johnshew/agents-live/issues/424).
+- #422 and #455 provide the unified operational page and repository-settings
+  overlay. #423 supplies canonical health, activity, and eligibility. #424 is
+  the remaining continuity, accessibility, reliability, and scale slice.
 
 The generated release report remains the source for the latest branch, test,
 and installed-version details. This section explains why the dashboard work is
@@ -60,7 +59,7 @@ redesign.
 | v6.6 viewport recovery | `AGT-03`; partial evidence toward `LOG-01` and `RSP-01` for the current single-repository page | [#419](https://github.com/johnshew/agents-live/issues/419) |
 | v6.6 qualified aggregate actions | `AGT-04`, `AGT-05`, `ACT-09`, `MUL-04`, `MUL-07`, `SEC-03`, `SEC-06` | [#421](https://github.com/johnshew/agents-live/issues/421) |
 | Unified product surface | `HDR-01`, `HDR-11`, `FLT-01`, `LOG-01`, `MUL-01`, `MUL-02`, `MUL-10`, `NAV-06`, `RSP-01` | Implemented by [#422](https://github.com/johnshew/agents-live/issues/422) |
-| Deferred truthful state and evidence | `HDR-02`, `HDR-03`, `HDR-10`, `HDR-11`, `AGT-01`, `AGT-02`, `AGT-04`, `LOG-02` through `LOG-05`, `HST-02`, `WCH-01`, `ACC-03` | [#423](https://github.com/johnshew/agents-live/issues/423) |
+| Truthful state and evidence | `HDR-02`, `HDR-03`, `HDR-10`, `HDR-11`, `AGT-01`, `AGT-02`, `AGT-04`, `LOG-02` through `LOG-05`, `HST-02`, `WCH-01`, `ACC-03` | Implemented by [#423](https://github.com/johnshew/agents-live/issues/423) |
 | Deferred continuity and hardening | `ACC-01`, `REF-03`, plus P0 defects exposed by reliability and accessibility acceptance | [#424](https://github.com/johnshew/agents-live/issues/424) |
 
 Partial evidence is not closure. In particular, #419 proves geometry for the
@@ -121,10 +120,22 @@ document across both mutations.
 
 ### C. Make state explainable
 
-Implement [#423](https://github.com/johnshew/agents-live/issues/423). Derive
-health, attention, eligibility, and activity from shared CLI and structured
-observability contracts. Add the compact filter and directed investigation
-journeys only after the page reads from one state model.
+[Issue #423](https://github.com/johnshew/agents-live/issues/423) derives health,
+attention, eligibility, and activity from shared CLI and structured
+observability contracts. The status and dashboard views share failure streak,
+watcher liveness, ownership, and health-beacon verdicts. Newest effective run
+failure remains visible across stopped and skipped states, disabled actions
+state their reasons, and watcher-observation failure does not disable unrelated
+valid lifecycle actions.
+
+Structured activity queries report complete, partial, or unavailable evidence
+instead of presenting unreadable data as zero. Repository-qualified summaries
+refresh at startup, manual and periodic refresh, and action completion. Focused
+source tests cover health parity, newest-failure precedence, watcher residency,
+partial dependencies, malformed activity, and scoped attention. Editable
+browser readiness passes ordinary, all-repositories, and reload-worker modes,
+including all required settings viewports, repository-qualified Run evidence,
+and abortive disconnect recovery.
 
 ### D. Preserve continuity and harden
 

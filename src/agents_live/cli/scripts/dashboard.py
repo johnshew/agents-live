@@ -48,6 +48,7 @@ from agents_live import agent, obs, paths, plugins, preflight, runtime, state  #
 from agents_live.cli import agent_view, identity, lifecycle  # noqa: E402
 from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
+from agents_live.obs import query as obs_query  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
 from nicegui import app, ui  # noqa: E402
@@ -147,20 +148,48 @@ def collect_agents() -> list[dict]:
         REPO_ROOT, ownership_rate_limit_secs=10**9)]
 
 
+def _collection_status(agents: list[dict]) -> dict:
+    reasons = list(dict.fromkeys(
+        str(reason) for row in agents for reason in (
+            row.get("stateError"), row.get("definitionError"),
+            row.get("ownershipError"), row.get("observationError"),
+        ) if reason
+    ))
+    valid_agents = sum(bool(row.get("identifier")) for row in agents)
+    if reasons and not valid_agents:
+        state_name = "unavailable"
+    elif reasons:
+        state_name = "partial"
+    else:
+        state_name = "available"
+    return {
+        "state": state_name,
+        "valid_agents": valid_agents,
+        "detail": "; ".join(reasons) if reasons else None,
+    }
+
+
 def _agent_view_dict(row: agent_view.AgentView) -> dict:
     return {
         "name": row.name,
         "identifier": row.identifier,
         "description": row.description,
         "state": row.state,
+        "stateError": row.state_error,
+        "definitionError": row.definition_error,
         "owner": row.owner,
         "isOwner": row.is_owner,
         "ownershipAvailable": row.ownership_available,
+        "ownershipError": row.ownership_error,
         "runtime": row.runtime,
         "model": row.model,
         "mode": row.mode,
         "schedule": list(row.schedules),
         "watch": row.watch,
+        "consecutiveFailures": row.consecutive_failures,
+        "watcherLiveness": row.watcher_liveness,
+        "observationsAvailable": row.observations_available,
+        "observationError": row.observation_error,
     }
 
 
@@ -301,6 +330,8 @@ def _scan(aliases: dict[str, str] | None = None,
         if entry.get("phase") != "done":
             continue
         status = str(entry.get("status", "")).lower()
+        if status == "skipped":
+            continue
         slots = newest.setdefault(identifier, {})
         for slot in ("any", status):
             current = slots.get(slot)
@@ -325,8 +356,9 @@ def _running_version() -> str:
     return AGENTS_LIVE_VERSION
 
 
-def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
-                             ) -> tuple[dict[str, int], dict[str, str]]:
+def _structured_log_snapshot(agent_names: dict[str, str] | set[str],
+                             logs_dir: Path | None = None,
+                             ) -> tuple[dict[str, int], dict[str, str], dict]:
     """Return trailing-hour errors and latest reported models via qlog.
 
     Accepts a mapping of identifier to display name. Records key on the
@@ -336,6 +368,16 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     display_by_key: dict[str, str] = (
         dict(agent_names) if isinstance(agent_names, dict)
         else {name: name for name in agent_names})
+    display_counts = {
+        name: sum(value == name for value in display_by_key.values())
+        for name in display_by_key.values()
+    }
+
+    def display_label(key: str) -> str | None:
+        name = display_by_key.get(key)
+        if name is None:
+            return None
+        return f"{name} ({key})" if display_counts[name] > 1 else name
     if (SCRIPTS_DIR / "__init__.py").is_file():
         if str(SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(SCRIPTS_DIR))
@@ -343,12 +385,14 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     else:
         import qlog as structured_qlog
 
-    logs_dir = _require_repo_path(LOGS_DIR)
+    logs_dir = _require_repo_path(logs_dir or LOGS_DIR)
     # Both suffixes: a run's outcome is written to <identifier>.jsonl, so
     # a *.log glob counted zero errors with failed runs on the screen.
     patterns = [str(logs_dir / "*.jsonl"), str(logs_dir / "*.log")]
-    if not any(logs_dir.glob("*.jsonl")) and not any(logs_dir.glob("*.log")):
-        return {}, {}
+    files = obs.files(logs_dir)
+    if not files:
+        return {}, {}, {"state": "available", "detail": None}
+    damaged = obs_query.damaged(files)
     connection = structured_qlog.duckdb.connect(":memory:")
     try:
         structured_qlog.build_view(connection, patterns,
@@ -381,15 +425,18 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
                 "QUALIFY row_number() OVER ("
                 "PARTITION BY agent_name ORDER BY ts DESC) = 1"
             ).fetchall()
-    except (OSError, structured_qlog.duckdb.Error):
-        return {}, {}
+    except (OSError, structured_qlog.duckdb.Error) as exc:
+        return {}, {}, {
+            "state": "unavailable",
+            "detail": f"Structured activity query failed: {exc}",
+        }
     finally:
         connection.close()
 
     errors: dict[str, int] = {}
     framework_errors = 0
     for raw_name, count in error_rows:
-        display = display_by_key.get(str(raw_name or ""))
+        display = display_label(str(raw_name or ""))
         if display is not None:
             errors[display] = errors.get(display, 0) + int(count)
         else:
@@ -397,21 +444,34 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     if framework_errors:
         errors["framework"] = framework_errors
     models = {
-        display_by_key.get(str(name), str(name)): str(model)
+        str(name): str(model)
         for name, model in model_rows
         if name and model
     }
-    return errors, models
+    evidence = {
+        "state": "partial" if damaged else "available",
+        "detail": (
+            f"{damaged} malformed structured log record"
+            f"{'s were' if damaged != 1 else ' was'} omitted"
+            if damaged else None
+        ),
+    }
+    return errors, models, evidence
 
 
 def _refresh_summary() -> str:
     agents = collect_agents()
     names = {agent["identifier"]: agent["name"] for agent in agents}
     names.update({agent["name"]: agent["name"] for agent in agents})
-    errors, models = _structured_log_snapshot(names)
+    errors, models, evidence = _structured_log_snapshot(names)
     STATE["models"] = models
-    error_text = ", ".join(
-        f"{name} {count}" for name, count in errors.items()) or "none"
+    if evidence["state"] == "unavailable":
+        error_text = f"unavailable ({evidence['detail']})"
+    else:
+        error_text = ", ".join(
+            f"{name} {count}" for name, count in errors.items()) or "none"
+        if evidence["state"] == "partial":
+            error_text += f"; partial ({evidence['detail']})"
     local_now = datetime.now().astimezone()
     timestamp = (
         f"{local_now.strftime('%b %d, %Y %I:%M:%S %p').replace(' 0', ' ')} "
@@ -741,14 +801,14 @@ async def _execute_action(request: _ActionRequest) -> int:
         type="positive" if ok else "negative",
     )
     elapsed = time.monotonic() - started
-    outcome = "completed" if ok else "failed"
+    outcome = "completed" if ok else "timed out" if code == 124 else "failed"
     _push_log(
         f"{outcome}: {request.description} (exit {code}, {elapsed:.1f}s)")
     log = globals().get("output_log")
     if log is not None:
         for line in out.splitlines():
             _safe_ui(log.push, f"    {line}")
-    _safe_ui(_refresh_views)
+    _safe_ui(_refresh_views, source="action completion")
     return code
 
 
@@ -773,7 +833,7 @@ async def _process_action_queue() -> None:
                 _push_log(
                     f"failed: {request.description} "
                     f"(exit {code}, {elapsed:.1f}s): {exc}")
-                _safe_ui(_refresh_views)
+                _safe_ui(_refresh_views, source="action completion")
                 if not request.future.done():
                     request.future.set_result(code)
             else:
@@ -866,8 +926,9 @@ async def health_check() -> None:
             return
         # Summarise the refreshed beacon so the user sees infra + smoketest,
         # not just exit codes. system_health reads the host health.ok beacon.
+        STATE["health_check_running"] = False
         h = system_health()
-        severity = {"ok": "positive", "degraded": "warning", "down": "negative"}
+        severity = {"healthy": "positive", "degraded": "warning"}
         _safe_ui(
             ui.notify, h["tip"],
             type=severity.get(h["level"], "negative"),
@@ -911,7 +972,9 @@ def agent_rows() -> list[dict]:
     return _agent_rows_for(REPO_ROOT, collect_agents())
 
 
-def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
+def _agent_rows_for(root: Path, agents: list[dict],
+                    reported_models: dict[str, str] | None = None
+                    ) -> list[dict]:
     """Shared informational row model for single and aggregate dashboards."""
     rows: list[dict] = []
     host = ownership.current_label()
@@ -922,6 +985,8 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
         name = agent["name"]
         identifier = agent["identifier"]
         state = re.sub(r"\s*\(pid \d+\)", "", agent.get("state", "?"))
+        state_error = agent.get("stateError")
+        definition_error = agent.get("definitionError")
         owner_value = agent.get("owner")
         ownership_available = agent.get("ownershipAvailable", True)
         owner = (
@@ -929,13 +994,35 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             "-" if ownership_available else "Unavailable"
         )
         ok_ago, err_ago, last_status = last_runs(identifier, runs)
-        # A failed last run only makes this host's view unhealthy while
-        # the agent is still registered here. "stopped" means no trigger
-        # is registered on this host - commonly an agent owned by
-        # another host, whose stale error belongs to that host's view.
-        # "unknown" (scheduler unreadable) keeps the flag rather than
-        # hiding a real failure (issue #176).
-        unhealthy = last_status == "error" and state != "stopped"
+        unhealthy = last_status == "error"
+        watcher_liveness = str(agent.get("watcherLiveness", "not-required"))
+        observations_available = agent.get("observationsAvailable", True)
+        unhealthy = unhealthy or watcher_liveness in {
+            "missing", "degraded", "unavailable"}
+        partial_reasons = [
+            reason for reason in (
+                f"State unavailable: {state_error}" if state_error else None,
+                f"Definition unavailable: {definition_error}"
+                if definition_error else None,
+                f"Ownership unavailable: {agent.get('ownershipError')}"
+                if not ownership_available else None,
+                f"Observations unavailable: {agent.get('observationError')}"
+                if not observations_available else None,
+            ) if reason
+        ]
+        health_reasons = list(partial_reasons)
+        if last_status == "error":
+            health_reasons.append("Failing: newest run")
+        watcher_reason = {
+            "missing": "Watcher missing",
+            "degraded": "Watcher degraded",
+            "unavailable": "Watcher unavailable",
+        }.get(watcher_liveness)
+        if watcher_reason:
+            health_reasons.append(watcher_reason)
+        health_text = "; ".join(health_reasons) or (
+            "Healthy" if last_status == "ok" else "No completed runs")
+        unhealthy = unhealthy or bool(partial_reasons)
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
@@ -943,22 +1030,60 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             agent_cost(identifier, costs) if runtime != "none"
             else ("-", "-"))
         cost_values = costs.get(identifier)
-        model = _agent_model(agent, STATE["models"])
-        can_pause = local and state == "started"
-        can_activate = local and state == "stopped"
+        model = _agent_model(agent, reported_models or STATE["models"])
+        collection_available = (
+            not state_error and not definition_error
+            and ownership_available)
+        can_run = collection_available and local and bool(identifier)
+        can_pause = collection_available and local and state == "started"
+        can_activate = collection_available and local and state == "stopped"
         can_claim = (
-            ownership_mode == "registry" and ownership_available and not local)
-        unavailable_tip = "Ownership registry unavailable"
+            collection_available and ownership_mode == "registry" and not local)
+        unavailable_tip = "; ".join(partial_reasons) or "Action unavailable"
+        remote_tip = (
+            f"Owned by another host ({owner}); use Claim to move it onto {host}"
+        )
         local_tip = (
             "Cross-machine ownership is disabled; run "
             "`agents-live ownership enable`")
+        run_tip = (
+            "Run this agent once now" if can_run else
+            unavailable_tip if not collection_available else remote_tip)
+        activate_tip = (
+            "Register this host's cron/watcher for this agent"
+            if can_activate else
+            unavailable_tip if not collection_available else
+            "Already active" if local else remote_tip)
+        pause_tip = (
+            "Stop this host's cron/watcher (config preserved)"
+            if can_pause else
+            unavailable_tip if not collection_available else
+            "Not running on this host" if local else remote_tip)
+        claim_tip = (
+            local_tip if ownership_mode == "local" else
+            unavailable_tip if not collection_available else
+            "Already local" if local else
+            f"Claim onto {host} (transfer ownership + register trigger)")
+        action_reasons = "; ".join(
+            f"{label}: {reason}"
+            for label, enabled, reason in (
+                ("Run", can_run, run_tip),
+                ("Start", can_activate, activate_tip),
+                ("Stop", can_pause, pause_tip),
+                ("Claim", can_claim, claim_tip),
+            )
+            if not enabled
+        )
         rows.append({
             "name": name,
             "identifier": identifier,
             "agent": agent_display,
             "trigger": trigger_summary(agent),
             "state": state,
+            "stateError": state_error,
+            "definitionError": definition_error,
             "owner": owner,
+            "ownershipError": agent.get("ownershipError"),
             "model": model,
             "last_ok": ok_ago,
             "last_err": err_ago,
@@ -967,26 +1092,21 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             "cost_day_value": cost_values[0] if cost_values else None,
             "cost_week_value": cost_values[1] if cost_values else None,
             "unhealthy": unhealthy,
+            "health": health_text,
+            "consecutive_failures": agent.get("consecutiveFailures", 0),
+            "watcher_liveness": watcher_liveness,
+            "observationsAvailable": observations_available,
+            "observationError": agent.get("observationError"),
             "local": local,
+            "can_run": can_run,
             "can_pause": can_pause,
             "can_activate": can_activate,
             "can_claim": can_claim,
-            "run_tip": "Run this agent once now",
-            "activate_tip": (
-                "Register this host's cron/watcher for this agent"
-                if can_activate else
-                (unavailable_tip if not ownership_available else
-                 "Already active" if local else
-                 f"Owned by another host - use Claim to move it onto {host}")),
-            "pause_tip": (
-                "Stop this host's cron/watcher (config preserved)"
-                if can_pause else
-                unavailable_tip if not ownership_available else
-                "Not running on this host"),
-            "claim_tip": (local_tip if ownership_mode == "local" else
-                          unavailable_tip if not ownership_available else
-                          "Already local" if local else
-                          f"Claim onto {host} (transfer ownership + register trigger)"),
+            "run_tip": run_tip,
+            "activate_tip": activate_tip,
+            "pause_tip": pause_tip,
+            "claim_tip": claim_tip,
+            "action_reasons": action_reasons,
         })
     return rows
 
@@ -1005,10 +1125,12 @@ def api_agents() -> dict:
     inventory without authentication. Keep DASHBOARD_HOST loopback-only unless
     the endpoint gains an authentication and network-exposure design (#215).
     """
+    agents = agent_rows() if REPO_ROOT is not None else []
     return {
         "host": ownership.current_label(),
         "repo": str(REPO_ROOT) if REPO_ROOT is not None else None,
-        "agents": agent_rows() if REPO_ROOT is not None else [],
+        "collection": _collection_status(agents),
+        "agents": agents,
     }
 
 
@@ -1043,7 +1165,9 @@ def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
     runtime = agent.get("runtime") or "agency copilot"
     if runtime == "none":
         return "-"
-    return reported_models.get(agent["name"]) or agent.get("model") or "default"
+        return (reported_models.get(agent["identifier"])
+            or reported_models.get(agent["name"])
+            or agent.get("model") or "default")
 
 
 def system_health() -> dict:
@@ -1058,26 +1182,40 @@ def system_health() -> dict:
     distinct *degraded* state: the framework end-to-end test is failing
     even though watcher/cron infrastructure is healthy.
 
-    Returns a dict with ``level`` ("ok" | "degraded" | "down"), a short
-    ``text`` label for the header, and a longer ``tip`` tooltip.
+    Returns a short textual state for the header and a longer evidence reason.
     """
     now = datetime.now(timezone.utc)
+    if STATE.get("health_check_running"):
+        return {
+            "level": "checking",
+            "text": "checking: host maintenance",
+            "tip": "Host maintenance and framework checks are in progress.",
+        }
     health_ok_path = HEALTH_OK_PATH
     if not health_ok_path.is_file():
-        return {"level": "down", "text": "unhealthy: no beacon",
+        return {"level": "unavailable", "text": "unavailable: no beacon",
                   "tip": "the host health.ok beacon is missing. Run "
                       "`agents-live doctor --repair`."}
-    mtime = datetime.fromtimestamp(health_ok_path.stat().st_mtime, timezone.utc)
+    try:
+        mtime = datetime.fromtimestamp(
+            health_ok_path.stat().st_mtime, timezone.utc)
+        data = json.loads(health_ok_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "level": "unavailable",
+            "text": "unavailable: invalid beacon",
+            "tip": f"The host health beacon could not be read: {exc}",
+        }
+    if not isinstance(data, dict):
+        return {
+            "level": "unavailable",
+            "text": "unavailable: invalid beacon",
+            "tip": "The host health beacon does not contain an object.",
+        }
     age_min = (now - mtime).total_seconds() / 60
     ago = _ago(mtime.isoformat(), now)
-    try:
-        data = json.loads(health_ok_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
     if age_min > HEALTH_STALE_MINUTES:
-        return {"level": "down", "text": f"unhealthy: beacon stale {ago}",
+        return {"level": "stale", "text": f"stale: beacon {ago}",
               "tip": f"health.ok last written {ago} (expected every five "
                   "minutes; unhealthy after one hour). Automatic "
                   "maintenance is not confirming infrastructure health - "
@@ -1086,18 +1224,25 @@ def system_health() -> dict:
     cron = data.get("cron")
     counts = (f"{watchers} watchers / {cron} cron"
               if watchers is not None and cron is not None else "infrastructure")
-    smoke = data.get("smoketest")
-    smoke = smoke if isinstance(smoke, dict) else {}
-    smoke_status = str(smoke.get("status", "")).lower()
-    if smoke_status == "fail":
-        reason = str(smoke.get("reason", "")).strip() or "no reason recorded"
-        return {"level": "degraded",
-                "text": f"degraded: smoketest failing {ago}",
-                "tip": f"Infrastructure healthy ({counts}); framework "
-                       f"smoketest is FAILING: {reason}"}
-    smoke_note = f"smoketest {smoke_status}" if smoke_status else "smoketest not run"
-    return {"level": "ok", "text": f"healthy {ago}",
-            "tip": f"Infrastructure healthy ({counts}); {smoke_note}; "
+    verdict = agent_view.health_verdict(data)
+    if not verdict.healthy:
+        if verdict.category == "agent_repeated_failures":
+            failures = data.get("agent_failures")
+            count = len(failures) if isinstance(failures, list) else 0
+            summary = (
+                f"{count} agent failure streak"
+                f"{'s' if count != 1 else ''}"
+            )
+        else:
+            summary = verdict.category.replace("_", " ")
+        return {
+            "level": "degraded",
+            "text": f"degraded: {summary} {ago}",
+            "tip": f"Infrastructure available ({counts}); {verdict.detail}; "
+                   f"remedy: {verdict.remedy}; beacon written {ago}",
+        }
+    return {"level": "healthy", "text": f"healthy {ago}",
+            "tip": f"Infrastructure healthy ({counts}); smoketest pass; "
                    f"beacon written {ago}"}
 
 
@@ -1291,6 +1436,7 @@ async def _claim_aggregate_row(event) -> None:
 _AGENT_COLUMNS = [
     {"name": "name", "label": "Agent", "field": "name", "align": "left", "sortable": True},
     {"name": "state", "label": "State", "field": "state", "align": "left", "sortable": True},
+    {"name": "health", "label": "Health", "field": "health", "align": "left", "sortable": True},
     {"name": "actions", "label": "Actions", "field": "actions", "align": "left"},
     {"name": "owner", "label": "Owner", "field": "owner", "align": "left", "sortable": True},
     {"name": "agent", "label": "Runtime", "field": "agent", "align": "left", "sortable": True},
@@ -1347,6 +1493,14 @@ def _add_agent_information_slots(table) -> None:
                    >{{ props.row.state }}</span>
         </q-td>
     ''')
+    if any(column["name"] == "health" for column in _AGENT_COLUMNS):
+        table.add_slot("body-cell-health", '''
+                <q-td :props="props">
+                    <span :class="props.row.unhealthy ? 'text-red text-weight-medium' : 'text-grey-7'">
+                        {{ props.row.health }}
+                    </span>
+                </q-td>
+        ''')
 
 
 def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
@@ -1357,23 +1511,32 @@ def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
     table.add_slot("body-cell-actions", f'''
         <q-td :props="props" class="text-left">
           <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
+               :disable="!props.row.can_run"
                  :title="props.row.run_tip"
+               :aria-label="'Run: ' + props.row.run_tip"
                  @click="() => $parent.$emit('{event_prefix}run', props.row)" />
           <q-btn flat dense round size="xs" icon="power_settings_new"
                  :color="props.row.can_activate ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_activate"
                  :title="props.row.activate_tip"
+                 :aria-label="'Start: ' + props.row.activate_tip"
                  @click="() => $parent.$emit('{event_prefix}activate', props.row)" />
           <q-btn flat dense round size="xs" icon="stop"
                  :color="props.row.can_pause ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_pause"
                  :title="props.row.pause_tip"
+                 :aria-label="'Stop: ' + props.row.pause_tip"
                  @click="() => $parent.$emit('{event_prefix}pause', props.row)" />
           <q-btn flat dense round size="xs" icon="download"
                  :color="props.row.can_claim ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_claim"
                  :title="props.row.claim_tip"
+                 :aria-label="'Claim: ' + props.row.claim_tip"
                  @click="() => $parent.$emit('{event_prefix}claim', props.row)" />
+                    <div v-if="props.row.action_reasons"
+                             class="text-caption text-grey-7"
+                        style="max-width:20rem;white-space:normal"
+                        v-text="props.row.action_reasons"></div>
         </q-td>
     ''')
     handlers = (
@@ -1481,9 +1644,12 @@ def header_actions() -> None:
     rows = agent_rows()
     with ui.row().classes("items-center gap-3 no-wrap"):
         h = system_health()
-        color = {"ok": "text-gray-500",
+        color = {"healthy": "text-gray-500",
                  "degraded": "text-orange-500",
-                 "down": "text-red-400"}.get(h["level"], "text-red-400")
+                 "checking": "text-blue-500",
+                 "stale": "text-orange-500",
+                 "unavailable": "text-red-400"}.get(
+                     h["level"], "text-red-400")
         ui.label(h["text"]).classes("text-sm " + color).tooltip(h["tip"])
         ui.button(
             "Run health check", icon="health_and_safety", on_click=health_check
@@ -1656,11 +1822,11 @@ def repository_settings_panel() -> None:
                     ).props("dense flat no-caps color=negative")
 
 
-def _refresh_views() -> None:
+def _refresh_views(*, source: str = "manual refresh") -> None:
     aggregate_refresh = globals().get("_all_repos_refresh")
     if aggregate_refresh is not None:
         with hostruntime.enumeration_pass():
-            _safe_ui(aggregate_refresh)
+            _safe_ui(aggregate_refresh, source=source)
             _safe_ui(host_service_panel.refresh)
         return
     # One pass for the whole render: the summary, the table, and the
@@ -1709,11 +1875,19 @@ def repository_rows() -> list[dict]:
         }
         if error is None:
             try:
-                discovered = agent_view.repository_agents(
-                    Path(path), ownership_rate_limit_secs=10**9)
-                row["agent_count"] = len(discovered)
+                discovered = [
+                    _agent_view_dict(item)
+                    for item in agent_view.repository_agents(
+                        Path(path), ownership_rate_limit_secs=10**9)
+                ]
+                collection = _collection_status(discovered)
+                row["agent_count"] = (
+                    collection["valid_agents"]
+                    if collection["state"] != "unavailable" else None)
                 row["discovery_state"] = (
-                    "discovered" if discovered else "empty")
+                    collection["state"] if collection["state"] != "available"
+                    else "discovered" if discovered else "empty")
+                row["error"] = collection["detail"]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
                 row["available"] = False
@@ -1812,6 +1986,13 @@ def _all_repos_groups() -> list[dict]:
             "available": error is None,
             "error": error,
             "rows": [],
+            "errors": {},
+            "activity": {"state": "unavailable", "detail": error},
+            "collection": {
+                "state": "unavailable" if error else "available",
+                "valid_agents": 0,
+                "detail": error,
+            },
         }
         if error is None:
             root = Path(path)
@@ -1821,6 +2002,12 @@ def _all_repos_groups() -> list[dict]:
                     for row in agent_view.repository_agents(
                         root, ownership_rate_limit_secs=10**9)
                 ]
+                group["collection"] = _collection_status(agents)
+                names = {row["identifier"]: row["name"] for row in agents}
+                errors, models, activity = _structured_log_snapshot(
+                    names, paths.repo_state_dir(root) / "logs")
+                group["errors"] = errors
+                group["activity"] = activity
                 group["rows"] = [
                     {
                         **row,
@@ -1828,7 +2015,8 @@ def _all_repos_groups() -> list[dict]:
                         "repository_path": str(root),
                         "repository_identifier": f"{alias}/{row['identifier']}",
                     }
-                    for row in _agent_rows_for(root, agents)
+                    for row in _agent_rows_for(
+                        root, agents, reported_models=models)
                 ]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
@@ -1901,6 +2089,16 @@ def operational_snapshot() -> dict:
         "rows": _ungrouped_agent_rows(groups),
         "health": system_health(),
         "scope": STATE["all_repos"].get("repo", "All"),
+        "errors": {
+            f"{group['name']}/{name}": count
+            for group in groups
+            for name, count in group.get("errors", {}).items()
+        },
+        "activity": {
+            group["name"]: group.get("activity", {
+                "state": "unavailable", "detail": "Activity not collected"})
+            for group in groups
+        },
     }
 
 
@@ -1918,16 +2116,57 @@ def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
     return filtered
 
 
-def _operational_summary(snapshot: dict) -> str:
+def _operational_summary(snapshot: dict, *, source: str | None = None) -> str:
     groups = snapshot["groups"]
     rows = snapshot["rows"]
     unavailable = sum(not group["available"] for group in groups)
+    partial = sum(
+        group["available"]
+        and group["collection"]["state"] != "available"
+        for group in groups)
     failing = sum(bool(row.get("unhealthy")) for row in rows)
     scope = ("all registered repositories" if snapshot["scope"] == "All"
              else f"repository {snapshot['scope']}")
+    unavailable_activity = [
+        name for name, evidence in snapshot["activity"].items()
+        if evidence["state"] == "unavailable"
+    ]
+    partial_activity = [
+        name for name, evidence in snapshot["activity"].items()
+        if evidence["state"] == "partial"
+    ]
+    errors = ", ".join(
+        f"{name} {count}" for name, count in snapshot["errors"].items()) or "none"
+    if unavailable_activity:
+        errors += "; unavailable for " + ", ".join(unavailable_activity)
+    if partial_activity:
+        errors += "; partial for " + ", ".join(partial_activity)
+    prefix = f"{source}: " if source else ""
     return (
+        prefix +
         f"Snapshot for {scope}: {len(groups)} repositories, {len(rows)} agents, "
-        f"{failing} failing, {unavailable} unavailable"
+        f"{failing} failing, {unavailable} unavailable, {partial} partial; "
+        f"errors in last hour: {errors}"
+    )
+
+
+def _attention_summary(snapshot: dict) -> str:
+    groups = snapshot["groups"]
+    scope = ("all registered repositories" if snapshot["scope"] == "All"
+             else f"repository {snapshot['scope']}")
+    failing = sum(bool(row.get("unhealthy")) for row in snapshot["rows"])
+    unavailable = sum(not group["available"] for group in groups)
+    partial = sum(
+        group["available"]
+        and group["collection"]["state"] != "available"
+        for group in groups)
+    host_issue = snapshot["health"].get("level") not in {"healthy", "checking"}
+    if not (failing or unavailable or partial or host_issue):
+        return f"No items need attention in {scope}."
+    return (
+        f"Attention in {scope}: {failing} failing agents, "
+        f"{unavailable} unavailable repositories, {partial} partial repositories, "
+        f"{int(host_issue)} host issues."
     )
 
 
@@ -2103,6 +2342,8 @@ def _build_operational_page() -> None:
                     "flat round dense aria-label=Reverse-sort")
             inventory_summary = ui.label().classes(
                 "text-xs text-gray-500 px-1")
+            attention_summary = ui.label().classes(
+                "text-xs text-orange-600 px-1")
             inventory = ui.element("div").classes(
                 "w-full grow min-h-0 agent-table-scroll")
 
@@ -2118,6 +2359,7 @@ def _build_operational_page() -> None:
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
             f"{len(visible_groups)} repositories")
+        attention_summary.text = _attention_summary(current)
         inventory.clear()
         with inventory:
             with ui.element("div").classes("all-repos-body w-full"):
@@ -2140,11 +2382,15 @@ def _build_operational_page() -> None:
                                     "repository-path grow text-xs text-gray-500")
                                 ui.label(
                                     "Unavailable" if not group["available"] else
+                                    f"{group['collection']['state'].title()} | "
                                     f"{len(group['rows'])} agents"
                                 ).classes("text-xs text-gray-500")
                             if group["error"]:
                                 ui.label(group["error"]).classes(
                                     "text-sm text-red-500 px-1")
+                            elif group["collection"]["detail"]:
+                                ui.label(group["collection"]["detail"]).classes(
+                                    "text-sm text-orange-600 px-1")
                             elif not group["rows"]:
                                 ui.label("No matching agents.").classes(
                                     "text-sm text-gray-500 px-1")
@@ -2186,7 +2432,8 @@ def _build_operational_page() -> None:
         health_label.text = f"Host {health['text']}"
         health_label.tooltip(health["tip"])
 
-    def rebuild(*, announce: bool = True) -> None:
+    def rebuild(*, announce: bool = True,
+                source: str = "manual refresh") -> None:
         nonlocal snapshot
         repo_names = [row["name"] for row in repository_rows()]
         if state_settings.get("repo") not in ["All", *repo_names]:
@@ -2199,7 +2446,7 @@ def _build_operational_page() -> None:
         update_labels(snapshot)
         render_inventory(snapshot)
         if announce:
-            _push_log(_operational_summary(snapshot))
+            _push_log(_operational_summary(snapshot, source=source))
 
     def select_repo(event) -> None:
         state_settings["repo"] = event.value
@@ -2232,10 +2479,11 @@ def _build_operational_page() -> None:
 
     update_labels(snapshot)
     render_inventory(snapshot)
-    _push_log(_operational_summary(snapshot))
+    _push_log(_operational_summary(snapshot, source="startup"))
     tick_age()
     ui.timer(1.0, tick_age)
-    _timer_after_first_interval(600.0, rebuild)
+    _timer_after_first_interval(
+        600.0, lambda: rebuild(source="periodic refresh"))
 
 
 PORT_PROBE_TIMEOUT_S = 0.5

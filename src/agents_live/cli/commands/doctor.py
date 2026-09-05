@@ -14,7 +14,7 @@ from ... import agent, deploy, paths, runtime, state
 from ...agent import providers
 from ...runtime.hosts import system as hostruntime
 from ...state import ownership, registry as repos
-from .. import lifecycle, update_check
+from .. import agent_view, lifecycle, update_check
 from . import internal
 
 
@@ -277,45 +277,15 @@ def _quick() -> int:
 
 
 def _quick_payload(payload: dict, source: str) -> int:
-    smoketest = payload.get("smoketest")
-    smoketest_status = (
-        str(smoketest.get("status", "")).lower()
-        if isinstance(smoketest, dict) else ""
-    )
-    if payload.get("status") == "healthy" and smoketest_status == "pass":
+    verdict = agent_view.health_verdict(payload)
+    if verdict.healthy:
         return _quick_result(True, "fresh", source)
-    if smoketest_status == "fail":
-        return _quick_result(
-            False,
-            "current framework smoketest verdict is failed",
-            source,
-            category="smoketest_failed",
-            remedy="agents-live smoketest",
-        )
-    if smoketest_status != "pass":
-        return _quick_result(
-            False,
-            "current framework smoketest verdict is missing or unknown",
-            source,
-            category="smoketest_unknown",
-            remedy="agents-live smoketest",
-        )
-    agent_checks = _agent_failure_checks(payload)
-    if agent_checks:
-        check = agent_checks[0]
-        return _quick_result(
-            False,
-            str(check["detail"]),
-            source,
-            category="agent_repeated_failures",
-            remedy=str(check["remedy"]),
-        )
     return _quick_result(
         False,
-        "current health record is degraded",
+        verdict.detail,
         source,
-        category="health_degraded",
-        remedy="agents-live doctor",
+        category=verdict.category,
+        remedy=verdict.remedy,
     )
 
 

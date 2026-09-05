@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -217,6 +218,24 @@ class TestDefinitionLoader(TempRepository):
         rows = status._rows(self.root)
 
         self.assertEqual(3, rows[0]["consecutive_failures"])
+
+    def test_status_reports_missing_and_alive_watcher_residency(self) -> None:
+        self.skill("watched", [
+            'agents-live.selector: "fake"',
+            'agents-live.watch: "docs/** debounce 1s"',
+        ])
+        spec = agent.load("watched", root=self.root)
+        state.replace(self.root, {spec.identifier})
+        host = MemoryHost()
+
+        with mock.patch.object(runtime, "current", return_value=host):
+            missing = status._rows(self.root)
+            collected = lifecycle.collect(selected_roots=(self.root,))
+            runtime.converge(collected.subscriptions, _host=host)
+            alive = status._rows(self.root)
+
+        self.assertEqual("missing", missing[0]["watcher_liveness"])
+        self.assertEqual("alive", alive[0]["watcher_liveness"])
 
     def test_status_reports_whether_this_runtime_owns_an_agent(self) -> None:
         self.skill("remote", ['agents-live.selector: "fake"'])
@@ -5581,6 +5600,248 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertIsNone(row["agent_count"])
         self.assertIn("not an existing directory", row["error"])
 
+    def test_dashboard_newest_failure_remains_visible_when_stopped(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("failed-agent", ['agents-live.selector: "fake/echo"'])
+        spec = agent.load("failed-agent", root=self.root)
+        obs.record(
+            paths.repo_state_dir(self.root) / "logs" / "failed.jsonl",
+            obs.create(
+                "run", "failed", repository=str(self.root),
+                agent=spec.identifier, run_id="failed-run", origin="manual"),
+        )
+        obs.record(
+            paths.repo_state_dir(self.root) / "logs" / "failed.jsonl",
+            obs.create(
+                "run", "skipped", repository=str(self.root),
+                agent=spec.identifier, run_id="skipped-run", origin="clock"),
+        )
+
+        rows = dashboard._agent_rows_for(
+            self.root, dashboard.collect_agents())
+
+        self.assertEqual("stopped", rows[0]["state"])
+        self.assertTrue(rows[0]["unhealthy"])
+        self.assertEqual("Failing: newest run", rows[0]["health"])
+
+    def test_dashboard_structured_activity_discloses_incomplete_evidence(
+        self,
+    ) -> None:
+        dashboard = self._dashboard_module()
+        logs = paths.repo_state_dir(self.root) / "logs"
+        logs.mkdir(parents=True)
+        (logs / "damaged.jsonl").write_text(
+            '{"ts":"2026-09-05T00:00:00+00:00"}\n{broken\n',
+            encoding="utf-8",
+        )
+
+        _errors, _models, evidence = dashboard._structured_log_snapshot(
+            {"sample": "sample"}, logs)
+
+        self.assertIn(evidence["state"], {"partial", "unavailable"})
+        self.assertTrue(evidence["detail"])
+
+        from agents_live.obs import qlog
+        with mock.patch.object(
+                qlog, "build_view",
+                side_effect=qlog.duckdb.Error("query unavailable")):
+            errors, models, unavailable = dashboard._structured_log_snapshot(
+                {"sample": "sample"}, logs)
+        self.assertEqual({}, errors)
+        self.assertEqual({}, models)
+        self.assertEqual("unavailable", unavailable["state"])
+        self.assertIn("Structured activity query failed", unavailable["detail"])
+
+    def test_dashboard_agent_collection_discloses_partial_dependencies(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("watched", [
+            'agents-live.selector: "fake/echo"',
+            'agents-live.watch: "docs/** debounce 1s"',
+        ])
+        spec = agent.load("watched", root=self.root)
+        state.replace(self.root, {spec.identifier})
+
+        failures = (
+            (
+                "started state",
+                mock.patch.object(
+                    dashboard.agent_view.state, "load",
+                    side_effect=state.StartedStateUnavailable(
+                        "started state unreadable")),
+                "State unavailable: started state unreadable",
+            ),
+            (
+                "definition",
+                mock.patch.object(
+                    dashboard.agent_view.agent, "discover",
+                    side_effect=agent.DefinitionError(
+                        "definition catalog unreadable")),
+                "Definition unavailable: definition catalog unreadable",
+            ),
+            (
+                "ownership",
+                mock.patch.object(
+                    dashboard.agent_view.ownership, "owns",
+                    side_effect=ownership.OwnershipUnavailableError(
+                        "runtime identity unreadable")),
+                "Ownership unavailable: runtime identity unreadable",
+            ),
+            (
+                "watcher enumeration",
+                mock.patch.object(
+                    dashboard.agent_view.runtime, "current",
+                    side_effect=RuntimeError("watcher host unreadable")),
+                "Observations unavailable: watcher host unreadable",
+            ),
+        )
+        for label, failure, expected in failures:
+            with self.subTest(label=label), failure:
+                if label == "ownership":
+                    with (
+                        mock.patch.object(
+                            dashboard.agent_view.ownership, "local_only",
+                            return_value=False),
+                        mock.patch.object(
+                            dashboard.agent_view.ownership, "load_owners",
+                            return_value={spec.identifier: "other/runtime"}),
+                        mock.patch.object(
+                            dashboard.agent_view.ownership, "resolve_owners",
+                            return_value={spec.identifier: "other/runtime"}),
+                    ):
+                        snapshot = dashboard.api_agents()
+                else:
+                    snapshot = dashboard.api_agents()
+            self.assertIn(
+                snapshot["collection"]["state"], {"partial", "unavailable"})
+            self.assertEqual(1, len(snapshot["agents"]))
+            row = snapshot["agents"][0]
+            self.assertIn(expected, row["health"])
+            self.assertTrue(row["unhealthy"])
+            if label != "watcher enumeration":
+                self.assertFalse(row["can_run"])
+                self.assertFalse(row["can_activate"])
+                self.assertFalse(row["can_pause"])
+                self.assertFalse(row["can_claim"])
+                self.assertIn(expected.split(":", 1)[0], row["run_tip"])
+            else:
+                self.assertTrue(row["can_run"])
+                self.assertFalse(row["can_activate"])
+                self.assertTrue(row["can_pause"])
+                self.assertFalse(row["can_claim"])
+                self.assertEqual("Run this agent once now", row["run_tip"])
+            if label == "watcher enumeration":
+                self.assertNotIn("Run:", row["action_reasons"])
+                self.assertIn("Start:", row["action_reasons"])
+                self.assertNotIn("Stop:", row["action_reasons"])
+                self.assertIn("Claim:", row["action_reasons"])
+                self.assertEqual(0, row["consecutive_failures"])
+                self.assertEqual("unavailable", row["watcher_liveness"])
+            else:
+                self.assertIn("Run:", row["action_reasons"])
+                self.assertIn("Start:", row["action_reasons"])
+                self.assertIn("Stop:", row["action_reasons"])
+                self.assertIn("Claim:", row["action_reasons"])
+
+    def test_dashboard_aggregate_summary_qualifies_partial_repository(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        dashboard.STATE["all_repos"]["repo"] = "All"
+
+        with mock.patch.object(
+                dashboard.agent_view.state, "load",
+                side_effect=state.StartedStateUnavailable(
+                    "started state unreadable")):
+            snapshot = dashboard.operational_snapshot()
+
+        self.assertEqual("partial", snapshot["groups"][0]["collection"]["state"])
+        self.assertIn(
+            "started state unreadable",
+            snapshot["groups"][0]["collection"]["detail"])
+        summary = dashboard._operational_summary(snapshot)
+        self.assertIn("all registered repositories", summary)
+        self.assertIn("1 partial", summary)
+        attention = dashboard._attention_summary(snapshot)
+        self.assertIn("Attention in all registered repositories", attention)
+        self.assertIn("1 failing agents", attention)
+
+    def test_dashboard_attention_includes_degraded_host_health(self) -> None:
+        dashboard = self._dashboard_module()
+        snapshot = {
+            "groups": [],
+            "rows": [],
+            "scope": "All",
+            "health": {"level": "degraded"},
+        }
+
+        summary = dashboard._attention_summary(snapshot)
+
+        self.assertIn("Attention in all registered repositories", summary)
+        self.assertIn("1 host issues", summary)
+        self.assertNotIn("No items need attention", summary)
+
+    def test_dashboard_activity_summary_runs_at_each_refresh_boundary(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        spec = agent.load("sample", root=self.root)
+        obs.record(
+            paths.repo_state_dir(self.root) / "logs" / "failed.jsonl",
+            obs.create(
+                "run", "failed", repository=str(self.root),
+                agent=spec.identifier, run_id="failed-run", origin="manual"),
+        )
+        dashboard.STATE["all_repos"]["repo"] = "All"
+        dashboard.ui.timer.reset_mock()
+        dashboard.host_service_panel.refresh = mock.Mock()
+        dashboard.repository_settings_panel.refresh = mock.Mock()
+
+        with (
+            mock.patch.object(dashboard, "_push_log") as activity,
+            mock.patch.object(
+                dashboard.hostruntime, "enumeration_pass",
+                return_value=contextlib.nullcontext()),
+        ):
+            dashboard._build_operational_page()
+            periodic = next(
+                call.args[1] for call in dashboard.ui.timer.call_args_list
+                if call.args and call.args[0] == 600.0)
+            periodic()
+            periodic()
+            dashboard._refresh_views()
+
+            async def complete_action() -> None:
+                request = dashboard._ActionRequest(
+                    "Stop", "stop", ["--name", spec.identifier],
+                    spec.identifier, None,
+                    asyncio.get_running_loop().create_future(),
+                    repository=self.root.name,
+                    repository_path=str(self.root),
+                )
+                with (
+                    mock.patch.object(
+                        dashboard.ng_run, "io_bound",
+                        new=mock.AsyncMock(return_value=(0, "", ""))),
+                    mock.patch.object(dashboard, "_log_action"),
+                ):
+                    self.assertEqual(0, await dashboard._execute_action(request))
+
+            asyncio.run(complete_action())
+
+        summaries = [
+            call.args[0] for call in activity.call_args_list
+            if "Snapshot for" in call.args[0]
+        ]
+        for source in (
+                "startup", "periodic refresh", "manual refresh",
+                "action completion"):
+            self.assertTrue(any(
+                line.startswith(f"{source}: Snapshot for ")
+                for line in summaries), (source, summaries))
+        self.assertTrue(any(
+            f"{self.root.name}/sample 1" in line for line in summaries),
+            summaries)
+
     def test_dashboard_all_repo_groups_use_the_shared_informational_rows(self) -> None:
         dashboard = self._dashboard_module()
         other = (self.root / "other").resolve()
@@ -5658,6 +5919,7 @@ class TestDashboardRepositorySurface(TempRepository):
             {self.root.name, "other"},
             {row["repository"] for row in aggregate["rows"]},
         )
+        self.assertEqual({}, aggregate["errors"])
         repository_match = dashboard._filtered_repo_groups(
             aggregate["groups"],
             {"name": "other", "state": "All", "owner": "All",
@@ -5805,6 +6067,39 @@ class TestDashboardRepositorySurface(TempRepository):
         finally:
             dashboard.STATE["health_check_running"] = False
             runtime.configure(previous)
+
+    def test_dashboard_header_reports_truthful_host_health_states(self) -> None:
+        dashboard = self._dashboard_module()
+        beacon = self.root / "health.ok"
+        with mock.patch.object(dashboard, "HEALTH_OK_PATH", beacon):
+            unavailable = dashboard.system_health()
+            self.assertEqual("unavailable", unavailable["level"])
+            self.assertIn("unavailable", unavailable["text"])
+
+            beacon.write_text("not json", encoding="utf-8")
+            invalid = dashboard.system_health()
+            self.assertEqual("unavailable", invalid["level"])
+            self.assertIn("invalid beacon", invalid["text"])
+
+            beacon.write_text(json.dumps({
+                "status": "degraded",
+                "watchers": 1,
+                "cron": 2,
+                "smoketest": {"status": "pass"},
+                "agent_failures": [{
+                    "agent": "sample",
+                    "consecutive_failures": 3,
+                }],
+            }), encoding="utf-8")
+            degraded = dashboard.system_health()
+            self.assertEqual("degraded", degraded["level"])
+            self.assertIn("1 agent failure streak", degraded["text"])
+
+            dashboard.STATE["health_check_running"] = True
+            checking = dashboard.system_health()
+            self.assertEqual("checking", checking["level"])
+            self.assertIn("checking", checking["text"])
+            dashboard.STATE["health_check_running"] = False
 
 
 class TestWindowsTaskScheduling(unittest.TestCase):
@@ -6474,7 +6769,7 @@ class TestArchitectureFitness(unittest.TestCase):
                             "visible-agent", root=root).identifier
                         state.replace(root, {identifier})
                         self.assertEqual(
-                            ({}, {}),
+                            ({}, {}, {"state": "available", "detail": None}),
                             dashboard._structured_log_snapshot(
                                 {"visible-agent"}))
                         snapshot = dashboard.api_agents()

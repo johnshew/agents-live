@@ -52,9 +52,10 @@ DEFINITION = """---
 name: readiness-agent
 description: Fixture definition for the dashboard readiness gate.
 metadata:
-  agents-live.schema-version: "1"
-  agents-live.selector: "fake/echo"
-  agents-live.schedule: "0 8 * * *"
+    agents-live.schema-version: "1"
+    agents-live.selector: "fake/echo"
+    agents-live.schedule: "0 8 * * *"
+    agents-live.watch: "docs/** debounce 1s"
 ---
 Report dashboard readiness.
 """
@@ -214,10 +215,19 @@ def _environment(directory: Path) -> dict[str, str]:
 
 SEED = """
 import sys
+import uuid
 from pathlib import Path
-from agents_live import agent, state
+from agents_live import agent, obs, paths, state
 root = Path(sys.argv[1]).resolve()
-state.replace(root, {agent.load("readiness-agent", root=root).identifier})
+identifier = agent.load("readiness-agent", root=root).identifier
+state.replace(root, {identifier})
+obs.record(
+    paths.repo_state_dir(root) / "logs" / f"{identifier}.jsonl",
+    obs.create(
+        "run", "failed", repository=str(root), agent=identifier,
+        run_id=uuid.uuid4().hex, origin="readiness",
+    ),
+)
 """
 
 
@@ -290,7 +300,8 @@ def _output(process: subprocess.Popen) -> str:
     return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
 
-def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
+def _assert_row(payload: dict, mode: str, *, started: bool,
+                expect_failure: bool = True) -> None:
     rows = payload["agents"]
     names = [row.get("name") for row in rows]
     if names != ["readiness-agent"]:
@@ -310,6 +321,24 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
         raise ReadinessError(
             f"{mode}: can_activate is {row.get('can_activate')!r} for a "
             f"{expected_state} row")
+    if row.get("watcher_liveness") != "missing":
+        raise ReadinessError(
+            f"{mode}: started watcher liveness is "
+            f"{row.get('watcher_liveness')!r}, expected 'missing'")
+    if expect_failure and (
+            not row.get("unhealthy")
+            or "Failing: newest run" not in str(row.get("health", ""))):
+        raise ReadinessError(
+            f"{mode}: newest structured run failure is not visible: "
+            f"{row.get('health')!r}")
+    if "Watcher missing" not in str(row.get("health", "")):
+        raise ReadinessError(
+            f"{mode}: watcher intent masked missing liveness: "
+            f"{row.get('health')!r}")
+    reasons = str(row.get("action_reasons", ""))
+    if "Start: Already active" not in reasons or "Claim:" not in reasons:
+        raise ReadinessError(
+            f"{mode}: disabled action reasons are incomplete: {reasons!r}")
 
 
 def _browser_executable() -> Path:
@@ -373,6 +402,12 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
                         or page.get_by_role("button", name="Filters").count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: compact controls are absent")
+                page.get_by_text(
+                    "Attention in all registered repositories:", exact=False,
+                ).wait_for()
+                page.get_by_text("Failing: newest run", exact=False).wait_for()
+                page.get_by_text("Watcher missing", exact=False).wait_for()
+                page.get_by_text("Start: Already active", exact=False).wait_for()
                 if body.locator(
                         ".host-service-panel, .repository-settings-panel").count():
                     raise ReadinessError(
@@ -562,7 +597,7 @@ def _assert_abortive_disconnect_survives(
             with contextlib.suppress(OSError):
                 client.sendall(request)
     payload = _await_rows(process, port, f"{mode} after client resets")
-    _assert_row(payload, mode, started=True)
+    _assert_row(payload, mode, started=True, expect_failure=False)
     _say(f"{mode}: remained available after abortive client disconnects")
 
 
@@ -652,10 +687,12 @@ def main() -> int:
         _check(
             launcher, directory, environment, dev=False,
             source=args.editable)
+        _seed_started_state(python, directory, environment)
         _check(
             launcher, directory, environment, dev=False,
             source=args.editable, all_repos=True)
         if not args.skip_dev:
+            _seed_started_state(python, directory, environment)
             _check(
                 launcher, directory, environment, dev=True,
                 source=args.editable)
