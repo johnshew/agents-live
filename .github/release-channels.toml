@@ -7,29 +7,20 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "main"
-version = "6.7.0"
+branch = "copilot/make-provider-integrations-self-contained-6-9"
+version = "6.9.0"
 promotes_to = "release"
-deployed_version = "6.7.0.dev0+g5ee721fb"
-deployed_commit = "5ee721fb9fbd30f04e5a395b715c9eeba6491fe2"
-validated_on = "2026-09-04"
+deployed_version = "6.8.0"
+deployed_commit = "186f3abbba03717637b71ae02e3e3d2b39ea4549"
+validated_on = "2026-09-05"
 
 [bake.issues]
 delivered = []
-partial = [334, 374, 388, 426]
-deferred = [105]
-promotion_decision = [334, 374, 376, 379, 395, 405, 422, 423, 424, 426]
+partial = [446]
+deferred = [447]
+promotion_decision = [446]
 
 [bake.recommendations]
-overall = "Keep testing in bake while the August work selected for v6.7 is completed, with verified installers and release-time reduction first."
-"334" = "Complete only the stable-launcher and migration ownership needed by the verified installer; keep broader generation cleanup separately reviewable."
-"374" = "Finish or explicitly narrow Copilot prompt transport after a supported large-prompt Windows test; retain the completed Claude path."
-"376" = "Use Claude schema-validated output and preserve a documented fallback for providers without an equivalent."
-"379" = "Add a read-only processor context command with human and JSON output before restoring documentation claims."
-"395" = "Deliver verified Windows and POSIX bootstrap packages backed by official GitHub release artifacts and the generation layout."
-"405" = "Add provider-neutral transcript discovery and bounded rendering without exposing runtime-private paths as a contract."
-"422" = "Unify the dashboard over one all-repositories snapshot before changing its health and continuity behavior."
-"423" = "Make dashboard health, eligibility, and activity use canonical CLI and observability semantics after the unified snapshot lands."
-"424" = "Prove refresh continuity, reconnect, accessibility, and scale after the unified and truthful dashboard slices land."
-"426" = "Shorten local and CI feedback by reusing environments and one digest-addressed wheel while preserving every distinct release gate."
-testing = "The installed test version is 6.7.0.dev0+g5ee721fb, deployed on Windows from the published GitHub prerelease through the public install.ps1. Clean-root bootstrap readiness passed on Windows and Linux in CI; all-repository doctor and started state were unchanged across the generation switch."
+overall = "Finish and test the self-contained provider contract in the current 6.9 bake before moving it to main."
+"446" = "Complete the provider contract and its cross-provider tests in the current draft pull request before moving the 6.9 bake to release."
+testing = "Version 6.8.0 passed installed operational acceptance on Windows before publication, including repository health, watcher restoration, and representative CLI and dashboard actions. The 6.9 provider-contract changes have not yet been installed or tested as a bake."
