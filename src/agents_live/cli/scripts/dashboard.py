@@ -45,7 +45,7 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
 from agents_live import agent, obs, paths, plugins, preflight, runtime, state  # noqa: E402
-from agents_live.cli import agent_view, lifecycle  # noqa: E402
+from agents_live.cli import agent_view, identity, lifecycle  # noqa: E402
 from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
@@ -1646,110 +1646,7 @@ def _timer_after_first_interval(interval: float, callback) -> None:
 
 def build_page() -> None:
     with hostruntime.enumeration_pass():
-        _build_page()
-
-
-def _build_page() -> None:
-    ui.dark_mode().auto()
-    if REPO_ROOT is None:
-        _build_no_project_page()
-        return
-    startup_summary = _refresh_summary()
-    ui.add_css(
-        ".q-table tbody tr{transition:background-color .08s}"
-        ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
-        ".body--dark .q-table tbody tr:hover{background-color:rgba(255,255,255,0.07)}"
-        ".hdr-btn{min-height:0}"
-        ".hdr-btn .q-btn__content{min-height:0;white-space:nowrap}"
-        ".hdr-btn .q-icon{font-size:0.95em}"
-        ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
-        ".dashboard-identity{min-width:0}"
-        ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".dashboard-settings{padding:1rem}"
-        ".dashboard-settings-content{min-width:0}"
-        "@media(max-width:640px){"
-        ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
-        ".dashboard-identity{flex-wrap:wrap}"
-        ".dashboard-scope{max-width:100%}"
-        ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
-        "}"
-        ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
-        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
-        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
-        ".agent-panel{overflow:hidden;display:flex;flex-direction:column}"
-        ".agent-table-scroll{min-height:0}"
-        ".agent-filters .q-field{min-width:8rem}"
-        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column}"
-        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
-    )
-    host = ownership.current_label()
-
-    with ui.right_drawer(value=False).classes(
-            "dashboard-settings").props(
-                "width=360 bordered") as settings_drawer:
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("Settings").classes("text-lg font-semibold")
-            ui.button(icon="close", on_click=settings_drawer.hide).props(
-                "flat round dense aria-label=Close")
-        with ui.column().classes(
-                "dashboard-settings-content w-full gap-4 no-wrap"):
-            host_service_panel()
-            repository_settings_panel()
-
-    with ui.row().classes(
-            "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
-        with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
-            ui.label("Agents Live").classes("text-xl font-semibold")
-            ui.label(host).classes("text-sm text-gray-500")
-            ui.label(_scope_label()).classes(
-                "dashboard-scope text-sm text-gray-500")
-        with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
-            header_actions()
-            refresh_age = ui.label().classes("text-sm text-gray-500")
-            ui.button(icon="refresh", on_click=_refresh_views).props("flat round dense")
-            ui.button(icon="settings", on_click=settings_drawer.show).props(
-                "flat round dense aria-label=Settings")
-
-    def tick_age() -> None:
-        ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
-        refresh_age.text = f"refreshed {ago}"
-
-    tick_age()
-    ui.timer(1.0, tick_age)
-
-    with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
-        with ui.card().classes("agent-panel w-full min-h-0"):
-            agent_grid()
-
-        with ui.element("section").classes("dashboard-log-panel w-full"):
-            ui.label("Log").classes("text-sm text-gray-500")
-            global output_log
-            output_log = ui.log(max_lines=300).classes(
-                "w-full grow font-mono text-xs"
-            )
-            _push_log(startup_summary)
-
-    _timer_after_first_interval(600.0, _refresh_views)
-
-
-def _build_no_project_page() -> None:
-    """Header plus an explanation, when no project root resolves.
-
-    The agent panel reads agent configs and logs through the project
-    root; with none there is nothing to enumerate, so the page states
-    that rather than rendering a complete but empty dashboard.
-    """
-    with ui.row().classes("w-full items-center gap-4"):
-        ui.label("Agents Live").classes("text-xl font-semibold")
-        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label(_scope_label()).classes("text-sm text-gray-500")
-    with ui.card().classes("w-full"):
-        ui.label("No project selected").classes("text-base font-medium")
-        ui.label(NO_PROJECT_HINT).classes("text-sm text-gray-500")
-        if REPO_ERROR:
-            ui.label(REPO_ERROR).classes("text-xs text-gray-500")
-    host_service_panel()
-    repository_settings_panel()
+        _build_operational_page()
 
 
 def repository_rows() -> list[dict]:
@@ -1889,6 +1786,44 @@ def all_repo_groups() -> list[dict]:
     return groups
 
 
+def operational_snapshot() -> dict:
+    """One coherent model for header, inventory, filters, and actions."""
+    groups = all_repo_groups()
+    return {
+        "groups": groups,
+        "rows": _ungrouped_agent_rows(groups),
+        "health": system_health(),
+        "scope": STATE["all_repos"].get("repo", "All"),
+    }
+
+
+def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
+    query = str(filters.get("name", "")).casefold().strip()
+    facet_filters = {**filters, "name": ""}
+    filtered = []
+    for group in groups:
+        rows = _filtered_agent_rows(group["rows"], facet_filters)
+        repository_matches = query and query in (
+            f"{group['name']} {group['path']}".casefold())
+        if query and not repository_matches:
+            rows = [row for row in rows if query in row["name"].casefold()]
+        filtered.append({**group, "rows": rows})
+    return filtered
+
+
+def _operational_summary(snapshot: dict) -> str:
+    groups = snapshot["groups"]
+    rows = snapshot["rows"]
+    unavailable = sum(not group["available"] for group in groups)
+    failing = sum(bool(row.get("unhealthy")) for row in rows)
+    scope = ("all registered repositories" if snapshot["scope"] == "All"
+             else f"repository {snapshot['scope']}")
+    return (
+        f"Snapshot for {scope}: {len(groups)} repositories, {len(rows)} agents, "
+        f"{failing} failing, {unavailable} unavailable"
+    )
+
+
 @app.get("/api/all-repos")
 def api_all_repos() -> dict:
     groups = all_repo_groups()
@@ -1903,134 +1838,271 @@ def api_all_repos() -> dict:
     }
 
 
-def build_all_repos_page() -> None:
-    """Registered-repository view with repository-qualified actions."""
+def _build_operational_page() -> None:
+    """Build the sole dashboard page over one all-repositories snapshot."""
     global _all_repos_refresh
     ui.dark_mode().auto()
     state_settings = STATE["all_repos"]
-    groups = all_repo_groups()
-    repo_names = [row["name"] for row in repository_rows()]
+    filters = STATE["filters"]
+    snapshot = operational_snapshot()
+    repo_rows = repository_rows()
+    repo_names = [row["name"] for row in repo_rows]
     ui.add_css(
-        ".all-repos-body{display:flex;flex-direction:column;gap:1rem}"
-        ".repository-group{overflow:hidden}"
+        ".q-table tbody tr{transition:background-color .08s}"
+        ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
+        ".body--dark .q-table tbody tr:hover{background-color:rgba(255,255,255,0.07)}"
+        ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
+        ".dashboard-header{min-height:2.5rem}"
+        ".dashboard-identity{min-width:0}"
+        ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".dashboard-settings{padding:1rem}"
+        ".dashboard-settings-content{min-width:0}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
+        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
+        ".agent-panel{overflow:hidden;display:flex;flex-direction:column;border-top:1px solid "
+        "rgba(127,127,127,.25);padding-top:.5rem}"
+        ".agent-toolbar{min-height:2.5rem}"
+        ".agent-table-scroll{min-height:0;overflow:auto}"
+        ".all-repos-body{display:flex;flex-direction:column;gap:.75rem;padding-right:.25rem}"
+        ".repository-group{overflow:visible}"
+        ".repository-heading{position:sticky;top:0;z-index:2;min-width:0;"
+        "background:#fff;padding:.3rem .25rem;border-bottom:1px solid "
+        "rgba(127,127,127,.25)}"
+        ".body--dark .repository-heading{background:var(--q-dark-page,#121212)}"
         ".repository-heading{min-width:0}"
         ".repository-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".agent-table-scroll{overflow-x:auto}"
+        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column;border-top:1px solid "
+        "rgba(127,127,127,.25);padding-top:.35rem}"
+        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
         ".q-table th:nth-child(1),.q-table td:nth-child(1){text-align:left}"
+        "@media(max-width:640px){"
+        ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
+        ".dashboard-identity{flex-wrap:wrap}"
+        ".dashboard-scope{max-width:100%}"
+        ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
+        ".dashboard-body{grid-template-rows:minmax(15rem,1fr) minmax(9rem,.6fr)}"
+        "}"
     )
 
-    with ui.row().classes("w-full items-center gap-4"):
-        ui.label("Agents Live").classes("text-xl font-semibold")
-        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label("All registered repositories").classes(
-            "text-sm text-gray-500")
-    host_service_panel()
-    with ui.expansion("Repository settings").classes("w-full"):
-        repository_settings_panel()
-    tables = []
+    with ui.right_drawer(value=False).classes(
+            "dashboard-settings").props("width=360 bordered") as settings_drawer:
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Settings").classes("text-lg font-semibold")
+            ui.button(icon="close", on_click=settings_drawer.hide).props(
+                "flat round dense aria-label=Close")
+        with ui.column().classes(
+                "dashboard-settings-content w-full gap-4 no-wrap"):
+            host_service_panel()
+            repository_settings_panel()
 
-    def render_groups(current: list[dict]) -> None:
-        tables.clear()
-        with ui.element("div").classes("all-repos-body w-full"):
-            if not current:
-                ui.label("No registered repositories match the selector.").classes(
-                    "text-sm text-gray-500")
-            for group in current:
-                with ui.card().classes("repository-group w-full"):
-                    label = group["name"] + (" (default)" if group["default"] else "")
-                    with ui.row().classes(
-                            "repository-heading w-full items-baseline gap-3 no-wrap"):
-                        ui.label(label).classes("text-base font-medium")
-                        ui.label(group["path"]).classes(
-                            "repository-path text-xs text-gray-500")
-                    if group["error"]:
-                        ui.label(group["error"]).classes("text-sm text-red-500")
-                    rows = group["rows"]
-                    if not rows and not group["error"]:
-                        ui.label("No agent definitions found.").classes(
-                            "text-sm text-gray-500")
-                    if rows:
-                        with ui.scroll_area().classes("w-full agent-table-scroll"):
-                            table = ui.table(
-                                columns=_AGGREGATE_COLUMNS, rows=rows,
-                                row_key="identifier",
-                                pagination={"rowsPerPage": 0},
-                            ).classes("w-full").props(
-                                "flat dense hide-bottom separator=none")
-                            tables.append(table)
-                            _add_agent_information_slots(table)
-                            _add_agent_action_slots(table, aggregate=True)
+    with ui.row().classes(
+            "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
+        with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
+            ui.label("Agents Live").classes("text-xl font-semibold")
+            ui.label(ownership.current_label()).classes("text-sm text-gray-500")
+            scope_label = ui.label().classes(
+                "dashboard-scope text-sm text-gray-500")
+            ui.label(
+                f"{identity.channel(AGENTS_LIVE_VERSION)} channel | "
+                f"{AGENTS_LIVE_VERSION}"
+            ).classes(
+                "text-xs text-gray-500")
+        with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
+            health_label = ui.label().classes("text-sm text-gray-500")
+            refresh_age = ui.label().classes("text-sm text-gray-500")
+            ui.button(icon="health_and_safety", on_click=health_check).props(
+                "flat round dense aria-label=Run-health-check")
+            ui.button(icon="refresh", on_click=_refresh_views).props(
+                "flat round dense aria-label=Refresh")
+            ui.button(icon="settings", on_click=settings_drawer.show).props(
+                "flat round dense aria-label=Settings")
 
-    container = ui.element("div").classes("w-full")
+    with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
+        with ui.element("section").classes("agent-panel w-full min-h-0"):
+            with ui.row().classes(
+                    "agent-toolbar w-full items-center gap-2 no-wrap"):
+                ui.select(
+                    ["All", *repo_names], value=state_settings["repo"],
+                    label="Repository scope",
+                    on_change=lambda event: select_repo(event),
+                ).props("dense outlined options-dense").classes("min-w-48")
+                ui.input(
+                    "Search agents or repositories", value=filters["name"],
+                    on_change=lambda event: set_filter("name", event.value),
+                ).props("dense outlined clearable").classes("grow min-w-48")
+                with ui.button(icon="filter_list").props(
+                        "flat round dense aria-label=Filters"):
+                    with ui.menu():
+                        with ui.column().classes("gap-2 p-2 min-w-48"):
+                            ui.label("Filters").classes("text-sm font-medium")
+                            ui.select(
+                                ["All", *sorted({row["state"] for row in snapshot["rows"]})],
+                                value=filters["state"], label="State",
+                                on_change=lambda event: set_filter("state", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.select(
+                                ["All", *sorted({row["owner"] for row in snapshot["rows"]})],
+                                value=filters["owner"], label="Owner",
+                                on_change=lambda event: set_filter("owner", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.select(
+                                ["All", *sorted({row["agent"] for row in snapshot["rows"]})],
+                                value=filters["runtime"], label="Runtime",
+                                on_change=lambda event: set_filter("runtime", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.checkbox(
+                                "Failing only", value=filters["failing"],
+                                on_change=lambda event: set_filter(
+                                    "failing", event.value),
+                            ).props("dense")
+                            ui.checkbox(
+                                "Group by repository",
+                                value=state_settings["grouped"],
+                                on_change=lambda event: set_grouped(event),
+                            ).props("dense")
+                sort_labels = {
+                    "Agent": "name", "State": "state", "Owner": "owner",
+                    "Runtime": "agent", "Model": "model",
+                    "List cost 24h": "cost_day", "List cost 1w": "cost_week",
+                }
+                current_sort = next(
+                    label for label, field in sort_labels.items()
+                    if field == state_settings["sort_by"])
+                ui.select(
+                    list(sort_labels), value=current_sort, label="Sort",
+                    on_change=lambda event: set_sort(sort_labels[event.value]),
+                ).props("dense outlined options-dense").classes("min-w-32")
+                sort_direction = ui.button(icon="arrow_upward").props(
+                    "flat round dense aria-label=Reverse-sort")
+            inventory_summary = ui.label().classes(
+                "text-xs text-gray-500 px-1")
+            inventory = ui.element("div").classes(
+                "w-full grow min-h-0 agent-table-scroll")
 
-    def rebuild() -> None:
-        nonlocal groups
-        groups = all_repo_groups()
-        container.clear()
-        with container:
-            if state_settings.get("grouped", True):
-                render_groups(groups)
-            else:
-                rows = _ungrouped_agent_rows(groups)
-                table = ui.table(
-                    columns=[
-                        {"name": "repository", "label": "Repository",
-                         "field": "repository", "sortable": True},
-                        *_AGGREGATE_COLUMNS,
-                    ],
-                    rows=_sorted_agent_rows(
-                        rows, str(state_settings.get("sort_by") or "name"),
-                        bool(state_settings.get("descending"))),
-                    row_key="repository_identifier",
-                    pagination={"rowsPerPage": 0},
-                ).classes("w-full").props("flat dense hide-bottom separator=none")
-                _add_agent_information_slots(table)
-                _add_agent_action_slots(table, aggregate=True)
+        with ui.element("section").classes("dashboard-log-panel w-full"):
+            activity_scope = ui.label().classes("text-sm text-gray-500")
+            global output_log
+            output_log = ui.log(max_lines=300).classes(
+                "w-full grow font-mono text-xs")
 
-    _all_repos_refresh = rebuild
+    def render_inventory(current: dict) -> None:
+        visible_groups = _filtered_repo_groups(current["groups"], filters)
+        visible_rows = sum(len(group["rows"]) for group in visible_groups)
+        inventory_summary.text = (
+            f"{visible_rows} of {len(current['rows'])} agents in "
+            f"{len(visible_groups)} repositories")
+        inventory.clear()
+        with inventory:
+            with ui.element("div").classes("all-repos-body w-full"):
+                if not current["groups"]:
+                    ui.label("No registered repositories.").classes(
+                        "text-sm font-medium")
+                    ui.button("Open settings", icon="settings",
+                              on_click=settings_drawer.show).props(
+                        "dense flat no-caps")
+                elif state_settings.get("grouped", True):
+                    for group in visible_groups:
+                        with ui.element("section").classes(
+                                "repository-group w-full"):
+                            label = group["name"] + (
+                                " (default)" if group["default"] else "")
+                            with ui.row().classes(
+                                    "repository-heading w-full items-baseline gap-3 no-wrap"):
+                                ui.label(label).classes("text-sm font-medium")
+                                ui.label(group["path"]).classes(
+                                    "repository-path grow text-xs text-gray-500")
+                                ui.label(
+                                    "Unavailable" if not group["available"] else
+                                    f"{len(group['rows'])} agents"
+                                ).classes("text-xs text-gray-500")
+                            if group["error"]:
+                                ui.label(group["error"]).classes(
+                                    "text-sm text-red-500 px-1")
+                            elif not group["rows"]:
+                                ui.label("No matching agents.").classes(
+                                    "text-sm text-gray-500 px-1")
+                            else:
+                                table = ui.table(
+                                    columns=_AGGREGATE_COLUMNS,
+                                    rows=group["rows"],
+                                    row_key="repository_identifier",
+                                    pagination={"rowsPerPage": 0},
+                                ).classes("w-full").props(
+                                    "flat dense hide-bottom separator=none")
+                                _add_agent_information_slots(table)
+                                _add_agent_action_slots(table, aggregate=True)
+                else:
+                    rows = _ungrouped_agent_rows(visible_groups)
+                    table = ui.table(
+                        columns=[
+                            {"name": "repository", "label": "Repository",
+                             "field": "repository", "sortable": True},
+                            *_AGGREGATE_COLUMNS,
+                        ], rows=rows, row_key="repository_identifier",
+                        pagination={"rowsPerPage": 0},
+                    ).classes("w-full").props(
+                        "flat dense hide-bottom separator=none")
+                    _add_agent_information_slots(table)
+                    _add_agent_action_slots(table, aggregate=True)
+
+    def update_labels(current: dict) -> None:
+        selected = current["scope"]
+        if selected == "All":
+            scope_text = "All registered repositories"
+        else:
+            group = next((item for item in current["groups"]
+                          if item["name"] == selected), None)
+            scope_text = (f"{selected} | {group['path']}" if group else selected)
+        scope_label.text = scope_text
+        activity_scope.text = f"Activity | {scope_text}"
+        health = current["health"]
+        health_label.text = f"Host {health['text']}"
+        health_label.tooltip(health["tip"])
+
+    def rebuild(*, announce: bool = True) -> None:
+        nonlocal snapshot
+        snapshot = operational_snapshot()
+        STATE["last_refresh"] = datetime.now(timezone.utc)
+        update_labels(snapshot)
+        render_inventory(snapshot)
+        if announce:
+            _push_log(_operational_summary(snapshot))
 
     def select_repo(event) -> None:
         state_settings["repo"] = event.value
         rebuild()
 
+    def set_filter(key: str, value) -> None:
+        filters[key] = value
+        render_inventory(snapshot)
+
     def set_grouped(event) -> None:
         state_settings["grouped"] = bool(event.value)
-        rebuild()
+        render_inventory(snapshot)
 
     def set_sort(field: str) -> None:
-        if state_settings.get("sort_by") == field:
-            state_settings["descending"] = not state_settings.get("descending")
-        else:
-            state_settings["sort_by"] = field
-            state_settings["descending"] = False
-        rebuild()
+        state_settings["sort_by"] = field
+        rebuild(announce=False)
 
-    def refresh() -> None:
-        rebuild()
+    def reverse_sort() -> None:
+        state_settings["descending"] = not state_settings["descending"]
+        sort_direction.props(
+            f"icon={'arrow_downward' if state_settings['descending'] else 'arrow_upward'}")
+        rebuild(announce=False)
 
-    with ui.row().classes("items-center gap-4"):
-        ui.select(["All", *repo_names], value=state_settings["repo"], label="Repository",
-                  on_change=select_repo)
-        ui.checkbox("Group by repository", value=state_settings["grouped"],
-                    on_change=set_grouped)
-        for field, label in (
-            ("name", "Agent"),
-            ("state", "State"),
-            ("owner", "Owner"),
-            ("agent", "Runtime"),
-            ("model", "Model"),
-            ("cost_day", "Cost 24h"),
-            ("cost_week", "Cost 1w"),
-        ):
-            suffix = ""
-            if state_settings.get("sort_by") == field:
-                suffix = " desc" if state_settings.get("descending") else " asc"
-            ui.button(f"Sort {label}{suffix}", on_click=lambda f=field: set_sort(f))
-        ui.button("Refresh", on_click=refresh)
-    rebuild()
-    # Same cadence as the single-repo page: the view tracks reality
-    # instead of freezing at process start.
-    ui.timer(600.0, refresh)
+    sort_direction.on("click", reverse_sort)
+    _all_repos_refresh = rebuild
+
+    def tick_age() -> None:
+        ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
+        refresh_age.text = f"refreshed {ago}"
+
+    update_labels(snapshot)
+    render_inventory(snapshot)
+    _push_log(_operational_summary(snapshot))
+    tick_age()
+    ui.timer(1.0, tick_age)
+    _timer_after_first_interval(600.0, rebuild)
 
 
 PORT_PROBE_TIMEOUT_S = 0.5
@@ -2124,7 +2196,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--all-repos", action="store_true",
-        help="Show all registered repositories without agent lifecycle controls")
+        help="Open the all-repositories scope (the default operational view)")
     args = parser.parse_args()
 
     if args.port == "next" and __name__ != "__main__":
@@ -2158,10 +2230,7 @@ def main() -> None:
         dashboards.record(args.port, os.getpid(), REPO_ROOT)
         atexit.register(dashboards.forget, args.port, os.getpid())
 
-    if args.all_repos:
-        build_all_repos_page()
-    else:
-        build_page()
+    build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
     try:
         ui.run(

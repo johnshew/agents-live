@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-08-29
+ms.date: 2026-09-05
 ms.topic: concept
 ---
 
@@ -59,7 +59,7 @@ redesign.
 | Existing baseline, retained by v6.6 | `REL-01`, `SEC-01`, `SEC-02`, `SEC-04`, `CMP-01` | Existing dashboard and artifact gates |
 | v6.6 viewport recovery | `AGT-03`; partial evidence toward `LOG-01` and `RSP-01` for the current single-repository page | [#419](https://github.com/johnshew/agents-live/issues/419) |
 | v6.6 qualified aggregate actions | `AGT-04`, `AGT-05`, `ACT-09`, `MUL-04`, `MUL-07`, `SEC-03`, `SEC-06` | [#421](https://github.com/johnshew/agents-live/issues/421) |
-| Deferred unified product surface | `HDR-01`, `HDR-11`, `FLT-01`, `LOG-01`, `MUL-01`, `MUL-02`, `MUL-10`, `RSP-01` | [#422](https://github.com/johnshew/agents-live/issues/422) |
+| Unified product surface | `HDR-01`, `HDR-11`, `FLT-01`, `LOG-01`, `MUL-01`, `MUL-02`, `MUL-10`, `NAV-06`, `RSP-01` | Implemented by [#422](https://github.com/johnshew/agents-live/issues/422) |
 | Deferred truthful state and evidence | `HDR-02`, `HDR-03`, `HDR-10`, `HDR-11`, `AGT-01`, `AGT-02`, `AGT-04`, `LOG-02` through `LOG-05`, `HST-02`, `WCH-01`, `ACC-03` | [#423](https://github.com/johnshew/agents-live/issues/423) |
 | Deferred continuity and hardening | `ACC-01`, `REF-03`, plus P0 defects exposed by reliability and accessibility acceptance | [#424](https://github.com/johnshew/agents-live/issues/424) |
 
@@ -88,10 +88,19 @@ durable-action-evidence gates on Linux and Windows.
 
 ### B. Unify the operational page
 
-Implement [#422](https://github.com/johnshew/agents-live/issues/422). Replace the
-separate single-repository and aggregate page builders with one adaptable page
-over one coherent all-repositories snapshot. Repository focus becomes view
-state, not a reason to launch another dashboard.
+[Issue #422](https://github.com/johnshew/agents-live/issues/422) replaces the
+separate single-repository and aggregate compositions with one adaptable page
+over one coherent all-repositories snapshot. All registered repositories are
+grouped by default, repository focus is view state, the shared inventory and
+activity surfaces remain in the first desktop viewport, and configuration
+remains in settings. The existing `/api/agents`, `/api/all-repos`, and
+`--all-repos` boundaries remain compatible.
+
+Editable-source evidence executes both the ordinary and `--all-repos` launch
+forms at 1280 x 720, verifies grouped repository identity, compact search and
+filters, focused scope without a second page, an always-visible ten-line log,
+and repository-qualified Run evidence. Canonical health, activity, and
+continuity semantics remain assigned to #423 and #424.
 
 ### C. Make state explainable
 

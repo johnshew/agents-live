@@ -248,6 +248,15 @@ def _api_agents(port: int) -> dict | None:
         return None
 
 
+def _api_all_repos(port: int) -> dict | None:
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/all-repos", timeout=2) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+
+
 def _await_rows(process: subprocess.Popen, port: int, mode: str) -> dict:
     deadline = time.monotonic() + READY_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -331,9 +340,15 @@ def _browser_executable() -> Path:
     raise ReadinessError("no installed Edge, Chrome, or Chromium browser is available")
 
 
-def _assert_operational_viewport(port: int, mode: str) -> None:
+def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
     from playwright.sync_api import sync_playwright
 
+    all_repos = _api_all_repos(port)
+    repositories = all_repos.get("repositories", []) if all_repos else []
+    if len(repositories) != 1 or repositories[0].get("path") != str(directory):
+        raise ReadinessError(
+            f"{mode}: /api/all-repos did not preserve the registered repository")
+    repository_name = str(repositories[0].get("name", ""))
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
@@ -342,6 +357,23 @@ def _assert_operational_viewport(port: int, mode: str) -> None:
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
             body = page.locator(".dashboard-body")
             body.wait_for(state="visible")
+            groups = page.locator(".repository-group")
+            if groups.count() != 1:
+                raise ReadinessError(
+                    f"{mode}: operational page rendered {groups.count()} "
+                    "repository groups")
+            heading = groups.locator(".repository-heading")
+            if str(directory) not in heading.inner_text():
+                raise ReadinessError(
+                    f"{mode}: repository heading does not show its full path")
+            if page.get_by_text(
+                    "All registered repositories", exact=True).count() != 1:
+                raise ReadinessError(
+                    f"{mode}: default scope is not all registered repositories")
+            if page.get_by_label("Search agents or repositories").count() != 1 \
+                    or page.get_by_role("button", name="Filters").count() != 1:
+                raise ReadinessError(
+                    f"{mode}: compact search and filter controls are absent")
             if body.locator(
                     ".host-service-panel, .repository-settings-panel").count():
                 raise ReadinessError(
@@ -361,6 +393,14 @@ def _assert_operational_viewport(port: int, mode: str) -> None:
                     "document.documentElement.scrollHeight > window.innerHeight"):
                 raise ReadinessError(
                     f"{mode}: operational view requires page-level scrolling")
+            scope = page.get_by_label("Repository scope")
+            scope.click()
+            page.get_by_role("option", name=repository_name, exact=True).click()
+            page.get_by_text(
+                f"{repository_name} | {directory}", exact=True).wait_for()
+            if page.locator(".repository-group").count() != 1:
+                raise ReadinessError(
+                    f"{mode}: repository focus replaced the operational page")
             page.get_by_role("button", name="Settings").click()
             page.locator(".dashboard-settings .host-service-panel").wait_for()
             page.locator(".dashboard-settings .repository-settings-panel").wait_for()
@@ -387,7 +427,7 @@ def _assert_operational_viewport(port: int, mode: str) -> None:
                     f"{mode}: settings drawer creates horizontal page scrolling")
         finally:
             browser.close()
-    _say(f"{mode}: inventory and log fit the 1280x720 viewport")
+    _say(f"{mode}: unified inventory and log fit the 1280x720 viewport")
 
 
 def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
@@ -518,10 +558,9 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
         _say(f"{mode}: served a started row with Stop available")
-        if all_repos:
-            _assert_aggregate_run(port, directory, payload, mode)
-        else:
-            _assert_operational_viewport(port, mode)
+        _assert_operational_viewport(port, directory, mode)
+        _assert_aggregate_run(port, directory, payload, mode)
+        if not all_repos:
             _assert_abortive_disconnect_survives(process, port, mode)
     finally:
         _terminate(process)

@@ -5607,6 +5607,52 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual(["alpha", "zeta"], [
             row["name"] for row in local_group["rows"]])
 
+    def test_dashboard_operational_snapshot_adapts_scope_and_filters(self) -> None:
+        dashboard = self._dashboard_module()
+        other = (self.root / "other").resolve()
+        self.skill("local-agent", ['agents-live.selector: "fake/echo"'])
+        (other / "Agents" / "remote-agent").mkdir(parents=True)
+        (other / "Agents" / "remote-agent" / "SKILL.md").write_text(
+            "---\nname: remote-agent\ndescription: Other repo.\nmetadata:\n"
+            '  agents-live.schema-version: "1"\n'
+            '  agents-live.selector: "fake/echo"\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        repos._add(str(self.root))
+        repos._add(str(other))
+        dashboard.STATE["all_repos"].update({
+            "repo": "All", "grouped": True,
+            "sort_by": "name", "descending": False,
+        })
+
+        aggregate = dashboard.operational_snapshot()
+
+        self.assertEqual("All", aggregate["scope"])
+        self.assertEqual(2, len(aggregate["groups"]))
+        self.assertEqual(
+            {self.root.name, "other"},
+            {row["repository"] for row in aggregate["rows"]},
+        )
+        repository_match = dashboard._filtered_repo_groups(
+            aggregate["groups"],
+            {"name": "other", "state": "All", "owner": "All",
+             "runtime": "All", "failing": False},
+        )
+        other_group = next(
+            group for group in repository_match if group["name"] == "other")
+        self.assertEqual(
+            ["remote-agent"], [row["name"] for row in other_group["rows"]])
+
+        dashboard.STATE["all_repos"]["repo"] = "other"
+        focused = dashboard.operational_snapshot()
+
+        self.assertEqual("other", focused["scope"])
+        self.assertEqual(["other"], [
+            group["name"] for group in focused["groups"]])
+        self.assertEqual(["remote-agent"], [
+            row["name"] for row in focused["rows"]])
+
     def test_dashboard_all_repo_groups_keep_unavailable_paths_visible(self) -> None:
         dashboard = self._dashboard_module()
         path = repos.config_path()
