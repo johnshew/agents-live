@@ -47,6 +47,12 @@ class ClaudeProvider(ProviderBase):
             invalid = set(spec.allow_tools) - PLAN_TOOLS
             if invalid:
                 return f"plan mode cannot allow tools: {', '.join(sorted(invalid))}"
+        if spec.mode == "pipeline":
+            invalid = set(spec.allow_tools) - {"pipeline"}
+            if invalid:
+                return (
+                    "pipeline mode cannot allow tools: "
+                    + ", ".join(sorted(invalid)))
         return None
 
     def artifacts(self, runtime: ProviderRuntime) -> tuple[RunArtifact, ...]:
@@ -86,10 +92,10 @@ class ClaudeProvider(ProviderBase):
             tools = tools or sorted(PLAN_TOOLS)
             mode = ["--permission-mode", "default", "--allowedTools", *tools]
         elif spec.mode == "pipeline":
-            tools = tools or ["mcp__pipeline__get", "mcp__pipeline__put"]
             mode = [
                 "--permission-mode", "default",
-                "--allowedTools", *tools,
+                "--allowedTools",
+                "mcp__pipeline__get", "mcp__pipeline__put",
             ]
         else:
             mode = ["--dangerously-skip-permissions"]

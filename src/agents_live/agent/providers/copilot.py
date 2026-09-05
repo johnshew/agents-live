@@ -138,6 +138,8 @@ class CopilotProvider(ProviderBase):
         ]
         if spec.model:
             argv.extend(("--model", spec.model))
+        if spec.effort:
+            argv.extend(("--effort", spec.effort))
         for variable in (PROJECT_MCP_CONFIG, PIPELINE_MCP_CONFIG):
             config = environment.get(variable)
             if config:

@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: enforce provider execution options consistently.
+  Claude pipeline runs reject caller-supplied tools outside the pipeline, and
+  Copilot runs pass their selected effort level to the CLI.
 - feat: make a provider integration self-contained. (#446)
   A provider now declares its CLI probe and installation guidance, the modes,
   models, efforts, and MCP transports it supports, the run-scoped files and

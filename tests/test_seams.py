@@ -4688,6 +4688,44 @@ class TestAgentPipeline(TempRepository):
         ]
         self.assertEqual(["pipeline", "task_complete"], allowed)
 
+    def test_claude_pipeline_rejects_caller_supplied_tools(self) -> None:
+        self.skill("isolated-claude", [
+            'agents-live.selector: "claude"',
+            'agents-live.mode: "pipeline"',
+            'agents-live.allow-tools: "[\\"Read\\"]"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("isolated-claude", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("pipeline mode", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_copilot_receives_the_selected_effort(self) -> None:
+        self.skill("copilot-effort", [
+            'agents-live.selector: "copilot:high"',
+        ])
+        runner = RecordingRunner([
+            ChildResult(("copilot",), 0, "done", ""),
+        ])
+
+        result = dispatch(
+            Firing("copilot-effort", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertTrue(result.ok, result)
+        argv = runner.argv[-1]
+        self.assertEqual(
+            ("--effort", "high"),
+            argv[argv.index("--effort"):argv.index("--effort") + 2],
+        )
+
     def test_declared_mcp_without_project_definition_fails_before_cli(self) -> None:
         self.skill("missing-mcp", [
             'agents-live.selector: "copilot"',
