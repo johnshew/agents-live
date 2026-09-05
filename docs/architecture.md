@@ -203,10 +203,19 @@ issue [#105](https://github.com/johnshew/agents-live/issues/105).
 
 ## Extensions
 
-Provider plugins implement the agent provider contract: resolve a selector,
-prepare a launch, and normalize raw output. Host adapters implement runtime
-protocols and never import `agent/`. Declared plugin distributions are
-validated and converged by `plugins.py` before their entry points are used.
+A provider plugin implements the complete agent provider contract: CLI
+metadata for probing and installation guidance, the modes, models, efforts,
+and MCP transports it supports, semantic validation that runs before launch,
+the run-scoped environment and files it needs, a prepared launch, a parsed
+result, a failure category, and a normalized transcript. Dispatch materializes
+and removes the declared files; a provider never receives a process,
+filesystem, or server object. No other module knows a provider's name. The
+contract and the migration from the 6.8 protocol are recorded in
+[provider-contract.md](provider-contract.md).
+
+Host adapters implement runtime protocols and never import `agent/`. Declared
+plugin source directories are validated by `plugins.py` before the objects
+they expose reach a seam.
 
 ## Compatibility boundary
 
@@ -221,7 +230,8 @@ product behavior and is removed in 7.0.
 1. `runtime/` does not import `agent/`, and `agent/` does not import
    `runtime/`.
 2. Only immutable records built from primitives cross a port boundary.
-3. Host services never enter the agent port.
+3. Host services never enter the agent port, and a provider receives only
+   immutable descriptions of the run.
 4. Platform detection and platform APIs stay under `runtime/hosts/`.
 5. Started intent, ownership, and a live run are different facts.
 6. Convergence never removes an artifact whose desired state could not be

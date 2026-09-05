@@ -19,11 +19,12 @@ The declaration keys and their containment rules survive. What changes is what
 
 A declared plugin extends one of two seams. A provider plugin supplies an
 object satisfying the `Provider` protocol in
-`src/agents_live/agent/providers/__init__.py`: a name, a model set, an effort
-set, `prepare`, and `parse`. An ownership plugin supplies a registry backend
-with four callables. `register()` duck-type checks the provider protocol and
-nothing else. Neither seam reads packaging metadata for any purpose beyond
-finding the object.
+`src/agents_live/agent/providers/__init__.py`; 6.9 widened that protocol to
+the complete integration contract described in
+[provider-contract.md](../provider-contract.md). An ownership plugin supplies
+a registry backend with four callables. `register()` checks the provider
+contract and nothing else. Neither seam reads packaging metadata for any
+purpose beyond finding the object.
 
 Until 6.8 a plugin was a built wheel. `.agents-live.toml` named the wheel by
 repository-relative path with an optional digest; the runtime installed it into
