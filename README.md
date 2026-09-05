@@ -38,7 +38,6 @@ instructions.
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
-export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin:$PATH"
 agents-live init
 agents-live start markdown-polisher
 ```
@@ -93,12 +92,6 @@ untested. First install and sign in to at least one supported provider CLI:
 - [Claude Code](https://code.claude.com/docs/en/setup)
 - [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started)
 
-The release installers fetch an authenticated wheel from GitHub, install
-[`uv`](https://docs.astral.sh/uv/getting-started/installation/) if it is
-missing, and activate the new version only after validation succeeds. Python
-3.12 or newer is required; uv obtains a compatible interpreter when the host
-does not have one.
-
 ### Linux and WSL
 
 On Debian, Ubuntu, or WSL, install the host tools used by schedules and file
@@ -110,15 +103,18 @@ sudo apt-get install -y cron inotify-tools
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 
-export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/agents-live/current/bin:$PATH"
 agents-live --repo /path/to/repository init
-agents-live --repo /path/to/repository doctor
 ```
 
 `cron` runs scheduled agents and automatic maintenance. `inotifywait` is only
-needed for file or directory watches. The installer adds the stable command
-directory to supported shell profiles; the `export` above makes it available
-to the current shell immediately.
+needed for file or directory watches. The installer links `agents-live` and
+`al` from `~/.local/bin` to the stable `current` commands and adds that
+directory to supported shell profiles. Open a new shell if the current one did
+not already include `~/.local/bin` on `PATH`.
+
+The installer refuses to replace an existing `~/.local/bin/agents-live` or
+`~/.local/bin/al` that does not point to this installation. Remove or rename
+the conflicting command, then run the installer again.
 
 On WSL, use these Linux instructions inside the distribution. The first
 convergence also stages and verifies Windows-side liveness so scheduled work
@@ -134,100 +130,28 @@ winget install Anthropic.ClaudeCode
 # Or: winget install GitHub.Copilot
 ```
 
-Download and run the latest stable installer, then initialize a repository
-through the absolute stable command so the current shell does not depend on a
-refreshed `PATH`:
+Run the latest stable installer, then initialize a repository:
 
 ```powershell
-$installer = Join-Path $env:TEMP "agents-live-install.ps1"
-Invoke-WebRequest `
-  "https://github.com/johnshew/agents-live/releases/latest/download/install.ps1" `
-  -OutFile $installer
-& $installer
-
-$agentsLive = Join-Path $env:LOCALAPPDATA "agents-live\current\Scripts\agents-live.exe"
-& $agentsLive --repo C:\path\to\repository init
-& $agentsLive --repo C:\path\to\repository doctor
+irm https://github.com/johnshew/agents-live/releases/latest/download/install.ps1 | iex
+agents-live --repo C:\path\to\repository init
 ```
 
-The installer updates the user `PATH`; open a new terminal before relying on a
-bare `agents-live` command. `init` prints the generated PowerShell completion
-script path and the exact line to add to `$PROFILE`. Native Windows uses Task
-Scheduler and directory change notifications, so no separate scheduler or
-watcher package is required.
+The installer updates both the current PowerShell process and the persistent
+user `PATH`. Native Windows uses Task Scheduler and directory change
+notifications, so no separate scheduler or watcher package is required.
 
-### Install an exact version
-
-Every installer asset attached to a release is stamped with that release's
-exact version. Download it from the version-specific release path to pin an
-installation without passing a separate argument. Prereleases are never
-selected through the `latest` path, and reinstalling the same version is safe.
-
-On Linux or WSL:
-
-```bash
-version="6.8.0"
-curl --proto '=https' --tlsv1.2 -LsSf \
-  "https://github.com/johnshew/agents-live/releases/download/v${version}/install.sh" \
-  | sh
-```
-
-On Windows:
-
-```powershell
-$version = "6.8.0"
-$tag = [Uri]::EscapeDataString("v$version")
-$installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
-Invoke-WebRequest `
-  "https://github.com/johnshew/agents-live/releases/download/$tag/install.ps1" `
-  -OutFile $installer
-& $installer
-```
-
-Both installers authenticate the selected release through GitHub metadata and
-verify its asset size and SHA-256 digest. Network, proxy, TLS, provenance, and
-checksum failures stop without a package-index or stale-cache fallback.
-
-### Upgrade, roll back, and remove
-
-Agents Live retains immutable versions side by side and selects one through the
-stable `current` path. Source plugins remain in their declaring repositories
-and load directly into the selected runtime; installation does not copy or
-install them into a generation.
+### Manage the installation
 
 ```bash
 agents-live upgrade
-agents-live generations list
-agents-live generations activate VERSION
 agents-live uninstall
 ```
 
-Selecting a generation converges native triggers and still-started watchers
-through that version. Work already running may finish on the immutable version
-where it began. Use `generations remove VERSION` to discard an inactive
-candidate, and `generations collect` to retain one rollback generation while
-removing older versions that no process is using.
-
-An existing legacy `uv tool` installation is removed only after the verified
-generation is active. The package also installs `al` as an exact shorthand for
-`agents-live`. If an unrelated `al` executable already exists, remove or rename
-it before installation rather than forcing replacement.
-
-### Existing repositories and diagnostics
-
-The installed `.claude/skills/agents-live/` payload is tool-managed and carries
-a directory-local `.gitignore`; project-authored sibling skills are unaffected.
-For an existing repository that already tracks the payload, run
-`git rm -r --cached .claude/skills/agents-live`, then
-`git add -f .claude/skills/agents-live/.gitignore`. Agents Live never changes the
-Git index itself.
-
-Run `agents-live doctor` to diagnose missing requirements and inspect
-configuration. Use `agents-live doctor --repair` to repair supported
-configuration issues. Automatic maintenance rotates framework logs and removes
-retained transcripts and processor output after 30 days by default. Set
-`retention_days` to a positive integer in `.agents-live.toml` (or
-`[tool.agents-live]`) to change that repository policy.
+See the [command reference](src/agents_live/skill/docs/commands.md) for pinning,
+rolling back, or removing installed versions. The [diagnostics
+guide](src/agents_live/skill/docs/diagnostics.md) covers installation conflicts,
+existing repositories, and repair.
 
 ## Go further
 

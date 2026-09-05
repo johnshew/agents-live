@@ -107,6 +107,13 @@ def command_root(root: Path | None = None) -> Path:
     return hostruntime.executable_dir(current_path(root))
 
 
+def public_command_root(root: Path | None = None) -> Path:
+    """The user-facing command directory persisted on PATH."""
+    if hostruntime.id() == hostruntime.WINDOWS:
+        return command_root(root)
+    return Path.home() / ".local" / "bin"
+
+
 def ownership_path(root: Path | None = None) -> Path:
     """Where this installation records which channel owns it.
 

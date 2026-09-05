@@ -135,8 +135,13 @@ try {
     $executable = Join-Path $installRoot 'current\Scripts\agents-live.exe'
     & $executable --version
     if ($LASTEXITCODE -ne 0) { throw "Installed command failed: $executable" }
+    $commandRoot = Split-Path -Parent $executable
+    $pathEntries = @($env:Path -split ';' | Where-Object { $_ })
+    $retained = @($pathEntries | Where-Object {
+        -not [string]::Equals($_, $commandRoot, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $env:Path = (@($commandRoot) + $retained) -join ';'
     Write-Output "Agents Live is ready: $executable"
-    Write-Output "Open a new terminal to pick it up on PATH."
 } finally {
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }

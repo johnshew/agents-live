@@ -2388,6 +2388,43 @@ class TestInstallationGenerations(unittest.TestCase):
         registry.OpenKey.assert_not_called()
         registry.SetValueEx.assert_not_called()
 
+    def test_posix_uninstall_removes_only_its_own_path_entry(self) -> None:
+        """An identical user-authored PATH export is not installer-owned."""
+        home = Path(self.temporary.name) / "home"
+        home.mkdir()
+        profile = home / ".profile"
+        command_root = home / ".local" / "bin"
+        export = f'export PATH="{command_root}:$PATH"'
+        with (
+            mock.patch.object(hostruntime, "_IS_WINDOWS", False),
+            mock.patch.object(hostruntime.Path, "home", return_value=home),
+        ):
+            profile.write_text(export + "\n", encoding="utf-8")
+            hostruntime.expose_user_path_directory(command_root)
+            hostruntime.remove_user_path_directory(command_root)
+            self.assertEqual(export + "\n", profile.read_text(encoding="utf-8"))
+
+            profile.write_text("", encoding="utf-8")
+            hostruntime.expose_user_path_directory(command_root)
+            self.assertIn(
+                hostruntime._PROFILE_MARKER,
+                profile.read_text(encoding="utf-8"),
+            )
+            hostruntime.remove_user_path_directory(command_root)
+            remaining = profile.read_text(encoding="utf-8")
+            self.assertNotIn(export, remaining)
+            self.assertNotIn(hostruntime._PROFILE_MARKER, remaining)
+
+            legacy_root = deploy.layout.command_root(self.root)
+            legacy_export = f'export PATH="{legacy_root}:$PATH"'
+            profile.write_text(
+                f"{hostruntime._PROFILE_MARKER}\n{legacy_export}\n",
+                encoding="utf-8",
+            )
+            uninstall._remove_command_exposure(self.root)
+            self.assertNotIn(
+                legacy_export, profile.read_text(encoding="utf-8"))
+
     def test_a_generation_name_cannot_escape_the_installation_root(self) -> None:
         """A staged generation writes wherever its name resolves.
 
