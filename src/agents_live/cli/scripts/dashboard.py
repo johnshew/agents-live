@@ -44,7 +44,7 @@ PACKAGE_PARENT = SCRIPTS_DIR.parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
-from agents_live import agent, obs, paths, preflight, runtime, state  # noqa: E402
+from agents_live import agent, obs, paths, plugins, preflight, runtime, state  # noqa: E402
 from agents_live.cli import agent_view, lifecycle  # noqa: E402
 from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
@@ -61,6 +61,16 @@ try:
 except ValueError as exc:
     REPO_ROOT = None
     REPO_ERROR = str(exc)
+
+plugin_roots = [REPO_ROOT] if REPO_ROOT is not None else []
+try:
+    plugin_roots.extend(
+        Path(value) for _alias, value, error in repos.entries() if not error)
+except (OSError, ValueError):
+    pass
+if plugin_roots:
+    plugins.load(list(dict.fromkeys(plugin_roots)))
+
 LOGS_DIR = paths.repo_state_dir(REPO_ROOT) / "logs" if REPO_ROOT else None
 # Shown instead of the agent panel when nothing resolves: an empty table
 # reads as broken agent discovery, so the page has to say what happened

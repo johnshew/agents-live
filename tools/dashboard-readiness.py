@@ -59,6 +59,23 @@ metadata:
 Report dashboard readiness.
 """
 
+OWNERSHIP_PLUGIN = """import sys
+
+def registry_file_exists(*, root=None):
+    return True
+
+def load_owners(*, root=None, rate_limit_secs=60):
+    return {"readiness-agent": "*"}
+
+def set_owner(name, owner, *, root=None):
+    return None
+
+def remove_owner(name, *, root=None):
+    return None
+
+OWNERSHIP_REGISTRY = sys.modules[__name__]
+"""
+
 
 class ReadinessError(RuntimeError):
     pass
@@ -164,16 +181,17 @@ def _launcher(
 
 
 def _fixture(directory: Path) -> None:
-    """A local-only project with one definition.
-
-    Local-only on purpose: an ownership registry is a private plugin, and
-    a gate that needed one would only run where that plugin is installed.
-    """
+    """A registry-owned project with one source-loaded plugin."""
     skill = directory / "Agents" / "readiness-agent"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(DEFINITION, encoding="utf-8")
+    plugin = directory / "readiness_ownership.py"
+    plugin.write_text(OWNERSHIP_PLUGIN, encoding="utf-8")
     (directory / ".agents-live.toml").write_text(
-        "# readiness fixture\n", encoding="utf-8")
+        'ownership = "registry"\n\n'
+        '[plugins.readiness-ownership]\n'
+        'path = "readiness_ownership.py"\n',
+        encoding="utf-8")
     registry = directory / "config" / "agents-live" / "config.toml"
     registry.parent.mkdir(parents=True)
     registry.write_text(
