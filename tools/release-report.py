@@ -151,6 +151,12 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "name,tagName,publishedAt,isDraft,isPrerelease,url")
     tag_sha = _sha(f"{latest['tagName']}^{{commit}}")
     _, release_ahead = _count(latest["tagName"], release_ref)
+    release_state = (
+        f"{latest['tagName']} is public. `main` contains "
+        f"{_commits(release_ahead)} of newer work not yet published."
+        if release_ahead else
+        f"{latest['tagName']} is public and `main` exactly matches it."
+    )
 
     pr_fields = (
         "number,title,state,isDraft,baseRefName,headRefName,mergedAt,url,"
@@ -251,11 +257,14 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         next_actions.append(
             f"Install and test a version built from `{bake_sha[:8]}`.")
     if not bake_moved:
-        next_actions.extend([
-            "Make sure the changelog describes everything included in bake.",
-            f"Open one pull request from `{bake['branch']}` to `{release['branch']}`.",
-            "After the Ubuntu and Windows checks pass, merge it into `main`.",
-        ])
+        next_actions.append(
+            "Make sure the changelog describes everything included in bake.")
+        if not promotion:
+            next_actions.append(
+                f"Open one pull request from `{bake['branch']}` to "
+                f"`{release['branch']}`.")
+        next_actions.append(
+            "After the Ubuntu and Windows checks pass, merge it into `main`.")
     next_actions.extend([
         "Use the release tool to build the candidate, install it, and complete the final tests.",
         f"Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
@@ -303,7 +312,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"| Bake | `{bake['branch']}` at `{bake_sha[:8]}` | {bake_state} | {bake_next} |",
         f"| Release | `{release['branch']}` at `{release_sha[:8]}`; "
         f"[{latest['tagName']}]({latest['url']}) at `{tag_sha[:8]}` | "
-        f"{latest['tagName']} is public. `main` contains newer work not yet published. | "
+        f"{release_state} | "
         f"Publish the next approved version to GitHub and PyPI. |",
         "",
         "## Channel definitions",
