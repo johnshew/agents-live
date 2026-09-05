@@ -1,36 +1,40 @@
 """Pipeline runtime context for agents-live `mode: pipeline`.
 
-Brings up an in-process :class:`PipelineMcp` and materialises per-agent
-MCP config files for the duration of one pipeline run.  Returns a dict
-of env vars that ``run.py`` merges into the agent's :class:`AgentConfig`
-so the pre-processor, agent, and post-processor subprocesses all see
-the same URL + bearer token and pick up the right per-agent config:
+Brings up an in-process :class:`PipelineMcp` for the duration of one
+pipeline run and describes it as a value. The session carries the
+environment every step sees:
 
-* ``PIPELINE_MCP_URL``, ``PIPELINE_MCP_TOKEN`` -- used by
-  pre/post-processors that connect over HTTP and by the stdio bridge
-  spawned for copilot.
-* ``PIPELINE_MCP_CLAUDE_CONFIG`` -- path to a JSON file suitable for
-  claude's ``--mcp-config <file>``.
-* ``PIPELINE_MCP_COPILOT_CONFIG`` -- path to a JSON file suitable for
-  copilot's ``--additional-mcp-config @<file>`` (stdio bridge entry,
-  because copilot 1.0.52 does not auto-connect HTTP MCP in ``-p`` mode).
+* ``PIPELINE_MCP_URL``, ``PIPELINE_MCP_TOKEN`` -- used by pre/post
+  processors that connect over HTTP and by the stdio bridge a provider
+  may configure.
+
+How an agent CLI is told about the server is the provider's business:
+the session exposes a :class:`PipelineEndpoint` describing the URL,
+token, and stdio bridge command, and each provider renders its own
+client configuration from it. Nothing here knows a provider's name.
 """
 from __future__ import annotations
 
-import json
-import shutil
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
+from ..agent import PipelineEndpoint
 from .server import PipelineMcp
+
+SERVER_NAME = "pipeline"
 
 
 class PipelineSession(dict[str, str]):
-    def __init__(self, environment: dict[str, str], mcp: PipelineMcp) -> None:
+    def __init__(
+        self,
+        environment: dict[str, str],
+        mcp: PipelineMcp,
+        endpoint: PipelineEndpoint,
+    ) -> None:
         super().__init__(environment)
         self._mcp = mcp
+        self.endpoint = endpoint
 
     def snapshot(self, path: str) -> tuple[bool, object]:
         return self._mcp.snapshot(path)
@@ -47,62 +51,22 @@ def pipeline_runtime(
     run_id: str | None = None,
 ) -> Generator[PipelineSession, None, None]:
     mcp = PipelineMcp(agent_log=agent_log, run_id=run_id)
-    tmp = Path(tempfile.mkdtemp(prefix="pipeline-mcp-"))
-    claude_cfg = tmp / "claude-mcp-config.json"
-    copilot_cfg = tmp / "copilot-mcp-config.json"
     try:
         mcp.start()
         if seed_puts:
             mcp.seed(seed_puts)
-        claude_cfg.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "pipeline": {
-                            "type": "http",
-                            "url": mcp.url,
-                            "headers": {
-                                "Authorization": f"Bearer {mcp.token}"
-                            },
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
+        endpoint = PipelineEndpoint(
+            SERVER_NAME,
+            mcp.url,
+            mcp.token,
+            ("uv", "run", "--script", str(_bridge_path())),
         )
-        copilot_cfg.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "pipeline": {
-                            "type": "local",
-                            "command": "uv",
-                            "args": [
-                                "run",
-                                "--script",
-                                str(_bridge_path()),
-                            ],
-                            "env": {
-                                "PIPELINE_MCP_URL": mcp.url,
-                                "PIPELINE_MCP_TOKEN": mcp.token,
-                            },
-                        }
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        claude_cfg.chmod(0o600)
-        copilot_cfg.chmod(0o600)
         yield PipelineSession({
             "PIPELINE_MCP_URL": mcp.url,
             "PIPELINE_MCP_TOKEN": mcp.token,
-            "PIPELINE_MCP_CLAUDE_CONFIG": str(claude_cfg),
-            "PIPELINE_MCP_COPILOT_CONFIG": str(copilot_cfg),
-        }, mcp)
+        }, mcp, endpoint)
     finally:
         mcp.shutdown()
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
-__all__ = ["pipeline_runtime"]
+__all__ = ["PipelineSession", "SERVER_NAME", "pipeline_runtime"]

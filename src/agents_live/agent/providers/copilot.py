@@ -5,13 +5,98 @@ import json
 import re
 from decimal import Decimal
 
-from ..values import Completion, Launch, RawOutput, Request, ResolvedSpec
+from ..values import (
+    Completion,
+    Launch,
+    ProviderCapabilities,
+    ProviderCli,
+    ProviderRuntime,
+    ProviderTranscript,
+    RawOutput,
+    Request,
+    ResolvedSpec,
+    RunArtifact,
+    ToolCall,
+    TranscriptSource,
+    TranscriptTurn,
+)
+from .base import ProviderBase, tool_call
+
+HOME = "COPILOT_HOME"
+PROJECT_MCP_CONFIG = "AGENTS_LIVE_COPILOT_PROJECT_MCP"
+PIPELINE_MCP_CONFIG = "AGENTS_LIVE_COPILOT_PIPELINE_MCP"
 
 
-class CopilotProvider:
+class CopilotProvider(ProviderBase):
     name = "copilot"
-    models: frozenset[str] | None = None
-    efforts = frozenset({"low", "medium", "high", "xhigh"})
+    cli = ProviderCli(
+        executable="copilot",
+        probe_argv=("--version",),
+        install_commands=(("windows", "winget install GitHub.Copilot"),),
+    )
+    capabilities = ProviderCapabilities(
+        modes=frozenset({"plan", "write", "pipeline"}),
+        mcp_transports=frozenset({"http", "sse", "stdio"}),
+        structured_output=False,
+        models=None,
+        efforts=frozenset({"low", "medium", "high", "xhigh"}),
+    )
+
+    def validate(self, spec: ResolvedSpec) -> str | None:
+        error = super().validate(spec)
+        if error is not None:
+            return error
+        if spec.mode == "pipeline":
+            disallowed = set(spec.allow_tools) - {"pipeline"}
+            if disallowed:
+                return (
+                    "pipeline mode cannot allow tools: "
+                    + ", ".join(sorted(disallowed)))
+        return None
+
+    def artifacts(self, runtime: ProviderRuntime) -> tuple[RunArtifact, ...]:
+        """The run-scoped home and MCP configuration this provider needs.
+
+        The isolated home is what keeps an unattended session from
+        adopting repository or user customizations it never agreed to
+        (#375); the settings file inside it disables hooks explicitly.
+        """
+        artifacts = [
+            RunArtifact("copilot-home", kind="directory", mode=0o700, env=(HOME,)),
+            RunArtifact(
+                "copilot-home/settings.json",
+                text=json.dumps({"disableAllHooks": True}, sort_keys=True),
+            ),
+        ]
+        if runtime.mcps:
+            artifacts.append(RunArtifact(
+                "copilot-project-mcp.json",
+                text=json.dumps(
+                    {"mcpServers": {
+                        server.name: dict(server.definition)
+                        for server in runtime.mcps}},
+                    sort_keys=True),
+                env=(PROJECT_MCP_CONFIG,),
+            ))
+        endpoint = runtime.pipeline
+        if endpoint is not None and endpoint.bridge_command:
+            # A stdio bridge rather than the URL directly: copilot 1.0.52
+            # does not auto-connect an HTTP MCP server in `-p` mode.
+            command, *arguments = endpoint.bridge_command
+            artifacts.append(RunArtifact(
+                "copilot-pipeline-mcp.json",
+                text=json.dumps({"mcpServers": {endpoint.name: {
+                    "type": "local",
+                    "command": command,
+                    "args": list(arguments),
+                    "env": {
+                        "PIPELINE_MCP_URL": endpoint.url,
+                        "PIPELINE_MCP_TOKEN": endpoint.token,
+                    },
+                }}}),
+                env=(PIPELINE_MCP_CONFIG,),
+            ))
+        return tuple(artifacts)
 
     def prepare(self, spec: ResolvedSpec, request: Request) -> Launch:
         """Ask for the machine-readable stream, not the human session.
@@ -34,11 +119,6 @@ class CopilotProvider:
             flags.insert(0, "--allow-all-tools")
         elif spec.mode == "pipeline":
             tools = spec.allow_tools or ("pipeline",)
-            disallowed = set(tools) - {"pipeline"}
-            if disallowed:
-                raise ValueError(
-                    "pipeline mode cannot allow tools: "
-                    + ", ".join(sorted(disallowed)))
             available = (*tools, "task_complete")
             flags.extend((
                 "--deny-tool", "shell",
@@ -58,12 +138,10 @@ class CopilotProvider:
         ]
         if spec.model:
             argv.extend(("--model", spec.model))
-        project_config = environment.get("AGENTS_LIVE_PROJECT_MCP_CONFIG")
-        if project_config:
-            argv.extend(("--additional-mcp-config", f"@{project_config}"))
-        pipeline_config = environment.get("PIPELINE_MCP_COPILOT_CONFIG")
-        if pipeline_config:
-            argv.extend(("--additional-mcp-config", f"@{pipeline_config}"))
+        for variable in (PROJECT_MCP_CONFIG, PIPELINE_MCP_CONFIG):
+            config = environment.get(variable)
+            if config:
+                argv.extend(("--additional-mcp-config", f"@{config}"))
         return Launch(
             tuple(argv),
             tuple(sorted(environment.items())),
@@ -81,6 +159,57 @@ class CopilotProvider:
             if not line.startswith(("GitHub Copilot", "Usage:", "Tip:"))
         ]
         return Completion("\n".join(lines).strip(), usage=_usage(raw.stdout))
+
+    def transcript(self, source: TranscriptSource) -> ProviderTranscript:
+        turns = _turns(source.stdout)
+        final = next(
+            (turn.text for turn in reversed(turns)
+             if turn.role == "assistant" and turn.text),
+            None,
+        )
+        return ProviderTranscript(
+            turns=turns,
+            final=final,
+            prompt=source.prompt if source.prompt is not None
+            else _prompt_from_argv(source.argv),
+        )
+
+
+def _prompt_from_argv(argv: tuple[str, ...]) -> str | None:
+    """The prompt a pre-6.2 transcript recorded only in the command line."""
+    if "-p" not in argv:
+        return None
+    index = argv.index("-p")
+    return argv[index + 1] if index + 1 < len(argv) else None
+
+
+def _turns(stdout: str) -> tuple[TranscriptTurn, ...]:
+    turns: list[TranscriptTurn] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("data"), dict):
+            continue
+        if event.get("type") not in {"assistant.message", "user.message"}:
+            continue
+        data = event["data"]
+        content = data.get("content")
+        requests = data.get("toolRequests")
+        calls: tuple[ToolCall, ...] = tuple(
+            call for call in (
+                tool_call(item) for item in requests
+            ) if call is not None
+        ) if isinstance(requests, list) else ()
+        text = content.strip() if isinstance(content, str) else ""
+        if text or calls:
+            turns.append(TranscriptTurn(
+                "assistant" if event["type"] == "assistant.message" else "user",
+                text,
+                calls,
+            ))
+    return tuple(turns)
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

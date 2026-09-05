@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 
 from .definition import DefinitionError
 from .values import McpServer
@@ -45,21 +42,6 @@ def resolve_mcp_servers(root: Path, names: tuple[str, ...]) -> tuple[McpServer, 
             raise DefinitionError(f"MCP server '{name}' definition must be an object")
         resolved.append(McpServer(name, server))
     return tuple(resolved)
-
-
-@contextmanager
-def mcp_config_runtime(mcps: Iterable[McpServer]) -> Iterator[str | None]:
-    definitions = {mcp.name: dict(mcp.definition) for mcp in mcps}
-    if not definitions:
-        yield None
-        return
-    descriptor, path = tempfile.mkstemp(prefix="agents-live-mcp-", suffix=".json")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump({"mcpServers": definitions}, stream, sort_keys=True)
-        yield path
-    finally:
-        Path(path).unlink(missing_ok=True)
 
 
 def _load_one(path: Path) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, and backlog
-ms.date: 2026-09-04
+ms.date: 2026-09-05
 ms.topic: overview
 ---
 
@@ -46,6 +46,9 @@ this directory is installed by `agents-live init` or `upgrade`.
   pytest, Home Assistant, and CPython precedent it rests on.
 - [compatibility-boundaries.md](compatibility-boundaries.md) - what the 6.8
   and 7.0 boundaries each retire, and why they are separate releases.
+- [provider-contract.md](provider-contract.md) - the complete provider
+  integration contract, why providers stay pure while dispatch owns their
+  run-scoped files, and how a 6.8 provider migrates.
 - [processor-contract.md](processor-contract.md) - why the processor contract
   is shaped the way it is, and which alternatives were rejected. The contract
   itself is specified in the skill payload.

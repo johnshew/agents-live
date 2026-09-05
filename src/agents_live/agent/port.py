@@ -16,9 +16,12 @@ from .values import (
     Discovery,
     Launch,
     Outcome,
+    PipelineEndpoint,
+    ProviderRuntime,
     RawOutput,
     Request,
     ResolvedSpec,
+    RunArtifact,
     RunShape,
     Step,
     StepContext,
@@ -59,6 +62,27 @@ def step_files(scratch: Path, step: Step) -> StepFiles:
         scratch / f"{step.value}-log.jsonl",
         scratch / f"{step.value}-output",
     )
+
+
+def provider_artifacts(
+    spec: AgentSpec,
+    pipeline: PipelineEndpoint | None = None,
+) -> tuple[RunArtifact, ...]:
+    """What the selected provider needs this run to put on disk.
+
+    The provider describes the files; dispatch owns where they land,
+    their permissions, and when they are removed. Nothing here touches
+    the filesystem, and no host object reaches the provider.
+    """
+    config = _config(spec)
+    if config.selector.provider == "none":
+        return ()
+    provider = get_provider(config.selector.provider)
+    return provider.artifacts(ProviderRuntime(
+        config.mode,
+        resolve_mcp_servers(spec.root, config.mcps),
+        pipeline,
+    ))
 
 
 def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
@@ -102,12 +126,6 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
     prompt = _prompt(spec, ctx)
     selector = config.selector
     provider = get_provider(selector.provider)
-    if selector.model and provider.models is not None and selector.model not in provider.models:
-        raise DefinitionError(
-            f"provider {provider.name} does not support model {selector.model}")
-    if selector.effort and selector.effort not in provider.efforts:
-        raise DefinitionError(
-            f"provider {provider.name} does not support effort {selector.effort}")
     if config.mode == "pipeline" and config.mcps:
         raise DefinitionError(
             "pipeline mode cannot declare project MCP servers; "
@@ -124,8 +142,19 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         provider.name,
         selector.model,
         selector.effort,
-        _resolved_output_schema(spec),
+        # A schema reaches the CLI only where the CLI enforces it. Where
+        # it does not, the port still validates the parsed value, so the
+        # guarantee holds either way and is never silently assumed.
+        _resolved_output_schema(spec)
+        if provider.capabilities.structured_output else None,
     )
+    # Everything a provider cannot honor is refused here, before a
+    # process exists: an unsupported mode reaching a CLI that ignores the
+    # flag would look like a run that succeeded under a policy nothing
+    # applied.
+    refusal = provider.validate(resolved)
+    if refusal is not None:
+        raise DefinitionError(refusal)
     launch = provider.prepare(resolved, ctx.request)
     return Launch(
         launch.argv,
@@ -250,11 +279,15 @@ def interpret(
             step, False, retryable=step is Step.AGENT,
             category="timeout", message="child timed out")
     if raw.returncode != 0:
-        category = {
-            Step.PRE: "pre_processor_crash",
-            Step.POST: "post_processor_crash",
-            Step.AGENT: _agent_failure_category(raw),
-        }[step]
+        if step is Step.AGENT:
+            provider = get_provider(
+                launch.provider or _config(spec).selector.provider)
+            category = provider.failure(raw) or "cli_crash"
+        else:
+            category = {
+                Step.PRE: "pre_processor_crash",
+                Step.POST: "post_processor_crash",
+            }[step]
         return StepResult(
             step, False, category=category,
             message=raw.stderr.strip() or f"child exited with status {raw.returncode}")
@@ -290,27 +323,6 @@ def _skip_on_stdout(text: str) -> bool:
     except json.JSONDecodeError:
         return False
     return isinstance(parsed, dict) and bool(parsed.get("skip"))
-
-
-def _agent_failure_category(raw: RawOutput) -> str:
-    if raw.returncode != 0:
-        text = f"{raw.stderr}\n{raw.stdout}".casefold()
-        if "json-schema" in text and "invalid" in text:
-            return "output_schema_rejected"
-        if any(phrase in text for phrase in (
-            "unexpected value",
-            "unexpected argument",
-            "unknown argument",
-            "unknown option",
-            "unrecognized argument",
-            "unrecognized option",
-            "unrecognized arguments",
-            "invalid argument",
-            "invalid option",
-            "invalid value",
-        )):
-            return "cli_argument_rejected"
-    return "cli_crash"
 
 
 def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:

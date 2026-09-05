@@ -15,6 +15,10 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 
 from agents_live import preflight  # noqa: E402
+from agents_live.agent import (  # noqa: E402
+    ToolCall, TranscriptSource, TranscriptTurn)
+from agents_live.agent import providers  # noqa: E402
+from agents_live.agent.providers.base import ProviderBase  # noqa: E402
 from agents_live.obs import query  # noqa: E402
 from agents_live.paths import repo_state_dir, resolve_root  # noqa: E402
 
@@ -49,78 +53,60 @@ def _select(
     return records[:last]
 
 
-def _tool_call(value: object) -> dict[str, object] | None:
-    if not isinstance(value, dict):
-        return None
-    name = value.get("name") or value.get("toolName") or value.get("tool_name")
-    if not isinstance(name, str) or not name:
-        return None
-    result: dict[str, object] = {"name": name}
-    arguments = value.get("arguments", value.get("input", value.get("parameters")))
-    if arguments is not None:
-        result["arguments"] = arguments
-    return result
+def _declared_executables(names: tuple[str, ...]) -> dict[str, str]:
+    """Each registered provider's executable, keyed for argv matching.
 
-
-def _copilot_turns(stdout: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    turns: list[dict[str, object]] = []
-    tools: list[dict[str, object]] = []
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+    A basename two providers share identifies neither, so it is dropped
+    rather than attributing an envelope to whichever sorted last.
+    """
+    claims: dict[str, list[str]] = {}
+    for name in names:
+        executable = providers.get(name).cli.executable
+        if not executable:
             continue
-        if not isinstance(event, dict) or not isinstance(event.get("data"), dict):
-            continue
-        event_type = event.get("type")
-        data = event["data"]
-        if event_type in {"assistant.message", "user.message"}:
-            content = data.get("content")
-            requests = data.get("toolRequests")
-            calls = [
-                call for call in (_tool_call(item) for item in requests)
-                if call is not None
-            ] if isinstance(requests, list) else []
-            tools.extend(calls)
-            if isinstance(content, str) and content.strip() or calls:
-                turn: dict[str, object] = {
-                    "role": "assistant" if event_type == "assistant.message" else "user",
-                    "text": content.strip() if isinstance(content, str) else "",
-                }
-                if calls:
-                    turn["tool_calls"] = calls
-                turns.append(turn)
-    return turns, tools
+        key = Path(executable).name.casefold().removesuffix(".exe")
+        claims.setdefault(key, []).append(name)
+    return {
+        key: owners[0]
+        for key, owners in claims.items() if len(owners) == 1}
 
 
 def _provider(envelope: dict[str, object]) -> str:
+    """Which provider produced this envelope.
+
+    Recent envelopes say so. Older ones do not, and the only evidence
+    left is the command line, so each registered provider's declared
+    executable is matched against it rather than a name known here.
+    """
     declared = envelope.get("provider")
     if isinstance(declared, str) and declared:
         return declared
     argv = envelope.get("argv")
     if isinstance(argv, list):
+        executables = _declared_executables(providers.names())
         for token in argv[:6]:
             if not isinstance(token, str):
                 continue
             name = token.replace("\\", "/").rsplit("/", 1)[-1].casefold()
             name = name.removesuffix(".exe")
-            if name == "copilot" or name.endswith("-copilot"):
-                return "copilot"
-            if name == "claude" or name.endswith("-claude"):
-                return "claude"
+            for candidate, provider_name in executables.items():
+                if name == candidate or name.endswith(f"-{candidate}"):
+                    return provider_name
     return "unknown"
 
 
-def _legacy_prompt(envelope: dict[str, object], provider: str) -> str | None:
-    prompt = envelope.get("prompt")
-    if isinstance(prompt, str):
-        return prompt
-    argv = envelope.get("argv")
-    if provider == "copilot" and isinstance(argv, list) and "-p" in argv:
-        index = argv.index("-p")
-        if index + 1 < len(argv) and isinstance(argv[index + 1], str):
-            return argv[index + 1]
-    return None
+def _rendered(call: ToolCall) -> dict[str, object]:
+    rendered: dict[str, object] = {"name": call.name}
+    if call.arguments is not None:
+        rendered["arguments"] = call.arguments
+    return rendered
+
+
+def _rendered_turn(turn: TranscriptTurn) -> dict[str, object]:
+    rendered: dict[str, object] = {"role": turn.role, "text": turn.text}
+    if turn.tool_calls:
+        rendered["tool_calls"] = [_rendered(call) for call in turn.tool_calls]
+    return rendered
 
 
 def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None]:
@@ -165,43 +151,31 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
         return base, raw
 
     provider = _provider(envelope)
-    prompt = _legacy_prompt(envelope, provider)
     stdout = envelope.get("stdout")
     stdout = stdout if isinstance(stdout, str) else ""
+    argv = envelope.get("argv")
+    declared_prompt = envelope.get("prompt")
+    source = TranscriptSource(
+        stdout,
+        tuple(item for item in argv if isinstance(item, str))
+        if isinstance(argv, list) else (),
+        declared_prompt if isinstance(declared_prompt, str) else None,
+    )
+    try:
+        normalized = providers.get(provider).transcript(source)
+    except ValueError:
+        # A transcript outlives the plugin that wrote it, so an
+        # unrecognized provider is read generically rather than refused.
+        normalized = ProviderBase().transcript(source)
+    prompt = normalized.prompt
     turns: list[dict[str, object]] = []
-    tools: list[dict[str, object]] = []
-    if prompt:
+    if prompt and not any(turn.role == "user" for turn in normalized.turns):
         turns.append({"role": "user", "text": prompt})
-    final: object = None
-    structured: object = None
-    if "claude" in provider:
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            final = payload.get("result")
-            structured = payload.get("structured_output")
-        if not isinstance(final, str):
-            final = stdout.strip() or None
-    elif "copilot" in provider:
-        provider_turns, tools = _copilot_turns(stdout)
-        turns.extend(provider_turns)
-        final = next(
-            (turn.get("text") for turn in reversed(provider_turns)
-             if turn.get("role") == "assistant" and turn.get("text")),
-            None,
-        )
-    else:
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            final = payload.get("text") or payload.get("result")
-            structured = payload.get("structured")
-        if not isinstance(final, str):
-            final = stdout.strip() or None
+    turns.extend(_rendered_turn(turn) for turn in normalized.turns)
+    tools = [
+        _rendered(call) for turn in normalized.turns for call in turn.tool_calls]
+    final = normalized.final
+    structured = normalized.structured
     if isinstance(final, str) and not any(
             turn.get("role") == "assistant" and turn.get("text") == final
             for turn in turns):

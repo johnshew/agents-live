@@ -11,6 +11,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- feat: make a provider integration self-contained. (#446)
+  A provider now declares its CLI probe and installation guidance, the modes,
+  models, efforts, and MCP transports it supports, the run-scoped files and
+  environment its CLI needs, and how to read its failures and transcripts.
+  Dispatch materializes and removes those files under the run scratch
+  directory, so a provider stays pure. Unattended setup, pipeline MCP
+  rendering, doctor probing, and transcript rendering no longer branch on a
+  provider name, and a source-directory plugin can complete a run without a
+  package change. Unsupported mode, model, effort, and transport combinations
+  now fail before a process starts.
+
 ## 6.8.0 - 2026-09-04
 
 - fix: load declared source plugins in the dashboard process.
