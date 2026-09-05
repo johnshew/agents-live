@@ -692,8 +692,11 @@ class TestDoctor(unittest.TestCase):
         refused = runtime.hosts.system.ExecutableNotFound(
             "only shims answer to 'claude' on this host's PATH; "
             "claude.cmd is a batch shim")
-        with mock.patch.object(
-                doctor.hostruntime, "pin_executable", side_effect=refused):
+        with (
+            mock.patch.object(
+                doctor.hostruntime, "pin_executable", side_effect=refused),
+            mock.patch.object(doctor.hostruntime, "id", return_value="windows"),
+        ):
             checks = doctor._provider_cli_checks({"claude"})
 
         self.assertEqual(1, len(checks))
@@ -2910,7 +2913,7 @@ class RecordingRunner:
             if flag in arguments:
                 value = arguments[arguments.index(flag) + 1].removeprefix("@")
                 path = Path(value)
-                if path.name.startswith("agents-live-mcp-"):
+                if path.name.endswith("project-mcp.json"):
                     self.mcp_configs.append((
                         path,
                         json.loads(path.read_text(encoding="utf-8")),
@@ -4206,10 +4209,12 @@ class TestAgentPipeline(TempRepository):
         reached a live agent before being caught, and each was diagnosed only
         by manually reconstructing the ``uv run --script`` invocation outside
         the test suite - nothing here actually ran the bridge as a real
-        subprocess against a live server. This spawns it exactly as
-        ``pipeline/runtime.py`` configures copilot to, over real stdio, and
-        confirms a genuine MCP ``initialize`` round-trip succeeds.
+        subprocess against a live server. This spawns it exactly as the
+        copilot provider renders it from the run's pipeline endpoint,
+        over real stdio, and confirms a genuine MCP ``initialize``
+        round-trip succeeds.
         """
+        from agents_live.agent import ProviderRuntime, providers
         from agents_live.runtime.spawn import find_uv
         from agents_live.pipeline.runtime import pipeline_runtime
 
@@ -4217,10 +4222,12 @@ class TestAgentPipeline(TempRepository):
         if uv is None:
             self.skipTest("uv not found on PATH")
         with pipeline_runtime(None) as env:
-            config = json.loads(
-                Path(env["PIPELINE_MCP_COPILOT_CONFIG"]).read_text(
-                    encoding="utf-8"))
-            bridge = config["mcpServers"]["pipeline"]
+            artifact = next(
+                item for item in providers.get("copilot").artifacts(
+                    ProviderRuntime("pipeline", (), env.endpoint))
+                if item.relative_path.endswith("pipeline-mcp.json")
+            )
+            bridge = json.loads(artifact.text)["mcpServers"]["pipeline"]
             child_env = {**os.environ, **bridge["env"]}
             proc = subprocess.Popen(
                 [uv, *bridge["args"]],

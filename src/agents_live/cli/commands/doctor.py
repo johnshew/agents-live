@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from ... import agent, deploy, paths, runtime, state
+from ...agent import providers
 from ...runtime.hosts import system as hostruntime
 from ...state import ownership, registry as repos
 from .. import lifecycle, update_check
@@ -150,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _configured_provider_names(registry: dict) -> set[str]:
+    """Which providers this host is actually expected to launch.
+
+    Derived from the definitions themselves and filtered by whether the
+    provider names a native executable, so a new provider is probed
+    without doctor learning its name.
+    """
     names: set[str] = set()
     for value in registry.get("repos", {}).values():
         root = state.resolve_root(value) if os.path.isdir(value) else None
@@ -161,32 +168,52 @@ def _configured_provider_names(registry: dict) -> set[str]:
             continue
         for spec in discovery.specs:
             config = spec.execution
-            if config is not None and config.selector.provider in {"claude", "copilot"}:
-                names.add(config.selector.provider)
+            if config is None:
+                continue
+            try:
+                provider = providers.get(config.selector.provider)
+            except ValueError:
+                continue
+            if provider.cli.executable:
+                names.add(provider.name)
     return names
 
 
 def _provider_cli_checks(names: set[str]) -> list[dict[str, object]]:
-    remediation = {
-        "claude": "winget install Anthropic.ClaudeCode",
-        "copilot": "winget install GitHub.Copilot",
-    }
+    host = hostruntime.id()
     checks = []
     for name in sorted(names):
         try:
-            executable = hostruntime.pin_executable(name)
-        except hostruntime.ExecutableNotFound as exc:
+            provider = providers.get(name)
+        except ValueError as exc:
             checks.append({
                 "check": f"provider CLI {name}",
                 "ok": False,
-                "detail": f"{exc}; install the native CLI with "
-                          f"`{remediation[name]}`",
+                "detail": str(exc),
+            })
+            continue
+        cli = provider.cli
+        if not cli.executable:
+            continue
+        try:
+            executable = hostruntime.pin_executable(cli.executable)
+        except hostruntime.ExecutableNotFound as exc:
+            install = cli.install_command(host)
+            remedy = (
+                f"; install the native CLI with `{install}`" if install
+                else "; install the native CLI"
+            )
+            checks.append({
+                "check": f"provider CLI {name}",
+                "ok": False,
+                "detail": f"{exc}{remedy}",
             })
         else:
+            probe = " ".join((executable, *cli.probe_argv))
             checks.append({
                 "check": f"provider CLI {name}",
                 "ok": True,
-                "detail": f"launchable executable: {executable}",
+                "detail": f"launchable executable: {executable}; probe: {probe}",
             })
     return checks
 

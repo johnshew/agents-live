@@ -167,6 +167,117 @@ class McpServer:
 
 
 @dataclass(frozen=True)
+class PipelineEndpoint:
+    """The run-scoped pipeline MCP server, described without owning it.
+
+    A provider renders its own client configuration from this; the
+    pipeline runtime keeps the server, and no host object crosses the
+    port.
+    """
+
+    name: str
+    url: str
+    token: str
+    bridge_command: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProviderRuntime:
+    """What one run offers a provider before anything is materialized."""
+
+    mode: str
+    mcps: tuple[McpServer, ...] = ()
+    pipeline: PipelineEndpoint | None = None
+
+
+@dataclass(frozen=True)
+class RunArtifact:
+    """A run-scoped file or directory a provider needs before launch.
+
+    The provider describes it; dispatch decides where it lands, creates
+    it with these permissions, binds ``env`` to its path, and removes it
+    when the run ends. ``relative_path`` is resolved under the run's own
+    scratch directory and may not escape it.
+    """
+
+    relative_path: str
+    kind: str = "file"
+    text: str | None = None
+    mode: int = 0o600
+    env: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProviderCli:
+    """How a host reaches this provider's command-line tool.
+
+    ``executable`` is ``None`` for a provider that launches no native
+    CLI, and such a provider is never probed or offered installation
+    guidance. ``probe_argv`` carries the tokens that follow it for a
+    liveness check, so a nested command (``copilot help``) is describable
+    without a caller knowing the provider's name.
+    """
+
+    executable: str | None = None
+    probe_argv: tuple[str, ...] = ()
+    install_commands: tuple[tuple[str, str], ...] = ()
+
+    def install_command(self, host: str) -> str | None:
+        for candidate, command in self.install_commands:
+            if candidate == host:
+                return command
+        return None
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """What a provider can be asked for, checked before a process starts.
+
+    Anything not listed is unsupported: an unknown mode, transport,
+    model, or effort fails closed rather than reaching a CLI that would
+    silently ignore the safety guarantee it stands for.
+    """
+
+    modes: frozenset[str]
+    mcp_transports: frozenset[str] = frozenset()
+    structured_output: bool = False
+    models: frozenset[str] | None = None
+    efforts: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    arguments: object | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptTurn:
+    role: str
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+@dataclass(frozen=True)
+class TranscriptSource:
+    """One recorded run, as the reader found it on disk."""
+
+    stdout: str
+    argv: tuple[str, ...] = ()
+    prompt: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderTranscript:
+    """One recorded conversation, in provider-neutral terms."""
+
+    turns: tuple[TranscriptTurn, ...] = ()
+    final: str | None = None
+    structured: object | None = None
+    prompt: str | None = None
+
+
+@dataclass(frozen=True)
 class ResolvedSpec:
     name: str
     prompt: str

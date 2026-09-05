@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import tempfile
 import time
 import uuid
@@ -21,6 +22,8 @@ from .runtime.hosts.processes import pid_exists
 _LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
 # A log line, not the artifact: enough to diagnose, not enough to bloat.
 _RECORDED_MAX_CHARS = 4096
+# Where run-scoped provider configuration lives for the length of a run.
+PROVIDER_DIRECTORY = "provider"
 
 
 @dataclass(frozen=True)
@@ -461,21 +464,17 @@ def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:
 
 @contextlib.contextmanager
 def _resource(spec, needed: bool, run_id: str, scratch: Path):
-    from .agent.mcp import mcp_config_runtime, resolve_mcp_servers
-    from .agent.unattended import provider_environment
+    """Everything one run needs on disk or on a port, and its cleanup.
 
+    The pipeline server comes up first so a provider can describe how it
+    would reach it; the provider's own files are materialized after and
+    removed before the server goes away.
+    """
     environment: dict[str, str] = {}
     pipeline_session = None
+    endpoint = None
     config = spec.execution
     with contextlib.ExitStack() as stack:
-        if config is not None:
-            environment.update(stack.enter_context(
-                provider_environment(config.selector.provider, scratch)))
-        if config is not None and config.mcps and config.mode != "pipeline":
-            resolved = resolve_mcp_servers(spec.root, config.mcps)
-            project_config = stack.enter_context(mcp_config_runtime(resolved))
-            if project_config:
-                environment["AGENTS_LIVE_PROJECT_MCP_CONFIG"] = project_config
         if needed:
             from .pipeline import pipeline_runtime
             from .paths import repo_state_dir
@@ -491,7 +490,59 @@ def _resource(spec, needed: bool, run_id: str, scratch: Path):
                 run_id=run_id,
             ))
             environment.update(pipeline_session)
+            endpoint = pipeline_session.endpoint
+        if config is not None:
+            environment.update(stack.enter_context(_provider_files(
+                scratch, agent.provider_artifacts(spec, endpoint))))
         yield tuple(sorted(environment.items())), pipeline_session
+
+
+@contextlib.contextmanager
+def _provider_files(scratch: Path, artifacts):
+    """Create what the provider asked for, bind it, and take it away.
+
+    The provider names the files and their permissions; where they live
+    and how long they live is dispatch's to decide, so a provider never
+    holds a path outside the run it belongs to.
+    """
+    owned = (scratch / PROVIDER_DIRECTORY).resolve()
+    environment: dict[str, str] = {}
+    try:
+        owned.mkdir(parents=True, exist_ok=True)
+        owned.chmod(0o700)
+        for artifact in artifacts:
+            target = _artifact_path(owned, artifact.relative_path)
+            if artifact.kind == "directory":
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(artifact.mode)
+            elif artifact.kind == "file":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    artifact.mode,
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(artifact.text or "")
+                target.chmod(artifact.mode)
+            else:
+                raise ValueError(
+                    f"unknown provider run artifact kind: {artifact.kind}")
+            for name in artifact.env:
+                environment[name] = str(target)
+        yield environment
+    finally:
+        shutil.rmtree(owned, ignore_errors=True)
+
+
+def _artifact_path(owned: Path, relative: str) -> Path:
+    """Where an artifact lands, refusing anything outside the run."""
+    candidate = Path(relative)
+    target = (owned / candidate).resolve()
+    if candidate.is_absolute() or not target.is_relative_to(owned):
+        raise ValueError(
+            f"provider run artifact escapes the run directory: {relative}")
+    return target
 
 
 def _event_path(root: Path, agent_id: str) -> Path:
