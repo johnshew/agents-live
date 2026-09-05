@@ -280,7 +280,8 @@ def interpret(
             category="timeout", message="child timed out")
     if raw.returncode != 0:
         if step is Step.AGENT:
-            provider = get_provider(launch.provider or _config(spec).selector.provider)
+            provider = get_provider(
+                launch.provider or _config(spec).selector.provider)
             category = provider.failure(raw) or "cli_crash"
         else:
             category = {

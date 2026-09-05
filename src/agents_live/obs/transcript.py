@@ -8,17 +8,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from functools import lru_cache
 from pathlib import Path
-from types import MappingProxyType
-from typing import Mapping
 
 PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 
 from agents_live import preflight  # noqa: E402
-from agents_live.agent import ToolCall, TranscriptSource, TranscriptTurn  # noqa: E402
+from agents_live.agent import (  # noqa: E402
+    ToolCall, TranscriptSource, TranscriptTurn)
 from agents_live.agent import providers  # noqa: E402
 from agents_live.agent.providers.base import ProviderBase  # noqa: E402
 from agents_live.obs import query  # noqa: E402
@@ -55,15 +53,22 @@ def _select(
     return records[:last]
 
 
-@lru_cache(maxsize=None)
-def _declared_executables(names: tuple[str, ...]) -> Mapping[str, str]:
-    """Each registered provider's executable, keyed for argv matching."""
-    return MappingProxyType({
-        Path(providers.get(name).cli.executable).name
-        .casefold().removesuffix(".exe"): name
-        for name in names
-        if providers.get(name).cli.executable
-    })
+def _declared_executables(names: tuple[str, ...]) -> dict[str, str]:
+    """Each registered provider's executable, keyed for argv matching.
+
+    A basename two providers share identifies neither, so it is dropped
+    rather than attributing an envelope to whichever sorted last.
+    """
+    claims: dict[str, list[str]] = {}
+    for name in names:
+        executable = providers.get(name).cli.executable
+        if not executable:
+            continue
+        key = Path(executable).name.casefold().removesuffix(".exe")
+        claims.setdefault(key, []).append(name)
+    return {
+        key: owners[0]
+        for key, owners in claims.items() if len(owners) == 1}
 
 
 def _provider(envelope: dict[str, object]) -> str:
