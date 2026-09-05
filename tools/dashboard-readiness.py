@@ -14,12 +14,16 @@ bound a port.
 
 This gate launches the artifact against a throwaway local-only project
 with one started definition, waits on ``/api/agents``, and asserts the
-row, its state, and the availability of the actions that act on it. It
-repeats the run with ``--dev``, where NiceGUI starts the reload worker as
-``__mp_main__`` and imports resolve differently.
+row, its state, and the availability of the actions that act on it. The
+default release plan assigns each launch mode distinct evidence: normal mode
+owns the responsive and continuity journeys, all-repositories owns the
+repository-qualified Run action, and ``--dev`` owns reload-worker startup.
 
     uv run --script tools/dashboard-readiness.py                 # built wheel
     uv run --script tools/dashboard-readiness.py --editable      # this checkout
+    uv run --script tools/dashboard-readiness.py --plan          # no browser
+    uv run --script tools/dashboard-readiness.py --editable \
+        --scenario continuity --viewport desktop                 # focused UX
 
 The fixture is a temporary directory with its own state, data, and config
 homes, so the gate never reads the developer's registry or touches a real
@@ -48,6 +52,23 @@ ROOT = Path(__file__).resolve().parents[1]
 READY_TIMEOUT_S = 180.0
 POLL_INTERVAL_S = 0.5
 SHUTDOWN_GRACE_S = 10.0
+
+SCENARIO_ORDER = (
+    "startup", "layout", "continuity", "repositories", "aggregate",
+    "disconnect",
+)
+VIEWPORTS = {
+    "desktop": (1280, 720),
+    "wide": (1440, 900),
+    "mobile": (390, 844),
+}
+RELEASE_SCENARIOS = {
+    "normal": (
+        "startup", "layout", "continuity", "repositories", "disconnect",
+    ),
+    "all-repos": ("startup", "aggregate"),
+    "dev": ("startup",),
+}
 
 DEFINITION = """---
 name: readiness-agent
@@ -370,7 +391,13 @@ def _browser_executable() -> Path:
     raise ReadinessError("no installed Edge, Chrome, or Chromium browser is available")
 
 
-def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
+def _assert_operational_viewport(
+    port: int,
+    directory: Path,
+    mode: str,
+    scenarios: set[str],
+    viewport_names: tuple[str, ...],
+) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
@@ -384,8 +411,10 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
         try:
-            viewports = ((1280, 720), (1440, 900), (390, 844))
-            for width, height in viewports:
+            continuity_viewport = viewport_names[0] if viewport_names else None
+            for viewport_name in viewport_names:
+                width, height = VIEWPORTS[viewport_name]
+                started = time.perf_counter()
                 page = browser.new_page(viewport={"width": width, "height": height})
                 page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
                 body = page.locator(".dashboard-body")
@@ -424,6 +453,13 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
                 if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > height:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: operational regions overflow")
+                if "continuity" not in scenarios \
+                        or viewport_name != continuity_viewport:
+                    page.close()
+                    _say(
+                        f"{mode}: layout {viewport_name} passed in "
+                        f"{time.perf_counter() - started:.1f}s")
+                    continue
                 scope = page.get_by_label("Repository scope")
                 scope.click()
                 page.get_by_role("option", name=repository_name, exact=True).click()
@@ -600,6 +636,13 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
                         f"{mode} {width}x{height}: focus did not return to Settings")
                 page.close()
 
+                _say(
+                    f"{mode}: layout and continuity {viewport_name} passed in "
+                    f"{time.perf_counter() - started:.1f}s")
+
+            if "repositories" not in scenarios:
+                return
+
             empty = directory / "empty-repository"
             (empty / "Agents").mkdir(parents=True, exist_ok=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
@@ -755,7 +798,7 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
             page.close()
         finally:
             browser.close()
-    _say(f"{mode}: settings overlay and repository refresh passed all viewports")
+    _say(f"{mode}: repository lifecycle and scale passed")
 
 
 def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
@@ -867,7 +910,9 @@ def _terminate(process: subprocess.Popen) -> None:
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-        *, dev: bool, source: bool, all_repos: bool = False) -> None:
+    *, dev: bool, source: bool, all_repos: bool = False,
+    scenarios: tuple[str, ...] = SCENARIO_ORDER,
+    viewport_names: tuple[str, ...] = tuple(VIEWPORTS)) -> None:
     mode = ("source" if source else "packaged") + (" --dev" if dev else "")
     if all_repos:
         mode += " all-repositories"
@@ -883,30 +928,115 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         argv, cwd=directory, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         **({} if os.name == "nt" else {"start_new_session": True}))
+    check_started = time.perf_counter()
     try:
+        started = time.perf_counter()
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
-        _say(f"{mode}: served a started row with Stop available")
-        _assert_operational_viewport(port, directory, mode)
-        _assert_aggregate_run(port, directory, payload, mode)
-        if not all_repos:
+        _say(
+            f"{mode}: startup served a started row with Stop available in "
+            f"{time.perf_counter() - started:.1f}s")
+        visual_scenarios = set(scenarios) & {"layout", "continuity"}
+        if visual_scenarios:
+            _assert_operational_viewport(
+                port, directory, mode, visual_scenarios, viewport_names)
+        if "aggregate" in scenarios:
+            started = time.perf_counter()
+            _assert_aggregate_run(port, directory, payload, mode)
+            _say(
+                f"{mode}: aggregate passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        if "repositories" in scenarios:
+            started = time.perf_counter()
+            _assert_operational_viewport(
+                port, directory, mode, {"repositories"}, ())
+            _say(
+                f"{mode}: repositories passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        if "disconnect" in scenarios and not all_repos:
+            started = time.perf_counter()
             _assert_abortive_disconnect_survives(process, port, mode)
+            _say(
+                f"{mode}: disconnect passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
     finally:
         _terminate(process)
 
 
+def _plan(args: argparse.Namespace) -> dict:
+    selected_modes = args.launch_mode
+    if selected_modes is None:
+        selected_modes = ["normal"] if args.scenario or args.viewport else [
+            "normal", "all-repos", "dev"]
+    if args.skip_dev:
+        selected_modes = [mode for mode in selected_modes if mode != "dev"]
+    if not selected_modes:
+        raise ReadinessError("no launch modes remain after --skip-dev")
+
+    requested = set(args.scenario or ())
+    if args.viewport and not requested & {"layout", "continuity"}:
+        raise ReadinessError(
+            "--viewport requires the layout or continuity scenario")
+
+    runs = []
+    for launch_mode in selected_modes:
+        scenarios = (
+            tuple(name for name in SCENARIO_ORDER
+                  if name == "startup" or name in requested)
+            if requested else RELEASE_SCENARIOS[launch_mode]
+        )
+        if "layout" in scenarios:
+            viewports = tuple(args.viewport or VIEWPORTS)
+        elif "continuity" in scenarios:
+            viewports = tuple(args.viewport or ("desktop",))
+        else:
+            viewports = ()
+        runs.append({
+            "mode": launch_mode,
+            "scenarios": list(scenarios),
+            "viewports": list(viewports),
+        })
+    return {
+        "artifact": "source" if args.editable else "packaged",
+        "runs": runs,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    artifact = parser.add_mutually_exclusive_group()
+    artifact.add_argument(
         "--editable", action="store_true",
         help="run this checkout instead of the built wheel")
     parser.add_argument(
         "--skip-dev", action="store_true",
         help="skip the reload-worker mode (for a slow CI host)")
-    parser.add_argument(
+    artifact.add_argument(
         "--wheel", type=Path,
         help="validate this exact wheel instead of dist/ for the current version")
+    parser.add_argument(
+        "--plan", action="store_true",
+        help="print the resolved test plan as JSON without running it")
+    parser.add_argument(
+        "--launch-mode", action="append",
+        choices=tuple(RELEASE_SCENARIOS),
+        help="run only this server mode; repeat to select multiple modes")
+    parser.add_argument(
+        "--scenario", action="append", choices=SCENARIO_ORDER,
+        help="run only this scenario; repeat to select multiple scenarios")
+    parser.add_argument(
+        "--viewport", action="append", choices=tuple(VIEWPORTS),
+        help="limit layout or continuity checks; repeat to select viewports")
     args = parser.parse_args()
+
+    try:
+        plan = _plan(args)
+    except ReadinessError as exc:
+        parser.error(str(exc))
+    if args.plan:
+        print(json.dumps(plan, indent=2))
+        return 0
 
     # A Windows handle can outlive the tree kill by a moment; a lingering
     # file must not fail a check that already passed.
@@ -917,20 +1047,18 @@ def main() -> int:
         _fixture(directory)
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
-        _seed_started_state(python, directory, environment)
-        _check(
-            launcher, directory, environment, dev=False,
-            source=args.editable)
-        _seed_started_state(python, directory, environment)
-        _check(
-            launcher, directory, environment, dev=False,
-            source=args.editable, all_repos=True)
-        if not args.skip_dev:
+        total_started = time.perf_counter()
+        for run in plan["runs"]:
             _seed_started_state(python, directory, environment)
             _check(
-                launcher, directory, environment, dev=True,
-                source=args.editable)
-    _say("ok")
+                launcher, directory, environment,
+                dev=run["mode"] == "dev",
+                source=args.editable,
+                all_repos=run["mode"] == "all-repos",
+                scenarios=tuple(run["scenarios"]),
+                viewport_names=tuple(run["viewports"]),
+            )
+    _say(f"ok in {time.perf_counter() - total_started:.1f}s")
     return 0
 
 

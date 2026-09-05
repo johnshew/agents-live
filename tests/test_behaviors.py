@@ -6029,6 +6029,63 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertIn(token, gate)
         self.assertIn("tools/dashboard-readiness.py", self._gate_text())
 
+    def test_dashboard_readiness_plans_release_and_focused_ux_evidence(self) -> None:
+        gate = REPOSITORY / "tools" / "dashboard-readiness.py"
+
+        release = subprocess.run(
+            [sys.executable, str(gate), "--plan"],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(0, release.returncode, release.stderr)
+        self.assertEqual([
+            {
+                "mode": "normal",
+                "scenarios": [
+                    "startup", "layout", "continuity", "repositories",
+                    "disconnect",
+                ],
+                "viewports": ["desktop", "wide", "mobile"],
+            },
+            {
+                "mode": "all-repos",
+                "scenarios": ["startup", "aggregate"],
+                "viewports": [],
+            },
+            {
+                "mode": "dev",
+                "scenarios": ["startup"],
+                "viewports": [],
+            },
+        ], json.loads(release.stdout)["runs"])
+
+        focused = subprocess.run(
+            [
+                sys.executable, str(gate), "--plan", "--editable",
+                "--launch-mode", "normal", "--scenario", "continuity",
+                "--viewport", "desktop",
+            ],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(0, focused.returncode, focused.stderr)
+        self.assertEqual({
+            "artifact": "source",
+            "runs": [{
+                "mode": "normal",
+                "scenarios": ["startup", "continuity"],
+                "viewports": ["desktop"],
+            }],
+        }, json.loads(focused.stdout))
+
+        invalid = subprocess.run(
+            [sys.executable, str(gate), "--plan", "--viewport", "mobile"],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(2, invalid.returncode)
+        self.assertIn(
+            "--viewport requires the layout or continuity scenario",
+            invalid.stderr,
+        )
+
 
 class TestRepositoryDiscoveryRoots(TempRepository):
     """Which files in a repository are Agents Live agents (#388).

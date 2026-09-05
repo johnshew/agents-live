@@ -163,11 +163,15 @@ labels in addition to color.
 
 Editable native-Windows evidence is the focused
 `TestDashboardRepositorySurface.test_dashboard_activity_summary_runs_at_each_refresh_boundary`
-seam and `tools/dashboard-readiness.py --editable`. The browser gate exercises
-1280 x 720, 1440 x 900, and 390 x 844 viewports; keyboard refresh, settings,
-split, and Run actions; manual refresh and full-page reconnect continuity;
-non-bottom activity retention; missing-repository isolation; failed-refresh
-staleness and recovery; and bounded DOM rendering for 151 discovered agents.
+seam and selectable scenarios in `tools/dashboard-readiness.py`. The default
+browser gate checks layout at 1280 x 720, 1440 x 900, and 390 x 844 without
+replaying every stateful journey. Normal mode owns keyboard refresh, settings,
+split, reconnect continuity, non-bottom activity retention, missing-repository
+isolation, failed-refresh recovery, and bounded rendering for 151 discovered
+agents. All-repositories mode owns the repository-qualified Run action, and
+development reload mode owns startup. `--plan` and focused `--scenario`,
+`--launch-mode`, and `--viewport` selectors keep Playwright out of unrelated
+implementation loops while preserving the complete default release gate.
 
 This evidence does not claim screen-reader acceptance, the 10,000-agent stress
 ceiling, Linux or WSL browser behavior, or installed-wheel acceptance. Those

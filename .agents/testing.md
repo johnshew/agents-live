@@ -229,6 +229,29 @@ is not validated until the built-wheel dashboard reaches `/api/agents` and
 returns the expected temporary-project rows and action flags in normal and
 `--dev` modes.
 
+Keep Playwright out of the implementation loop until a changed user journey
+needs browser evidence. Inspect the resolved release matrix without installing
+or launching anything:
+
+```bash
+uv run --script tools/dashboard-readiness.py --plan
+```
+
+For a changed journey, run one editable launch mode and the smallest relevant
+scenario and viewport. For example:
+
+```bash
+uv run --script tools/dashboard-readiness.py --editable \
+  --launch-mode normal --scenario continuity --viewport desktop
+```
+
+The default command remains the release gate. It runs responsive layout at the
+three required viewports, but runs the stateful continuity journey only once.
+Repository lifecycle and scale run once in normal mode, the repository-qualified
+Run action runs once in all-repositories mode, and reload-worker mode proves
+packaged startup without replaying the UX matrix. Each scenario reports elapsed
+time so a slow or late failure identifies the responsible boundary.
+
 On a Microsoft-managed host whose proxy does not yet expose the candidate,
 install the local wheel by path and let the proxy resolve only its
 dependencies. Follow the Windows and WSL procedure in
