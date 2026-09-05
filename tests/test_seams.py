@@ -12,6 +12,7 @@ import os
 import re
 import runpy
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4802,6 +4803,383 @@ class TestAgentPipeline(TempRepository):
             runtime.configure(previous)
         self.assertEqual(0, code, stdout.getvalue())
         self.assertNotIn(identifier, state.load(self.root).agents)
+
+
+PLUGIN_SOURCE = '''
+"""A provider that lives outside the package and implements the contract."""
+import json
+import sys
+
+from agents_live.agent.values import (
+    Completion,
+    Launch,
+    ProviderCapabilities,
+    ProviderCli,
+    ProviderTranscript,
+    RunArtifact,
+    TranscriptTurn,
+)
+
+CHILD = (
+    "import json, os, sys; "
+    "print(json.dumps({"
+    "'policy': json.load(open(os.environ['DEMO_POLICY'], encoding='utf-8')), "
+    "'prompt': sys.argv[1]}))"
+)
+
+
+class Provider:
+    name = "contract-demo"
+    cli = ProviderCli(
+        executable=sys.executable,
+        probe_argv=("-m", "demo_cli", "--help"),
+        install_commands=(("windows", "winget install Example.Demo"),),
+    )
+    capabilities = ProviderCapabilities(
+        modes=frozenset({"plan"}),
+        mcp_transports=frozenset({"stdio"}),
+        structured_output=False,
+        models=frozenset({"only"}),
+        efforts=frozenset(),
+    )
+
+    def validate(self, spec):
+        if spec.mode not in self.capabilities.modes:
+            return f"contract-demo does not support mode {spec.mode}"
+        return None
+
+    def artifacts(self, runtime):
+        return (
+            RunArtifact(
+                "demo-home", kind="directory", mode=0o700, env=("DEMO_HOME",)),
+            RunArtifact(
+                "demo-home/policy.json",
+                text=json.dumps({"sealed": True}),
+                env=("DEMO_POLICY",),
+            ),
+        )
+
+    def prepare(self, spec, request):
+        return Launch(
+            (sys.executable, "-c", CHILD, spec.prompt),
+            spec.env,
+            provider=self.name,
+            prompt=spec.prompt,
+        )
+
+    def parse(self, raw):
+        payload = json.loads(raw.stdout)
+        return Completion(payload["prompt"], structured=payload)
+
+    def failure(self, raw):
+        return "demo_policy_refused" if "sealed" in raw.stderr else None
+
+    def transcript(self, source):
+        payload = json.loads(source.stdout)
+        return ProviderTranscript(
+            turns=(TranscriptTurn("assistant", payload["prompt"]),),
+            final=payload["prompt"],
+            structured=payload,
+            prompt=source.prompt,
+        )
+
+
+PROVIDER = Provider()
+'''
+
+
+class _EscapingProvider(providers.ProviderBase):
+    """A provider that asks for a file outside the run it belongs to."""
+
+    name = "escaping"
+    cli = agent.ProviderCli()
+    capabilities = agent.ProviderCapabilities(frozenset({"plan"}))
+
+    def artifacts(self, runtime):
+        return (agent.RunArtifact(
+            "../escaped.json", text="{}", env=("ESCAPED",)),)
+
+    def prepare(self, spec, request):  # pragma: no cover - must not be reached
+        raise AssertionError("a refused artifact must not reach a launch")
+
+    def parse(self, raw):  # pragma: no cover - must not be reached
+        raise AssertionError
+
+
+class _ArtifactRecorder:
+    """A runner that reads what the provider asked dispatch to create."""
+
+    def __init__(self, outputs: list[ChildResult]) -> None:
+        self.outputs = outputs
+        self.observed: dict[str, object] = {}
+        self.argv: list[tuple[str, ...]] = []
+
+    def run_child(self, argv, **kwargs):
+        self.argv.append(tuple(argv))
+        environment = dict(kwargs.get("env", {}))
+        home = Path(environment["AGENTS_LIVE_FAKE_HOME"])
+        settings = Path(environment["AGENTS_LIVE_FAKE_SETTINGS"])
+        self.observed = {
+            "home": home,
+            "settings": json.loads(settings.read_text(encoding="utf-8")),
+            "home_mode": stat.S_IMODE(home.stat().st_mode),
+            "settings_mode": stat.S_IMODE(settings.stat().st_mode),
+        }
+        return self.outputs.pop(0)
+
+
+class TestProviderContract(TempRepository):
+    """One provider module describes its whole integration.
+
+    Everything here used to be a provider-name branch in dispatch,
+    unattended setup, the pipeline runtime, doctor, or transcript
+    rendering, which is why adding a CLI meant editing modules that had
+    no business knowing it existed (#446).
+    """
+
+    def _register(self, provider) -> None:
+        providers.register(provider)
+        self.addCleanup(providers._providers.pop, provider.name, None)
+
+    def _plugin_provider(self):
+        """Load a provider from a source directory, as a plugin would."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        module_path = Path(directory.name) / "contract_demo_plugin.py"
+        module_path.write_text(PLUGIN_SOURCE, encoding="utf-8")
+        specification = importlib.util.spec_from_file_location(
+            "contract_demo_plugin", module_path)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        self._register(module.PROVIDER)
+        return module.PROVIDER
+
+    def _scratch_runs(self) -> Path:
+        return paths.repo_state_dir(self.root) / "runs"
+
+    def test_provider_run_files_are_materialized_bound_and_readable(self) -> None:
+        self.skill("artifact-agent", ['agents-live.selector: "fake"'])
+        runner = _ArtifactRecorder([ChildResult(
+            ("fake",), 0, json.dumps({"text": "done"}), "")])
+
+        result = dispatch(
+            Firing("artifact-agent", str(self.root), "manual"), runner=runner)
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"isolated": True}, runner.observed["settings"])
+        home = runner.observed["home"]
+        self.assertTrue(
+            home.resolve().is_relative_to(self._scratch_runs().resolve()),
+            f"{home} is outside the run scratch directory")
+        if os.name == "posix":
+            self.assertEqual(0o700, runner.observed["home_mode"])
+            self.assertEqual(0o600, runner.observed["settings_mode"])
+        self.assertFalse(home.exists(), "the run-scoped home outlived the run")
+
+    def test_a_real_child_reads_the_configuration_the_provider_asked_for(
+            self) -> None:
+        """The files have to exist for the child, not only for the parent.
+
+        Materialization that the launched process cannot read is the
+        failure this catches, and only a real subprocess shows it.
+        """
+        self.skill("real-artifact-agent", [
+            'agents-live.selector: "fake"',
+            'agents-live.transcript: "true"',
+        ])
+
+        result = dispatch(
+            Firing("real-artifact-agent", str(self.root), "manual"),
+            runner=LocalChildRunner(),
+        )
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"prompt": "Do the work."}, result.structured)
+        envelope = json.loads(
+            Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"isolated": True},
+            json.loads(envelope["stdout"])["settings"],
+            "the child did not read the settings file it was handed")
+
+    def test_provider_files_are_removed_after_a_failed_run(self) -> None:
+        self.skill("failing-artifact-agent", ['agents-live.selector: "fake"'])
+        runner = _ArtifactRecorder([ChildResult(("fake",), 1, "", "boom")])
+
+        result = dispatch(
+            Firing("failing-artifact-agent", str(self.root), "manual"),
+            runner=runner,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertFalse(runner.observed["home"].exists())
+
+    def test_a_run_artifact_cannot_escape_the_directory_that_owns_it(
+            self) -> None:
+        self._register(_EscapingProvider())
+        self.skill("escaping-agent", ['agents-live.selector: "escaping"'])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("escaping-agent", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("escapes the run directory", result.message)
+        self.assertEqual([], runner.argv)
+        self.assertFalse((self.root.parent / "escaped.json").exists())
+
+    def test_an_unsupported_mode_is_refused_before_a_process_starts(
+            self) -> None:
+        self.skill("unsupported-mode", [
+            'agents-live.selector: "fake"',
+            'agents-live.mode: "write"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("unsupported-mode", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("does not support mode write", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_an_unsupported_model_is_refused_before_a_process_starts(
+            self) -> None:
+        self.skill("unsupported-model", ['agents-live.selector: "fake/opus"'])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("unsupported-model", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("does not support model opus", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_an_unsupported_mcp_transport_is_refused(self) -> None:
+        (self.root / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "remote-tool": {"type": "http", "url": "https://example.invalid"},
+        }}), encoding="utf-8")
+        self.skill("remote-mcp", [
+            'agents-live.selector: "fake"',
+            'agents-live.mcps: "[\\"remote-tool\\"]"',
+        ])
+        runner = RecordingRunner([])
+
+        result = dispatch(
+            Firing("remote-mcp", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("agent_invalid", result.category)
+        self.assertIn("http transport", result.message)
+        self.assertEqual([], runner.argv)
+
+    def test_a_source_directory_provider_completes_a_run_unaided(self) -> None:
+        """No package module learns this provider's name.
+
+        It contributes its own run-scoped policy file, renders its own
+        launch, and normalizes its own output, which is the whole point
+        of the contract.
+        """
+        self._plugin_provider()
+        self.skill("demo-agent", [
+            'agents-live.selector: "contract-demo/only"',
+            'agents-live.transcript: "true"',
+        ])
+
+        result = dispatch(
+            Firing("demo-agent", str(self.root), "manual"),
+            runner=LocalChildRunner(),
+        )
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual("Do the work.", result.text)
+        self.assertEqual({"sealed": True}, result.structured["policy"])
+        self.assertTrue(result.transcript)
+
+    def test_a_plugin_provider_classifies_its_own_failure(self) -> None:
+        provider = self._plugin_provider()
+        self.skill("demo-failure", ['agents-live.selector: "contract-demo"'])
+        runner = RecordingRunner([ChildResult(
+            ("demo",), 3, "", "the sealed policy refused the request")])
+
+        result = dispatch(
+            Firing("demo-failure", str(self.root), "manual"), runner=runner)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("demo_policy_refused", result.category)
+        self.assertEqual(
+            "demo_policy_refused",
+            provider.failure(agent.RawOutput(3, "", "sealed")),
+        )
+
+    def test_doctor_probes_the_command_the_provider_declares(self) -> None:
+        self._plugin_provider()
+
+        checks = doctor._provider_cli_checks({"contract-demo"})
+
+        self.assertEqual(1, len(checks))
+        self.assertTrue(checks[0]["ok"], checks[0])
+        self.assertIn("-m demo_cli --help", checks[0]["detail"])
+
+    def test_doctor_offers_the_install_command_the_provider_declares(
+            self) -> None:
+        self._plugin_provider()
+        refused = runtime.hosts.system.ExecutableNotFound("nothing answers")
+        with (
+            mock.patch.object(
+                doctor.hostruntime, "pin_executable", side_effect=refused),
+            mock.patch.object(doctor.hostruntime, "id", return_value="windows"),
+        ):
+            checks = doctor._provider_cli_checks({"contract-demo"})
+
+        self.assertFalse(checks[0]["ok"])
+        self.assertIn("winget install Example.Demo", checks[0]["detail"])
+
+    def test_a_provider_without_an_executable_is_not_probed(self) -> None:
+        self._register(_EscapingProvider())
+
+        self.assertEqual([], doctor._provider_cli_checks({"escaping"}))
+
+    def test_transcript_rendering_uses_the_providers_own_normalization(
+            self) -> None:
+        self._plugin_provider()
+        directory = paths.repo_state_dir(self.root) / "runs" / "demo"
+        directory.mkdir(parents=True, exist_ok=True)
+        envelope = directory / "demo-run-agent-1.json"
+        envelope.write_text(json.dumps({
+            "argv": ["demo"],
+            "prompt": "Inspect the run.",
+            "provider": "contract-demo",
+            "returncode": 0,
+            "stderr": "",
+            "stdout": json.dumps({"policy": {"sealed": True}, "prompt": "Answer."}),
+            "timed_out": False,
+        }), encoding="utf-8")
+        obs.record(
+            paths.repo_state_dir(self.root) / "logs" / "demo.jsonl",
+            obs.create(
+                "run", "success", repository=str(self.root),
+                agent="demo-1234567890", run_id="demo-run", origin="manual",
+                transcript=str(envelope),
+                attributes=(("model_called", True),
+                            ("transcript_state", "available"))))
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = transcript_command.main(["demo-run", "--format", "json"])
+
+        self.assertEqual(0, code, stdout.getvalue())
+        item = json.loads(stdout.getvalue())["transcripts"][0]
+        self.assertEqual("contract-demo", item["provider"])
+        self.assertEqual("Answer.", item["final"])
+        self.assertEqual("Inspect the run.", item["prompt"])
+        self.assertEqual(
+            ["user", "assistant"], [turn["role"] for turn in item["turns"]])
+        self.assertEqual({"sealed": True}, item["structured"]["policy"])
+
 
 
 class TestDashboardRepositorySurface(TempRepository):

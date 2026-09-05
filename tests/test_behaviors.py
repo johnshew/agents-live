@@ -550,47 +550,62 @@ class TestProviderRegistry(unittest.TestCase):
             self.assertIn(name, message)
 
     def test_registration_validates_the_fields_it_documents(self) -> None:
-        class Provider:
-            name = "probe-provider"
-            models = None
-            efforts = frozenset()
-
-            def prepare(self, spec, request):  # pragma: no cover - unused
-                raise AssertionError
-
-            def parse(self, raw):  # pragma: no cover - unused
-                raise AssertionError
-
         for attribute, value in (
             ("name", ""),
-            ("efforts", ["high"]),
-            ("models", {"sonnet"}),
+            ("capabilities", None),
+            ("capabilities", agent.ProviderCapabilities(frozenset())),
+            ("capabilities", agent.ProviderCapabilities(
+                frozenset({"plan"}), efforts=["high"])),
+            ("capabilities", agent.ProviderCapabilities(
+                frozenset({"plan"}), models={"sonnet"})),
+            ("cli", "claude"),
         ):
-            with self.subTest(attribute=attribute):
-                candidate = Provider()
+            with self.subTest(attribute=attribute, value=value):
+                candidate = _ContractProvider()
                 setattr(candidate, attribute, value)
                 with self.assertRaises(ValueError):
                     providers.register(candidate)
                 self.assertNotIn("probe-provider", providers.names())
 
+    def test_an_incomplete_provider_is_named_by_the_member_it_is_missing(
+            self) -> None:
+        """A plugin that stops short of the contract has to say where.
+
+        Every one of these was a provider-name branch in a module that
+        had no business knowing the name, so an integration that skips
+        one is incomplete rather than merely unusual (#446)."""
+        for method in providers.CONTRACT_METHODS:
+            with self.subTest(method=method):
+                candidate = _ContractProvider()
+                setattr(candidate, method, None)
+                with self.assertRaises(ValueError) as caught:
+                    providers.register(candidate)
+                self.assertIn(method, str(caught.exception))
+                self.assertIn("provider contract", str(caught.exception))
+
     def test_a_second_provider_cannot_take_a_registered_name(self) -> None:
         existing = providers.get("fake")
         providers.register(existing)
-
-        class Impostor:
-            name = "fake"
-            models = None
-            efforts = frozenset()
-
-            def prepare(self, spec, request):  # pragma: no cover - unused
-                raise AssertionError
-
-            def parse(self, raw):  # pragma: no cover - unused
-                raise AssertionError
+        impostor = _ContractProvider()
+        impostor.name = "fake"
 
         with self.assertRaises(ValueError):
-            providers.register(Impostor())
+            providers.register(impostor)
         self.assertIs(existing, providers.get("fake"))
+
+
+class _ContractProvider(providers.ProviderBase):
+    """A minimal complete provider, mutated one field at a time."""
+
+    name = "probe-provider"
+    cli = agent.ProviderCli()
+    capabilities = agent.ProviderCapabilities(frozenset({"plan"}))
+
+    def prepare(self, spec, request):  # pragma: no cover - unused
+        raise AssertionError
+
+    def parse(self, raw):  # pragma: no cover - unused
+        raise AssertionError
 
 
 class TestDamagedLogsStayReadable(TempRepository):
