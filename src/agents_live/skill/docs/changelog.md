@@ -15,9 +15,10 @@ history is retained in the source repository.
   Codex supports plan and workspace-confined write runs, explicit models and
   reasoning effort, native output schemas, selected stdio and HTTP MCP servers,
   JSONL usage and transcript normalization, stable failures, isolated
-  configuration, and provider-owned installation and CLI help probes. Pipeline
-  mode, tool allow-lists, and a separate turn limit remain rejected or
-  unsupported where the CLI cannot prove the required boundary.
+  configuration, credential-safe MCP environment indirection, and
+  provider-owned installation and CLI help probes. Pipeline mode, tool
+  allow-lists, and a separate turn limit remain rejected or unsupported where
+  the CLI cannot prove the required boundary.
 - fix: deliver Copilot prompts off the command line. (#374)
   Copilot now receives resolved prompts through stdin while retaining its
   machine-readable unattended mode. A 50 KB seam test and an opt-in 60 KB live
