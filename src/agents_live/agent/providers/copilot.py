@@ -132,10 +132,7 @@ class CopilotProvider(ProviderBase):
             flags.extend(("--deny-tool", "shell", "--deny-tool", "write"))
             for tool in spec.allow_tools:
                 flags.extend(("--allow-tool", tool))
-        argv = [
-            "copilot", "-p", spec.prompt, *flags,
-            "--output-format", "json",
-        ]
+        argv = ["copilot", *flags, "--output-format", "json"]
         if spec.model:
             argv.extend(("--model", spec.model))
         if spec.effort:
@@ -147,6 +144,7 @@ class CopilotProvider(ProviderBase):
         return Launch(
             tuple(argv),
             tuple(sorted(environment.items())),
+            input_text=spec.prompt,
             timeout=None,
             provider=self.name,
             prompt=spec.prompt,

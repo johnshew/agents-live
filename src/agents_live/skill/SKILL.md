@@ -1,10 +1,11 @@
 ---
 name: agents-live
 description: >-
-  Add safe local schedules and file triggers to existing Claude Code and
-  GitHub Copilot agents, then test, activate, inspect, and tear down that
-  automation. Supports claude and copilot out of the box; installed plugins
-  can register additional adapters (e.g. agency claude, agency copilot).
+  Add safe local schedules and file triggers to existing Claude Code, GitHub
+  Copilot, and OpenAI Codex agents, then test, activate, inspect, and tear down
+  that automation. Supports claude, copilot, and codex out of the box;
+  installed plugins can register additional adapters (e.g. agency claude,
+  agency copilot).
   Triggers: "make this agent live", "schedule an agent", "watch files with an agent",
   "agents-live create", "agents-live run", "agents-live status",
   "review agent logs", "why did X not pick up", "debug watcher race",

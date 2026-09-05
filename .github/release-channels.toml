@@ -18,9 +18,10 @@ validated_on = "2026-09-05"
 delivered = [446]
 partial = []
 deferred = []
-promotion_decision = [447]
+promotion_decision = [374, 447]
 
 [bake.recommendations]
 overall = "Finish and test the Codex provider on main before preparing the official 6.9 candidate."
 "447" = "Implement and test Codex as the first consumer of the self-contained provider contract before releasing 6.9."
-testing = "Version 6.8.0 passed installed operational acceptance on Windows before publication, including repository health, watcher restoration, and representative CLI and dashboard actions. The 6.9 provider-contract changes have not yet been installed or tested as a bake."
+"374" = "Verify the Copilot stdin transport and the Codex provider against signed-in native Windows CLIs before releasing 6.9."
+testing = "Version 6.8.0 passed installed operational acceptance on Windows before publication. The 6.9 provider changes pass live Codex and Copilot conformance on WSL/Linux, but still require the portable Windows CI matrix and signed-in native Windows conformance against the exact candidate before publication."

@@ -38,9 +38,11 @@ neutral behavior. A provider overrides only what differs.
 
 **Identity and CLI metadata.** `name` is the selector. `cli` is a
 `ProviderCli` carrying the executable to probe, the arguments that make it
-report itself, and per-host installation guidance. Doctor pins the executable
-and then runs those arguments, because a pinned executable is a file and not
-yet a working CLI. A provider with
+report itself, the help surfaces that document emitted options, and per-host
+installation guidance. Doctor pins the executable and then runs the probe
+arguments, because a pinned executable is a file and not yet a working CLI.
+Executable conformance combines the declared help surfaces, including nested
+subcommands such as `codex exec`, without learning the provider name. A provider with
 no executable of its own sets `executable` to `None` and is never probed nor
 offered an install command. The probe arguments are a tuple, so a CLI whose
 version lives behind a subcommand is described rather than special-cased.
@@ -129,8 +131,8 @@ the member that is missing.
 2. Replace the `models` and `efforts` attributes with a
    `ProviderCapabilities` record on `capabilities`, adding the definition
    modes and MCP transports the integration supports.
-3. Add a `ProviderCli`. A provider with no executable declares
-   `ProviderCli()`.
+3. Add a `ProviderCli`, including every help surface that documents an option
+   the provider emits. A provider with no executable declares `ProviderCli()`.
 4. Move any configuration file the integration needed into `artifacts`, and
    read its path from the environment name the record declares rather than
    writing the file.

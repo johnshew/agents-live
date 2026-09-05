@@ -103,7 +103,7 @@ The runtime and agent ports do not import each other.
 
 Only immutable records made from primitive values cross a seam. Host behavior
 lives behind POSIX and Windows adapters; provider quirks live behind Claude,
-Copilot, and deterministic fake-provider plugins.
+Copilot, Codex, and deterministic fake-provider plugins.
 
 ## Installation
 
@@ -111,6 +111,10 @@ Install at least one supported provider CLI through its current official
 installer, then use the verified release bootstrap. It selects the latest
 stable release by default, authenticates release bytes before activation, and
 does not resolve Agents Live through a configured Python index:
+
+- [Claude Code](https://code.claude.com/docs/en/setup)
+- [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started)
+- [OpenAI Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \

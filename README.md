@@ -4,9 +4,9 @@
 [![Python 3.12 or later](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/agents-live/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Take your agents live.** Turn Claude Code and GitHub Copilot agents into
-scheduled and file-triggered local automations, without moving them to another
-agent platform.
+**Take your agents live.** Turn Claude Code, GitHub Copilot, and OpenAI Codex
+agents into scheduled and file-triggered local automations, without moving
+them to another agent platform.
 
 Definitions can be conforming Agent Skill directories or flat Markdown files
 in configured repository directories. Agents Live reads their namespaced
@@ -59,8 +59,9 @@ operating system reports a change in the watched directory.
 ## Lightweight
 
 There is no listener service, separate application runtime, or database to
-deploy and maintain. The core stack is the Claude Code or GitHub Copilot CLI
-you already use, `uv`, and your host scheduler and file-watch facility.
+deploy and maintain. The core stack is the Claude Code, GitHub Copilot, or
+OpenAI Codex CLI you already use, `uv`, and your host scheduler and file-watch
+facility.
 
 Cron-only agents have no persistent process. A file-watch agent uses one small
 local watcher. There are no externally reachable ports or databases. Custom
@@ -91,6 +92,7 @@ untested. First install and sign in to at least one supported provider CLI:
 
 - [Claude Code](https://code.claude.com/docs/en/setup)
 - [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started)
+- [OpenAI Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
 
 ### Linux and WSL
 

@@ -542,6 +542,13 @@ class TestProviderRegistry(unittest.TestCase):
         self.assertLessEqual({"claude", "codex", "copilot", "fake"},
                              set(providers.names()))
 
+    def test_codex_declares_official_host_installers(self) -> None:
+        cli = providers.get("codex").cli
+
+        self.assertIn("codex/install.sh", cli.install_command("linux"))
+        self.assertIn("codex/install.sh", cli.install_command("wsl"))
+        self.assertIn("codex/install.ps1", cli.install_command("windows"))
+
     def test_codex_uses_stdin_and_explicit_unattended_policy(self) -> None:
         provider = providers.get("codex")
         launch = provider.prepare(
@@ -561,6 +568,10 @@ class TestProviderRegistry(unittest.TestCase):
                      "--ignore-rules", "--strict-config"):
             self.assertIn(flag, launch.argv)
         self.assertIn('model_reasoning_effort="high"', launch.argv)
+        self.assertIn(
+            "sandbox_workspace_write.exclude_slash_tmp=true", launch.argv)
+        self.assertIn(
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true", launch.argv)
 
     def test_codex_normalizes_documented_jsonl_events(self) -> None:
         stream = "\n".join((
@@ -584,6 +595,35 @@ class TestProviderRegistry(unittest.TestCase):
             "output_tokens": "2",
             "reasoning_output_tokens": "1",
         }, dict(completion.usage))
+
+    def test_codex_normalizes_completed_tool_events(self) -> None:
+        stream = "\n".join((
+            '{"type":"item.completed","item":{"type":"mcp_tool_call",'
+            '"server":"declared","tool":"marker","arguments":{}}}',
+            '{"type":"item.completed","item":{"type":"command_execution",'
+            '"command":"git status"}}',
+            '{"type":"item.completed","item":{"type":"file_change",'
+            '"changes":[{"path":"result.txt"}]}}',
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"done"}}',
+        ))
+
+        transcript = providers.get("codex").transcript(
+            agent.TranscriptSource(stream))
+
+        self.assertEqual(
+            ["declared/marker", "shell", "write"],
+            [call.name for turn in transcript.turns
+             for call in turn.tool_calls],
+        )
+        self.assertEqual("done", transcript.final)
+
+    def test_codex_malformed_stream_is_not_successful_text(self) -> None:
+        completion = providers.get("codex").parse(
+            agent.RawOutput(0, "{malformed jsonl", ""))
+
+        self.assertEqual("", completion.text)
+        self.assertIsNone(completion.structured)
 
     def test_codex_materializes_its_native_output_schema(self) -> None:
         schema = {"type": "object", "required": ["summary"]}
@@ -612,6 +652,61 @@ class TestProviderRegistry(unittest.TestCase):
 
         self.assertEqual(
             "provider codex does not support allow-tools", refusal)
+
+    def test_codex_renders_only_declared_mcp_servers(self) -> None:
+        provider = providers.get("codex")
+        servers = (
+            McpServer("local tool", {
+                "type": "stdio",
+                "command": "uv",
+                "args": ["run", "server.py"],
+                "env": {"TOOL_TOKEN": "opaque"},
+            }),
+            McpServer("remote", {
+                "type": "http",
+                "url": "https://example.invalid/mcp",
+                "headers": {"X-Region": "test"},
+                "bearer_token_env_var": "MCP_TOKEN",
+            }),
+        )
+        spec = agent.ResolvedSpec(
+            "codex-mcps", "Use the tools.", "plan", (), servers, (),
+            "codex", None, None,
+        )
+
+        self.assertIsNone(provider.validate(spec))
+        launch = provider.prepare(spec, agent.Request())
+        overrides = [
+            launch.argv[index + 1]
+            for index, value in enumerate(launch.argv[:-1])
+            if value == "--config"
+        ]
+
+        self.assertIn(
+            'mcp_servers."local tool".command="uv"', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".args=["run","server.py"]', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".required=true', overrides)
+        self.assertIn(
+            'mcp_servers."local tool".default_tools_approval_mode="approve"',
+            overrides,
+        )
+        self.assertIn(
+            'mcp_servers.remote.bearer_token_env_var="MCP_TOKEN"', overrides)
+        self.assertFalse(any("undeclared" in value for value in overrides))
+
+    def test_codex_rejects_mcp_fields_it_cannot_translate(self) -> None:
+        refusal = providers.get("codex").validate(agent.ResolvedSpec(
+            "codex-mcp", "Use the tool.", "plan", (), (
+                McpServer("repo", {
+                    "type": "stdio", "command": "uv", "unsupported": True,
+                }),
+            ), (), "codex", None, None,
+        ))
+
+        self.assertEqual(
+            "MCP server repo has unsupported fields: unsupported", refusal)
 
     def test_codex_classifies_jsonl_authentication_failures(self) -> None:
         stdout = "\n".join((
@@ -3479,9 +3574,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
             executable = shutil.which(argv[0])
             if executable is None:
                 continue  # the CLI this provider drives is not installed here
-            help_text = subprocess.run(
-                [executable, "--help"], capture_output=True, text=True,
-                check=False, timeout=120).stdout
+            help_text = "\n".join(
+                subprocess.run(
+                    [executable, *help_argv], capture_output=True, text=True,
+                    check=False, timeout=120).stdout
+                for help_argv in providers.get(name).cli.help_argvs
+            )
             if "--help" not in help_text:
                 continue  # the probe itself did not answer; prove nothing
             checked += 1

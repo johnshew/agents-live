@@ -91,6 +91,24 @@ Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
 single host needs to be isolated. The publish workflow calls the same workflow
 against the resolved release commit and cannot publish until both hosts pass.
 
+Provider-backed conformance is opt-in because it spends account credits and CI
+does not hold provider credentials. Before publishing a release that changes a
+provider, run the relevant live suite against the exact candidate on every host
+whose behavior the change claims. For 6.9, sign in to native Windows Codex and
+Copilot CLIs, install the candidate checkout or wheel, and run from PowerShell:
+
+```powershell
+$env:AGENTS_LIVE_CODEX_CONFORMANCE = "1"
+$env:AGENTS_LIVE_COPILOT_CONFORMANCE = "1"
+uv run --with-editable . python -m unittest `
+  tests.test_seams.TestCodexLiveConformance `
+  tests.test_seams.TestCopilotLiveConformance -v
+```
+
+Do not treat the WSL/Linux pass as native Windows evidence. Record the native
+Windows CLI versions, candidate commit, and result in candidate acceptance. The
+portable Windows CI matrix remains required as a separate package and host gate.
+
 A development host has an initialized global workspace, so tests that do
 not build their own temp project still resolve a root here and fail only
 in CI. Reproduce a bare host before pushing:
