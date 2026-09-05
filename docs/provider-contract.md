@@ -69,9 +69,11 @@ directory precedes the files inside it.
 **MCP input.** `artifacts` receives a `ProviderRuntime` carrying the
 selected server descriptors and, in pipeline mode, a `PipelineEndpoint`
 with the pipeline server's URL, token, and stdio bridge command. The
-provider renders its own CLI configuration from that input. The pipeline
-runtime owns the server; the provider only describes how its CLI is told
-where the server is.
+runtime also carries the resolved output schema so a provider whose CLI
+accepts only a schema file can describe that run-scoped artifact. The provider
+renders its own CLI configuration from that input. The pipeline runtime owns
+the server; the provider only describes how its CLI is told where the server
+is.
 
 **Failure and transcript normalization.** `failure` maps raw output to a
 category, and `transcript` maps raw output to a `ProviderTranscript` of

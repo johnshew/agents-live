@@ -5211,6 +5211,18 @@ class TestProviderContract(TempRepository):
         self.assertFalse(checks[0]["ok"])
         self.assertIn("winget install Example.Demo", checks[0]["detail"])
 
+    def test_doctor_offers_codex_installation_guidance_on_wsl(self) -> None:
+        refused = runtime.hosts.system.ExecutableNotFound("nothing answers")
+        with (
+            mock.patch.object(
+                doctor.hostruntime, "pin_executable", side_effect=refused),
+            mock.patch.object(doctor.hostruntime, "id", return_value="wsl"),
+        ):
+            checks = doctor._provider_cli_checks({"codex"})
+
+        self.assertFalse(checks[0]["ok"])
+        self.assertIn("chatgpt.com/codex/install.sh", checks[0]["detail"])
+
     def test_a_provider_without_an_executable_is_not_probed(self) -> None:
         self._register(_EscapingProvider())
 

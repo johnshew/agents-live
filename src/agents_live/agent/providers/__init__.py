@@ -100,10 +100,12 @@ def names() -> tuple[str, ...]:
 
 from .base import ProviderBase
 from .claude import CLAUDE
+from .codex import CODEX
 from .copilot import COPILOT
 from .fake import FAKE
 
 register(CLAUDE)
+register(CODEX)
 register(COPILOT)
 register(FAKE)
 

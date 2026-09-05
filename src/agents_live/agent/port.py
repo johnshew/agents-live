@@ -82,6 +82,8 @@ def provider_artifacts(
         config.mode,
         resolve_mcp_servers(spec.root, config.mcps),
         pipeline,
+        _resolved_output_schema(spec)
+        if provider.capabilities.structured_output else None,
     ))
 
 

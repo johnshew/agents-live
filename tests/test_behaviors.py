@@ -107,6 +107,7 @@ def tearDownModule() -> None:
 
 PROVIDER_SPEND: dict[str, str | None] = {
     "claude": '{"result": "done", "total_cost_usd": 0.42}',
+    "codex": None,
     "copilot": '{"type": "session.usage_checkpoint", '
                '"data": {"totalNanoAiu": 42000000000}}',
     "fake": None,
@@ -538,8 +539,100 @@ class TestProviderRegistry(unittest.TestCase):
     """
 
     def test_the_public_providers_are_registered(self) -> None:
-        self.assertLessEqual({"claude", "copilot", "fake"},
+        self.assertLessEqual({"claude", "codex", "copilot", "fake"},
                              set(providers.names()))
+
+    def test_codex_uses_stdin_and_explicit_unattended_policy(self) -> None:
+        provider = providers.get("codex")
+        launch = provider.prepare(
+            agent.ResolvedSpec(
+                "codex-plan", "Inspect without editing.", "plan", (), (), (),
+                "codex", "gpt-5.5", "high",
+            ),
+            agent.Request(),
+        )
+
+        self.assertEqual("Inspect without editing.", launch.input_text)
+        self.assertNotIn("Inspect without editing.", launch.argv)
+        self.assertEqual("read-only", launch.argv[launch.argv.index("--sandbox") + 1])
+        self.assertEqual("never", launch.argv[launch.argv.index(
+            "--ask-for-approval") + 1])
+        for flag in ("--json", "--ephemeral", "--ignore-user-config",
+                     "--ignore-rules", "--strict-config"):
+            self.assertIn(flag, launch.argv)
+        self.assertIn('model_reasoning_effort="high"', launch.argv)
+
+    def test_codex_normalizes_documented_jsonl_events(self) -> None:
+        stream = "\n".join((
+            '{"type":"thread.started","thread_id":"thread-1"}',
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"id":"item-1",'
+            '"type":"agent_message","text":"done"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":10,'
+            '"cached_input_tokens":4,"output_tokens":2,'
+            '"reasoning_output_tokens":1}}',
+        ))
+
+        completion = providers.get("codex").parse(
+            agent.RawOutput(0, stream, ""))
+
+        self.assertEqual("done", completion.text)
+        self.assertEqual("thread-1", completion.transcript)
+        self.assertEqual({
+            "cached_input_tokens": "4",
+            "input_tokens": "10",
+            "output_tokens": "2",
+            "reasoning_output_tokens": "1",
+        }, dict(completion.usage))
+
+    def test_codex_materializes_its_native_output_schema(self) -> None:
+        schema = {"type": "object", "required": ["summary"]}
+        provider = providers.get("codex")
+        artifact = provider.artifacts(agent.ProviderRuntime(
+            "plan", output_schema=schema))[0]
+        launch = provider.prepare(
+            agent.ResolvedSpec(
+                "codex-schema", "Summarize.", "plan", (), (), (
+                    ("AGENTS_LIVE_CODEX_OUTPUT_SCHEMA", "/run/schema.json"),
+                ), "codex", None, None, schema,
+            ),
+            agent.Request(),
+        )
+
+        self.assertEqual("codex-output-schema.json", artifact.relative_path)
+        self.assertEqual(schema, json.loads(artifact.text))
+        schema_index = launch.argv.index("--output-schema")
+        self.assertEqual("/run/schema.json", launch.argv[schema_index + 1])
+
+    def test_codex_rejects_tool_lists_it_cannot_enforce(self) -> None:
+        refusal = providers.get("codex").validate(agent.ResolvedSpec(
+            "codex-tools", "Inspect.", "plan", ("shell",), (), (),
+            "codex", None, None,
+        ))
+
+        self.assertEqual(
+            "provider codex does not support allow-tools", refusal)
+
+    def test_codex_classifies_jsonl_authentication_failures(self) -> None:
+        stdout = "\n".join((
+            '{"type":"thread.started","thread_id":"thread-1"}',
+            '{"type":"turn.failed","error":{"message":'
+            '"unexpected status 401 Unauthorized: Missing bearer token"}}',
+        ))
+
+        category = providers.get("codex").failure(
+            agent.RawOutput(1, stdout, ""))
+
+        self.assertEqual("authentication_failed", category)
+
+    def test_codex_classifies_other_failed_turns(self) -> None:
+        stdout = (
+            '{"type":"turn.failed","error":{"message":"model failed"}}')
+
+        category = providers.get("codex").failure(
+            agent.RawOutput(1, stdout, ""))
+
+        self.assertEqual("provider_turn_failed", category)
 
     def test_an_unknown_provider_fails_closed_and_names_what_is_installed(self) -> None:
         with self.assertRaises(ValueError) as caught:

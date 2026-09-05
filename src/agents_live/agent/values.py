@@ -188,6 +188,7 @@ class ProviderRuntime:
     mode: str
     mcps: tuple[McpServer, ...] = ()
     pipeline: PipelineEndpoint | None = None
+    output_schema: dict | None = None
 
 
 @dataclass(frozen=True)
