@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import copy
 import json
 import os
 import re
@@ -97,19 +98,31 @@ WORKER_TIMEOUT = 480
 DEFAULT_PORT = 8231
 MAX_PORT = 65535
 SELECTED_PORT_ENV = "AGENTS_LIVE_DASHBOARD_SELECTED_PORT"
+VIRTUAL_ROW_SIZE = 36
+MAX_RENDERED_REPOSITORIES = 10
+
+def _new_page_state() -> dict:
+    """Return independent preferences and transient state for one page."""
+    return {
+        "last_refresh": datetime.now(timezone.utc),
+        "filters": {"name": "", "state": "All", "owner": "All",
+                    "runtime": "All", "failing": False},
+        "all_repos": {
+            "repo": "All",
+            "grouped": True,
+            "sort_by": "name",
+            "descending": False,
+            "selection": [],
+            "expanded_repositories": [],
+            "settings_open": False,
+        },
+        "repository_result": None,
+    }
+
 
 STATE: dict = {
-    "last_refresh": datetime.now(timezone.utc),
+    **_new_page_state(),
     "models": {},
-    "filters": {"name": "", "state": "All", "owner": "All",
-                "runtime": "All", "failing": False},
-    "all_repos": {
-        "repo": "All",
-        "grouped": True,
-        "sort_by": "name",
-        "descending": False,
-    },
-    "repository_result": None,
     "health_check_running": False,
 }
 _SCAN_CACHE: tuple[
@@ -119,6 +132,14 @@ _SCAN_CACHE: tuple[
         dict[str, tuple[float, float]],
     ],
 ] | None = None
+_PAGE_REFRESHES: dict[str, object] = {}
+
+
+def _client_key() -> str | None:
+    try:
+        return str(ui.context.client.id)
+    except (AttributeError, RuntimeError):
+        return None
 
 
 def _require_repo_path(path: Path | None) -> Path:
@@ -1459,7 +1480,7 @@ _AGGREGATE_COLUMNS = list(_AGENT_COLUMNS)
 def _add_agent_information_slots(table) -> None:
     table.add_slot("body-cell-name", '''
         <q-td :props="props">
-          <div style="white-space:nowrap"
+                    <div style="white-space:nowrap" :data-agent-key="props.row.repository_identifier"
                :title="props.row.unhealthy ? props.row.name + ' - last run errored' : props.row.name"
                :class="props.row.unhealthy ? 'text-red text-weight-medium' : ''">{{ props.row.name }}</div>
         </q-td>
@@ -1598,7 +1619,8 @@ def agent_grid() -> None:
         ).classes("w-full").props("flat dense hide-bottom separator=none")
     table.add_slot("body-cell-name", '''
         <q-td :props="props">
-          <div style="white-space:nowrap"
+            <div style="white-space:nowrap"
+                :data-agent-key="props.row.repository_identifier || props.row.identifier"
                :title="props.row.unhealthy ? props.row.name + ' - last run errored' : props.row.name"
                :class="props.row.unhealthy ? 'text-red text-weight-medium' : ''">{{ props.row.name }}</div>
         </q-td>
@@ -1717,8 +1739,12 @@ def host_service_panel() -> None:
 
 
 @ui.refreshable
-def repository_settings_panel() -> None:
-    rows = repository_rows()
+def repository_settings_panel(rows: list[dict] | None = None, *,
+                              page_state: dict | None = None,
+                              refresh=None) -> None:
+    current_state = STATE if page_state is None else page_state
+    refresh_views = _refresh_views if refresh is None else refresh
+    rows = repository_rows() if rows is None else rows
     new_path = {"value": ""}
 
     def announce(result: dict) -> None:
@@ -1728,8 +1754,7 @@ def repository_settings_panel() -> None:
         else:
             _safe_ui(ui.notify, result.get("error", "registry update failed"),
                      type="negative", multi_line=True)
-        repository_settings_panel.refresh()
-        _refresh_views()
+        refresh_views()
 
     def confirm_unregister(row: dict) -> None:
         with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
@@ -1749,7 +1774,8 @@ def repository_settings_panel() -> None:
                     on_click=lambda: (
                         confirmation.close(),
                         announce(_repository_mutation(
-                            {"action": "remove", "repo": row["name"]})),
+                            {"action": "remove", "repo": row["name"]},
+                            page_state=current_state)),
                     ),
                 ).props("color=negative unelevated no-caps autofocus")
         confirmation.open()
@@ -1761,7 +1787,7 @@ def repository_settings_panel() -> None:
             "The default repository controls fallback CLI resolution. "
             "Changing it does not change the current dashboard view."
         ).classes("text-xs text-gray-500")
-        result = STATE.get("repository_result")
+        result = current_state.get("repository_result")
         if result:
             result_class = "text-green-700" if result.get("ok") else "text-red-600"
             ui.label(result.get("message") or result.get("error")).classes(
@@ -1776,12 +1802,15 @@ def repository_settings_panel() -> None:
                 "Register",
                 on_click=lambda: announce(
                     _repository_mutation(
-                        {"action": "add", "path": new_path["value"]})),
+                        {"action": "add", "path": new_path["value"]},
+                        page_state=current_state)),
             ).props("dense color=primary unelevated no-caps")
             ui.button(
                 "Clear default",
                 on_click=lambda: announce(
-                    _repository_mutation({"action": "clear-default"})),
+                    _repository_mutation(
+                        {"action": "clear-default"},
+                        page_state=current_state)),
             ).props("dense unelevated no-caps")
         for row in rows:
             with ui.element("section").classes("repository-setting-row w-full"):
@@ -1812,7 +1841,8 @@ def repository_settings_panel() -> None:
                         icon="home",
                         on_click=lambda name=row["name"]: announce(
                             _repository_mutation(
-                                {"action": "set-default", "repo": name})),
+                                {"action": "set-default", "repo": name},
+                                page_state=current_state)),
                     ).props("dense flat no-caps").set_enabled(
                         row["available"] and not row["default"])
                     ui.button(
@@ -1823,7 +1853,9 @@ def repository_settings_panel() -> None:
 
 
 def _refresh_views(*, source: str = "manual refresh") -> None:
-    aggregate_refresh = globals().get("_all_repos_refresh")
+    client_key = _client_key()
+    aggregate_refresh = (
+        _PAGE_REFRESHES.get(client_key) if client_key is not None else None)
     if aggregate_refresh is not None:
         with hostruntime.enumeration_pass():
             _safe_ui(aggregate_refresh, source=source)
@@ -1856,7 +1888,7 @@ def _timer_after_first_interval(interval: float, callback) -> None:
 
 def build_page() -> None:
     with hostruntime.enumeration_pass():
-        _build_operational_page()
+        _build_operational_page(_new_page_state())
 
 
 def repository_rows() -> list[dict]:
@@ -1907,8 +1939,9 @@ async def api_repository_mutation(payload: dict) -> dict:
     return _repository_mutation(payload)
 
 
-def _repository_mutation(payload: dict) -> dict:
+def _repository_mutation(payload: dict, *, page_state: dict | None = None) -> dict:
     """Apply one registry mutation through the registry port."""
+    current_state = STATE if page_state is None else page_state
     action = str(payload.get("action", "")).strip()
     value = str(payload.get("path") or payload.get("repo") or "").strip()
     before = repository_rows()
@@ -1944,7 +1977,7 @@ def _repository_mutation(payload: dict) -> dict:
             message = (
                 f"Registered {target['name']}, but discovery failed: "
                 f"{target['error']}")
-        current_scope = STATE["all_repos"].get("repo", "All")
+        current_scope = current_state["all_repos"].get("repo", "All")
         if current_scope not in ("All", target["name"]):
             message += f" The current view remains scoped to {current_scope}."
     elif action == "remove":
@@ -1971,11 +2004,15 @@ def _repository_mutation(payload: dict) -> dict:
         "repository": target,
         "repositories": rows,
     }
-    STATE["repository_result"] = result
+    current_state["repository_result"] = result
     return result
 
 
-def _all_repos_groups() -> list[dict]:
+def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
+    previous = {
+        (str(group.get("name")), str(group.get("path"))): group
+        for group in (previous_groups or [])
+    }
     groups = []
     current = repos.load()
     for alias, path, error in repos.entries(current):
@@ -1994,6 +2031,23 @@ def _all_repos_groups() -> list[dict]:
                 "detail": error,
             },
         }
+        prior = previous.get((alias, path))
+        if error and prior is not None:
+            detail = f"Discovery failed: {error}"
+            group = copy.deepcopy(prior)
+            group.update({
+                "name": alias,
+                "path": path,
+                "default": alias == current["default_repo"],
+                "available": False,
+                "stale": True,
+                "error": detail,
+                "collection": {
+                    **prior.get("collection", {}),
+                    "state": "stale",
+                    "detail": detail,
+                },
+            })
         if error is None:
             root = Path(path)
             try:
@@ -2020,8 +2074,30 @@ def _all_repos_groups() -> list[dict]:
                 ]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
-                group["available"] = False
-                group["error"] = str(exc)
+                detail = f"Discovery failed: {exc}"
+                if prior is not None:
+                    group = copy.deepcopy(prior)
+                    group.update({
+                        "name": alias,
+                        "path": path,
+                        "default": alias == current["default_repo"],
+                        "available": False,
+                        "stale": True,
+                        "error": detail,
+                        "collection": {
+                            **prior.get("collection", {}),
+                            "state": "stale",
+                            "detail": detail,
+                        },
+                    })
+                else:
+                    group["available"] = False
+                    group["error"] = detail
+                    group["collection"] = {
+                        "state": "unavailable",
+                        "valid_agents": 0,
+                        "detail": detail,
+                    }
         groups.append(group)
     return groups
 
@@ -2065,8 +2141,8 @@ def _ungrouped_agent_rows(groups: list[dict]) -> list[dict]:
     ]
 
 
-def all_repo_groups() -> list[dict]:
-    settings = STATE["all_repos"]
+def all_repo_groups(settings: dict | None = None) -> list[dict]:
+    settings = STATE["all_repos"] if settings is None else settings
     selected = settings.get("repo", "All")
     groups = [
         group for group in _all_repos_groups()
@@ -2081,14 +2157,30 @@ def all_repo_groups() -> list[dict]:
     return groups
 
 
-def operational_snapshot() -> dict:
+def operational_snapshot(previous_snapshot: dict | None = None, *,
+                         settings: dict | None = None) -> dict:
     """One coherent model for header, inventory, filters, and actions."""
-    groups = all_repo_groups()
+    settings = STATE["all_repos"] if settings is None else settings
+    selected = settings.get("repo", "All")
+    repository_groups = _all_repos_groups(
+        previous_snapshot.get("repository_groups", [])
+        if previous_snapshot else None)
+    for group in repository_groups:
+        group["rows"] = _sorted_agent_rows(
+            group["rows"],
+            str(settings.get("sort_by") or "name"),
+            bool(settings.get("descending")),
+        )
+    groups = [
+        group for group in repository_groups
+        if selected == "All" or group["name"] == selected
+    ]
     return {
         "groups": groups,
+        "repository_groups": repository_groups,
         "rows": _ungrouped_agent_rows(groups),
         "health": system_health(),
-        "scope": STATE["all_repos"].get("repo", "All"),
+        "scope": selected,
         "errors": {
             f"{group['name']}/{name}": count
             for group in groups
@@ -2100,6 +2192,36 @@ def operational_snapshot() -> dict:
             for group in groups
         },
     }
+
+
+def _registered_repository_names() -> list[str]:
+    """Read selector names without repeating agent discovery."""
+    return [alias for alias, _path, _error in repos.entries(repos.load())]
+
+
+def _repository_rows_from_groups(groups: list[dict]) -> list[dict]:
+    """Project settings rows from the current coherent observation."""
+    rows = []
+    for group in groups:
+        collection = group["collection"]
+        rows.append({
+            "name": group["name"],
+            "path": group["path"],
+            "default": group["default"],
+            "available": group["available"],
+            "error": group["error"] or collection["detail"],
+            "agent_count": (
+                collection["valid_agents"]
+                if collection["state"] not in {"unavailable", "stale"}
+                else None),
+            "discovery_state": (
+                "failed" if collection["state"] == "stale" else
+                collection["state"]
+                if collection["state"] != "available" else
+                "discovered" if group["rows"] else "empty"),
+            "registered": True,
+        })
+    return rows
 
 
 def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
@@ -2114,6 +2236,49 @@ def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
             rows = [row for row in rows if query in row["name"].casefold()]
         filtered.append({**group, "rows": rows})
     return filtered
+
+
+def _canonical_selection_keys(groups: list[dict]) -> set[str]:
+    return {
+        str(row["repository_identifier"])
+        for group in groups for row in group["rows"]
+    }
+
+
+def _updated_selection_keys(current: list[str], selected: list[dict],
+                            scope_keys: set[str]) -> list[str]:
+    keys = set(current) - scope_keys
+    keys.update(
+        str(row["repository_identifier"])
+        for row in selected if row.get("repository_identifier")
+    )
+    return sorted(keys)
+
+
+def _repository_window(groups: list[dict], expanded: list[str],
+                       limit: int = MAX_RENDERED_REPOSITORIES
+                       ) -> tuple[list[dict], list[dict]]:
+    """Bound mounted repository groups while retaining on-demand identity."""
+    if limit < 1:
+        raise ValueError("repository window limit must be positive")
+    by_name = {str(group["name"]): group for group in groups}
+    names = [str(group["name"]) for group in groups[:limit]]
+    for name in expanded:
+        if name not in by_name:
+            continue
+        if name in names:
+            names.remove(name)
+        names.append(name)
+        names = names[-limit:]
+    mounted_names = set(names)
+    return (
+        [group for group in groups if group["name"] in mounted_names],
+        [group for group in groups if group["name"] not in mounted_names],
+    )
+
+
+def _set_settings_open(view_state: dict, visible: bool) -> None:
+    view_state["settings_open"] = visible
 
 
 def _operational_summary(snapshot: dict, *, source: str | None = None) -> str:
@@ -2184,15 +2349,14 @@ def api_all_repos() -> dict:
     }
 
 
-def _build_operational_page() -> None:
+def _build_operational_page(page_state: dict | None = None) -> None:
     """Build the sole dashboard page over one all-repositories snapshot."""
-    global _all_repos_refresh
+    page_state = _new_page_state() if page_state is None else page_state
     ui.dark_mode().auto()
-    state_settings = STATE["all_repos"]
-    filters = STATE["filters"]
-    snapshot = operational_snapshot()
-    repo_rows = repository_rows()
-    repo_names = [row["name"] for row in repo_rows]
+    state_settings = page_state["all_repos"]
+    filters = page_state["filters"]
+    snapshot = operational_snapshot(settings=state_settings)
+    repo_names = _registered_repository_names()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
         ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
@@ -2210,12 +2374,13 @@ def _build_operational_page() -> None:
         ".repository-setting-row{display:grid;gap:.35rem;padding:.75rem 0;"
         "border-top:1px solid rgba(127,127,127,.25)}"
         ".repository-setting-path{overflow-wrap:anywhere}"
-        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
-        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(8rem,var(--inventory-size,55%)) "
+        "6px minmax(8rem,1fr);gap:0;min-height:0}"
         ".agent-panel{overflow:hidden;display:flex;flex-direction:column;border-top:1px solid "
         "rgba(127,127,127,.25);padding-top:.5rem}"
         ".agent-toolbar{min-height:2.5rem}"
         ".agent-table-scroll{min-height:0;overflow:auto}"
+        ".virtualized-agent-table{max-height:22rem;overflow:auto}"
         ".all-repos-body{display:flex;flex-direction:column;gap:.75rem;padding-right:.25rem}"
         ".repository-group{overflow:visible}"
         ".repository-heading{position:sticky;top:0;z-index:2;min-width:0;"
@@ -2226,14 +2391,18 @@ def _build_operational_page() -> None:
         ".repository-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
         ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column;border-top:1px solid "
         "rgba(127,127,127,.25);padding-top:.35rem}"
-        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
+        ".dashboard-log-panel .activity-log{min-height:0;flex:1}"
+        ".dashboard-splitter{cursor:row-resize;background:rgba(127,127,127,.25);"
+        "outline:none}"
+        ".dashboard-splitter:focus-visible{background:var(--q-primary);"
+        "box-shadow:0 0 0 2px var(--q-primary)}"
         ".q-table th:nth-child(1),.q-table td:nth-child(1){text-align:left}"
         "@media(max-width:640px){"
         ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
         ".dashboard-identity{flex-wrap:wrap}"
         ".dashboard-scope{max-width:100%}"
         ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
-        ".dashboard-body{grid-template-rows:minmax(15rem,1fr) minmax(9rem,.6fr)}"
+        ".dashboard-body{--inventory-size:58%}"
         ".dashboard-settings-surface{padding:.75rem}"
         ".repository-register{align-items:stretch}"
         ".repository-register .q-field{flex-basis:100%}"
@@ -2254,11 +2423,26 @@ def _build_operational_page() -> None:
                         icon="close", on_click=settings_dialog.close
                     ).props("flat round dense autofocus aria-label=Close-settings")
                 host_service_panel()
-                repository_settings_panel()
-    settings_dialog.on(
-        "hide", lambda: _safe_ui(
+                repository_settings_panel(
+                    _repository_rows_from_groups(
+                        snapshot["repository_groups"]),
+                    page_state=page_state,
+                    refresh=lambda: rebuild())
+
+    def settings_visibility(visible: bool) -> None:
+        _set_settings_open(state_settings, visible)
+        _safe_ui(
             ui.run_javascript,
-            "document.querySelector('.settings-trigger')?.focus()"))
+            "window.agentsLiveContinuity?.setSettingsOpen("
+            f"{str(visible).lower()})",
+        )
+        if not visible:
+            _safe_ui(
+                ui.run_javascript,
+                "document.querySelector('.settings-trigger')?.focus()")
+
+    settings_dialog.on("show", lambda: settings_visibility(True))
+    settings_dialog.on("hide", lambda: settings_visibility(False))
 
     with ui.row().classes(
             "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
@@ -2273,11 +2457,12 @@ def _build_operational_page() -> None:
             ).classes(
                 "text-xs text-gray-500")
         with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
-            health_label = ui.label().classes("text-sm text-gray-500")
+            health_label = ui.label().classes(
+                "dashboard-health-label text-sm text-gray-500")
             refresh_age = ui.label().classes("text-sm text-gray-500")
             ui.button(icon="health_and_safety", on_click=health_check).props(
                 "flat round dense aria-label=Run-health-check")
-            ui.button(icon="refresh", on_click=_refresh_views).props(
+            ui.button(icon="refresh", on_click=lambda: rebuild()).props(
                 "flat round dense aria-label=Refresh")
             ui.button(icon="settings", on_click=settings_dialog.open).classes(
                 "settings-trigger").props(
@@ -2342,23 +2527,41 @@ def _build_operational_page() -> None:
                     "flat round dense aria-label=Reverse-sort")
             inventory_summary = ui.label().classes(
                 "text-xs text-gray-500 px-1")
+            selection_summary = ui.label().classes(
+                "text-xs text-gray-500 px-1").props(
+                    "role=status aria-live=polite")
             attention_summary = ui.label().classes(
                 "text-xs text-orange-600 px-1")
             inventory = ui.element("div").classes(
                 "w-full grow min-h-0 agent-table-scroll")
 
+        ui.element("div").classes("dashboard-splitter").props(
+            "role=separator tabindex=0 aria-label=Resize-inventory-and-activity "
+            "aria-orientation=horizontal aria-valuemin=25 aria-valuemax=75 "
+            "aria-valuenow=55")
+
         with ui.element("section").classes("dashboard-log-panel w-full"):
             activity_scope = ui.label().classes("text-sm text-gray-500")
             global output_log
             output_log = ui.log(max_lines=300).classes(
-                "w-full grow font-mono text-xs")
+                "activity-log w-full grow font-mono text-xs")
+
+    continuity_ready = False
 
     def render_inventory(current: dict) -> None:
+        if continuity_ready:
+            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.capture()")
         visible_groups = _filtered_repo_groups(current["groups"], filters)
         visible_rows = sum(len(group["rows"]) for group in visible_groups)
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
             f"{len(visible_groups)} repositories")
+        selected_keys = set(state_settings.get("selection", []))
+        available_keys = _canonical_selection_keys(
+            current["repository_groups"])
+        selected_keys.intersection_update(available_keys)
+        state_settings["selection"] = sorted(selected_keys)
+        selection_summary.text = f"{len(selected_keys)} agents selected"
         attention_summary.text = _attention_summary(current)
         inventory.clear()
         with inventory:
@@ -2370,7 +2573,22 @@ def _build_operational_page() -> None:
                               on_click=settings_dialog.open).props(
                         "dense flat no-caps")
                 elif state_settings.get("grouped", True):
-                    for group in visible_groups:
+                    expanded = list(
+                        state_settings.get("expanded_repositories", []))
+                    mounted_groups, deferred_groups = _repository_window(
+                        visible_groups, expanded)
+                    if deferred_groups:
+                        ui.select(
+                            {
+                                group["name"]: (
+                                    f"{group['name']} | {len(group['rows'])} agents")
+                                for group in deferred_groups
+                            },
+                            label=f"Show one of {len(deferred_groups)} more repositories",
+                            on_change=lambda event: expand_repository(event.value),
+                        ).props("dense outlined options-dense clearable").classes(
+                            "min-w-64 px-1")
+                    for group in mounted_groups:
                         with ui.element("section").classes(
                                 "repository-group w-full"):
                             label = group["name"] + (
@@ -2381,6 +2599,7 @@ def _build_operational_page() -> None:
                                 ui.label(group["path"]).classes(
                                     "repository-path grow text-xs text-gray-500")
                                 ui.label(
+                                    "Stale" if group.get("stale") else
                                     "Unavailable" if not group["available"] else
                                     f"{group['collection']['state'].title()} | "
                                     f"{len(group['rows'])} agents"
@@ -2391,17 +2610,30 @@ def _build_operational_page() -> None:
                             elif group["collection"]["detail"]:
                                 ui.label(group["collection"]["detail"]).classes(
                                     "text-sm text-orange-600 px-1")
-                            elif not group["rows"]:
+                            if not group["rows"]:
                                 ui.label("No matching agents.").classes(
                                     "text-sm text-gray-500 px-1")
                             else:
+                                group_keys = {
+                                    str(row["repository_identifier"])
+                                    for row in group["rows"]
+                                }
                                 table = ui.table(
                                     columns=_AGGREGATE_COLUMNS,
                                     rows=group["rows"],
                                     row_key="repository_identifier",
                                     pagination={"rowsPerPage": 0},
-                                ).classes("w-full").props(
-                                    "flat dense hide-bottom separator=none")
+                                    selection="multiple",
+                                    on_select=lambda event, keys=group_keys:
+                                        set_selection(event.selection, keys),
+                                ).classes("virtualized-agent-table w-full").props(
+                                    "flat dense hide-bottom separator=none "
+                                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                                table.selected = [
+                                    row for row in group["rows"]
+                                    if row["repository_identifier"] in selected_keys
+                                ]
+                                table.update()
                                 _add_agent_information_slots(table)
                                 _add_agent_action_slots(table, aggregate=True)
                 else:
@@ -2413,10 +2645,22 @@ def _build_operational_page() -> None:
                             *_AGGREGATE_COLUMNS,
                         ], rows=rows, row_key="repository_identifier",
                         pagination={"rowsPerPage": 0},
-                    ).classes("w-full").props(
-                        "flat dense hide-bottom separator=none")
+                        selection="multiple",
+                        on_select=lambda event, keys={
+                            str(row["repository_identifier"]) for row in rows
+                        }: set_selection(event.selection, keys),
+                    ).classes("virtualized-agent-table w-full").props(
+                        "flat dense hide-bottom separator=none "
+                        f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                    table.selected = [
+                        row for row in rows
+                        if row["repository_identifier"] in selected_keys
+                    ]
+                    table.update()
                     _add_agent_information_slots(table)
                     _add_agent_action_slots(table, aggregate=True)
+        if continuity_ready:
+            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.restore()")
 
     def update_labels(current: dict) -> None:
         selected = current["scope"]
@@ -2429,24 +2673,49 @@ def _build_operational_page() -> None:
         scope_label.text = scope_text
         activity_scope.text = f"Activity | {scope_text}"
         health = current["health"]
-        health_label.text = f"Host {health['text']}"
-        health_label.tooltip(health["tip"])
+        refresh_error = current.get("refresh_error")
+        health_label.text = (
+            f"Data stale: {refresh_error}; host {health['text']}"
+            if refresh_error else f"Host {health['text']}")
+        health_label.tooltip(
+            f"Refresh failed; showing the last coherent snapshot. {refresh_error}"
+            if refresh_error else health["tip"])
 
     def rebuild(*, announce: bool = True,
                 source: str = "manual refresh") -> None:
         nonlocal snapshot
-        repo_names = [row["name"] for row in repository_rows()]
-        if state_settings.get("repo") not in ["All", *repo_names]:
-            state_settings["repo"] = "All"
-        snapshot = operational_snapshot()
+        try:
+            repo_names = _registered_repository_names()
+            if state_settings.get("repo") not in ["All", *repo_names]:
+                state_settings["repo"] = "All"
+            refreshed = operational_snapshot(snapshot, settings=state_settings)
+        except (OSError, ValueError, agent.DefinitionError,
+                state.StartedStateUnavailable) as exc:
+            snapshot = {**snapshot, "refresh_error": str(exc)}
+            update_labels(snapshot)
+            if announce:
+                _push_log(
+                    f"{source} failed; showing the last coherent snapshot: {exc}")
+            return
+        snapshot = refreshed
         repo_select.options = ["All", *repo_names]
         repo_select.value = state_settings["repo"]
         repo_select.update()
-        STATE["last_refresh"] = datetime.now(timezone.utc)
+        page_state["last_refresh"] = datetime.now(timezone.utc)
         update_labels(snapshot)
         render_inventory(snapshot)
+        _safe_ui(
+            repository_settings_panel.refresh,
+            _repository_rows_from_groups(snapshot["repository_groups"]),
+            page_state=page_state,
+            refresh=lambda: rebuild(),
+        )
         if announce:
             _push_log(_operational_summary(snapshot, source=source))
+
+    client_key = _client_key()
+    if client_key is not None:
+        _PAGE_REFRESHES[client_key] = rebuild
 
     def select_repo(event) -> None:
         state_settings["repo"] = event.value
@@ -2456,8 +2725,36 @@ def _build_operational_page() -> None:
         filters[key] = value
         render_inventory(snapshot)
 
+    async def set_selection(selected: list[dict], group_keys: set[str]) -> None:
+        persisted = await ui.run_javascript(
+            "return window.agentsLiveContinuity?.getSelection() || []")
+        current = set(state_settings.get("selection", []))
+        if isinstance(persisted, list):
+            current.update(str(key) for key in persisted)
+        current.intersection_update(
+            _canonical_selection_keys(snapshot["repository_groups"]))
+        keys = _updated_selection_keys(
+            sorted(current), selected, group_keys)
+        state_settings["selection"] = keys
+        selection_summary.text = f"{len(keys)} agents selected"
+        _safe_ui(
+            ui.run_javascript,
+            "window.agentsLiveContinuity?.setSelection("
+            f"{json.dumps(keys)})",
+        )
+
     def set_grouped(event) -> None:
         state_settings["grouped"] = bool(event.value)
+        render_inventory(snapshot)
+
+    def expand_repository(name: str) -> None:
+        expanded = [
+            value for value in state_settings.get(
+                "expanded_repositories", []) if value != name
+        ]
+        expanded.append(name)
+        state_settings["expanded_repositories"] = expanded[
+            -MAX_RENDERED_REPOSITORIES:]
         render_inventory(snapshot)
 
     def set_sort(field: str) -> None:
@@ -2471,14 +2768,140 @@ def _build_operational_page() -> None:
         rebuild(announce=False)
 
     sort_direction.on("click", reverse_sort)
-    _all_repos_refresh = rebuild
-
     def tick_age() -> None:
-        ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
+        ago = _ago(
+            page_state["last_refresh"].isoformat(), datetime.now(timezone.utc))
         refresh_age.text = f"refreshed {ago}"
 
     update_labels(snapshot)
     render_inventory(snapshot)
+    continuity_script = '''
+                (() => {
+                    const storageKey = 'agents-live-dashboard-view';
+                    const read = () => {
+                        try { return JSON.parse(sessionStorage.getItem(storageKey) || '{}'); }
+                        catch (_) { return {}; }
+                    };
+                    const write = state => sessionStorage.setItem(storageKey, JSON.stringify(state));
+                    const scrollNode = selector => document.querySelector(selector);
+                    const controller = window.agentsLiveContinuity = {
+                        state: read(),
+                        capture() {
+                            const inventory = scrollNode('.agent-table-scroll');
+                            const activity = scrollNode('.dashboard-log-panel .activity-log');
+                            const active = document.activeElement;
+                            this.state.inventoryScroll = inventory?.scrollTop || 0;
+                            this.state.search = document.querySelector(
+                                '[aria-label="Search agents or repositories"]')?.value || '';
+                            if (activity) {
+                                this.state.activityAtBottom =
+                                    activity.scrollHeight - activity.clientHeight - activity.scrollTop < 4;
+                                this.state.activityScroll = activity.scrollTop;
+                            }
+                            this.state.focusLabel = active?.getAttribute?.('aria-label') || '';
+                            write(this.state);
+                        },
+                        setSelection(keys) {
+                            this.state.selection = keys;
+                            write(this.state);
+                        },
+                        getSelection() {
+                            return this.state.selection || [];
+                        },
+                        setSettingsOpen(visible) {
+                            this.state.settingsOpen = visible;
+                            write(this.state);
+                        },
+                        restore() {
+                            const inventory = scrollNode('.agent-table-scroll');
+                            const activity = scrollNode('.dashboard-log-panel .activity-log');
+                            const selectedToRestore = new Set(this.state.selection || []);
+                            requestAnimationFrame(() => {
+                                if (inventory) inventory.scrollTop = this.state.inventoryScroll || 0;
+                                if (activity) activity.scrollTop = this.state.activityAtBottom
+                                    ? activity.scrollHeight : (this.state.activityScroll || 0);
+                                if (this.state.focusLabel) {
+                                    const escaped = CSS.escape(this.state.focusLabel);
+                                    document.querySelector(`[aria-label="${escaped}"]`)?.focus();
+                                }
+                                const search = document.querySelector(
+                                    '[aria-label="Search agents or repositories"]');
+                                if (search && search.value !== (this.state.search || '')) {
+                                    const setter = Object.getOwnPropertyDescriptor(
+                                        HTMLInputElement.prototype, 'value').set;
+                                    setter.call(search, this.state.search || '');
+                                    search.dispatchEvent(new Event('input', {bubbles: true}));
+                                    search.dispatchEvent(new Event('change', {bubbles: true}));
+                                }
+                                let selectionAttempts = 0;
+                                const restoreSelection = () => {
+                                    const restored = new Set();
+                                    document.querySelectorAll(
+                                        '.virtualized-agent-table tbody tr').forEach(row => {
+                                        const key = row.querySelector('[data-agent-key]')?.dataset.agentKey;
+                                        const checkbox = row.querySelector('[role=checkbox]');
+                                        if (selectedToRestore.has(key)) {
+                                            if (checkbox?.getAttribute('aria-checked') !== 'true') {
+                                                checkbox?.click();
+                                            }
+                                            if (checkbox?.getAttribute('aria-checked') === 'true') {
+                                                restored.add(key);
+                                            }
+                                        }
+                                    });
+                                    selectionAttempts += 1;
+                                    if (restored.size < selectedToRestore.size
+                                            && selectionAttempts < 20) {
+                                        setTimeout(restoreSelection, 100);
+                                    }
+                                };
+                                setTimeout(restoreSelection, 100);
+                            });
+                        },
+                    };
+                    const body = document.querySelector('.dashboard-body');
+                    const splitter = document.querySelector('.dashboard-splitter');
+                    const setSplit = value => {
+                        const bounded = Math.max(25, Math.min(75, Math.round(value)));
+                        body?.style.setProperty('--inventory-size', `${bounded}%`);
+                        splitter?.setAttribute('aria-valuenow', String(bounded));
+                        controller.state.split = bounded;
+                        write(controller.state);
+                    };
+                    setSplit(controller.state.split || 55);
+                    splitter?.addEventListener('keydown', event => {
+                        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+                        event.preventDefault();
+                        const current = Number(splitter.getAttribute('aria-valuenow')) || 55;
+                        setSplit(event.key === 'Home' ? 25 : event.key === 'End' ? 75
+                            : current + (event.key === 'ArrowDown' ? 5 : -5));
+                    });
+                    splitter?.addEventListener('pointerdown', event => {
+                        splitter.setPointerCapture(event.pointerId);
+                        const move = pointer => {
+                            const bounds = body.getBoundingClientRect();
+                            setSplit(((pointer.clientY - bounds.top) / bounds.height) * 100);
+                        };
+                        const done = () => {
+                            splitter.removeEventListener('pointermove', move);
+                            splitter.removeEventListener('pointerup', done);
+                        };
+                        splitter.addEventListener('pointermove', move);
+                        splitter.addEventListener('pointerup', done);
+                    });
+                    window.addEventListener('beforeunload', () => controller.capture());
+                    controller.restore();
+                    if (controller.state.settingsOpen) {
+                        setTimeout(() => document.querySelector('[aria-label="Settings"]')?.click(), 0);
+                    }
+                })();
+    '''
+    ui.timer(
+        0.1,
+        lambda: _safe_ui(ui.run_javascript, continuity_script),
+        once=True,
+    )
+    continuity_ready = True
     _push_log(_operational_summary(snapshot, source="startup"))
     tick_age()
     ui.timer(1.0, tick_age)

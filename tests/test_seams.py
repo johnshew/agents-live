@@ -5799,6 +5799,10 @@ class TestDashboardRepositorySurface(TempRepository):
         with (
             mock.patch.object(dashboard, "_push_log") as activity,
             mock.patch.object(
+                dashboard.agent_view, "repository_agents",
+                wraps=dashboard.agent_view.repository_agents,
+            ) as collect_agents,
+            mock.patch.object(
                 dashboard.hostruntime, "enumeration_pass",
                 return_value=contextlib.nullcontext()),
         ):
@@ -5827,6 +5831,8 @@ class TestDashboardRepositorySurface(TempRepository):
                     self.assertEqual(0, await dashboard._execute_action(request))
 
             asyncio.run(complete_action())
+
+        self.assertEqual(4, collect_agents.call_count)
 
         summaries = [
             call.args[0] for call in activity.call_args_list
@@ -5938,6 +5944,156 @@ class TestDashboardRepositorySurface(TempRepository):
             group["name"] for group in focused["groups"]])
         self.assertEqual(["remote-agent"], [
             row["name"] for row in focused["rows"]])
+
+    def test_dashboard_refresh_preserves_only_failed_repository_as_stale(
+        self,
+    ) -> None:
+        dashboard = self._dashboard_module()
+        other = (self.root / "other").resolve()
+        self.skill("local-agent", ['agents-live.selector: "fake/echo"'])
+        (other / "Agents" / "remote-agent").mkdir(parents=True)
+        (other / "Agents" / "remote-agent" / "SKILL.md").write_text(
+            "---\nname: remote-agent\ndescription: Other repo.\nmetadata:\n"
+            '  agents-live.schema-version: "1"\n'
+            '  agents-live.selector: "fake/echo"\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        repos._add(str(self.root))
+        repos._add(str(other))
+        dashboard.STATE["all_repos"]["repo"] = "All"
+        before = dashboard.operational_snapshot()
+        self.skill("new-local-agent", ['agents-live.selector: "fake/echo"'])
+        original = dashboard.agent_view.repository_agents
+
+        def collect(root, **kwargs):
+            if Path(root).resolve() == other:
+                raise agent.DefinitionError("catalog temporarily unreadable")
+            return original(root, **kwargs)
+
+        with mock.patch.object(
+                dashboard.agent_view, "repository_agents", side_effect=collect):
+            after = dashboard.operational_snapshot(before)
+
+        stale = next(group for group in after["repository_groups"]
+                     if group["name"] == "other")
+        updated = next(group for group in after["repository_groups"]
+                       if group["name"] == self.root.name)
+        self.assertTrue(stale["stale"])
+        self.assertEqual("stale", stale["collection"]["state"])
+        self.assertEqual(["remote-agent"], [row["name"] for row in stale["rows"]])
+        self.assertEqual(
+            ["local-agent", "new-local-agent"],
+            [row["name"] for row in updated["rows"]],
+        )
+        setting = next(
+            row for row in dashboard._repository_rows_from_groups(
+                after["repository_groups"])
+            if row["name"] == "other")
+        self.assertEqual("failed", setting["discovery_state"])
+        self.assertIsNone(setting["agent_count"])
+        self.assertIn("catalog temporarily unreadable", setting["error"])
+
+    def test_dashboard_refresh_preserves_missing_repository_rows_as_stale(
+        self,
+    ) -> None:
+        dashboard = self._dashboard_module()
+        other = (self.root / "other").resolve()
+        (other / "Agents" / "remote-agent").mkdir(parents=True)
+        (other / "Agents" / "remote-agent" / "SKILL.md").write_text(
+            "---\nname: remote-agent\ndescription: Other repo.\nmetadata:\n"
+            '  agents-live.schema-version: "1"\n'
+            '  agents-live.selector: "fake/echo"\n'
+            "---\nbody\n",
+            encoding="utf-8",
+        )
+        repos._add(str(other))
+        before = dashboard.operational_snapshot()
+        selected_key = before["rows"][0]["repository_identifier"]
+        shutil.rmtree(other)
+
+        after = dashboard.operational_snapshot(before)
+
+        stale = after["repository_groups"][0]
+        self.assertTrue(stale["stale"])
+        self.assertEqual("stale", stale["collection"]["state"])
+        self.assertEqual(["remote-agent"], [row["name"] for row in stale["rows"]])
+        self.assertIn(
+            selected_key,
+            dashboard._canonical_selection_keys(after["repository_groups"]),
+        )
+        self.assertIn("not an existing directory", stale["error"])
+
+    def test_dashboard_page_preferences_are_independent(self) -> None:
+        dashboard = self._dashboard_module()
+        first = dashboard._new_page_state()
+        second = dashboard._new_page_state()
+
+        first["all_repos"]["repo"] = "first"
+        first["all_repos"]["selection"].append("first/agent")
+        first["filters"]["name"] = "only-first"
+        first["all_repos"]["settings_open"] = True
+
+        self.assertEqual(
+            "first",
+            dashboard.operational_snapshot(
+                settings=first["all_repos"])["scope"],
+        )
+        self.assertEqual(
+            "All",
+            dashboard.operational_snapshot(
+                settings=second["all_repos"])["scope"],
+        )
+        self.assertEqual("All", second["all_repos"]["repo"])
+        self.assertEqual([], second["all_repos"]["selection"])
+        self.assertEqual("", second["filters"]["name"])
+        self.assertFalse(second["all_repos"]["settings_open"])
+        self.assertEqual("All", dashboard.STATE["all_repos"]["repo"])
+        self.assertEqual([], dashboard.STATE["all_repos"]["selection"])
+        self.assertEqual("", dashboard.STATE["filters"]["name"])
+
+    def test_dashboard_semantic_selection_retains_hidden_repository_keys(
+        self,
+    ) -> None:
+        dashboard = self._dashboard_module()
+
+        selected = dashboard._updated_selection_keys(
+            ["hidden/agent-1", "visible/agent-1"],
+            [{"repository_identifier": "visible/agent-2"}],
+            {"visible/agent-1", "visible/agent-2"},
+        )
+
+        self.assertEqual(
+            ["hidden/agent-1", "visible/agent-2"], selected)
+
+    def test_dashboard_repository_window_bounds_mounted_groups(self) -> None:
+        dashboard = self._dashboard_module()
+        groups = [
+            {"name": f"repo-{index}", "rows": list(range(index))}
+            for index in range(25)
+        ]
+
+        mounted, deferred = dashboard._repository_window(
+            groups, ["repo-20", "repo-24"], limit=10)
+
+        self.assertEqual(10, len(mounted))
+        self.assertEqual(25, len(mounted) + len(deferred))
+        self.assertEqual(
+            {group["name"] for group in groups},
+            {group["name"] for group in [*mounted, *deferred]},
+        )
+        self.assertTrue({"repo-20", "repo-24"}.issubset(
+            {group["name"] for group in mounted}))
+
+    def test_dashboard_settings_visibility_tracks_dialog_lifecycle(self) -> None:
+        dashboard = self._dashboard_module()
+        view_state = {"settings_open": False, "selection": ["repo/agent"]}
+
+        dashboard._set_settings_open(view_state, True)
+        self.assertTrue(view_state["settings_open"])
+        dashboard._set_settings_open(view_state, False)
+        self.assertFalse(view_state["settings_open"])
+        self.assertEqual(["repo/agent"], view_state["selection"])
 
     def test_dashboard_all_repo_groups_keep_unavailable_paths_visible(self) -> None:
         dashboard = self._dashboard_module()

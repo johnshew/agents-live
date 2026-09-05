@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -430,9 +431,122 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
                     f"{repository_name} | {directory}", exact=True).wait_for()
                 search = page.get_by_label("Search agents or repositories")
                 search.fill("readiness")
+                page.wait_for_function("window.agentsLiveContinuity !== undefined")
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                if row_checkbox.get_attribute("aria-checked") != "true":
+                    row_checkbox.click()
+                page.get_by_text("1 agents selected", exact=True).wait_for()
+                search.fill("no matching agent")
+                page.get_by_text("0 of 1 agents", exact=False).wait_for()
+                page.get_by_text("1 agents selected", exact=True).wait_for()
+                search.fill("readiness")
+                page.get_by_text("readiness-agent", exact=True).wait_for()
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                try:
+                    page.wait_for_function("""() => document.querySelector(
+                        '.repository-group tbody [role=checkbox]')
+                        ?.getAttribute('aria-checked') === 'true'""")
+                except PlaywrightTimeoutError as exc:
+                    filtered_state = page.evaluate("""() => ({
+                        persisted: JSON.parse(sessionStorage.getItem(
+                            'agents-live-dashboard-view') || '{}').selection || [],
+                        rows: Array.from(document.querySelectorAll(
+                            '.repository-group tbody tr')).map(row => ({
+                                key: row.querySelector('[data-agent-key]')
+                                    ?.dataset.agentKey || null,
+                                checked: row.querySelector('[role=checkbox]')
+                                    ?.getAttribute('aria-checked') || null,
+                            })),
+                    })""")
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: filtered selection did not "
+                        f"restore: {filtered_state}") from exc
+                splitter = page.get_by_role(
+                    "separator", name="Resize-inventory-and-activity")
+                splitter.focus()
+                page.keyboard.press("End")
+                if splitter.get_attribute("aria-valuenow") != "75":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: keyboard split resize failed")
+                refresh = page.get_by_role("button", name="Refresh")
+                refresh.focus()
+                page.keyboard.press("Enter")
+                page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
+                if search.input_value() != "readiness" \
+                        or row_checkbox.get_attribute("aria-checked") != "true":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh lost filter or selection")
+                if page.evaluate(
+                        "document.activeElement?.getAttribute('aria-label')") != "Refresh":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh did not restore focus")
+                persisted = page.evaluate("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}')""")
+                if len(persisted.get("selection", [])) != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: selection was not persisted "
+                        "before reconnect")
+                page.reload(wait_until="networkidle")
+                page.wait_for_function("window.agentsLiveContinuity !== undefined")
+                search = page.get_by_label("Search agents or repositories")
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                splitter = page.get_by_role(
+                    "separator", name="Resize-inventory-and-activity")
+                try:
+                    page.wait_for_function("""() => document.querySelector(
+                        '.repository-group tbody [role=checkbox]')
+                        ?.getAttribute('aria-checked') === 'true'""")
+                except PlaywrightTimeoutError as exc:
+                    reconnect_state = page.evaluate("""() => ({
+                        persisted: JSON.parse(sessionStorage.getItem(
+                            'agents-live-dashboard-view') || '{}').selection || [],
+                        rows: Array.from(document.querySelectorAll(
+                            '.repository-group tbody tr')).map(row => ({
+                                key: row.querySelector('[data-agent-key]')
+                                    ?.dataset.agentKey || null,
+                                checked: row.querySelector('[role=checkbox]')
+                                    ?.getAttribute('aria-checked') || null,
+                            })),
+                    })""")
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: reconnect selection "
+                        f"did not restore: {reconnect_state}") from exc
+                search_value = search.input_value()
+                selected_value = row_checkbox.get_attribute("aria-checked")
+                split_value = splitter.get_attribute("aria-valuenow")
+                if search_value != "readiness" or selected_value != "true" \
+                    or split_value != "75":
+                    raise ReadinessError(
+                    f"{mode} {width}x{height}: reconnect lost view state "
+                    f"(search={search_value!r}, selected={selected_value!r}, "
+                    f"split={split_value!r})")
+                activity = page.locator(".dashboard-log-panel .activity-log")
+                activity.evaluate("""element => {
+                    for (let index = 0; index < 40; index += 1) {
+                        const line = document.createElement('div');
+                        line.textContent = `continuity fixture ${index}`;
+                        element.appendChild(line);
+                    }
+                    element.scrollTop = 0;
+                }""")
+                if activity.evaluate(
+                        "element => element.scrollHeight <= element.clientHeight"):
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: activity fixture did not overflow")
+                refresh = page.get_by_role("button", name="Refresh")
+                refresh.click()
+                page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
+                if activity.evaluate("element => element.scrollTop") > 4:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh moved non-bottom activity")
                 before = body.bounding_box()
-                page.get_by_role("button", name="Settings").click()
+                settings_button = page.get_by_role("button", name="Settings")
                 settings = page.locator(".dashboard-settings")
+                settings.wait_for(state="hidden")
+                settings_button.click()
                 settings.wait_for(state="visible")
                 settings_box = settings.bounding_box()
                 if settings_box is None or abs(settings_box["x"]) > 1 \
@@ -456,13 +570,22 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
                             f"{mode} {width}x{height}: settings omitted {expected!r}")
                 if body.bounding_box() != before:
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: settings resized the dashboard")
+                        f"{mode} {width}x{height}: settings resized the dashboard "
+                        f"from {before} to {body.bounding_box()}")
                 if page.evaluate(
                         "document.documentElement.scrollWidth > window.innerWidth"):
                     raise ReadinessError(
                         f"{mode} {width}x{height}: page scrolls horizontally")
-                page.get_by_role("button", name="Close-settings").click()
+                page.wait_for_function("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}').settingsOpen === true""")
+                page.reload(wait_until="networkidle")
+                settings = page.locator(".dashboard-settings")
+                settings.wait_for(state="visible")
+                page.get_by_role("button", name="Close-settings").focus()
+                page.keyboard.press("Enter")
                 settings.wait_for(state="hidden")
+                page.wait_for_function("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}').settingsOpen === false""")
                 if search.input_value() != "readiness" or body.bounding_box() != before:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: closing settings lost context")
@@ -495,15 +618,23 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
             ).wait_for()
             if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
                 raise ReadinessError(f"{mode}: registration reloaded the page")
-            page.get_by_role("button", name="Close-settings").click()
-            scope.click()
-            page.get_by_role("option", name="empty-repository", exact=True).wait_for()
-            page.keyboard.press("Escape")
-            page.get_by_role("button", name="Settings").click()
             empty_row = page.locator(".repository-setting-row").filter(
                 has=page.get_by_text("empty-repository", exact=True))
             if "0 agent definitions discovered" not in empty_row.inner_text():
                 raise ReadinessError(f"{mode}: zero definitions is not explicit")
+            page.get_by_role("button", name="Close-settings").click()
+            scope.click()
+            page.get_by_role("option", name="empty-repository", exact=True).wait_for()
+            page.get_by_role("option", name="All", exact=True).click()
+            shutil.rmtree(empty)
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("Stale", exact=True).wait_for()
+            page.get_by_text("readiness-agent", exact=True).wait_for()
+            page.get_by_role("button", name="Settings").click()
+            empty_row = page.locator(".repository-setting-row").filter(
+                has=page.get_by_text("empty-repository", exact=True))
+            if "Discovery failed" not in empty_row.inner_text():
+                raise ReadinessError(f"{mode}: discovery failure is not explicit")
             empty_row.get_by_role("button", name="Unregister").click()
             confirmation = page.get_by_text(
                 "This removes only the registry entry.", exact=False)
@@ -519,6 +650,108 @@ def _assert_operational_viewport(port: int, directory: Path, mode: str) -> None:
             if page.get_by_role(
                     "option", name="empty-repository", exact=True).count():
                 raise ReadinessError(f"{mode}: unregister did not refresh selector")
+
+            registry = directory / "config" / "agents-live" / "config.toml"
+            registry_text = registry.read_text(encoding="utf-8")
+            registry.write_text("not valid = [", encoding="utf-8")
+            page.keyboard.press("Escape")
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("Data stale:", exact=False).wait_for()
+            page.get_by_text("readiness-agent", exact=True).wait_for()
+            registry.write_text(registry_text, encoding="utf-8")
+            page.get_by_role("button", name="Refresh").click()
+            page.locator(".dashboard-health-label").get_by_text(
+                "Host ", exact=False).wait_for()
+            page.get_by_role("button", name="Settings").click()
+            page.get_by_role("dialog").wait_for(state="visible")
+            page.keyboard.press("Escape")
+            page.get_by_role("dialog").wait_for(state="hidden")
+
+            scale_repositories = directory / "scale-repositories"
+            registry_lines = [registry_text.rstrip()]
+            for index in range(12):
+                scale_repository = scale_repositories / f"repo-{index:02d}"
+                skill = scale_repository / "Agents" / "scale-agent"
+                skill.mkdir(parents=True)
+                skill.joinpath("SKILL.md").write_text(
+                    DEFINITION.replace(
+                        "name: readiness-agent", "name: scale-agent"),
+                    encoding="utf-8",
+                )
+                registry_lines.append(
+                    f'scale{index:02d} = {json.dumps(str(scale_repository))}')
+            registry.write_text("\n".join(registry_lines) + "\n", encoding="utf-8")
+            page.get_by_role("button", name="Refresh").click()
+            page.wait_for_function(
+                "document.querySelectorAll('.repository-group').length === 10")
+            registered_names = {
+                repository_name, *(f"scale{index:02d}" for index in range(12))
+            }
+            mounted_names = {
+                heading.locator(".text-sm.font-medium").inner_text().removesuffix(
+                    " (default)")
+                for heading in page.locator(".repository-heading").all()
+            }
+            deferred_names = registered_names - mounted_names
+            deferred_selector = page.get_by_label(
+                re.compile(r"Show one of 3 more repositories"))
+            if len(mounted_names) != 10 or len(deferred_names) != 3 \
+                    or mounted_names | deferred_names != registered_names \
+                    or deferred_selector.count() != 1:
+                raise ReadinessError(
+                    f"{mode}: progressive repository rendering mounted "
+                    f"{sorted(mounted_names)} and deferred "
+                    f"{sorted(deferred_names)} with an invalid selector")
+            scope.click()
+            for name in sorted(registered_names):
+                if page.get_by_role("option", name=name, exact=True).count() != 1:
+                    raise ReadinessError(
+                        f"{mode}: repository scope omitted {name}")
+            page.keyboard.press("Escape")
+            deferred_selector.click()
+            first_deferred = sorted(deferred_names)[0]
+            page.get_by_role(
+                "option", name=f"{first_deferred} | 1 agents", exact=True
+            ).wait_for()
+            for name in sorted(deferred_names):
+                if page.get_by_role(
+                        "option", name=f"{name} | 1 agents", exact=True
+                ).count() != 1:
+                    raise ReadinessError(
+                        f"{mode}: deferred repository selector omitted {name}")
+            selected_deferred = sorted(deferred_names)[-1]
+            page.get_by_role(
+                "option", name=f"{selected_deferred} | 1 agents",
+                exact=True).click()
+            page.locator(".repository-group").filter(
+                has=page.get_by_text(selected_deferred, exact=True)).wait_for()
+            if page.locator(".repository-group").count() != 10:
+                raise ReadinessError(
+                    f"{mode}: on-demand repository access exceeded mount cap")
+            registry.write_text(registry_text, encoding="utf-8")
+            shutil.rmtree(scale_repositories)
+            page.get_by_role("button", name="Refresh").click()
+            page.wait_for_function(
+                "document.querySelectorAll('.repository-group').length === 1")
+
+            scale_root = directory / "Agents"
+            for index in range(150):
+                skill = scale_root / f"scale-{index:03d}"
+                skill.mkdir()
+                skill.joinpath("SKILL.md").write_text(
+                    DEFINITION.replace(
+                        "name: readiness-agent", f"name: scale-{index:03d}"),
+                    encoding="utf-8",
+                )
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("151 of 151 agents", exact=False).wait_for()
+            rendered_rows = page.locator(
+                ".virtualized-agent-table tbody tr").count()
+            if rendered_rows >= 151:
+                raise ReadinessError(
+                    f"{mode}: virtual table rendered all {rendered_rows} rows")
+            for index in range(150):
+                shutil.rmtree(scale_root / f"scale-{index:03d}")
             page.close()
         finally:
             browser.close()
@@ -569,7 +802,8 @@ def _assert_aggregate_run(port: int, directory: Path,
                     f"{mode}: aggregate dashboard rendered {row.count()} "
                     "fixture rows")
             row.get_by_role(
-                "button", name="Run this agent once now").click()
+                "button", name="Run this agent once now").focus()
+            page.keyboard.press("Enter")
             _await_aggregate_run(directory, identifier, mode)
         finally:
             browser.close()

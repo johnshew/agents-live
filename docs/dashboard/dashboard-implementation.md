@@ -144,6 +144,37 @@ view state through refresh and reconnect, complete keyboard and screen-reader
 acceptance, and prove progressive rendering and degraded-data isolation at the
 supported scale.
 
+The #424 implementation now preserves repository scope, search and facet
+filters, stable sorting and grouping, selected rows, the inventory/activity
+allocation, settings context, keyboard focus, and activity follow position
+through manual and periodic refresh. Browser-session state restores the
+browser-owned split, search, selection, settings, focus, and non-bottom
+activity position after a reconnect; operational truth still comes from the
+single server snapshot. Refresh failure retains that last coherent snapshot,
+marks it stale with the failure reason, and recovers on the next successful
+refresh. Per-repository collection failures remain confined to their group.
+
+Quasar virtual scrolling bounds active row elements, and repository settings
+derive from the same collected groups used by the operational page instead of
+running a second agent discovery pass. The adjustable separator supports
+pointer, Arrow Up, Arrow Down, Home, and End operation at short desktop
+heights. Selection, health, eligibility, progress, and failures retain textual
+labels in addition to color.
+
+Editable native-Windows evidence is the focused
+`TestDashboardRepositorySurface.test_dashboard_activity_summary_runs_at_each_refresh_boundary`
+seam and `tools/dashboard-readiness.py --editable`. The browser gate exercises
+1280 x 720, 1440 x 900, and 390 x 844 viewports; keyboard refresh, settings,
+split, and Run actions; manual refresh and full-page reconnect continuity;
+non-bottom activity retention; missing-repository isolation; failed-refresh
+staleness and recovery; and bounded DOM rendering for 151 discovered agents.
+
+This evidence does not claim screen-reader acceptance, the 10,000-agent stress
+ceiling, Linux or WSL browser behavior, or installed-wheel acceptance. Those
+remain release acceptance work under the validation plan; the 151-agent check
+proves the progressive-rendering mechanism without substituting for the full
+scale profile.
+
 ## Dependencies and risks
 
 - B depends on one coherent observation model; duplicating state across the two
