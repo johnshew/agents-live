@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 PACKAGE_PARENT = Path(__file__).resolve().parents[2]
@@ -52,6 +53,17 @@ def _select(
     return records[:last]
 
 
+@lru_cache(maxsize=None)
+def _declared_executables(names: tuple[str, ...]) -> dict[str, str]:
+    """Each registered provider's executable, keyed for argv matching."""
+    return {
+        Path(providers.get(name).cli.executable).name
+        .casefold().removesuffix(".exe"): name
+        for name in names
+        if providers.get(name).cli.executable
+    }
+
+
 def _provider(envelope: dict[str, object]) -> str:
     """Which provider produced this envelope.
 
@@ -64,12 +76,7 @@ def _provider(envelope: dict[str, object]) -> str:
         return declared
     argv = envelope.get("argv")
     if isinstance(argv, list):
-        executables = {
-            Path(provider.cli.executable).name.casefold().removesuffix(".exe"):
-                provider.name
-            for provider in (providers.get(name) for name in providers.names())
-            if provider.cli.executable
-        }
+        executables = _declared_executables(providers.names())
         for token in argv[:6]:
             if not isinstance(token, str):
                 continue

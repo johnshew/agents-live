@@ -66,7 +66,7 @@ class FakeProvider(ProviderBase):
             servers[endpoint.name] = {
                 "type": "stdio",
                 "command": list(endpoint.bridge_command),
-                "url": endpoint.url,
+                "env": {"PIPELINE_MCP_URL": endpoint.url},
             }
         if servers:
             artifacts.append(RunArtifact(
