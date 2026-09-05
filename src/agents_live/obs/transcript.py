@@ -10,6 +10,8 @@ import json
 import sys
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
 PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
@@ -54,14 +56,14 @@ def _select(
 
 
 @lru_cache(maxsize=None)
-def _declared_executables(names: tuple[str, ...]) -> dict[str, str]:
+def _declared_executables(names: tuple[str, ...]) -> Mapping[str, str]:
     """Each registered provider's executable, keyed for argv matching."""
-    return {
+    return MappingProxyType({
         Path(providers.get(name).cli.executable).name
         .casefold().removesuffix(".exe"): name
         for name in names
         if providers.get(name).cli.executable
-    }
+    })
 
 
 def _provider(envelope: dict[str, object]) -> str:

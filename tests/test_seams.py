@@ -48,6 +48,7 @@ from agents_live.agent import providers
 from agents_live.agent import port
 from agents_live.obs import transcript as transcript_command
 from agents_live.state import ownership
+from agents_live import dispatch as dispatch_module
 from agents_live.dispatch import Firing, _RunLock, dispatch
 from agents_live.cli.commands import definition_migrate
 from agents_live.cli.commands.definition_migrate import MigrationError, convert
@@ -5028,6 +5029,26 @@ class TestProviderContract(TempRepository):
         self.assertIn("escapes the run directory", result.message)
         self.assertEqual([], runner.argv)
         self.assertFalse((self.root.parent / "escaped.json").exists())
+
+    def test_one_refused_artifact_stops_the_others_being_written(self) -> None:
+        """A declaration is checked whole, before the run owns any file."""
+        scratch = Path(self.root) / "scratch"
+        scratch.mkdir()
+        declared = (
+            agent.RunArtifact("kept.json", text="{}", env=("KEPT",)),
+            agent.RunArtifact("../escaped.json", text="{}", env=("ESCAPED",)),
+        )
+
+        with (
+            mock.patch.object(dispatch_module.shutil, "rmtree") as removal,
+            self.assertRaises(ValueError),
+        ):
+            with dispatch_module._provider_files(scratch, declared):
+                pass
+
+        removal.assert_not_called()
+        self.assertFalse(
+            (scratch / dispatch_module.PROVIDER_DIRECTORY).exists())
 
     def test_an_unsupported_mode_is_refused_before_a_process_starts(
             self) -> None:

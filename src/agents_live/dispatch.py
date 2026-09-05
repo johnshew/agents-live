@@ -507,11 +507,15 @@ def _provider_files(scratch: Path, artifacts):
     """
     owned = (scratch / PROVIDER_DIRECTORY).resolve()
     environment: dict[str, str] = {}
+    # Resolve every path before creating anything, so a run that asks for
+    # somewhere it does not own writes nothing at all.
+    placed = tuple(
+        (artifact, _artifact_path(owned, artifact.relative_path))
+        for artifact in artifacts)
     try:
         owned.mkdir(parents=True, exist_ok=True)
         owned.chmod(0o700)
-        for artifact in artifacts:
-            target = _artifact_path(owned, artifact.relative_path)
+        for artifact, target in placed:
             if artifact.kind == "directory":
                 target.mkdir(parents=True, exist_ok=True)
                 target.chmod(artifact.mode)
