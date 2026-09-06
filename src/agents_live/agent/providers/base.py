@@ -49,16 +49,6 @@ class ProviderBase:
     cli: ProviderCli = ProviderCli()
     capabilities: ProviderCapabilities = ProviderCapabilities(frozenset())
 
-    @property
-    def models(self) -> frozenset[str] | None:
-        """Models supported by this provider, reading from capabilities."""
-        return self.capabilities.models
-
-    @property
-    def efforts(self) -> frozenset[str]:
-        """Effort levels supported by this provider, reading from capabilities."""
-        return self.capabilities.efforts
-
     def validate(self, spec: ResolvedSpec) -> str | None:
         """Why this provider cannot run *spec*, before any process starts."""
         capabilities = self.capabilities

@@ -223,21 +223,23 @@ def _attach(module) -> str:
             try:
                 provider_plugins.register(candidate)
                 attached.append(f"provider {candidate.name}")
-            except (ValueError, TypeError, AttributeError) as exc:
+            except Exception as exc:
                 errors.append(f"provider {getattr(candidate, 'name', '?')}: {exc}")
     registry = getattr(module, OWNERSHIP_ATTR, None)
     if registry is not None:
         try:
             ownership.use_backend(registry)
             attached.append("ownership registry")
-        except (ValueError, TypeError, AttributeError) as exc:
+        except Exception as exc:
             errors.append(f"ownership registry: {exc}")
+    if errors:
+        detail = "; ".join(errors)
+        if attached:
+            detail += f"; attached: {', '.join(attached)}"
+        raise PluginError(detail)
     if not attached:
-        reason = (
-            "; ".join(errors) if errors else
-            f"exposes none of {', '.join((*PROVIDER_ATTRS, OWNERSHIP_ATTR))}"
-        )
-        raise PluginError(reason)
+        raise PluginError(
+            f"exposes none of {', '.join((*PROVIDER_ATTRS, OWNERSHIP_ATTR))}")
     return ", ".join(attached)
 
 

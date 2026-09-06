@@ -1,7 +1,7 @@
 ---
 title: Why the provider contract is shaped this way
 description: The complete provider integration contract, the ownership boundary it preserves, and the migration from the 6.8 protocol
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: concept
 ---
 
@@ -148,6 +148,20 @@ the member that is missing.
    generic JSON one.
 
 `prepare` and `parse` are unchanged.
+
+Wrapping another provider does not change this contract. The wrapper declares
+its own `capabilities` and `cli` and explicitly implements every method.
+Registration never inspects a `delegate` or `_delegate` attribute, copies bound
+methods, or supplies legacy `models` and `efforts` properties. A wrapper with
+narrower capabilities validates those restrictions before applying its
+delegate's semantic rules; forwarding the delegate's bound `validate` alone
+would validate the wrong capability record.
+
+Plugin attachment attempts each provider and ownership registry independently.
+A broken component does not prevent healthy components from attaching, but
+the plugin result remains failed and names both failures and successful
+attachments. Doctor and upgrade preflight must not turn partial attachment
+into a healthy plugin result.
 
 ## Consequences
 

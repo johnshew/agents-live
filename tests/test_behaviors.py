@@ -474,6 +474,37 @@ class TestPluginDeclarations(unittest.TestCase):
         self.assertEqual("source-provider", register.call_args.args[0].name)
         use_backend.assert_called_once()
 
+    def test_partial_plugin_failure_preserves_components_and_reports_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "plugin.py"
+            source.write_text(
+                "from agents_live.agent.providers import FAKE\n"
+                "class Broken:\n"
+                "    name = 'broken-provider'\n"
+                "class Registry:\n"
+                "    def registry_file_exists(self, **kwargs): return True\n"
+                "    def load_owners(self, **kwargs): return {'agent': '*'}\n"
+                "    def set_owner(self, *args, **kwargs): pass\n"
+                "    def remove_owner(self, *args, **kwargs): pass\n"
+                "PROVIDERS = (Broken(), FAKE)\n"
+                "OWNERSHIP_REGISTRY = Registry()\n",
+                encoding="utf-8")
+            self._project(root, source)
+            with (
+                mock.patch.object(ownership, "_backend_cache", None),
+                mock.patch.object(ownership, "_backend_resolved", False),
+            ):
+                loaded = plugins.load([root])
+                self.assertEqual({'agent': '*'}, ownership._backend().load_owners())
+                self.assertIs(providers.FAKE, providers.get("fake"))
+                self.assertFalse(loaded[0].ok)
+                self.assertIn("broken-provider", loaded[0].detail)
+                self.assertIn("ownership registry", loaded[0].detail)
+                self.assertFalse(plugins.checks(root)[0][1])
+                self.assertTrue(plugins.compatibility_errors(
+                    [root], runtime_requirement="agents-live==6.9.0"))
+
     def test_a_wheel_declaration_names_the_source_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -832,6 +863,21 @@ class TestProviderRegistry(unittest.TestCase):
                     providers.register(candidate)
                 self.assertIn(method, str(caught.exception))
                 self.assertIn("provider contract", str(caught.exception))
+
+    def test_registration_does_not_infer_a_wrappers_contract(self) -> None:
+        for attribute in ("_delegate", "delegate"):
+            with self.subTest(attribute=attribute):
+                candidate = type("Wrapper", (), {
+                    "name": f"plan-only-wrapper-{attribute}",
+                    "capabilities": agent.ProviderCapabilities(frozenset({"plan"})),
+                    "cli": agent.ProviderCli(),
+                    attribute: providers.CLAUDE,
+                })()
+                self.addCleanup(providers._providers.pop, candidate.name, None)
+                with self.assertRaisesRegex(ValueError, "validate"):
+                    providers.register(candidate)
+                self.assertNotIn(candidate.name, providers.names())
+                self.assertFalse(hasattr(candidate, "validate"))
 
     def test_a_second_provider_cannot_take_a_registered_name(self) -> None:
         existing = providers.get("fake")

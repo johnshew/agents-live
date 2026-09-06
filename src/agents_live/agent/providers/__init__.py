@@ -54,15 +54,6 @@ CONTRACT_METHODS = (
 def register(provider: Provider) -> None:
     if not getattr(provider, "name", ""):
         raise ValueError("provider name must not be empty")
-    delegate = getattr(provider, "_delegate", None) or getattr(provider, "delegate", None)
-    if delegate is not None:
-        if not hasattr(provider, "capabilities") and hasattr(delegate, "capabilities"):
-            provider.capabilities = delegate.capabilities
-        if not hasattr(provider, "cli") and hasattr(delegate, "cli"):
-            provider.cli = delegate.cli
-        for method in CONTRACT_METHODS:
-            if not hasattr(provider, method) and hasattr(delegate, method):
-                setattr(provider, method, getattr(delegate, method))
     capabilities = getattr(provider, "capabilities", None)
     if not isinstance(capabilities, ProviderCapabilities):
         raise ValueError(
