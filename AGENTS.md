@@ -42,8 +42,18 @@ uv run --script tools/release.py --publish --yes          # publish prepared
 
 The standard loop for any change that lands as commits:
 
-1. Read the guide matching the task (table above) and check
-   `gh issue list` for related backlog.
+1. Read the guide matching the task (table above), check `gh issue list` for
+  related backlog, then refresh and read the release report before choosing a
+  target branch:
+
+  ```bash
+  git fetch origin --prune
+  uv run --script tools/release-report.py
+  ```
+
+  The generated `.reports/release-report.md` identifies the active release
+  phase, configured bake branch, tested version, and next action. Treat it as
+  required routing context, not as a release-only document.
 2. Investigate in place; reads and searches are fine in the primary
    checkout.
 3. Branch in the primary checkout. Tool-generated branch names are
@@ -63,12 +73,19 @@ The standard loop for any change that lands as commits:
 
 ### Active bake routing
 
-Before branching, inspect `.github/release-channels.toml`. When its configured
-`bake.branch` exists and contains work not yet in `main`, that branch is the
-integration target for the active bake cycle. Focused pull requests should
-target the bake branch instead of `main`; direct commits are acceptable for
-small administrative changes, but substantive fixes should retain PR review
-and CI evidence.
+Use the generated release report together with `.github/release-channels.toml`.
+When the configured `bake.branch` exists and contains work not yet in `main`,
+that branch is the integration target for the active bake cycle. Being asked
+to change the bake branch is sufficient evidence that the work belongs to the
+bake. Focused pull requests should target the bake branch instead of `main`;
+direct commits are acceptable for small administrative changes, but
+substantive fixes should retain PR review and CI evidence.
+
+If an active bake exists but a request names `main`, do not assume the change
+should bypass bake. Ask whether the intent is to fix the current bake, perform
+release promotion, or make independent post-release work before editing or
+branching. A request to prepare or publish a release follows `.agents/release.md`
+and the report's ordered next actions.
 
 After a change reaches the bake branch, deploy its exact synchronized commit:
 
@@ -84,6 +101,11 @@ when intentionally moving to a lower numeric `major.minor.patch` release; it
 is not needed between a stable candidate and a bake on the same release line.
 When bake is approved, move it to `main` through one promotion pull request,
 then prepare a new official candidate from the resulting clean `main`.
+
+Keep these instructions, `.agents/release-report.md`, and
+`tools/release-report.py` aligned. When branch-routing or release-cycle guidance
+changes, update the report policy and generated wording in the same change so
+a new agent receives the same answer from either entry point.
 
 ## Rules
 

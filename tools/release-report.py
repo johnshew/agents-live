@@ -289,6 +289,9 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"- Commit small, simple fixes directly to `{bake['branch']}`.",
         "- For larger work, create a focused branch and open a pull request "
         f"targeting `{bake['branch']}`.",
+        f"- If requested work names `{release['branch']}`, confirm whether it "
+        "is a bake fix, bake-to-release promotion, or independent post-release "
+        "work before changing branches.",
         "- After each change reaches bake, deploy its exact synchronized commit:",
         "",
         "```bash",

@@ -8,6 +8,20 @@ call those steps channels. The report brings together code changes, reviews,
 issues, test results, and the version installed for testing so that a passing
 pull request is never mistaken for a public release.
 
+Generate and read the report at the start of repository work, before choosing
+a target branch:
+
+```bash
+git fetch origin --prune
+uv run --script tools/release-report.py
+```
+
+The report is routing guidance for development as well as release review. It
+must agree with `AGENTS.md` about the active phase, branch targets, local bake
+deployment, and the conditions for moving work to `main`. When either source
+changes those rules, update the other source and the generator wording in the
+same change.
+
 ## Channel model
 
 | Channel | Branch | Version | Moves to |
@@ -21,6 +35,12 @@ release channel only through one reviewable promotion pull request from bake to
 `main`. The official `release/v<version>-candidate` branch is a temporary branch
 created by `tools/release.py` after bake moves into a clean, up-to-date `main`;
 it is not a third channel.
+
+The configured bake branch and report state decide routing, not the branch that
+happens to be checked out when an agent starts. Work explicitly requested on
+the active bake belongs to that bake. If an active bake exists but a request
+names `main`, ask whether the developer intends a bake fix, bake-to-release
+promotion, or independent post-release work before making changes.
 
 If local testing rejects an official candidate before publication, do not add
 fixes to its temporary candidate branch. Reopen a `bake/v<version>-local`
