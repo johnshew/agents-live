@@ -11,6 +11,19 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: replace stale Windows scheduled executables during generation convergence. (#473)
+  Scheduled agents, maintenance, and watchers compare their effective action
+  and working directory with the selected generation instead of retaining
+  an old executable whenever the subscription key is unchanged.
+- fix: preserve native Claude subscription authentication in isolated print mode.
+  Explicit configuration, instruction, hook, memory, connector, and IDE
+  discovery controls replace bare mode without extracting credentials or
+  silently selecting API-key billing. Authentication failures receive a
+  specific category, and explicit effort overrides inherited effort values.
+- fix: wait for the newly requested dashboard readiness action. (#463)
+  Aggregate checks exclude completion IDs from earlier scenarios before
+  accepting Run success, preventing stale evidence from racing the next
+  mode's seeded failure assertion.
 - fix: retain Copilot answers sent in the same message as task completion.
   When no separate answer exists, completion parsing keeps the message content
   instead of replacing valid JSON with the prose task summary. Explicit final
