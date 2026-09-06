@@ -11,6 +11,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain model transcripts and submitted proposals when postprocessing fails. (#468)
+  Failed runs keep their model telemetry and exact postprocessor input before
+  postprocessing starts. Full transcript JSON includes recorded pipeline results
+  while summary output omits proposal content; disabled recording stays disabled.
+- fix: restore dashboard model values and move aggregate attention into Activity.
+  Inventory shows reported or configured models, with an explicit default for
+  unspecified models, while handlers show a dash. Aggregate attention no longer
+  occupies a separate inventory banner; per-agent health indicators remain.
+- fix: reuse deployment preparation evidence across worktrees.
+  Validated wheels and receipts live in shared Git storage and include Python
+  identity. Release guidance reuses passing checks for unchanged inputs instead
+  of repeating suites at handoffs; changed artifacts still require validation.
 - fix: accept the documented version-classification arguments.
   CLI validation consumes positional values in order, so `versions classify`
   validates the status instead of mistaking the version for it. Missing and
