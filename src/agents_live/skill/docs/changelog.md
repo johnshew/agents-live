@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep actions working in virtualized dashboard tables.
+  Aggregate Run, Start, Stop, and Claim controls now dispatch through the
+  virtual-scroll wrapper while preserving repository-qualified targets.
 - feat: add OpenAI Codex as a self-contained provider. (#447)
   Codex supports plan and workspace-confined write runs, explicit models and
   reasoning effort, native output schemas, selected stdio and HTTP MCP servers,

@@ -7,7 +7,7 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "copilot/make-provider-integrations-self-contained-6-9"
+branch = "feat/dashboard-6.9-cleanup"
 version = "6.9.0"
 promotes_to = "release"
 deployed_version = "6.8.0"
@@ -15,13 +15,13 @@ deployed_commit = "186f3abbba03717637b71ae02e3e3d2b39ea4549"
 validated_on = "2026-09-05"
 
 [bake.issues]
-delivered = [446]
+delivered = [374, 446, 447]
 partial = []
 deferred = []
-promotion_decision = [374, 447]
+promotion_decision = [424, 455]
 
 [bake.recommendations]
-overall = "Finish and test the Codex provider on main before preparing the official 6.9 candidate."
-"447" = "Implement and test Codex as the first consumer of the self-contained provider contract before releasing 6.9."
-"374" = "Verify the Copilot stdin transport and the Codex provider against signed-in native Windows CLIs before releasing 6.9."
-testing = "Version 6.8.0 passed installed operational acceptance on Windows before publication. The 6.9 provider changes pass live Codex and Copilot conformance on WSL/Linux, but still require the portable Windows CI matrix and signed-in native Windows conformance against the exact candidate before publication."
+overall = "Merge the dashboard cleanup, confirm its issues close, and finish native-Windows candidate validation before preparing 6.9.0."
+"424" = "Include the completed continuity and bounded-rendering work in 6.9.0 after the dashboard pull request passes both host matrices."
+"455" = "Include the completed repository settings workflow in 6.9.0 after the dashboard pull request passes both host matrices."
+testing = "Version 6.8.0 passed installed operational acceptance on Windows. The 6.9 provider and dashboard changes still require signed-in native-Windows provider conformance and installed-candidate acceptance before publication."
