@@ -84,6 +84,63 @@ def _checks(pr: dict[str, Any]) -> str:
     return "passed"
 
 
+def _promotion_state(bake: dict[str, Any], bake_sha: str) -> tuple[bool, str]:
+    promotion = bake.get("promotion")
+    if not isinstance(promotion, dict):
+        raise ReportError("bake.promotion configuration is missing")
+    decision = promotion.get("decision")
+    if decision == "continue-bake":
+        return False, "The developer has directed this version to remain in bake."
+    if decision != "approved":
+        raise ReportError(
+            "bake.promotion.decision must be 'continue-bake' or 'approved'")
+    approved_commit = promotion.get("commit")
+    decided_on = promotion.get("decided_on")
+    if not isinstance(approved_commit, str) \
+            or re.fullmatch(r"[0-9a-f]{40}", approved_commit) is None \
+            or not isinstance(decided_on, str) \
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", decided_on) is None:
+        raise ReportError(
+            "approved bake promotion requires a full commit and decided_on date")
+    if approved_commit != bake_sha:
+        return False, (
+            f"Developer approval names `{approved_commit[:8]}`, but the current "
+            f"bake is `{bake_sha[:8]}`. Revalidate it and record a new decision.")
+    return True, (
+        f"The developer approved bake `{bake_sha[:8]}` for promotion on "
+        f"`{decided_on}`.")
+
+
+def _development_state(
+    *, bake_moved: bool, promotion_approved: bool,
+    promotion_open: bool,
+) -> tuple[str, str]:
+    if bake_moved:
+        return (
+            "ready for candidate",
+            "The approved bake is in `main`; prepare a new official candidate.",
+        )
+    if promotion_open and promotion_approved:
+        return (
+            "promotion proposed",
+            "The bake-to-`main` pull request is open and must pass its checks.",
+        )
+    if promotion_approved:
+        return (
+            "promotion approved",
+            "The current bake commit is approved; open the bake-to-`main` pull request.",
+        )
+    if promotion_open:
+        return (
+            "baking",
+            "A promotion pull request exists without current developer approval; do not merge it.",
+        )
+    return (
+        "baking",
+        "Keep fixing, deploying, and validating the configured bake branch.",
+    )
+
+
 def _issue_rows(
     repository: str,
     configured: dict[str, list[int]],
@@ -143,6 +200,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         bake_ref = merged_promotions[0]["headRefOid"]
     release_sha = _sha(release_ref)
     bake_sha = _sha(bake_ref)
+    promotion_approved, promotion_state = _promotion_state(bake, bake_sha)
     _, bake_ahead = _count(release_ref, bake_ref)
     bake_moved = bake_ahead == 0
 
@@ -179,6 +237,11 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     promotion = _json(
         "gh", "pr", "list", "--state", "open", "--base", release["branch"],
         "--head", bake["branch"], "--limit", "10", "--json", pr_fields)
+    development_state, development_state_detail = _development_state(
+        bake_moved=bake_moved,
+        promotion_approved=promotion_approved,
+        promotion_open=bool(promotion),
+    )
 
     issue_rows, assigned = _issue_rows(repository, bake["issues"])
     decisions = [
@@ -219,6 +282,8 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "does not belong to the current bake"
     )
     release_actions = []
+    if not bake_moved:
+        release_actions.append(promotion_state)
     if not runtime_current:
         release_actions.append(
             "The version installed for testing is not the newest bake. "
@@ -227,6 +292,10 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
     if bake_moved:
         release_actions.append(
             "Bake has moved into `main`. Prepare, install, and accept the official candidate.")
+    elif not promotion_approved:
+        release_actions.append(
+            "Do not open or merge the bake-to-main pull request until the "
+            "developer records approval for the current bake commit.")
     elif not promotion:
         release_actions.append(
             "After the newest bake is accepted, open a pull request to move "
@@ -264,6 +333,10 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
             "every recommendation and is accepted for promotion.")
         next_actions.append(
             "Make sure the changelog describes everything included in bake.")
+        if not promotion_approved:
+            next_actions.append(
+                "Obtain developer approval for the exact bake commit and record "
+                "it in `.github/release-channels.toml`.")
         if not promotion:
             next_actions.append(
                 f"Only then, open one pull request from `{bake['branch']}` to "
@@ -314,6 +387,12 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "Point-in-time release report for "
         f"[{repository}]({repository_data['url']}), generated at "
         f"`{generated_at.isoformat().replace('+00:00', 'Z')}`.",
+        "",
+        "## Current development state",
+        "",
+        f"**`{development_state}`**",
+        "",
+        development_state_detail,
         "",
         "## Can we release this version now?",
         "",

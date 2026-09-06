@@ -4672,6 +4672,77 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("Awaiting promotion decision", rows[0])
         self.assertIn("| open | required |", rows[0])
 
+    def test_release_report_requires_current_developer_promotion_approval(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "release-report.py"))
+        promotion_state = script["_promotion_state"]
+        development_state = script["_development_state"]
+        commit = "a" * 40
+
+        approved, message = promotion_state({
+            "promotion": {"decision": "continue-bake"},
+        }, commit)
+        self.assertFalse(approved)
+        self.assertIn("remain in bake", message)
+
+        approved, message = promotion_state({
+            "promotion": {
+                "decision": "approved",
+                "commit": commit,
+                "decided_on": "2026-09-06",
+            },
+        }, commit)
+        self.assertTrue(approved)
+        self.assertIn("approved bake", message)
+
+        approved, message = promotion_state({
+            "promotion": {
+                "decision": "approved",
+                "commit": "b" * 40,
+                "decided_on": "2026-09-06",
+            },
+        }, commit)
+        self.assertFalse(approved)
+        self.assertIn("Revalidate it", message)
+
+        with self.assertRaisesRegex(
+                script["ReportError"], "full commit and decided_on date"):
+            promotion_state({
+                "promotion": {
+                    "decision": "approved",
+                    "commit": "abc123",
+                },
+            }, commit)
+
+        self.assertEqual("baking", development_state(
+            bake_moved=False,
+            promotion_approved=False,
+            promotion_open=False,
+        )[0])
+        self.assertEqual("promotion approved", development_state(
+            bake_moved=False,
+            promotion_approved=True,
+            promotion_open=False,
+        )[0])
+        self.assertEqual("promotion proposed", development_state(
+            bake_moved=False,
+            promotion_approved=True,
+            promotion_open=True,
+        )[0])
+        invalid_state, invalid_detail = development_state(
+            bake_moved=False,
+            promotion_approved=False,
+            promotion_open=True,
+        )
+        self.assertEqual("baking", invalid_state)
+        self.assertIn("do not merge", invalid_detail)
+        self.assertEqual("ready for candidate", development_state(
+            bake_moved=True,
+            promotion_approved=True,
+            promotion_open=False,
+        )[0])
+
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))

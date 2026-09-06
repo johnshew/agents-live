@@ -14,6 +14,9 @@ deployed_version = "6.8.0"
 deployed_commit = "186f3abbba03717637b71ae02e3e3d2b39ea4549"
 validated_on = "2026-09-05"
 
+[bake.promotion]
+decision = "continue-bake"
+
 [bake.issues]
 delivered = [374, 424, 446, 447, 455]
 partial = []

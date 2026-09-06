@@ -17,6 +17,7 @@ work on it.
 | When you are... | Read first |
 |---|---|
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
+| Understanding the development and release state machine | [docs/development-release-process.md](docs/development-release-process.md) |
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
 | Adding, changing, or deleting a test | [docs/testing-methodology.md](docs/testing-methodology.md) |
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
@@ -99,8 +100,12 @@ The deployment creates and selects a commit-qualified
 `<target>.dev0+g<commit>` generation. `--allow-downgrade` is required only
 when intentionally moving to a lower numeric `major.minor.patch` release; it
 is not needed between a stable candidate and a bake on the same release line.
-When bake is approved, move it to `main` through one promotion pull request,
-then prepare a new official candidate from the resulting clean `main`.
+When the developer approves bake promotion, update `[bake.promotion]` in
+`.github/release-channels.toml` to `decision = "approved"` and record the exact
+full bake `commit` plus `decided_on = "YYYY-MM-DD"`. Approval applies only to
+that commit; new bake changes require renewed validation and approval. Then
+move the approved bake to `main` through one promotion pull request and prepare
+a new official candidate from the resulting clean `main`.
 
 Keep these instructions, `.agents/release-report.md`, and
 `tools/release-report.py` aligned. When branch-routing or release-cycle guidance

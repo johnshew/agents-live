@@ -42,6 +42,28 @@ the active bake belongs to that bake. If an active bake exists but a request
 names `main`, ask whether the developer intends a bake fix, bake-to-release
 promotion, or independent post-release work before making changes.
 
+Developer promotion intent is durable manifest state, not an inference from a
+conversation or a green build. While testing continues, set:
+
+```toml
+[bake.promotion]
+decision = "continue-bake"
+```
+
+When the developer explicitly approves promotion, change it to:
+
+```toml
+[bake.promotion]
+decision = "approved"
+commit = "<full-current-bake-commit>"
+decided_on = "YYYY-MM-DD"
+```
+
+Approval is bound to that exact commit. Any later bake commit makes it stale;
+retest and record a new developer decision before opening or merging the
+bake-to-`main` pull request. The report validates this state and must block
+promotion when approval is absent, malformed, or stale.
+
 If local testing rejects an official candidate before publication, do not add
 fixes to its temporary candidate branch. Reopen a `bake/v<version>-local`
 branch from current `origin/main`, update `.github/release-channels.toml`, and
@@ -68,7 +90,7 @@ show issue disposition and channel separately.
 - GitHub issues establish whether work remains open or closed.
 - [.github/release-channels.toml](../.github/release-channels.toml) records
   decisions APIs cannot infer: partial delivery, explicit deferral, promotion
-  decisions, and the last deployed bake artifact.
+  approval for an exact bake commit, and the last deployed bake artifact.
 - The records created by release preparation and final testing remain the
   authority for approving the official candidate. The report summarizes them;
   it never replaces a required check.
@@ -81,6 +103,8 @@ deployment fields only after installing and validating that exact artifact.
 
 Every generated report must include:
 
+- the current development state and the evidence or decision needed for its
+  next transition;
 - a plain-English answer to "Are we ready to release?", followed by the
   specific decisions and actions still needed;
 - a recommended decision for each unresolved release question, plus one clear
@@ -141,7 +165,10 @@ The generated summary uses evidence-based states:
 
 - `idle`: no changes beyond the upstream channel.
 - `baking`: changes are integrated but no promotion pull request is open.
+- `promotion approved`: the developer approved the exact current bake commit.
 - `promotion proposed`: a bake-to-release pull request is open.
+- `ready for candidate`: the approved bake is in `main` and release
+  preparation is next.
 - `candidate`: release preparation produced a receipt-bound candidate.
 - `released`: an immutable stable tag has a published GitHub release.
 - `blocked`: a required check failed or the developer explicitly declared a
@@ -152,6 +179,9 @@ translate them into plain English. Moving bake to release still requires every
 open decision resolved, all checks passing, the installed test version matching
 the current bake branch, complete changelog and issue review, and every gate in
 [release.md](release.md).
+
+The complete transition model and durable evidence for each state are defined
+in [development-release-process.md](../docs/development-release-process.md).
 
 ## Generate the report
 
