@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import copy
 import json
 import os
 import re
@@ -45,9 +46,10 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 from agents_live import __version__ as AGENTS_LIVE_VERSION  # noqa: E402
 from agents_live import agent, obs, paths, plugins, preflight, runtime, state  # noqa: E402
-from agents_live.cli import agent_view, lifecycle  # noqa: E402
+from agents_live.cli import agent_view, identity, lifecycle  # noqa: E402
 from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
+from agents_live.obs import query as obs_query  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
 from nicegui import app, ui  # noqa: E402
@@ -96,18 +98,31 @@ WORKER_TIMEOUT = 480
 DEFAULT_PORT = 8231
 MAX_PORT = 65535
 SELECTED_PORT_ENV = "AGENTS_LIVE_DASHBOARD_SELECTED_PORT"
+VIRTUAL_ROW_SIZE = 36
+MAX_RENDERED_REPOSITORIES = 10
+
+def _new_page_state() -> dict:
+    """Return independent preferences and transient state for one page."""
+    return {
+        "last_refresh": datetime.now(timezone.utc),
+        "filters": {"name": "", "state": "All", "owner": "All",
+                    "runtime": "All", "failing": False},
+        "all_repos": {
+            "repo": "All",
+            "grouped": True,
+            "sort_by": "name",
+            "descending": False,
+            "selection": [],
+            "expanded_repositories": [],
+            "settings_open": False,
+        },
+        "repository_result": None,
+    }
+
 
 STATE: dict = {
-    "last_refresh": datetime.now(timezone.utc),
+    **_new_page_state(),
     "models": {},
-    "filters": {"name": "", "state": "All", "owner": "All",
-                "runtime": "All", "failing": False},
-    "all_repos": {
-        "repo": "All",
-        "grouped": True,
-        "sort_by": "name",
-        "descending": False,
-    },
     "health_check_running": False,
 }
 _SCAN_CACHE: tuple[
@@ -117,6 +132,14 @@ _SCAN_CACHE: tuple[
         dict[str, tuple[float, float]],
     ],
 ] | None = None
+_PAGE_REFRESHES: dict[str, object] = {}
+
+
+def _client_key() -> str | None:
+    try:
+        return str(ui.context.client.id)
+    except (AttributeError, RuntimeError):
+        return None
 
 
 def _require_repo_path(path: Path | None) -> Path:
@@ -146,20 +169,48 @@ def collect_agents() -> list[dict]:
         REPO_ROOT, ownership_rate_limit_secs=10**9)]
 
 
+def _collection_status(agents: list[dict]) -> dict:
+    reasons = list(dict.fromkeys(
+        str(reason) for row in agents for reason in (
+            row.get("stateError"), row.get("definitionError"),
+            row.get("ownershipError"), row.get("observationError"),
+        ) if reason
+    ))
+    valid_agents = sum(bool(row.get("identifier")) for row in agents)
+    if reasons and not valid_agents:
+        state_name = "unavailable"
+    elif reasons:
+        state_name = "partial"
+    else:
+        state_name = "available"
+    return {
+        "state": state_name,
+        "valid_agents": valid_agents,
+        "detail": "; ".join(reasons) if reasons else None,
+    }
+
+
 def _agent_view_dict(row: agent_view.AgentView) -> dict:
     return {
         "name": row.name,
         "identifier": row.identifier,
         "description": row.description,
         "state": row.state,
+        "stateError": row.state_error,
+        "definitionError": row.definition_error,
         "owner": row.owner,
         "isOwner": row.is_owner,
         "ownershipAvailable": row.ownership_available,
+        "ownershipError": row.ownership_error,
         "runtime": row.runtime,
         "model": row.model,
         "mode": row.mode,
         "schedule": list(row.schedules),
         "watch": row.watch,
+        "consecutiveFailures": row.consecutive_failures,
+        "watcherLiveness": row.watcher_liveness,
+        "observationsAvailable": row.observations_available,
+        "observationError": row.observation_error,
     }
 
 
@@ -300,6 +351,8 @@ def _scan(aliases: dict[str, str] | None = None,
         if entry.get("phase") != "done":
             continue
         status = str(entry.get("status", "")).lower()
+        if status == "skipped":
+            continue
         slots = newest.setdefault(identifier, {})
         for slot in ("any", status):
             current = slots.get(slot)
@@ -324,8 +377,9 @@ def _running_version() -> str:
     return AGENTS_LIVE_VERSION
 
 
-def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
-                             ) -> tuple[dict[str, int], dict[str, str]]:
+def _structured_log_snapshot(agent_names: dict[str, str] | set[str],
+                             logs_dir: Path | None = None,
+                             ) -> tuple[dict[str, int], dict[str, str], dict]:
     """Return trailing-hour errors and latest reported models via qlog.
 
     Accepts a mapping of identifier to display name. Records key on the
@@ -335,6 +389,16 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     display_by_key: dict[str, str] = (
         dict(agent_names) if isinstance(agent_names, dict)
         else {name: name for name in agent_names})
+    display_counts = {
+        name: sum(value == name for value in display_by_key.values())
+        for name in display_by_key.values()
+    }
+
+    def display_label(key: str) -> str | None:
+        name = display_by_key.get(key)
+        if name is None:
+            return None
+        return f"{name} ({key})" if display_counts[name] > 1 else name
     if (SCRIPTS_DIR / "__init__.py").is_file():
         if str(SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(SCRIPTS_DIR))
@@ -342,12 +406,14 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     else:
         import qlog as structured_qlog
 
-    logs_dir = _require_repo_path(LOGS_DIR)
+    logs_dir = _require_repo_path(logs_dir or LOGS_DIR)
     # Both suffixes: a run's outcome is written to <identifier>.jsonl, so
     # a *.log glob counted zero errors with failed runs on the screen.
     patterns = [str(logs_dir / "*.jsonl"), str(logs_dir / "*.log")]
-    if not any(logs_dir.glob("*.jsonl")) and not any(logs_dir.glob("*.log")):
-        return {}, {}
+    files = obs.files(logs_dir)
+    if not files:
+        return {}, {}, {"state": "available", "detail": None}
+    damaged = obs_query.damaged(files)
     connection = structured_qlog.duckdb.connect(":memory:")
     try:
         structured_qlog.build_view(connection, patterns,
@@ -380,15 +446,18 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
                 "QUALIFY row_number() OVER ("
                 "PARTITION BY agent_name ORDER BY ts DESC) = 1"
             ).fetchall()
-    except (OSError, structured_qlog.duckdb.Error):
-        return {}, {}
+    except (OSError, structured_qlog.duckdb.Error) as exc:
+        return {}, {}, {
+            "state": "unavailable",
+            "detail": f"Structured activity query failed: {exc}",
+        }
     finally:
         connection.close()
 
     errors: dict[str, int] = {}
     framework_errors = 0
     for raw_name, count in error_rows:
-        display = display_by_key.get(str(raw_name or ""))
+        display = display_label(str(raw_name or ""))
         if display is not None:
             errors[display] = errors.get(display, 0) + int(count)
         else:
@@ -396,21 +465,34 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str]
     if framework_errors:
         errors["framework"] = framework_errors
     models = {
-        display_by_key.get(str(name), str(name)): str(model)
+        str(name): str(model)
         for name, model in model_rows
         if name and model
     }
-    return errors, models
+    evidence = {
+        "state": "partial" if damaged else "available",
+        "detail": (
+            f"{damaged} malformed structured log record"
+            f"{'s were' if damaged != 1 else ' was'} omitted"
+            if damaged else None
+        ),
+    }
+    return errors, models, evidence
 
 
 def _refresh_summary() -> str:
     agents = collect_agents()
     names = {agent["identifier"]: agent["name"] for agent in agents}
     names.update({agent["name"]: agent["name"] for agent in agents})
-    errors, models = _structured_log_snapshot(names)
+    errors, models, evidence = _structured_log_snapshot(names)
     STATE["models"] = models
-    error_text = ", ".join(
-        f"{name} {count}" for name, count in errors.items()) or "none"
+    if evidence["state"] == "unavailable":
+        error_text = f"unavailable ({evidence['detail']})"
+    else:
+        error_text = ", ".join(
+            f"{name} {count}" for name, count in errors.items()) or "none"
+        if evidence["state"] == "partial":
+            error_text += f"; partial ({evidence['detail']})"
     local_now = datetime.now().astimezone()
     timestamp = (
         f"{local_now.strftime('%b %d, %Y %I:%M:%S %p').replace(' 0', ' ')} "
@@ -740,14 +822,14 @@ async def _execute_action(request: _ActionRequest) -> int:
         type="positive" if ok else "negative",
     )
     elapsed = time.monotonic() - started
-    outcome = "completed" if ok else "failed"
+    outcome = "completed" if ok else "timed out" if code == 124 else "failed"
     _push_log(
         f"{outcome}: {request.description} (exit {code}, {elapsed:.1f}s)")
     log = globals().get("output_log")
     if log is not None:
         for line in out.splitlines():
             _safe_ui(log.push, f"    {line}")
-    _safe_ui(_refresh_views)
+    _safe_ui(_refresh_views, source="action completion")
     return code
 
 
@@ -772,7 +854,7 @@ async def _process_action_queue() -> None:
                 _push_log(
                     f"failed: {request.description} "
                     f"(exit {code}, {elapsed:.1f}s): {exc}")
-                _safe_ui(_refresh_views)
+                _safe_ui(_refresh_views, source="action completion")
                 if not request.future.done():
                     request.future.set_result(code)
             else:
@@ -865,8 +947,9 @@ async def health_check() -> None:
             return
         # Summarise the refreshed beacon so the user sees infra + smoketest,
         # not just exit codes. system_health reads the host health.ok beacon.
+        STATE["health_check_running"] = False
         h = system_health()
-        severity = {"ok": "positive", "degraded": "warning", "down": "negative"}
+        severity = {"healthy": "positive", "degraded": "warning"}
         _safe_ui(
             ui.notify, h["tip"],
             type=severity.get(h["level"], "negative"),
@@ -910,7 +993,9 @@ def agent_rows() -> list[dict]:
     return _agent_rows_for(REPO_ROOT, collect_agents())
 
 
-def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
+def _agent_rows_for(root: Path, agents: list[dict],
+                    reported_models: dict[str, str] | None = None
+                    ) -> list[dict]:
     """Shared informational row model for single and aggregate dashboards."""
     rows: list[dict] = []
     host = ownership.current_label()
@@ -921,6 +1006,8 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
         name = agent["name"]
         identifier = agent["identifier"]
         state = re.sub(r"\s*\(pid \d+\)", "", agent.get("state", "?"))
+        state_error = agent.get("stateError")
+        definition_error = agent.get("definitionError")
         owner_value = agent.get("owner")
         ownership_available = agent.get("ownershipAvailable", True)
         owner = (
@@ -928,13 +1015,35 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             "-" if ownership_available else "Unavailable"
         )
         ok_ago, err_ago, last_status = last_runs(identifier, runs)
-        # A failed last run only makes this host's view unhealthy while
-        # the agent is still registered here. "stopped" means no trigger
-        # is registered on this host - commonly an agent owned by
-        # another host, whose stale error belongs to that host's view.
-        # "unknown" (scheduler unreadable) keeps the flag rather than
-        # hiding a real failure (issue #176).
-        unhealthy = last_status == "error" and state != "stopped"
+        unhealthy = last_status == "error"
+        watcher_liveness = str(agent.get("watcherLiveness", "not-required"))
+        observations_available = agent.get("observationsAvailable", True)
+        unhealthy = unhealthy or watcher_liveness in {
+            "missing", "degraded", "unavailable"}
+        partial_reasons = [
+            reason for reason in (
+                f"State unavailable: {state_error}" if state_error else None,
+                f"Definition unavailable: {definition_error}"
+                if definition_error else None,
+                f"Ownership unavailable: {agent.get('ownershipError')}"
+                if not ownership_available else None,
+                f"Observations unavailable: {agent.get('observationError')}"
+                if not observations_available else None,
+            ) if reason
+        ]
+        health_reasons = list(partial_reasons)
+        if last_status == "error":
+            health_reasons.append("Failing: newest run")
+        watcher_reason = {
+            "missing": "Watcher missing",
+            "degraded": "Watcher degraded",
+            "unavailable": "Watcher unavailable",
+        }.get(watcher_liveness)
+        if watcher_reason:
+            health_reasons.append(watcher_reason)
+        health_text = "; ".join(health_reasons) or (
+            "Healthy" if last_status == "ok" else "No completed runs")
+        unhealthy = unhealthy or bool(partial_reasons)
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
@@ -942,22 +1051,60 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             agent_cost(identifier, costs) if runtime != "none"
             else ("-", "-"))
         cost_values = costs.get(identifier)
-        model = _agent_model(agent, STATE["models"])
-        can_pause = local and state == "started"
-        can_activate = local and state == "stopped"
+        model = _agent_model(agent, reported_models or STATE["models"])
+        collection_available = (
+            not state_error and not definition_error
+            and ownership_available)
+        can_run = collection_available and local and bool(identifier)
+        can_pause = collection_available and local and state == "started"
+        can_activate = collection_available and local and state == "stopped"
         can_claim = (
-            ownership_mode == "registry" and ownership_available and not local)
-        unavailable_tip = "Ownership registry unavailable"
+            collection_available and ownership_mode == "registry" and not local)
+        unavailable_tip = "; ".join(partial_reasons) or "Action unavailable"
+        remote_tip = (
+            f"Owned by another host ({owner}); use Claim to move it onto {host}"
+        )
         local_tip = (
             "Cross-machine ownership is disabled; run "
             "`agents-live ownership enable`")
+        run_tip = (
+            "Run this agent once now" if can_run else
+            unavailable_tip if not collection_available else remote_tip)
+        activate_tip = (
+            "Register this host's cron/watcher for this agent"
+            if can_activate else
+            unavailable_tip if not collection_available else
+            "Already active" if local else remote_tip)
+        pause_tip = (
+            "Stop this host's cron/watcher (config preserved)"
+            if can_pause else
+            unavailable_tip if not collection_available else
+            "Not running on this host" if local else remote_tip)
+        claim_tip = (
+            local_tip if ownership_mode == "local" else
+            unavailable_tip if not collection_available else
+            "Already local" if local else
+            f"Claim onto {host} (transfer ownership + register trigger)")
+        action_reasons = "; ".join(
+            f"{label}: {reason}"
+            for label, enabled, reason in (
+                ("Run", can_run, run_tip),
+                ("Start", can_activate, activate_tip),
+                ("Stop", can_pause, pause_tip),
+                ("Claim", can_claim, claim_tip),
+            )
+            if not enabled
+        )
         rows.append({
             "name": name,
             "identifier": identifier,
             "agent": agent_display,
             "trigger": trigger_summary(agent),
             "state": state,
+            "stateError": state_error,
+            "definitionError": definition_error,
             "owner": owner,
+            "ownershipError": agent.get("ownershipError"),
             "model": model,
             "last_ok": ok_ago,
             "last_err": err_ago,
@@ -966,26 +1113,21 @@ def _agent_rows_for(root: Path, agents: list[dict]) -> list[dict]:
             "cost_day_value": cost_values[0] if cost_values else None,
             "cost_week_value": cost_values[1] if cost_values else None,
             "unhealthy": unhealthy,
+            "health": health_text,
+            "consecutive_failures": agent.get("consecutiveFailures", 0),
+            "watcher_liveness": watcher_liveness,
+            "observationsAvailable": observations_available,
+            "observationError": agent.get("observationError"),
             "local": local,
+            "can_run": can_run,
             "can_pause": can_pause,
             "can_activate": can_activate,
             "can_claim": can_claim,
-            "run_tip": "Run this agent once now",
-            "activate_tip": (
-                "Register this host's cron/watcher for this agent"
-                if can_activate else
-                (unavailable_tip if not ownership_available else
-                 "Already active" if local else
-                 f"Owned by another host - use Claim to move it onto {host}")),
-            "pause_tip": (
-                "Stop this host's cron/watcher (config preserved)"
-                if can_pause else
-                unavailable_tip if not ownership_available else
-                "Not running on this host"),
-            "claim_tip": (local_tip if ownership_mode == "local" else
-                          unavailable_tip if not ownership_available else
-                          "Already local" if local else
-                          f"Claim onto {host} (transfer ownership + register trigger)"),
+            "run_tip": run_tip,
+            "activate_tip": activate_tip,
+            "pause_tip": pause_tip,
+            "claim_tip": claim_tip,
+            "action_reasons": action_reasons,
         })
     return rows
 
@@ -1004,10 +1146,12 @@ def api_agents() -> dict:
     inventory without authentication. Keep DASHBOARD_HOST loopback-only unless
     the endpoint gains an authentication and network-exposure design (#215).
     """
+    agents = agent_rows() if REPO_ROOT is not None else []
     return {
         "host": ownership.current_label(),
         "repo": str(REPO_ROOT) if REPO_ROOT is not None else None,
-        "agents": agent_rows() if REPO_ROOT is not None else [],
+        "collection": _collection_status(agents),
+        "agents": agents,
     }
 
 
@@ -1042,7 +1186,9 @@ def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
     runtime = agent.get("runtime") or "agency copilot"
     if runtime == "none":
         return "-"
-    return reported_models.get(agent["name"]) or agent.get("model") or "default"
+        return (reported_models.get(agent["identifier"])
+            or reported_models.get(agent["name"])
+            or agent.get("model") or "default")
 
 
 def system_health() -> dict:
@@ -1057,26 +1203,40 @@ def system_health() -> dict:
     distinct *degraded* state: the framework end-to-end test is failing
     even though watcher/cron infrastructure is healthy.
 
-    Returns a dict with ``level`` ("ok" | "degraded" | "down"), a short
-    ``text`` label for the header, and a longer ``tip`` tooltip.
+    Returns a short textual state for the header and a longer evidence reason.
     """
     now = datetime.now(timezone.utc)
+    if STATE.get("health_check_running"):
+        return {
+            "level": "checking",
+            "text": "checking: host maintenance",
+            "tip": "Host maintenance and framework checks are in progress.",
+        }
     health_ok_path = HEALTH_OK_PATH
     if not health_ok_path.is_file():
-        return {"level": "down", "text": "unhealthy: no beacon",
+        return {"level": "unavailable", "text": "unavailable: no beacon",
                   "tip": "the host health.ok beacon is missing. Run "
                       "`agents-live doctor --repair`."}
-    mtime = datetime.fromtimestamp(health_ok_path.stat().st_mtime, timezone.utc)
+    try:
+        mtime = datetime.fromtimestamp(
+            health_ok_path.stat().st_mtime, timezone.utc)
+        data = json.loads(health_ok_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "level": "unavailable",
+            "text": "unavailable: invalid beacon",
+            "tip": f"The host health beacon could not be read: {exc}",
+        }
+    if not isinstance(data, dict):
+        return {
+            "level": "unavailable",
+            "text": "unavailable: invalid beacon",
+            "tip": "The host health beacon does not contain an object.",
+        }
     age_min = (now - mtime).total_seconds() / 60
     ago = _ago(mtime.isoformat(), now)
-    try:
-        data = json.loads(health_ok_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
     if age_min > HEALTH_STALE_MINUTES:
-        return {"level": "down", "text": f"unhealthy: beacon stale {ago}",
+        return {"level": "stale", "text": f"stale: beacon {ago}",
               "tip": f"health.ok last written {ago} (expected every five "
                   "minutes; unhealthy after one hour). Automatic "
                   "maintenance is not confirming infrastructure health - "
@@ -1085,18 +1245,25 @@ def system_health() -> dict:
     cron = data.get("cron")
     counts = (f"{watchers} watchers / {cron} cron"
               if watchers is not None and cron is not None else "infrastructure")
-    smoke = data.get("smoketest")
-    smoke = smoke if isinstance(smoke, dict) else {}
-    smoke_status = str(smoke.get("status", "")).lower()
-    if smoke_status == "fail":
-        reason = str(smoke.get("reason", "")).strip() or "no reason recorded"
-        return {"level": "degraded",
-                "text": f"degraded: smoketest failing {ago}",
-                "tip": f"Infrastructure healthy ({counts}); framework "
-                       f"smoketest is FAILING: {reason}"}
-    smoke_note = f"smoketest {smoke_status}" if smoke_status else "smoketest not run"
-    return {"level": "ok", "text": f"healthy {ago}",
-            "tip": f"Infrastructure healthy ({counts}); {smoke_note}; "
+    verdict = agent_view.health_verdict(data)
+    if not verdict.healthy:
+        if verdict.category == "agent_repeated_failures":
+            failures = data.get("agent_failures")
+            count = len(failures) if isinstance(failures, list) else 0
+            summary = (
+                f"{count} agent failure streak"
+                f"{'s' if count != 1 else ''}"
+            )
+        else:
+            summary = verdict.category.replace("_", " ")
+        return {
+            "level": "degraded",
+            "text": f"degraded: {summary} {ago}",
+            "tip": f"Infrastructure available ({counts}); {verdict.detail}; "
+                   f"remedy: {verdict.remedy}; beacon written {ago}",
+        }
+    return {"level": "healthy", "text": f"healthy {ago}",
+            "tip": f"Infrastructure healthy ({counts}); smoketest pass; "
                    f"beacon written {ago}"}
 
 
@@ -1290,6 +1457,7 @@ async def _claim_aggregate_row(event) -> None:
 _AGENT_COLUMNS = [
     {"name": "name", "label": "Agent", "field": "name", "align": "left", "sortable": True},
     {"name": "state", "label": "State", "field": "state", "align": "left", "sortable": True},
+    {"name": "health", "label": "Health", "field": "health", "align": "left", "sortable": True},
     {"name": "actions", "label": "Actions", "field": "actions", "align": "left"},
     {"name": "owner", "label": "Owner", "field": "owner", "align": "left", "sortable": True},
     {"name": "agent", "label": "Runtime", "field": "agent", "align": "left", "sortable": True},
@@ -1312,7 +1480,7 @@ _AGGREGATE_COLUMNS = list(_AGENT_COLUMNS)
 def _add_agent_information_slots(table) -> None:
     table.add_slot("body-cell-name", '''
         <q-td :props="props">
-          <div style="white-space:nowrap"
+                    <div style="white-space:nowrap" :data-agent-key="props.row.repository_identifier"
                :title="props.row.unhealthy ? props.row.name + ' - last run errored' : props.row.name"
                :class="props.row.unhealthy ? 'text-red text-weight-medium' : ''">{{ props.row.name }}</div>
         </q-td>
@@ -1346,33 +1514,57 @@ def _add_agent_information_slots(table) -> None:
                    >{{ props.row.state }}</span>
         </q-td>
     ''')
+    if any(column["name"] == "health" for column in _AGENT_COLUMNS):
+        table.add_slot("body-cell-health", '''
+                <q-td :props="props">
+                    <span :class="props.row.unhealthy ? 'text-red text-weight-medium' : 'text-grey-7'">
+                        {{ props.row.health }}
+                    </span>
+                </q-td>
+        ''')
 
 
 def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
     event_prefix = "aggregate-" if aggregate else ""
+    event_target = "$parent.$parent" if aggregate else "$parent"
+    event_args = (
+        "{identifier: props.row.identifier, "
+        "repository: props.row.repository, "
+        "repository_path: props.row.repository_path}"
+        if aggregate else "props.row"
+    )
     table.add_slot("header-cell-actions", '''
         <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
     ''')
     table.add_slot("body-cell-actions", f'''
         <q-td :props="props" class="text-left">
           <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
+               :disable="!props.row.can_run"
                  :title="props.row.run_tip"
-                 @click="() => $parent.$emit('{event_prefix}run', props.row)" />
+               :aria-label="'Run: ' + props.row.run_tip"
+                                 @click="() => {event_target}.$emit('{event_prefix}run', {event_args})" />
           <q-btn flat dense round size="xs" icon="power_settings_new"
                  :color="props.row.can_activate ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_activate"
                  :title="props.row.activate_tip"
-                 @click="() => $parent.$emit('{event_prefix}activate', props.row)" />
+                 :aria-label="'Start: ' + props.row.activate_tip"
+                 @click="() => {event_target}.$emit('{event_prefix}activate', {event_args})" />
           <q-btn flat dense round size="xs" icon="stop"
                  :color="props.row.can_pause ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_pause"
                  :title="props.row.pause_tip"
-                 @click="() => $parent.$emit('{event_prefix}pause', props.row)" />
+                 :aria-label="'Stop: ' + props.row.pause_tip"
+                 @click="() => {event_target}.$emit('{event_prefix}pause', {event_args})" />
           <q-btn flat dense round size="xs" icon="download"
                  :color="props.row.can_claim ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_claim"
                  :title="props.row.claim_tip"
-                 @click="() => $parent.$emit('{event_prefix}claim', props.row)" />
+                 :aria-label="'Claim: ' + props.row.claim_tip"
+                 @click="() => {event_target}.$emit('{event_prefix}claim', {event_args})" />
+                    <div v-if="props.row.action_reasons"
+                             class="text-caption text-grey-7"
+                        style="max-width:20rem;white-space:normal"
+                        v-text="props.row.action_reasons"></div>
         </q-td>
     ''')
     handlers = (
@@ -1434,7 +1626,8 @@ def agent_grid() -> None:
         ).classes("w-full").props("flat dense hide-bottom separator=none")
     table.add_slot("body-cell-name", '''
         <q-td :props="props">
-          <div style="white-space:nowrap"
+            <div style="white-space:nowrap"
+                :data-agent-key="props.row.repository_identifier || props.row.identifier"
                :title="props.row.unhealthy ? props.row.name + ' - last run errored' : props.row.name"
                :class="props.row.unhealthy ? 'text-red text-weight-medium' : ''">{{ props.row.name }}</div>
         </q-td>
@@ -1480,9 +1673,12 @@ def header_actions() -> None:
     rows = agent_rows()
     with ui.row().classes("items-center gap-3 no-wrap"):
         h = system_health()
-        color = {"ok": "text-gray-500",
+        color = {"healthy": "text-gray-500",
                  "degraded": "text-orange-500",
-                 "down": "text-red-400"}.get(h["level"], "text-red-400")
+                 "checking": "text-blue-500",
+                 "stale": "text-orange-500",
+                 "unavailable": "text-red-400"}.get(
+                     h["level"], "text-red-400")
         ui.label(h["text"]).classes("text-sm " + color).tooltip(h["tip"])
         ui.button(
             "Run health check", icon="health_and_safety", on_click=health_check
@@ -1522,7 +1718,7 @@ def host_service_panel() -> None:
         "stale": "text-orange-500",
         "missing": "text-red-400",
     }.get(service["state"], "text-gray-500")
-    with ui.card().classes("w-full host-service-panel"):
+    with ui.element("section").classes("settings-panel w-full host-service-panel"):
         with ui.row().classes("w-full items-center justify-between gap-3"):
             with ui.column().classes("gap-1"):
                 ui.label("Host services").classes("text-base font-medium")
@@ -1550,22 +1746,61 @@ def host_service_panel() -> None:
 
 
 @ui.refreshable
-def repository_settings_panel() -> None:
-    rows = repository_rows()
+def repository_settings_panel(rows: list[dict] | None = None, *,
+                              page_state: dict | None = None,
+                              refresh=None) -> None:
+    current_state = STATE if page_state is None else page_state
+    refresh_views = _refresh_views if refresh is None else refresh
+    rows = repository_rows() if rows is None else rows
     new_path = {"value": ""}
 
     def announce(result: dict) -> None:
         if result.get("ok"):
-            _safe_ui(ui.notify, "Repository registry updated.", type="positive")
+            _safe_ui(ui.notify, result["message"], type="positive",
+                     multi_line=True)
         else:
             _safe_ui(ui.notify, result.get("error", "registry update failed"),
                      type="negative", multi_line=True)
-        repository_settings_panel.refresh()
-        _safe_ui(ui.run_javascript, "window.location.reload()")
+        refresh_views()
 
-    with ui.card().classes("w-full repository-settings-panel"):
-        ui.label("Repository settings").classes("text-base font-medium")
-        with ui.row().classes("w-full items-center gap-2"):
+    def confirm_unregister(row: dict) -> None:
+        with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
+            ui.label(f"Unregister {row['name']}?").classes(
+                "text-base font-medium")
+            ui.label(
+                "This removes only the registry entry. Repository files, "
+                "agent definitions, logs, triggers, and runtime state will "
+                "not be deleted."
+            ).classes("text-sm")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=confirmation.close).props(
+                    "flat no-caps")
+                ui.button(
+                    "Unregister",
+                    icon="link_off",
+                    on_click=lambda: (
+                        confirmation.close(),
+                        announce(_repository_mutation(
+                            {"action": "remove", "repo": row["name"]},
+                            page_state=current_state)),
+                    ),
+                ).props("color=negative unelevated no-caps autofocus")
+        confirmation.open()
+
+    with ui.element("section").classes(
+            "settings-panel w-full repository-settings-panel"):
+        ui.label("Repository administration").classes("text-base font-medium")
+        ui.label(
+            "The default repository controls fallback CLI resolution. "
+            "Changing it does not change the current dashboard view."
+        ).classes("text-xs text-gray-500")
+        result = current_state.get("repository_result")
+        if result:
+            result_class = "text-green-700" if result.get("ok") else "text-red-600"
+            ui.label(result.get("message") or result.get("error")).classes(
+                f"repository-result text-sm {result_class}").props(
+                    "role=status aria-live=polite")
+        with ui.row().classes("repository-register w-full items-center gap-2"):
             ui.input(
                 "Repository path", value="",
                 on_change=lambda event: new_path.update(value=event.value),
@@ -1574,49 +1809,63 @@ def repository_settings_panel() -> None:
                 "Register",
                 on_click=lambda: announce(
                     _repository_mutation(
-                        {"action": "add", "path": new_path["value"]})),
+                        {"action": "add", "path": new_path["value"]},
+                        page_state=current_state)),
             ).props("dense color=primary unelevated no-caps")
             ui.button(
                 "Clear default",
                 on_click=lambda: announce(
-                    _repository_mutation({"action": "clear-default"})),
+                    _repository_mutation(
+                        {"action": "clear-default"},
+                        page_state=current_state)),
             ).props("dense unelevated no-caps")
         for row in rows:
-            if row["default"] and not row["available"]:
-                state_label = "default, unavailable"
-            elif not row["available"]:
-                state_label = "unavailable"
-            elif row["default"]:
-                state_label = "default"
-            else:
-                state_label = "registered"
-            with ui.row().classes("w-full items-center gap-2 no-wrap"):
-                ui.label(row["name"]).classes("text-sm font-medium")
-                ui.label(state_label).classes("text-xs text-gray-500")
+            with ui.element("section").classes("repository-setting-row w-full"):
+                with ui.row().classes(
+                        "repository-setting-summary w-full items-center gap-2"):
+                    ui.label(row["name"]).classes("text-sm font-medium")
+                    ui.label(
+                        "Available" if row["available"] else "Unavailable"
+                    ).classes(
+                        "text-xs text-green-700" if row["available"]
+                        else "text-xs text-red-600")
+                    ui.label(
+                        "Default fallback" if row["default"] else "Not default"
+                    ).classes("text-xs text-gray-500")
+                    discovery = (
+                        "Discovery failed" if row["agent_count"] is None else
+                        f"{row['agent_count']} agent definition"
+                        f"{'s' if row['agent_count'] != 1 else ''} discovered"
+                    )
+                    ui.label(discovery).classes("text-xs text-gray-500")
                 ui.label(row["path"]).classes(
-                    "repository-path grow text-xs text-gray-500")
-                ui.button(
-                    "Set default",
-                    on_click=lambda name=row["name"]: announce(
-                        _repository_mutation(
-                            {"action": "set-default", "repo": name})),
-                ).props("dense flat no-caps").set_enabled(
-                    row["available"] and not row["default"])
-                ui.button(
-                    "Remove",
-                    on_click=lambda name=row["name"]: announce(
-                        _repository_mutation(
-                            {"action": "remove", "repo": name})),
-                ).props("dense flat no-caps")
-            if row["error"]:
-                ui.label(row["error"]).classes("text-xs text-red-500")
+                    "repository-setting-path text-xs text-gray-500")
+                if row["error"]:
+                    ui.label(row["error"]).classes("text-xs text-red-600")
+                with ui.row().classes("repository-setting-actions gap-2"):
+                    ui.button(
+                        "Set default",
+                        icon="home",
+                        on_click=lambda name=row["name"]: announce(
+                            _repository_mutation(
+                                {"action": "set-default", "repo": name},
+                                page_state=current_state)),
+                    ).props("dense flat no-caps").set_enabled(
+                        row["available"] and not row["default"])
+                    ui.button(
+                        "Unregister",
+                        icon="link_off",
+                        on_click=lambda selected=row: confirm_unregister(selected),
+                    ).props("dense flat no-caps color=negative")
 
 
-def _refresh_views() -> None:
-    aggregate_refresh = globals().get("_all_repos_refresh")
+def _refresh_views(*, source: str = "manual refresh") -> None:
+    client_key = _client_key()
+    aggregate_refresh = (
+        _PAGE_REFRESHES.get(client_key) if client_key is not None else None)
     if aggregate_refresh is not None:
         with hostruntime.enumeration_pass():
-            _safe_ui(aggregate_refresh)
+            _safe_ui(aggregate_refresh, source=source)
             _safe_ui(host_service_panel.refresh)
         return
     # One pass for the whole render: the summary, the table, and the
@@ -1646,124 +1895,45 @@ def _timer_after_first_interval(interval: float, callback) -> None:
 
 def build_page() -> None:
     with hostruntime.enumeration_pass():
-        _build_page()
-
-
-def _build_page() -> None:
-    ui.dark_mode().auto()
-    if REPO_ROOT is None:
-        _build_no_project_page()
-        return
-    startup_summary = _refresh_summary()
-    ui.add_css(
-        ".q-table tbody tr{transition:background-color .08s}"
-        ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
-        ".body--dark .q-table tbody tr:hover{background-color:rgba(255,255,255,0.07)}"
-        ".hdr-btn{min-height:0}"
-        ".hdr-btn .q-btn__content{min-height:0;white-space:nowrap}"
-        ".hdr-btn .q-icon{font-size:0.95em}"
-        ".hdr-btn .q-btn__content .q-icon{margin-right:5px}"
-        ".dashboard-identity{min-width:0}"
-        ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".dashboard-settings{padding:1rem}"
-        ".dashboard-settings-content{min-width:0}"
-        "@media(max-width:640px){"
-        ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
-        ".dashboard-identity{flex-wrap:wrap}"
-        ".dashboard-scope{max-width:100%}"
-        ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
-        "}"
-        ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
-        ".dashboard-body{display:grid;grid-template-rows:minmax(12rem,1fr) "
-        "minmax(9rem,.7fr);gap:.5rem;min-height:0}"
-        ".agent-panel{overflow:hidden;display:flex;flex-direction:column}"
-        ".agent-table-scroll{min-height:0}"
-        ".agent-filters .q-field{min-width:8rem}"
-        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column}"
-        ".dashboard-log-panel .q-log{min-height:0;flex:1}"
-    )
-    host = ownership.current_label()
-
-    with ui.right_drawer(value=False).classes(
-            "dashboard-settings").props(
-                "width=360 bordered") as settings_drawer:
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("Settings").classes("text-lg font-semibold")
-            ui.button(icon="close", on_click=settings_drawer.hide).props(
-                "flat round dense aria-label=Close")
-        with ui.column().classes(
-                "dashboard-settings-content w-full gap-4 no-wrap"):
-            host_service_panel()
-            repository_settings_panel()
-
-    with ui.row().classes(
-            "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
-        with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
-            ui.label("Agents Live").classes("text-xl font-semibold")
-            ui.label(host).classes("text-sm text-gray-500")
-            ui.label(_scope_label()).classes(
-                "dashboard-scope text-sm text-gray-500")
-        with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
-            header_actions()
-            refresh_age = ui.label().classes("text-sm text-gray-500")
-            ui.button(icon="refresh", on_click=_refresh_views).props("flat round dense")
-            ui.button(icon="settings", on_click=settings_drawer.show).props(
-                "flat round dense aria-label=Settings")
-
-    def tick_age() -> None:
-        ago = _ago(STATE["last_refresh"].isoformat(), datetime.now(timezone.utc))
-        refresh_age.text = f"refreshed {ago}"
-
-    tick_age()
-    ui.timer(1.0, tick_age)
-
-    with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
-        with ui.card().classes("agent-panel w-full min-h-0"):
-            agent_grid()
-
-        with ui.element("section").classes("dashboard-log-panel w-full"):
-            ui.label("Log").classes("text-sm text-gray-500")
-            global output_log
-            output_log = ui.log(max_lines=300).classes(
-                "w-full grow font-mono text-xs"
-            )
-            _push_log(startup_summary)
-
-    _timer_after_first_interval(600.0, _refresh_views)
-
-
-def _build_no_project_page() -> None:
-    """Header plus an explanation, when no project root resolves.
-
-    The agent panel reads agent configs and logs through the project
-    root; with none there is nothing to enumerate, so the page states
-    that rather than rendering a complete but empty dashboard.
-    """
-    with ui.row().classes("w-full items-center gap-4"):
-        ui.label("Agents Live").classes("text-xl font-semibold")
-        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label(_scope_label()).classes("text-sm text-gray-500")
-    with ui.card().classes("w-full"):
-        ui.label("No project selected").classes("text-base font-medium")
-        ui.label(NO_PROJECT_HINT).classes("text-sm text-gray-500")
-        if REPO_ERROR:
-            ui.label(REPO_ERROR).classes("text-xs text-gray-500")
-    host_service_panel()
-    repository_settings_panel()
+        _build_operational_page(_new_page_state())
 
 
 def repository_rows() -> list[dict]:
     current = repos.load()
-    return [
-        {
+    rows = []
+    for alias, path, error in repos.entries(current):
+        row = {
             "name": alias,
             "path": path,
             "default": alias == current["default_repo"],
             "available": error is None,
             "error": error,
+            "agent_count": None,
+            "discovery_state": "failed" if error else "empty",
+            "registered": True,
         }
-        for alias, path, error in repos.entries(current)
-    ]
+        if error is None:
+            try:
+                discovered = [
+                    _agent_view_dict(item)
+                    for item in agent_view.repository_agents(
+                        Path(path), ownership_rate_limit_secs=10**9)
+                ]
+                collection = _collection_status(discovered)
+                row["agent_count"] = (
+                    collection["valid_agents"]
+                    if collection["state"] != "unavailable" else None)
+                row["discovery_state"] = (
+                    collection["state"] if collection["state"] != "available"
+                    else "discovered" if discovered else "empty")
+                row["error"] = collection["detail"]
+            except (OSError, ValueError, agent.DefinitionError,
+                    state.StartedStateUnavailable) as exc:
+                row["available"] = False
+                row["error"] = str(exc)
+                row["discovery_state"] = "failed"
+        rows.append(row)
+    return rows
 
 
 @app.get("/api/repositories")
@@ -1776,10 +1946,13 @@ async def api_repository_mutation(payload: dict) -> dict:
     return _repository_mutation(payload)
 
 
-def _repository_mutation(payload: dict) -> dict:
+def _repository_mutation(payload: dict, *, page_state: dict | None = None) -> dict:
     """Apply one registry mutation through the registry port."""
+    current_state = STATE if page_state is None else page_state
     action = str(payload.get("action", "")).strip()
     value = str(payload.get("path") or payload.get("repo") or "").strip()
+    before = repository_rows()
+    target = next((row for row in before if row["name"] == value), None)
     try:
         if action == "add":
             repo_commands._converge_registered(repos._add(value))
@@ -1792,12 +1965,61 @@ def _repository_mutation(payload: dict) -> dict:
         else:
             raise ValueError("unknown repository settings action")
     except (OSError, ValueError) as exc:
-        return {"ok": False, "error": str(exc),
+        return {"ok": False, "action": action, "error": str(exc),
                 "repositories": repository_rows()}
-    return {"ok": True, "repositories": repository_rows()}
+    rows = repository_rows()
+    if action == "add":
+        expected = Path(value).expanduser().resolve()
+        target = next(
+            (row for row in rows
+             if Path(row["path"]).expanduser().resolve() == expected), None)
+        if target is None:
+            raise RuntimeError("registered repository is absent from registry")
+        count = target["agent_count"]
+        if target["available"]:
+            message = (
+                f"Registered {target['name']} successfully; discovered "
+                f"{count} agent definition{'s' if count != 1 else ''}.")
+        else:
+            message = (
+                f"Registered {target['name']}, but discovery failed: "
+                f"{target['error']}")
+        current_scope = current_state["all_repos"].get("repo", "All")
+        if current_scope not in ("All", target["name"]):
+            message += f" The current view remains scoped to {current_scope}."
+    elif action == "remove":
+        if target is None:
+            raise RuntimeError("unregistered repository was absent from registry")
+        target = {**target, "registered": False, "default": False}
+        message = (
+            f"Unregistered {target['name']}. Repository files, definitions, "
+            "logs, triggers, and runtime state were not deleted.")
+    elif action == "set-default":
+        target = next((row for row in rows if row["name"] == value), None)
+        message = (
+            f"{value} is now the fallback repository. The current dashboard "
+            "view did not change.")
+    else:
+        target = None
+        message = (
+            "Cleared the fallback repository. The current dashboard view did "
+            "not change.")
+    result = {
+        "ok": True,
+        "action": action,
+        "message": message,
+        "repository": target,
+        "repositories": rows,
+    }
+    current_state["repository_result"] = result
+    return result
 
 
-def _all_repos_groups() -> list[dict]:
+def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
+    previous = {
+        (str(group.get("name")), str(group.get("path"))): group
+        for group in (previous_groups or [])
+    }
     groups = []
     current = repos.load()
     for alias, path, error in repos.entries(current):
@@ -1808,7 +2030,31 @@ def _all_repos_groups() -> list[dict]:
             "available": error is None,
             "error": error,
             "rows": [],
+            "errors": {},
+            "activity": {"state": "unavailable", "detail": error},
+            "collection": {
+                "state": "unavailable" if error else "available",
+                "valid_agents": 0,
+                "detail": error,
+            },
         }
+        prior = previous.get((alias, path))
+        if error and prior is not None:
+            detail = f"Discovery failed: {error}"
+            group = copy.deepcopy(prior)
+            group.update({
+                "name": alias,
+                "path": path,
+                "default": alias == current["default_repo"],
+                "available": False,
+                "stale": True,
+                "error": detail,
+                "collection": {
+                    **prior.get("collection", {}),
+                    "state": "stale",
+                    "detail": detail,
+                },
+            })
         if error is None:
             root = Path(path)
             try:
@@ -1817,6 +2063,12 @@ def _all_repos_groups() -> list[dict]:
                     for row in agent_view.repository_agents(
                         root, ownership_rate_limit_secs=10**9)
                 ]
+                group["collection"] = _collection_status(agents)
+                names = {row["identifier"]: row["name"] for row in agents}
+                errors, models, activity = _structured_log_snapshot(
+                    names, paths.repo_state_dir(root) / "logs")
+                group["errors"] = errors
+                group["activity"] = activity
                 group["rows"] = [
                     {
                         **row,
@@ -1824,12 +2076,35 @@ def _all_repos_groups() -> list[dict]:
                         "repository_path": str(root),
                         "repository_identifier": f"{alias}/{row['identifier']}",
                     }
-                    for row in _agent_rows_for(root, agents)
+                    for row in _agent_rows_for(
+                        root, agents, reported_models=models)
                 ]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
-                group["available"] = False
-                group["error"] = str(exc)
+                detail = f"Discovery failed: {exc}"
+                if prior is not None:
+                    group = copy.deepcopy(prior)
+                    group.update({
+                        "name": alias,
+                        "path": path,
+                        "default": alias == current["default_repo"],
+                        "available": False,
+                        "stale": True,
+                        "error": detail,
+                        "collection": {
+                            **prior.get("collection", {}),
+                            "state": "stale",
+                            "detail": detail,
+                        },
+                    })
+                else:
+                    group["available"] = False
+                    group["error"] = detail
+                    group["collection"] = {
+                        "state": "unavailable",
+                        "valid_agents": 0,
+                        "detail": detail,
+                    }
         groups.append(group)
     return groups
 
@@ -1873,8 +2148,8 @@ def _ungrouped_agent_rows(groups: list[dict]) -> list[dict]:
     ]
 
 
-def all_repo_groups() -> list[dict]:
-    settings = STATE["all_repos"]
+def all_repo_groups(settings: dict | None = None) -> list[dict]:
+    settings = STATE["all_repos"] if settings is None else settings
     selected = settings.get("repo", "All")
     groups = [
         group for group in _all_repos_groups()
@@ -1887,6 +2162,184 @@ def all_repo_groups() -> list[dict]:
             bool(settings.get("descending")),
         )
     return groups
+
+
+def operational_snapshot(previous_snapshot: dict | None = None, *,
+                         settings: dict | None = None) -> dict:
+    """One coherent model for header, inventory, filters, and actions."""
+    settings = STATE["all_repos"] if settings is None else settings
+    selected = settings.get("repo", "All")
+    repository_groups = _all_repos_groups(
+        previous_snapshot.get("repository_groups", [])
+        if previous_snapshot else None)
+    for group in repository_groups:
+        group["rows"] = _sorted_agent_rows(
+            group["rows"],
+            str(settings.get("sort_by") or "name"),
+            bool(settings.get("descending")),
+        )
+    groups = [
+        group for group in repository_groups
+        if selected == "All" or group["name"] == selected
+    ]
+    return {
+        "groups": groups,
+        "repository_groups": repository_groups,
+        "rows": _ungrouped_agent_rows(groups),
+        "health": system_health(),
+        "scope": selected,
+        "errors": {
+            f"{group['name']}/{name}": count
+            for group in groups
+            for name, count in group.get("errors", {}).items()
+        },
+        "activity": {
+            group["name"]: group.get("activity", {
+                "state": "unavailable", "detail": "Activity not collected"})
+            for group in groups
+        },
+    }
+
+
+def _registered_repository_names() -> list[str]:
+    """Read selector names without repeating agent discovery."""
+    return [alias for alias, _path, _error in repos.entries(repos.load())]
+
+
+def _repository_rows_from_groups(groups: list[dict]) -> list[dict]:
+    """Project settings rows from the current coherent observation."""
+    rows = []
+    for group in groups:
+        collection = group["collection"]
+        rows.append({
+            "name": group["name"],
+            "path": group["path"],
+            "default": group["default"],
+            "available": group["available"],
+            "error": group["error"] or collection["detail"],
+            "agent_count": (
+                collection["valid_agents"]
+                if collection["state"] not in {"unavailable", "stale"}
+                else None),
+            "discovery_state": (
+                "failed" if collection["state"] == "stale" else
+                collection["state"]
+                if collection["state"] != "available" else
+                "discovered" if group["rows"] else "empty"),
+            "registered": True,
+        })
+    return rows
+
+
+def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
+    query = str(filters.get("name", "")).casefold().strip()
+    facet_filters = {**filters, "name": ""}
+    filtered = []
+    for group in groups:
+        rows = _filtered_agent_rows(group["rows"], facet_filters)
+        repository_matches = query and query in (
+            f"{group['name']} {group['path']}".casefold())
+        if query and not repository_matches:
+            rows = [row for row in rows if query in row["name"].casefold()]
+        filtered.append({**group, "rows": rows})
+    return filtered
+
+
+def _canonical_selection_keys(groups: list[dict]) -> set[str]:
+    return {
+        str(row["repository_identifier"])
+        for group in groups for row in group["rows"]
+    }
+
+
+def _updated_selection_keys(current: list[str], selected: list[dict],
+                            scope_keys: set[str]) -> list[str]:
+    keys = set(current) - scope_keys
+    keys.update(
+        str(row["repository_identifier"])
+        for row in selected if row.get("repository_identifier")
+    )
+    return sorted(keys)
+
+
+def _repository_window(groups: list[dict], expanded: list[str],
+                       limit: int = MAX_RENDERED_REPOSITORIES
+                       ) -> tuple[list[dict], list[dict]]:
+    """Bound mounted repository groups while retaining on-demand identity."""
+    if limit < 1:
+        raise ValueError("repository window limit must be positive")
+    by_name = {str(group["name"]): group for group in groups}
+    names = [str(group["name"]) for group in groups[:limit]]
+    for name in expanded:
+        if name not in by_name:
+            continue
+        if name in names:
+            names.remove(name)
+        names.append(name)
+        names = names[-limit:]
+    mounted_names = set(names)
+    return (
+        [group for group in groups if group["name"] in mounted_names],
+        [group for group in groups if group["name"] not in mounted_names],
+    )
+
+
+def _set_settings_open(view_state: dict, visible: bool) -> None:
+    view_state["settings_open"] = visible
+
+
+def _operational_summary(snapshot: dict, *, source: str | None = None) -> str:
+    groups = snapshot["groups"]
+    rows = snapshot["rows"]
+    unavailable = sum(not group["available"] for group in groups)
+    partial = sum(
+        group["available"]
+        and group["collection"]["state"] != "available"
+        for group in groups)
+    failing = sum(bool(row.get("unhealthy")) for row in rows)
+    scope = ("all registered repositories" if snapshot["scope"] == "All"
+             else f"repository {snapshot['scope']}")
+    unavailable_activity = [
+        name for name, evidence in snapshot["activity"].items()
+        if evidence["state"] == "unavailable"
+    ]
+    partial_activity = [
+        name for name, evidence in snapshot["activity"].items()
+        if evidence["state"] == "partial"
+    ]
+    errors = ", ".join(
+        f"{name} {count}" for name, count in snapshot["errors"].items()) or "none"
+    if unavailable_activity:
+        errors += "; unavailable for " + ", ".join(unavailable_activity)
+    if partial_activity:
+        errors += "; partial for " + ", ".join(partial_activity)
+    prefix = f"{source}: " if source else ""
+    return (
+        prefix +
+        f"Snapshot for {scope}: {len(groups)} repositories, {len(rows)} agents, "
+        f"{failing} failing, {unavailable} unavailable, {partial} partial; "
+        f"errors in last hour: {errors}"
+    )
+
+
+def _attention_summary(snapshot: dict) -> str:
+    groups = snapshot["groups"]
+    scope = ("all registered repositories" if snapshot["scope"] == "All"
+             else f"repository {snapshot['scope']}")
+    failing = sum(bool(row.get("unhealthy")) for row in snapshot["rows"])
+    unavailable = sum(not group["available"] for group in groups)
+    partial = sum(
+        group["available"]
+        and group["collection"]["state"] != "available"
+        for group in groups)
+    host_issue = snapshot["health"].get("level") not in {"healthy", "checking"}
+    if not (failing or unavailable or partial or host_issue):
+        return f"No items need attention in {scope}."
+    return (
+        f"Attention in {scope}: {failing} failing agents, "
+        f"{unavailable} unavailable repositories, {partial} partial repositories, "
+        f"{int(host_issue)} host issues."
+    )
 
 
 @app.get("/api/all-repos")
@@ -1903,134 +2356,564 @@ def api_all_repos() -> dict:
     }
 
 
-def build_all_repos_page() -> None:
-    """Registered-repository view with repository-qualified actions."""
-    global _all_repos_refresh
+def _build_operational_page(page_state: dict | None = None) -> None:
+    """Build the sole dashboard page over one all-repositories snapshot."""
+    page_state = _new_page_state() if page_state is None else page_state
     ui.dark_mode().auto()
-    state_settings = STATE["all_repos"]
-    groups = all_repo_groups()
-    repo_names = [row["name"] for row in repository_rows()]
+    state_settings = page_state["all_repos"]
+    filters = page_state["filters"]
+    snapshot = operational_snapshot(settings=state_settings)
+    repo_names = _registered_repository_names()
     ui.add_css(
-        ".all-repos-body{display:flex;flex-direction:column;gap:1rem}"
-        ".repository-group{overflow:hidden}"
+        ".q-table tbody tr{transition:background-color .08s}"
+        ".q-table tbody tr:hover{background-color:rgba(0,0,0,0.045)}"
+        ".body--dark .q-table tbody tr:hover{background-color:rgba(255,255,255,0.07)}"
+        ".nicegui-content{height:100vh;overflow:hidden;display:flex;flex-direction:column}"
+        ".dashboard-header{min-height:2.5rem}"
+        ".dashboard-identity{min-width:0}"
+        ".dashboard-scope{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".dashboard-settings .q-dialog__inner{padding:0}"
+        ".dashboard-settings-surface{min-width:0;overflow:auto;padding:1rem 1.25rem;"
+        "background:var(--q-background,#fff);border-radius:0}"
+        ".dashboard-settings-content{width:min(72rem,100%);margin:0 auto;min-width:0}"
+        ".settings-panel{display:grid;gap:.5rem;padding:1rem 0;border-top:1px solid "
+        "rgba(127,127,127,.25)}"
+        ".repository-setting-row{display:grid;gap:.35rem;padding:.75rem 0;"
+        "border-top:1px solid rgba(127,127,127,.25)}"
+        ".repository-setting-path{overflow-wrap:anywhere}"
+        ".dashboard-body{display:grid;grid-template-rows:minmax(8rem,var(--inventory-size,55%)) "
+        "6px minmax(8rem,1fr);gap:0;min-height:0}"
+        ".agent-panel{overflow:hidden;display:flex;flex-direction:column;border-top:1px solid "
+        "rgba(127,127,127,.25);padding-top:.5rem}"
+        ".agent-toolbar{min-height:2.5rem}"
+        ".agent-table-scroll{min-height:0;overflow:auto}"
+        ".virtualized-agent-table{max-height:22rem;overflow:auto}"
+        ".all-repos-body{display:flex;flex-direction:column;gap:.75rem;padding-right:.25rem}"
+        ".repository-group{overflow:visible}"
+        ".repository-heading{position:sticky;top:0;z-index:2;min-width:0;"
+        "background:#fff;padding:.3rem .25rem;border-bottom:1px solid "
+        "rgba(127,127,127,.25)}"
+        ".body--dark .repository-heading{background:var(--q-dark-page,#121212)}"
         ".repository-heading{min-width:0}"
         ".repository-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".agent-table-scroll{overflow-x:auto}"
+        ".dashboard-log-panel{min-height:0;display:flex;flex-direction:column;border-top:1px solid "
+        "rgba(127,127,127,.25);padding-top:.35rem}"
+        ".dashboard-log-panel .activity-log{min-height:0;flex:1}"
+        ".dashboard-splitter{cursor:row-resize;background:rgba(127,127,127,.25);"
+        "outline:none}"
+        ".dashboard-splitter:focus-visible{background:var(--q-primary);"
+        "box-shadow:0 0 0 2px var(--q-primary)}"
         ".q-table th:nth-child(1),.q-table td:nth-child(1){text-align:left}"
+        "@media(max-width:640px){"
+        ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
+        ".dashboard-identity{flex-wrap:wrap}"
+        ".dashboard-scope{max-width:100%}"
+        ".dashboard-header-actions{width:100%;flex-wrap:wrap}"
+        ".dashboard-body{--inventory-size:58%}"
+        ".dashboard-settings-surface{padding:.75rem}"
+        ".repository-register{align-items:stretch}"
+        ".repository-register .q-field{flex-basis:100%}"
+        ".repository-setting-summary{align-items:flex-start}"
+        "}"
     )
 
-    with ui.row().classes("w-full items-center gap-4"):
-        ui.label("Agents Live").classes("text-xl font-semibold")
-        ui.label(ownership.current_label()).classes("text-sm text-gray-500")
-        ui.label("All registered repositories").classes(
-            "text-sm text-gray-500")
-    host_service_panel()
-    with ui.expansion("Repository settings").classes("w-full"):
-        repository_settings_panel()
-    tables = []
+    with ui.dialog().classes("dashboard-settings").props(
+            "maximized aria-modal=true") as settings_dialog:
+        with ui.card().classes("dashboard-settings-surface w-full h-full").props(
+            "aria-labelledby=settings-title"):
+            with ui.column().classes(
+                    "dashboard-settings-content gap-4 no-wrap"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Settings").classes(
+                        "text-xl font-semibold").props("id=settings-title")
+                    ui.button(
+                        icon="close", on_click=settings_dialog.close
+                    ).props("flat round dense autofocus aria-label=Close-settings")
+                host_service_panel()
+                repository_settings_panel(
+                    _repository_rows_from_groups(
+                        snapshot["repository_groups"]),
+                    page_state=page_state,
+                    refresh=lambda: rebuild())
 
-    def render_groups(current: list[dict]) -> None:
-        tables.clear()
-        with ui.element("div").classes("all-repos-body w-full"):
-            if not current:
-                ui.label("No registered repositories match the selector.").classes(
-                    "text-sm text-gray-500")
-            for group in current:
-                with ui.card().classes("repository-group w-full"):
-                    label = group["name"] + (" (default)" if group["default"] else "")
-                    with ui.row().classes(
-                            "repository-heading w-full items-baseline gap-3 no-wrap"):
-                        ui.label(label).classes("text-base font-medium")
-                        ui.label(group["path"]).classes(
-                            "repository-path text-xs text-gray-500")
-                    if group["error"]:
-                        ui.label(group["error"]).classes("text-sm text-red-500")
-                    rows = group["rows"]
-                    if not rows and not group["error"]:
-                        ui.label("No agent definitions found.").classes(
-                            "text-sm text-gray-500")
-                    if rows:
-                        with ui.scroll_area().classes("w-full agent-table-scroll"):
-                            table = ui.table(
-                                columns=_AGGREGATE_COLUMNS, rows=rows,
-                                row_key="identifier",
-                                pagination={"rowsPerPage": 0},
-                            ).classes("w-full").props(
-                                "flat dense hide-bottom separator=none")
-                            tables.append(table)
-                            _add_agent_information_slots(table)
-                            _add_agent_action_slots(table, aggregate=True)
+    def settings_visibility(visible: bool) -> None:
+        _set_settings_open(state_settings, visible)
+        _safe_ui(
+            ui.run_javascript,
+            "window.agentsLiveContinuity?.setSettingsOpen("
+            f"{str(visible).lower()})",
+        )
+        if not visible:
+            _safe_ui(
+                ui.run_javascript,
+                "document.querySelector('.settings-trigger')?.focus()")
 
-    container = ui.element("div").classes("w-full")
+    settings_dialog.on("show", lambda: settings_visibility(True))
+    settings_dialog.on("hide", lambda: settings_visibility(False))
 
-    def rebuild() -> None:
-        nonlocal groups
-        groups = all_repo_groups()
-        container.clear()
-        with container:
-            if state_settings.get("grouped", True):
-                render_groups(groups)
-            else:
-                rows = _ungrouped_agent_rows(groups)
-                table = ui.table(
-                    columns=[
-                        {"name": "repository", "label": "Repository",
-                         "field": "repository", "sortable": True},
-                        *_AGGREGATE_COLUMNS,
-                    ],
-                    rows=_sorted_agent_rows(
-                        rows, str(state_settings.get("sort_by") or "name"),
-                        bool(state_settings.get("descending"))),
-                    row_key="repository_identifier",
-                    pagination={"rowsPerPage": 0},
-                ).classes("w-full").props("flat dense hide-bottom separator=none")
-                _add_agent_information_slots(table)
-                _add_agent_action_slots(table, aggregate=True)
+    with ui.row().classes(
+            "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
+        with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
+            ui.label("Agents Live").classes("text-xl font-semibold")
+            ui.label(ownership.current_label()).classes("text-sm text-gray-500")
+            scope_label = ui.label().classes(
+                "dashboard-scope text-sm text-gray-500")
+            ui.label(
+                f"{identity.channel(AGENTS_LIVE_VERSION)} channel | "
+                f"{AGENTS_LIVE_VERSION}"
+            ).classes(
+                "text-xs text-gray-500")
+        with ui.row().classes("dashboard-header-actions items-center gap-3 no-wrap"):
+            health_label = ui.label().classes(
+                "dashboard-health-label text-sm text-gray-500")
+            refresh_age = ui.label().classes("text-sm text-gray-500")
+            ui.button(icon="health_and_safety", on_click=health_check).props(
+                "flat round dense aria-label=Run-health-check")
+            ui.button(icon="refresh", on_click=lambda: rebuild()).props(
+                "flat round dense aria-label=Refresh")
+            ui.button(icon="settings", on_click=settings_dialog.open).classes(
+                "settings-trigger").props(
+                    "flat round dense aria-label=Settings")
 
-    _all_repos_refresh = rebuild
+    with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
+        with ui.element("section").classes("agent-panel w-full min-h-0"):
+            with ui.row().classes(
+                    "agent-toolbar w-full items-center gap-2 no-wrap"):
+                repo_select = ui.select(
+                    ["All", *repo_names], value=state_settings["repo"],
+                    label="Repository scope",
+                    on_change=lambda event: select_repo(event),
+                ).props("dense outlined options-dense").classes("min-w-48")
+                ui.input(
+                    "Search agents or repositories", value=filters["name"],
+                    on_change=lambda event: set_filter("name", event.value),
+                ).props("dense outlined clearable").classes("grow min-w-48")
+                with ui.button(icon="filter_list").props(
+                        "flat round dense aria-label=Filters"):
+                    with ui.menu():
+                        with ui.column().classes("gap-2 p-2 min-w-48"):
+                            ui.label("Filters").classes("text-sm font-medium")
+                            ui.select(
+                                ["All", *sorted({row["state"] for row in snapshot["rows"]})],
+                                value=filters["state"], label="State",
+                                on_change=lambda event: set_filter("state", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.select(
+                                ["All", *sorted({row["owner"] for row in snapshot["rows"]})],
+                                value=filters["owner"], label="Owner",
+                                on_change=lambda event: set_filter("owner", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.select(
+                                ["All", *sorted({row["agent"] for row in snapshot["rows"]})],
+                                value=filters["runtime"], label="Runtime",
+                                on_change=lambda event: set_filter("runtime", event.value),
+                            ).props("dense outlined options-dense").classes("w-full")
+                            ui.checkbox(
+                                "Failing only", value=filters["failing"],
+                                on_change=lambda event: set_filter(
+                                    "failing", event.value),
+                            ).props("dense")
+                            ui.checkbox(
+                                "Group by repository",
+                                value=state_settings["grouped"],
+                                on_change=lambda event: set_grouped(event),
+                            ).props("dense")
+                sort_labels = {
+                    "Agent": "name", "State": "state", "Owner": "owner",
+                    "Runtime": "agent", "Model": "model",
+                    "List cost 24h": "cost_day", "List cost 1w": "cost_week",
+                }
+                current_sort = next(
+                    label for label, field in sort_labels.items()
+                    if field == state_settings["sort_by"])
+                ui.select(
+                    list(sort_labels), value=current_sort, label="Sort",
+                    on_change=lambda event: set_sort(sort_labels[event.value]),
+                ).props("dense outlined options-dense").classes("min-w-32")
+                sort_direction = ui.button(icon="arrow_upward").props(
+                    "flat round dense aria-label=Reverse-sort")
+            inventory_summary = ui.label().classes(
+                "text-xs text-gray-500 px-1")
+            selection_summary = ui.label().classes(
+                "text-xs text-gray-500 px-1").props(
+                    "role=status aria-live=polite")
+            attention_summary = ui.label().classes(
+                "text-xs text-orange-600 px-1")
+            inventory = ui.element("div").classes(
+                "w-full grow min-h-0 agent-table-scroll")
+
+        ui.element("div").classes("dashboard-splitter").props(
+            "role=separator tabindex=0 aria-label=Resize-inventory-and-activity "
+            "aria-orientation=horizontal aria-valuemin=25 aria-valuemax=75 "
+            "aria-valuenow=55")
+
+        with ui.element("section").classes("dashboard-log-panel w-full"):
+            activity_scope = ui.label().classes("text-sm text-gray-500")
+            global output_log
+            output_log = ui.log(max_lines=300).classes(
+                "activity-log w-full grow font-mono text-xs")
+
+    continuity_ready = False
+
+    def render_inventory(current: dict) -> None:
+        if continuity_ready:
+            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.capture()")
+        visible_groups = _filtered_repo_groups(current["groups"], filters)
+        visible_rows = sum(len(group["rows"]) for group in visible_groups)
+        inventory_summary.text = (
+            f"{visible_rows} of {len(current['rows'])} agents in "
+            f"{len(visible_groups)} repositories")
+        selected_keys = set(state_settings.get("selection", []))
+        available_keys = _canonical_selection_keys(
+            current["repository_groups"])
+        selected_keys.intersection_update(available_keys)
+        state_settings["selection"] = sorted(selected_keys)
+        selection_summary.text = f"{len(selected_keys)} agents selected"
+        attention_summary.text = _attention_summary(current)
+        inventory.clear()
+        with inventory:
+            with ui.element("div").classes("all-repos-body w-full"):
+                if not current["groups"]:
+                    ui.label("No registered repositories.").classes(
+                        "text-sm font-medium")
+                    ui.button("Open settings", icon="settings",
+                              on_click=settings_dialog.open).props(
+                        "dense flat no-caps")
+                elif state_settings.get("grouped", True):
+                    expanded = list(
+                        state_settings.get("expanded_repositories", []))
+                    mounted_groups, deferred_groups = _repository_window(
+                        visible_groups, expanded)
+                    if deferred_groups:
+                        ui.select(
+                            {
+                                group["name"]: (
+                                    f"{group['name']} | {len(group['rows'])} agents")
+                                for group in deferred_groups
+                            },
+                            label=f"Show one of {len(deferred_groups)} more repositories",
+                            on_change=lambda event: expand_repository(event.value),
+                        ).props("dense outlined options-dense clearable").classes(
+                            "min-w-64 px-1")
+                    for group in mounted_groups:
+                        with ui.element("section").classes(
+                                "repository-group w-full"):
+                            label = group["name"] + (
+                                " (default)" if group["default"] else "")
+                            with ui.row().classes(
+                                    "repository-heading w-full items-baseline gap-3 no-wrap"):
+                                ui.label(label).classes("text-sm font-medium")
+                                ui.label(group["path"]).classes(
+                                    "repository-path grow text-xs text-gray-500")
+                                ui.label(
+                                    "Stale" if group.get("stale") else
+                                    "Unavailable" if not group["available"] else
+                                    f"{group['collection']['state'].title()} | "
+                                    f"{len(group['rows'])} agents"
+                                ).classes("text-xs text-gray-500")
+                            if group["error"]:
+                                ui.label(group["error"]).classes(
+                                    "text-sm text-red-500 px-1")
+                            elif group["collection"]["detail"]:
+                                ui.label(group["collection"]["detail"]).classes(
+                                    "text-sm text-orange-600 px-1")
+                            if not group["rows"]:
+                                ui.label("No matching agents.").classes(
+                                    "text-sm text-gray-500 px-1")
+                            else:
+                                group_keys = {
+                                    str(row["repository_identifier"])
+                                    for row in group["rows"]
+                                }
+                                table = ui.table(
+                                    columns=_AGGREGATE_COLUMNS,
+                                    rows=group["rows"],
+                                    row_key="repository_identifier",
+                                    pagination={"rowsPerPage": 0},
+                                    selection="multiple",
+                                    on_select=lambda event, keys=group_keys:
+                                        set_selection(event.selection, keys),
+                                ).classes("virtualized-agent-table w-full").props(
+                                    "flat dense hide-bottom separator=none "
+                                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                                table.selected = [
+                                    row for row in group["rows"]
+                                    if row["repository_identifier"] in selected_keys
+                                ]
+                                table.update()
+                                _add_agent_information_slots(table)
+                                _add_agent_action_slots(table, aggregate=True)
+                else:
+                    rows = _ungrouped_agent_rows(visible_groups)
+                    table = ui.table(
+                        columns=[
+                            {"name": "repository", "label": "Repository",
+                             "field": "repository", "sortable": True},
+                            *_AGGREGATE_COLUMNS,
+                        ], rows=rows, row_key="repository_identifier",
+                        pagination={"rowsPerPage": 0},
+                        selection="multiple",
+                        on_select=lambda event, keys={
+                            str(row["repository_identifier"]) for row in rows
+                        }: set_selection(event.selection, keys),
+                    ).classes("virtualized-agent-table w-full").props(
+                        "flat dense hide-bottom separator=none "
+                        f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                    table.selected = [
+                        row for row in rows
+                        if row["repository_identifier"] in selected_keys
+                    ]
+                    table.update()
+                    _add_agent_information_slots(table)
+                    _add_agent_action_slots(table, aggregate=True)
+        if continuity_ready:
+            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.restore()")
+
+    def update_labels(current: dict) -> None:
+        selected = current["scope"]
+        if selected == "All":
+            scope_text = "All registered repositories"
+        else:
+            group = next((item for item in current["groups"]
+                          if item["name"] == selected), None)
+            scope_text = (f"{selected} | {group['path']}" if group else selected)
+        scope_label.text = scope_text
+        activity_scope.text = f"Activity | {scope_text}"
+        health = current["health"]
+        refresh_error = current.get("refresh_error")
+        health_label.text = (
+            f"Data stale: {refresh_error}; host {health['text']}"
+            if refresh_error else f"Host {health['text']}")
+        health_label.tooltip(
+            f"Refresh failed; showing the last coherent snapshot. {refresh_error}"
+            if refresh_error else health["tip"])
+
+    def rebuild(*, announce: bool = True,
+                source: str = "manual refresh") -> None:
+        nonlocal snapshot
+        try:
+            repo_names = _registered_repository_names()
+            if state_settings.get("repo") not in ["All", *repo_names]:
+                state_settings["repo"] = "All"
+            refreshed = operational_snapshot(snapshot, settings=state_settings)
+        except (OSError, ValueError, agent.DefinitionError,
+                state.StartedStateUnavailable) as exc:
+            snapshot = {**snapshot, "refresh_error": str(exc)}
+            update_labels(snapshot)
+            if announce:
+                _push_log(
+                    f"{source} failed; showing the last coherent snapshot: {exc}")
+            return
+        snapshot = refreshed
+        repo_select.options = ["All", *repo_names]
+        repo_select.value = state_settings["repo"]
+        repo_select.update()
+        page_state["last_refresh"] = datetime.now(timezone.utc)
+        update_labels(snapshot)
+        render_inventory(snapshot)
+        _safe_ui(
+            repository_settings_panel.refresh,
+            _repository_rows_from_groups(snapshot["repository_groups"]),
+            page_state=page_state,
+            refresh=lambda: rebuild(),
+        )
+        if announce:
+            _push_log(_operational_summary(snapshot, source=source))
+
+    client_key = _client_key()
+    if client_key is not None:
+        _PAGE_REFRESHES[client_key] = rebuild
 
     def select_repo(event) -> None:
         state_settings["repo"] = event.value
         rebuild()
 
+    def set_filter(key: str, value) -> None:
+        filters[key] = value
+        render_inventory(snapshot)
+
+    async def set_selection(selected: list[dict], group_keys: set[str]) -> None:
+        persisted = await ui.run_javascript(
+            "return window.agentsLiveContinuity?.getSelection() || []")
+        current = set(state_settings.get("selection", []))
+        if isinstance(persisted, list):
+            current.update(str(key) for key in persisted)
+        current.intersection_update(
+            _canonical_selection_keys(snapshot["repository_groups"]))
+        keys = _updated_selection_keys(
+            sorted(current), selected, group_keys)
+        state_settings["selection"] = keys
+        selection_summary.text = f"{len(keys)} agents selected"
+        _safe_ui(
+            ui.run_javascript,
+            "window.agentsLiveContinuity?.setSelection("
+            f"{json.dumps(keys)})",
+        )
+
     def set_grouped(event) -> None:
         state_settings["grouped"] = bool(event.value)
-        rebuild()
+        render_inventory(snapshot)
+
+    def expand_repository(name: str) -> None:
+        expanded = [
+            value for value in state_settings.get(
+                "expanded_repositories", []) if value != name
+        ]
+        expanded.append(name)
+        state_settings["expanded_repositories"] = expanded[
+            -MAX_RENDERED_REPOSITORIES:]
+        render_inventory(snapshot)
 
     def set_sort(field: str) -> None:
-        if state_settings.get("sort_by") == field:
-            state_settings["descending"] = not state_settings.get("descending")
-        else:
-            state_settings["sort_by"] = field
-            state_settings["descending"] = False
-        rebuild()
+        state_settings["sort_by"] = field
+        rebuild(announce=False)
 
-    def refresh() -> None:
-        rebuild()
+    def reverse_sort() -> None:
+        state_settings["descending"] = not state_settings["descending"]
+        sort_direction.props(
+            f"icon={'arrow_downward' if state_settings['descending'] else 'arrow_upward'}")
+        rebuild(announce=False)
 
-    with ui.row().classes("items-center gap-4"):
-        ui.select(["All", *repo_names], value=state_settings["repo"], label="Repository",
-                  on_change=select_repo)
-        ui.checkbox("Group by repository", value=state_settings["grouped"],
-                    on_change=set_grouped)
-        for field, label in (
-            ("name", "Agent"),
-            ("state", "State"),
-            ("owner", "Owner"),
-            ("agent", "Runtime"),
-            ("model", "Model"),
-            ("cost_day", "Cost 24h"),
-            ("cost_week", "Cost 1w"),
-        ):
-            suffix = ""
-            if state_settings.get("sort_by") == field:
-                suffix = " desc" if state_settings.get("descending") else " asc"
-            ui.button(f"Sort {label}{suffix}", on_click=lambda f=field: set_sort(f))
-        ui.button("Refresh", on_click=refresh)
-    rebuild()
-    # Same cadence as the single-repo page: the view tracks reality
-    # instead of freezing at process start.
-    ui.timer(600.0, refresh)
+    sort_direction.on("click", reverse_sort)
+    def tick_age() -> None:
+        ago = _ago(
+            page_state["last_refresh"].isoformat(), datetime.now(timezone.utc))
+        refresh_age.text = f"refreshed {ago}"
+
+    update_labels(snapshot)
+    render_inventory(snapshot)
+    continuity_script = '''
+                (() => {
+                    const storageKey = 'agents-live-dashboard-view';
+                    const read = () => {
+                        try { return JSON.parse(sessionStorage.getItem(storageKey) || '{}'); }
+                        catch (_) { return {}; }
+                    };
+                    const write = state => sessionStorage.setItem(storageKey, JSON.stringify(state));
+                    const scrollNode = selector => document.querySelector(selector);
+                    const controller = window.agentsLiveContinuity = {
+                        state: read(),
+                        capture() {
+                            const inventory = scrollNode('.agent-table-scroll');
+                            const activity = scrollNode('.dashboard-log-panel .activity-log');
+                            const active = document.activeElement;
+                            this.state.inventoryScroll = inventory?.scrollTop || 0;
+                            this.state.search = document.querySelector(
+                                '[aria-label="Search agents or repositories"]')?.value || '';
+                            if (activity) {
+                                this.state.activityAtBottom =
+                                    activity.scrollHeight - activity.clientHeight - activity.scrollTop < 4;
+                                this.state.activityScroll = activity.scrollTop;
+                            }
+                            this.state.focusLabel = active?.getAttribute?.('aria-label') || '';
+                            write(this.state);
+                        },
+                        setSelection(keys) {
+                            this.state.selection = keys;
+                            write(this.state);
+                        },
+                        getSelection() {
+                            return this.state.selection || [];
+                        },
+                        setSettingsOpen(visible) {
+                            this.state.settingsOpen = visible;
+                            write(this.state);
+                        },
+                        restore() {
+                            const inventory = scrollNode('.agent-table-scroll');
+                            const activity = scrollNode('.dashboard-log-panel .activity-log');
+                            const selectedToRestore = new Set(this.state.selection || []);
+                            requestAnimationFrame(() => {
+                                if (inventory) inventory.scrollTop = this.state.inventoryScroll || 0;
+                                if (activity) activity.scrollTop = this.state.activityAtBottom
+                                    ? activity.scrollHeight : (this.state.activityScroll || 0);
+                                if (this.state.focusLabel) {
+                                    const escaped = CSS.escape(this.state.focusLabel);
+                                    document.querySelector(`[aria-label="${escaped}"]`)?.focus();
+                                }
+                                const search = document.querySelector(
+                                    '[aria-label="Search agents or repositories"]');
+                                if (search && search.value !== (this.state.search || '')) {
+                                    const setter = Object.getOwnPropertyDescriptor(
+                                        HTMLInputElement.prototype, 'value').set;
+                                    setter.call(search, this.state.search || '');
+                                    search.dispatchEvent(new Event('input', {bubbles: true}));
+                                    search.dispatchEvent(new Event('change', {bubbles: true}));
+                                }
+                                let selectionAttempts = 0;
+                                const restoreSelection = () => {
+                                    const restored = new Set();
+                                    document.querySelectorAll(
+                                        '.virtualized-agent-table tbody tr').forEach(row => {
+                                        const key = row.querySelector('[data-agent-key]')?.dataset.agentKey;
+                                        const checkbox = row.querySelector('[role=checkbox]');
+                                        if (selectedToRestore.has(key)) {
+                                            if (checkbox?.getAttribute('aria-checked') !== 'true') {
+                                                checkbox?.click();
+                                            }
+                                            if (checkbox?.getAttribute('aria-checked') === 'true') {
+                                                restored.add(key);
+                                            }
+                                        }
+                                    });
+                                    selectionAttempts += 1;
+                                    if (restored.size < selectedToRestore.size
+                                            && selectionAttempts < 20) {
+                                        setTimeout(restoreSelection, 100);
+                                    }
+                                };
+                                setTimeout(restoreSelection, 100);
+                            });
+                        },
+                    };
+                    const body = document.querySelector('.dashboard-body');
+                    const splitter = document.querySelector('.dashboard-splitter');
+                    const setSplit = value => {
+                        const bounded = Math.max(25, Math.min(75, Math.round(value)));
+                        body?.style.setProperty('--inventory-size', `${bounded}%`);
+                        splitter?.setAttribute('aria-valuenow', String(bounded));
+                        controller.state.split = bounded;
+                        write(controller.state);
+                    };
+                    setSplit(controller.state.split || 55);
+                    splitter?.addEventListener('keydown', event => {
+                        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+                        event.preventDefault();
+                        const current = Number(splitter.getAttribute('aria-valuenow')) || 55;
+                        setSplit(event.key === 'Home' ? 25 : event.key === 'End' ? 75
+                            : current + (event.key === 'ArrowDown' ? 5 : -5));
+                    });
+                    splitter?.addEventListener('pointerdown', event => {
+                        splitter.setPointerCapture(event.pointerId);
+                        const move = pointer => {
+                            const bounds = body.getBoundingClientRect();
+                            setSplit(((pointer.clientY - bounds.top) / bounds.height) * 100);
+                        };
+                        const done = () => {
+                            splitter.removeEventListener('pointermove', move);
+                            splitter.removeEventListener('pointerup', done);
+                        };
+                        splitter.addEventListener('pointermove', move);
+                        splitter.addEventListener('pointerup', done);
+                    });
+                    window.addEventListener('beforeunload', () => controller.capture());
+                    controller.restore();
+                    if (controller.state.settingsOpen) {
+                        setTimeout(() => document.querySelector('[aria-label="Settings"]')?.click(), 0);
+                    }
+                })();
+    '''
+    ui.timer(
+        0.1,
+        lambda: _safe_ui(ui.run_javascript, continuity_script),
+        once=True,
+    )
+    continuity_ready = True
+    _push_log(_operational_summary(snapshot, source="startup"))
+    tick_age()
+    ui.timer(1.0, tick_age)
+    _timer_after_first_interval(
+        600.0, lambda: rebuild(source="periodic refresh"))
 
 
 PORT_PROBE_TIMEOUT_S = 0.5
@@ -2124,7 +3007,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--all-repos", action="store_true",
-        help="Show all registered repositories without agent lifecycle controls")
+        help="Open the all-repositories scope (the default operational view)")
     args = parser.parse_args()
 
     if args.port == "next" and __name__ != "__main__":
@@ -2158,10 +3041,7 @@ def main() -> None:
         dashboards.record(args.port, os.getpid(), REPO_ROOT)
         atexit.register(dashboards.forget, args.port, os.getpid())
 
-    if args.all_repos:
-        build_all_repos_page()
-    else:
-        build_page()
+    build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
     try:
         ui.run(

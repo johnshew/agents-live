@@ -14,12 +14,16 @@ bound a port.
 
 This gate launches the artifact against a throwaway local-only project
 with one started definition, waits on ``/api/agents``, and asserts the
-row, its state, and the availability of the actions that act on it. It
-repeats the run with ``--dev``, where NiceGUI starts the reload worker as
-``__mp_main__`` and imports resolve differently.
+row, its state, and the availability of the actions that act on it. The
+default release plan assigns each launch mode distinct evidence: normal mode
+owns the responsive and continuity journeys, all-repositories owns the
+repository-qualified Run action, and ``--dev`` owns reload-worker startup.
 
     uv run --script tools/dashboard-readiness.py                 # built wheel
     uv run --script tools/dashboard-readiness.py --editable      # this checkout
+    uv run --script tools/dashboard-readiness.py --plan          # no browser
+    uv run --script tools/dashboard-readiness.py --editable \
+        --scenario continuity --viewport desktop                 # focused UX
 
 The fixture is a temporary directory with its own state, data, and config
 homes, so the gate never reads the developer's registry or touches a real
@@ -31,6 +35,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -48,13 +53,31 @@ READY_TIMEOUT_S = 180.0
 POLL_INTERVAL_S = 0.5
 SHUTDOWN_GRACE_S = 10.0
 
+SCENARIO_ORDER = (
+    "startup", "layout", "continuity", "repositories", "aggregate",
+    "disconnect",
+)
+VIEWPORTS = {
+    "desktop": (1280, 720),
+    "wide": (1440, 900),
+    "mobile": (390, 844),
+}
+RELEASE_SCENARIOS = {
+    "normal": (
+        "startup", "layout", "continuity", "repositories", "disconnect",
+    ),
+    "all-repos": ("startup", "aggregate"),
+    "dev": ("startup",),
+}
+
 DEFINITION = """---
 name: readiness-agent
 description: Fixture definition for the dashboard readiness gate.
 metadata:
-  agents-live.schema-version: "1"
-  agents-live.selector: "fake/echo"
-  agents-live.schedule: "0 8 * * *"
+    agents-live.schema-version: "1"
+    agents-live.selector: "fake/echo"
+    agents-live.schedule: "0 8 * * *"
+    agents-live.watch: "docs/** debounce 1s"
 ---
 Report dashboard readiness.
 """
@@ -214,10 +237,19 @@ def _environment(directory: Path) -> dict[str, str]:
 
 SEED = """
 import sys
+import uuid
 from pathlib import Path
-from agents_live import agent, state
+from agents_live import agent, obs, paths, state
 root = Path(sys.argv[1]).resolve()
-state.replace(root, {agent.load("readiness-agent", root=root).identifier})
+identifier = agent.load("readiness-agent", root=root).identifier
+state.replace(root, {identifier})
+obs.record(
+    paths.repo_state_dir(root) / "logs" / f"{identifier}.jsonl",
+    obs.create(
+        "run", "failed", repository=str(root), agent=identifier,
+        run_id=uuid.uuid4().hex, origin="readiness",
+    ),
+)
 """
 
 
@@ -243,6 +275,15 @@ def _api_agents(port: int) -> dict | None:
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+
+
+def _api_all_repos(port: int) -> dict | None:
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/all-repos", timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
@@ -281,7 +322,15 @@ def _output(process: subprocess.Popen) -> str:
     return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
 
-def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
+def _watcher_health_label(liveness: object) -> str | None:
+    return {
+        "missing": "Watcher missing",
+        "unavailable": "Watcher unavailable",
+    }.get(liveness)
+
+
+def _assert_row(payload: dict, mode: str, *, started: bool,
+                expect_failure: bool = True) -> None:
     rows = payload["agents"]
     names = [row.get("name") for row in rows]
     if names != ["readiness-agent"]:
@@ -301,6 +350,26 @@ def _assert_row(payload: dict, mode: str, *, started: bool) -> None:
         raise ReadinessError(
             f"{mode}: can_activate is {row.get('can_activate')!r} for a "
             f"{expected_state} row")
+    watcher_liveness = row.get("watcher_liveness")
+    watcher_health = _watcher_health_label(watcher_liveness)
+    if watcher_health is None:
+        raise ReadinessError(
+            f"{mode}: started watcher liveness is "
+            f"{watcher_liveness!r}, expected 'missing' or 'unavailable'")
+    if expect_failure and (
+            not row.get("unhealthy")
+            or "Failing: newest run" not in str(row.get("health", ""))):
+        raise ReadinessError(
+            f"{mode}: newest structured run failure is not visible: "
+            f"{row.get('health')!r}")
+    if watcher_health not in str(row.get("health", "")):
+        raise ReadinessError(
+            f"{mode}: watcher intent masked {watcher_liveness} liveness: "
+            f"{row.get('health')!r}")
+    reasons = str(row.get("action_reasons", ""))
+    if "Start: Already active" not in reasons or "Claim:" not in reasons:
+        raise ReadinessError(
+            f"{mode}: disabled action reasons are incomplete: {reasons!r}")
 
 
 def _browser_executable() -> Path:
@@ -331,63 +400,415 @@ def _browser_executable() -> Path:
     raise ReadinessError("no installed Edge, Chrome, or Chromium browser is available")
 
 
-def _assert_operational_viewport(port: int, mode: str) -> None:
+def _assert_operational_viewport(
+    port: int,
+    directory: Path,
+    mode: str,
+    scenarios: set[str],
+    viewport_names: tuple[str, ...],
+    watcher_health: str,
+) -> None:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
+    all_repos = _api_all_repos(port)
+    repositories = all_repos.get("repositories", []) if all_repos else []
+    if len(repositories) != 1 or repositories[0].get("path") != str(directory):
+        raise ReadinessError(
+            f"{mode}: /api/all-repos did not preserve the registered repository")
+    repository_name = str(repositories[0].get("name", ""))
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
         try:
+            continuity_viewport = viewport_names[0] if viewport_names else None
+            for viewport_name in viewport_names:
+                width, height = VIEWPORTS[viewport_name]
+                started = time.perf_counter()
+                page = browser.new_page(viewport={"width": width, "height": height})
+                page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+                body = page.locator(".dashboard-body")
+                body.wait_for(state="visible")
+                groups = page.locator(".repository-group")
+                if groups.count() != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: rendered {groups.count()} "
+                        "repository groups")
+                heading = groups.locator(".repository-heading")
+                if str(directory) not in heading.inner_text():
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: repository path is absent")
+                if page.get_by_label("Search agents or repositories").count() != 1 \
+                        or page.get_by_role("button", name="Filters").count() != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: compact controls are absent")
+                page.get_by_text(
+                    "Attention in all registered repositories:", exact=False,
+                ).wait_for()
+                page.get_by_text("Failing: newest run", exact=False).wait_for()
+                page.get_by_text(watcher_health, exact=False).wait_for()
+                page.get_by_text("Start: Already active", exact=False).wait_for()
+                if body.locator(
+                        ".host-service-panel, .repository-settings-panel").count():
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings consume the dashboard")
+                agent_box = page.locator(".agent-panel").bounding_box()
+                log_box = page.locator(".dashboard-log-panel").bounding_box()
+                if agent_box is None or log_box is None:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: inventory or log is absent")
+                if width >= 1280 and log_box["height"] < 140:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: log cannot show ten lines")
+                if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > height:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: operational regions overflow")
+                if "continuity" not in scenarios \
+                        or viewport_name != continuity_viewport:
+                    page.close()
+                    _say(
+                        f"{mode}: layout {viewport_name} passed in "
+                        f"{time.perf_counter() - started:.1f}s")
+                    continue
+                scope = page.get_by_label("Repository scope")
+                scope.click()
+                page.get_by_role("option", name=repository_name, exact=True).click()
+                page.get_by_text(
+                    f"{repository_name} | {directory}", exact=True).wait_for()
+                search = page.get_by_label("Search agents or repositories")
+                search.fill("readiness")
+                page.wait_for_function("window.agentsLiveContinuity !== undefined")
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                if row_checkbox.get_attribute("aria-checked") != "true":
+                    row_checkbox.click()
+                page.get_by_text("1 agents selected", exact=True).wait_for()
+                search.fill("no matching agent")
+                page.get_by_text("0 of 1 agents", exact=False).wait_for()
+                page.get_by_text("1 agents selected", exact=True).wait_for()
+                search.fill("readiness")
+                page.get_by_text("readiness-agent", exact=True).wait_for()
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                try:
+                    page.wait_for_function("""() => document.querySelector(
+                        '.repository-group tbody [role=checkbox]')
+                        ?.getAttribute('aria-checked') === 'true'""")
+                except PlaywrightTimeoutError as exc:
+                    filtered_state = page.evaluate("""() => ({
+                        persisted: JSON.parse(sessionStorage.getItem(
+                            'agents-live-dashboard-view') || '{}').selection || [],
+                        rows: Array.from(document.querySelectorAll(
+                            '.repository-group tbody tr')).map(row => ({
+                                key: row.querySelector('[data-agent-key]')
+                                    ?.dataset.agentKey || null,
+                                checked: row.querySelector('[role=checkbox]')
+                                    ?.getAttribute('aria-checked') || null,
+                            })),
+                    })""")
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: filtered selection did not "
+                        f"restore: {filtered_state}") from exc
+                splitter = page.get_by_role(
+                    "separator", name="Resize-inventory-and-activity")
+                splitter.focus()
+                page.keyboard.press("End")
+                if splitter.get_attribute("aria-valuenow") != "75":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: keyboard split resize failed")
+                refresh = page.get_by_role("button", name="Refresh")
+                refresh.focus()
+                page.keyboard.press("Enter")
+                page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
+                if search.input_value() != "readiness" \
+                        or row_checkbox.get_attribute("aria-checked") != "true":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh lost filter or selection")
+                if page.evaluate(
+                        "document.activeElement?.getAttribute('aria-label')") != "Refresh":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh did not restore focus")
+                persisted = page.evaluate("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}')""")
+                if len(persisted.get("selection", [])) != 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: selection was not persisted "
+                        "before reconnect")
+                page.reload(wait_until="networkidle")
+                page.wait_for_function("window.agentsLiveContinuity !== undefined")
+                search = page.get_by_label("Search agents or repositories")
+                row_checkbox = page.locator(
+                    ".repository-group tbody [role=checkbox]").first
+                splitter = page.get_by_role(
+                    "separator", name="Resize-inventory-and-activity")
+                try:
+                    page.wait_for_function("""() => document.querySelector(
+                        '.repository-group tbody [role=checkbox]')
+                        ?.getAttribute('aria-checked') === 'true'""")
+                except PlaywrightTimeoutError as exc:
+                    reconnect_state = page.evaluate("""() => ({
+                        persisted: JSON.parse(sessionStorage.getItem(
+                            'agents-live-dashboard-view') || '{}').selection || [],
+                        rows: Array.from(document.querySelectorAll(
+                            '.repository-group tbody tr')).map(row => ({
+                                key: row.querySelector('[data-agent-key]')
+                                    ?.dataset.agentKey || null,
+                                checked: row.querySelector('[role=checkbox]')
+                                    ?.getAttribute('aria-checked') || null,
+                            })),
+                    })""")
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: reconnect selection "
+                        f"did not restore: {reconnect_state}") from exc
+                search_value = search.input_value()
+                selected_value = row_checkbox.get_attribute("aria-checked")
+                split_value = splitter.get_attribute("aria-valuenow")
+                if search_value != "readiness" or selected_value != "true" \
+                    or split_value != "75":
+                    raise ReadinessError(
+                    f"{mode} {width}x{height}: reconnect lost view state "
+                    f"(search={search_value!r}, selected={selected_value!r}, "
+                    f"split={split_value!r})")
+                activity = page.locator(".dashboard-log-panel .activity-log")
+                activity.evaluate("""element => {
+                    for (let index = 0; index < 40; index += 1) {
+                        const line = document.createElement('div');
+                        line.textContent = `continuity fixture ${index}`;
+                        element.appendChild(line);
+                    }
+                    element.scrollTop = 0;
+                }""")
+                if activity.evaluate(
+                        "element => element.scrollHeight <= element.clientHeight"):
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: activity fixture did not overflow")
+                refresh = page.get_by_role("button", name="Refresh")
+                refresh.click()
+                page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
+                if activity.evaluate("element => element.scrollTop") > 4:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: refresh moved non-bottom activity")
+                before = body.bounding_box()
+                settings_button = page.get_by_role("button", name="Settings")
+                settings = page.locator(".dashboard-settings")
+                settings.wait_for(state="hidden")
+                settings_button.click()
+                settings.wait_for(state="visible")
+                settings_box = settings.bounding_box()
+                if settings_box is None or abs(settings_box["x"]) > 1 \
+                        or abs(settings_box["y"]) > 1 \
+                        or abs(settings_box["width"] - width) > 1 \
+                        or abs(settings_box["height"] - height) > 1:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings is not full-screen")
+                if settings.get_attribute("aria-modal") != "true":
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings lacks modal semantics")
+                settings.locator(".host-service-panel").wait_for()
+                repository_panel = settings.locator(".repository-settings-panel")
+                repository_panel.wait_for()
+                repository_text = repository_panel.inner_text()
+                for expected in (repository_name, str(directory), "Available",
+                                 "1 agent definition discovered",
+                                 "Default fallback"):
+                    if expected not in repository_text:
+                        raise ReadinessError(
+                            f"{mode} {width}x{height}: settings omitted {expected!r}")
+                if body.bounding_box() != before:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: settings resized the dashboard "
+                        f"from {before} to {body.bounding_box()}")
+                if page.evaluate(
+                        "document.documentElement.scrollWidth > window.innerWidth"):
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: page scrolls horizontally")
+                page.wait_for_function("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}').settingsOpen === true""")
+                page.reload(wait_until="networkidle")
+                settings = page.locator(".dashboard-settings")
+                settings.wait_for(state="visible")
+                page.get_by_role("button", name="Close-settings").focus()
+                page.keyboard.press("Enter")
+                settings.wait_for(state="hidden")
+                page.wait_for_function("""() => JSON.parse(sessionStorage.getItem(
+                    'agents-live-dashboard-view') || '{}').settingsOpen === false""")
+                if search.input_value() != "readiness" or body.bounding_box() != before:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: closing settings lost context")
+                try:
+                    page.wait_for_function(
+                        "document.activeElement?.getAttribute('aria-label') === "
+                        "'Settings'",
+                        timeout=3000,
+                    )
+                except PlaywrightTimeoutError:
+                    raise ReadinessError(
+                        f"{mode} {width}x{height}: focus did not return to Settings")
+                page.close()
+
+                _say(
+                    f"{mode}: layout and continuity {viewport_name} passed in "
+                    f"{time.perf_counter() - started:.1f}s")
+
+            if "repositories" not in scenarios:
+                return
+
+            empty = directory / "empty-repository"
+            (empty / "Agents").mkdir(parents=True, exist_ok=True)
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            body = page.locator(".dashboard-body")
-            body.wait_for(state="visible")
-            if body.locator(
-                    ".host-service-panel, .repository-settings-panel").count():
-                raise ReadinessError(
-                    f"{mode}: settings consume the operational viewport")
-            agent_box = page.locator(".agent-panel").bounding_box()
-            log_box = page.locator(".dashboard-log-panel").bounding_box()
-            if agent_box is None or log_box is None:
-                raise ReadinessError(
-                    f"{mode}: inventory or log is absent from the first viewport")
-            if log_box["height"] < 140:
-                raise ReadinessError(
-                    f"{mode}: log height {log_box['height']:.0f}px cannot show ten lines")
-            if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > 720:
-                raise ReadinessError(
-                    f"{mode}: inventory or log extends below the 1280x720 viewport")
-            if page.evaluate(
-                    "document.documentElement.scrollHeight > window.innerHeight"):
-                raise ReadinessError(
-                    f"{mode}: operational view requires page-level scrolling")
+            page.evaluate("window.__repositoryMutationAcceptance = 'retained'")
+            scope = page.get_by_label("Repository scope")
+            scope.click()
+            page.get_by_role("option", name=repository_name, exact=True).click()
             page.get_by_role("button", name="Settings").click()
-            page.locator(".dashboard-settings .host-service-panel").wait_for()
-            page.locator(".dashboard-settings .repository-settings-panel").wait_for()
+            page.get_by_label("Repository path").fill(str(empty))
+            page.get_by_role("button", name="Register", exact=True).click()
+            page.get_by_role("status").get_by_text(
+                "Registered empty-repository successfully; discovered 0 agent "
+                f"definitions. The current view remains scoped to {repository_name}.",
+                exact=True,
+            ).wait_for()
+            if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
+                raise ReadinessError(f"{mode}: registration reloaded the page")
+            empty_row = page.locator(".repository-setting-row").filter(
+                has=page.get_by_text("empty-repository", exact=True))
+            if "0 agent definitions discovered" not in empty_row.inner_text():
+                raise ReadinessError(f"{mode}: zero definitions is not explicit")
+            page.get_by_role("button", name="Close-settings").click()
+            scope.click()
+            page.get_by_role("option", name="empty-repository", exact=True).wait_for()
+            page.get_by_role("option", name="All", exact=True).click()
+            shutil.rmtree(empty)
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("Stale", exact=True).wait_for()
+            page.get_by_text("readiness-agent", exact=True).wait_for()
+            page.get_by_role("button", name="Settings").click()
+            empty_row = page.locator(".repository-setting-row").filter(
+                has=page.get_by_text("empty-repository", exact=True))
+            if "Discovery failed" not in empty_row.inner_text():
+                raise ReadinessError(f"{mode}: discovery failure is not explicit")
+            empty_row.get_by_role("button", name="Unregister").click()
+            confirmation = page.get_by_text(
+                "This removes only the registry entry.", exact=False)
+            confirmation.wait_for()
+            page.get_by_role("button", name="Unregister", exact=True).last.click()
+            page.get_by_role("status").get_by_text(
+                "Repository files, definitions, logs, triggers, and runtime "
+                "state were not deleted.", exact=False).wait_for()
+            if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
+                raise ReadinessError(f"{mode}: unregister reloaded the page")
+            page.get_by_role("button", name="Close-settings").click()
+            scope.click()
+            if page.get_by_role(
+                    "option", name="empty-repository", exact=True).count():
+                raise ReadinessError(f"{mode}: unregister did not refresh selector")
+
+            registry = directory / "config" / "agents-live" / "config.toml"
+            registry_text = registry.read_text(encoding="utf-8")
+            registry.write_text("not valid = [", encoding="utf-8")
+            page.keyboard.press("Escape")
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("Data stale:", exact=False).wait_for()
+            page.get_by_text("readiness-agent", exact=True).wait_for()
+            registry.write_text(registry_text, encoding="utf-8")
+            page.get_by_role("button", name="Refresh").click()
+            page.locator(".dashboard-health-label").get_by_text(
+                "Host ", exact=False).wait_for()
+            page.get_by_role("button", name="Settings").click()
+            page.get_by_role("dialog").wait_for(state="visible")
+            page.keyboard.press("Escape")
+            page.get_by_role("dialog").wait_for(state="hidden")
+
+            scale_repositories = directory / "scale-repositories"
+            registry_lines = [registry_text.rstrip()]
+            for index in range(12):
+                scale_repository = scale_repositories / f"repo-{index:02d}"
+                skill = scale_repository / "Agents" / "scale-agent"
+                skill.mkdir(parents=True)
+                skill.joinpath("SKILL.md").write_text(
+                    DEFINITION.replace(
+                        "name: readiness-agent", "name: scale-agent"),
+                    encoding="utf-8",
+                )
+                registry_lines.append(
+                    f'scale{index:02d} = {json.dumps(str(scale_repository))}')
+            registry.write_text("\n".join(registry_lines) + "\n", encoding="utf-8")
+            page.get_by_role("button", name="Refresh").click()
+            page.wait_for_function(
+                "document.querySelectorAll('.repository-group').length === 10")
+            registered_names = {
+                repository_name, *(f"scale{index:02d}" for index in range(12))
+            }
+            mounted_names = {
+                heading.locator(".text-sm.font-medium").inner_text().removesuffix(
+                    " (default)")
+                for heading in page.locator(".repository-heading").all()
+            }
+            deferred_names = registered_names - mounted_names
+            deferred_selector = page.get_by_label(
+                re.compile(r"Show one of 3 more repositories"))
+            if len(mounted_names) != 10 or len(deferred_names) != 3 \
+                    or mounted_names | deferred_names != registered_names \
+                    or deferred_selector.count() != 1:
+                raise ReadinessError(
+                    f"{mode}: progressive repository rendering mounted "
+                    f"{sorted(mounted_names)} and deferred "
+                    f"{sorted(deferred_names)} with an invalid selector")
+            scope.click()
+            for name in sorted(registered_names):
+                if page.get_by_role("option", name=name, exact=True).count() != 1:
+                    raise ReadinessError(
+                        f"{mode}: repository scope omitted {name}")
+            page.keyboard.press("Escape")
+            deferred_selector.click()
+            first_deferred = sorted(deferred_names)[0]
+            page.get_by_role(
+                "option", name=f"{first_deferred} | 1 agents", exact=True
+            ).wait_for()
+            for name in sorted(deferred_names):
+                if page.get_by_role(
+                        "option", name=f"{name} | 1 agents", exact=True
+                ).count() != 1:
+                    raise ReadinessError(
+                        f"{mode}: deferred repository selector omitted {name}")
+            selected_deferred = sorted(deferred_names)[-1]
+            page.get_by_role(
+                "option", name=f"{selected_deferred} | 1 agents",
+                exact=True).click()
+            page.locator(".repository-group").filter(
+                has=page.get_by_text(selected_deferred, exact=True)).wait_for()
+            if page.locator(".repository-group").count() != 10:
+                raise ReadinessError(
+                    f"{mode}: on-demand repository access exceeded mount cap")
+            registry.write_text(registry_text, encoding="utf-8")
+            shutil.rmtree(scale_repositories)
+            page.get_by_role("button", name="Refresh").click()
+            page.wait_for_function(
+                "document.querySelectorAll('.repository-group').length === 1")
+
+            scale_root = directory / "Agents"
+            for index in range(150):
+                skill = scale_root / f"scale-{index:03d}"
+                skill.mkdir()
+                skill.joinpath("SKILL.md").write_text(
+                    DEFINITION.replace(
+                        "name: readiness-agent", f"name: scale-{index:03d}"),
+                    encoding="utf-8",
+                )
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("151 of 151 agents", exact=False).wait_for()
+            rendered_rows = page.locator(
+                ".virtualized-agent-table tbody tr").count()
+            if rendered_rows >= 151:
+                raise ReadinessError(
+                    f"{mode}: virtual table rendered all {rendered_rows} rows")
+            for index in range(150):
+                shutil.rmtree(scale_root / f"scale-{index:03d}")
             page.close()
-            page = browser.new_page(viewport={"width": 390, "height": 844})
-            page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            page.get_by_role("button", name="Settings").click()
-            page.wait_for_function("""
-                () => {
-                    const drawer = document.querySelector('.dashboard-settings');
-                    if (!drawer) return false;
-                    const box = drawer.getBoundingClientRect();
-                    return box.left >= 0 && box.right <= window.innerWidth;
-                }
-            """)
-            drawer_box = page.locator(".dashboard-settings").bounding_box()
-            if drawer_box is None or drawer_box["x"] < 0 \
-                    or drawer_box["x"] + drawer_box["width"] > 390:
-                raise ReadinessError(
-                    f"{mode}: settings drawer extends outside a mobile viewport")
-            if page.evaluate(
-                    "document.documentElement.scrollWidth > window.innerWidth"):
-                raise ReadinessError(
-                    f"{mode}: settings drawer creates horizontal page scrolling")
         finally:
             browser.close()
-    _say(f"{mode}: inventory and log fit the 1280x720 viewport")
+    _say(f"{mode}: repository lifecycle and scale passed")
 
 
 def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
@@ -421,11 +842,28 @@ def _assert_aggregate_run(port: int, directory: Path,
     identifier = payload["agents"][0].get("identifier")
     if not isinstance(identifier, str) or not identifier:
         raise ReadinessError(f"{mode}: fixture row has no canonical identifier")
+    all_repos = _api_all_repos(port)
+    repository_rows = [
+        row
+        for repository in (all_repos or {}).get("repositories", [])
+        for row in repository.get("rows", [])
+        if row.get("identifier") == identifier
+    ]
+    if len(repository_rows) != 1 or not repository_rows[0].get("can_run"):
+        raise ReadinessError(
+            f"{mode}: aggregate Run is unavailable: {repository_rows!r}")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
+            browser_errors: list[str] = []
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            page.on(
+                "console",
+                lambda message: browser_errors.append(message.text)
+                if message.type == "error" else None,
+            )
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
             row = page.get_by_role("row").filter(
                 has=page.get_by_text("readiness-agent", exact=True))
@@ -433,8 +871,18 @@ def _assert_aggregate_run(port: int, directory: Path,
                 raise ReadinessError(
                     f"{mode}: aggregate dashboard rendered {row.count()} "
                     "fixture rows")
-            row.get_by_role(
-                "button", name="Run this agent once now").click()
+            run_button = row.get_by_role(
+                "button", name="Run this agent once now")
+            if not run_button.is_enabled():
+                raise ReadinessError(
+                    f"{mode}: aggregate Run rendered disabled: "
+                    f"{run_button.evaluate('element => element.outerHTML')}")
+            run_button.click()
+            page.wait_for_timeout(500)
+            if browser_errors:
+                raise ReadinessError(
+                    f"{mode}: aggregate Run raised browser errors: "
+                    f"{browser_errors!r}")
             _await_aggregate_run(directory, identifier, mode)
         finally:
             browser.close()
@@ -462,7 +910,7 @@ def _assert_abortive_disconnect_survives(
             with contextlib.suppress(OSError):
                 client.sendall(request)
     payload = _await_rows(process, port, f"{mode} after client resets")
-    _assert_row(payload, mode, started=True)
+    _assert_row(payload, mode, started=True, expect_failure=False)
     _say(f"{mode}: remained available after abortive client disconnects")
 
 
@@ -498,7 +946,9 @@ def _terminate(process: subprocess.Popen) -> None:
 
 
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-        *, dev: bool, source: bool, all_repos: bool = False) -> None:
+    *, dev: bool, source: bool, all_repos: bool = False,
+    scenarios: tuple[str, ...] = SCENARIO_ORDER,
+    viewport_names: tuple[str, ...] = tuple(VIEWPORTS)) -> None:
     mode = ("source" if source else "packaged") + (" --dev" if dev else "")
     if all_repos:
         mode += " all-repositories"
@@ -514,31 +964,126 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         argv, cwd=directory, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         **({} if os.name == "nt" else {"start_new_session": True}))
+    check_started = time.perf_counter()
     try:
+        started = time.perf_counter()
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
-        _say(f"{mode}: served a started row with Stop available")
-        if all_repos:
+        watcher_health = _watcher_health_label(
+            payload["agents"][0].get("watcher_liveness"))
+        assert watcher_health is not None
+        _say(
+            f"{mode}: startup served a started row with Stop available in "
+            f"{time.perf_counter() - started:.1f}s")
+        visual_scenarios = set(scenarios) & {"layout", "continuity"}
+        if visual_scenarios:
+            _assert_operational_viewport(
+                port, directory, mode, visual_scenarios, viewport_names,
+                watcher_health)
+        if "aggregate" in scenarios:
+            started = time.perf_counter()
             _assert_aggregate_run(port, directory, payload, mode)
-        else:
-            _assert_operational_viewport(port, mode)
+            _say(
+                f"{mode}: aggregate passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        if "repositories" in scenarios:
+            started = time.perf_counter()
+            _assert_operational_viewport(
+                port, directory, mode, {"repositories"}, (), watcher_health)
+            _say(
+                f"{mode}: repositories passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        if "disconnect" in scenarios and not all_repos:
+            started = time.perf_counter()
             _assert_abortive_disconnect_survives(process, port, mode)
+            _say(
+                f"{mode}: disconnect passed in "
+                f"{time.perf_counter() - started:.1f}s")
+        _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
+    except ReadinessError as exc:
+        _terminate(process)
+        output = process.stdout.read().strip() if process.stdout else ""
+        if output:
+            raise ReadinessError(
+                f"{exc}\ndashboard output:\n{output[-4000:]}") from exc
+        raise
     finally:
         _terminate(process)
 
 
+def _plan(args: argparse.Namespace) -> dict:
+    selected_modes = args.launch_mode
+    if selected_modes is None:
+        selected_modes = ["normal"] if args.scenario or args.viewport else [
+            "normal", "all-repos", "dev"]
+    if args.skip_dev:
+        selected_modes = [mode for mode in selected_modes if mode != "dev"]
+    if not selected_modes:
+        raise ReadinessError("no launch modes remain after --skip-dev")
+
+    requested = set(args.scenario or ())
+    if args.viewport and not requested & {"layout", "continuity"}:
+        raise ReadinessError(
+            "--viewport requires the layout or continuity scenario")
+
+    runs = []
+    for launch_mode in selected_modes:
+        scenarios = (
+            tuple(name for name in SCENARIO_ORDER
+                  if name == "startup" or name in requested)
+            if requested else RELEASE_SCENARIOS[launch_mode]
+        )
+        if "layout" in scenarios:
+            viewports = tuple(args.viewport or VIEWPORTS)
+        elif "continuity" in scenarios:
+            viewports = tuple(args.viewport or ("desktop",))
+        else:
+            viewports = ()
+        runs.append({
+            "mode": launch_mode,
+            "scenarios": list(scenarios),
+            "viewports": list(viewports),
+        })
+    return {
+        "artifact": "source" if args.editable else "packaged",
+        "runs": runs,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    artifact = parser.add_mutually_exclusive_group()
+    artifact.add_argument(
         "--editable", action="store_true",
         help="run this checkout instead of the built wheel")
     parser.add_argument(
         "--skip-dev", action="store_true",
         help="skip the reload-worker mode (for a slow CI host)")
-    parser.add_argument(
+    artifact.add_argument(
         "--wheel", type=Path,
         help="validate this exact wheel instead of dist/ for the current version")
+    parser.add_argument(
+        "--plan", action="store_true",
+        help="print the resolved test plan as JSON without running it")
+    parser.add_argument(
+        "--launch-mode", action="append",
+        choices=tuple(RELEASE_SCENARIOS),
+        help="run only this server mode; repeat to select multiple modes")
+    parser.add_argument(
+        "--scenario", action="append", choices=SCENARIO_ORDER,
+        help="run only this scenario; repeat to select multiple scenarios")
+    parser.add_argument(
+        "--viewport", action="append", choices=tuple(VIEWPORTS),
+        help="limit layout or continuity checks; repeat to select viewports")
     args = parser.parse_args()
+
+    try:
+        plan = _plan(args)
+    except ReadinessError as exc:
+        parser.error(str(exc))
+    if args.plan:
+        print(json.dumps(plan, indent=2))
+        return 0
 
     # A Windows handle can outlive the tree kill by a moment; a lingering
     # file must not fail a check that already passed.
@@ -549,18 +1094,18 @@ def main() -> int:
         _fixture(directory)
         environment = _environment(directory)
         launcher, python = _launcher(directory, args.editable, args.wheel)
-        _seed_started_state(python, directory, environment)
-        _check(
-            launcher, directory, environment, dev=False,
-            source=args.editable)
-        _check(
-            launcher, directory, environment, dev=False,
-            source=args.editable, all_repos=True)
-        if not args.skip_dev:
+        total_started = time.perf_counter()
+        for run in plan["runs"]:
+            _seed_started_state(python, directory, environment)
             _check(
-                launcher, directory, environment, dev=True,
-                source=args.editable)
-    _say("ok")
+                launcher, directory, environment,
+                dev=run["mode"] == "dev",
+                source=args.editable,
+                all_repos=run["mode"] == "all-repos",
+                scenarios=tuple(run["scenarios"]),
+                viewport_names=tuple(run["viewports"]),
+            )
+    _say(f"ok in {time.perf_counter() - total_started:.1f}s")
     return 0
 
 

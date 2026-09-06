@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ... import __version__, agent, obs, paths, state
 from ...state import ownership, registry as repos
-from .. import identity, resolve
+from .. import agent_view, identity, resolve
 
 
 def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
@@ -73,6 +73,10 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
         is_owner_by_identifier = {
             identifier: False for identifier in discovered
         }
+    observations = agent_view.runtime_observations(
+        root, tuple(discovered.values()), started_names,
+        is_owner_by_identifier,
+    )
     identifiers = set(discovered) | set(started_names)
     if selected:
         try:
@@ -110,7 +114,11 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "owner": owner,
             "is_owner": is_owner_by_identifier.get(identifier, False),
             "ownership_available": ownership_available,
-            "consecutive_failures": failure_streaks.get(identifier, 0),
+            "consecutive_failures": observations.get(
+                identifier, (failure_streaks.get(identifier, 0),
+                             "not-required"))[0],
+            "watcher_liveness": observations.get(
+                identifier, (0, "not-required"))[1],
             "error": load_error,
         })
     for item in unloadable:
@@ -130,6 +138,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
             "is_owner": False,
             "ownership_available": ownership_available,
             "consecutive_failures": 0,
+            "watcher_liveness": "not-required",
             "error": item.message,
         })
     return rows

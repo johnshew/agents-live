@@ -942,10 +942,11 @@ class TestFailuresAreVisible(TempRepository):
         logs = self._logs()
         dashboard = self._dashboard()
         with mock.patch.object(dashboard, "LOGS_DIR", logs):
-            errors, models = dashboard._structured_log_snapshot(
+            errors, models, evidence = dashboard._structured_log_snapshot(
                 {self.IDENTIFIER: "failing-agent"})
         self.assertEqual({"failing-agent": 1}, errors)
-        self.assertEqual({"failing-agent": "test-model-1"}, models)
+        self.assertEqual({self.IDENTIFIER: "test-model-1"}, models)
+        self.assertEqual({"state": "available", "detail": None}, evidence)
 
     def test_the_header_reads_both_log_suffixes(self) -> None:
         """A run's outcome is written to <identifier>.jsonl. A *.log glob
@@ -960,15 +961,16 @@ class TestFailuresAreVisible(TempRepository):
         dashboard = self._dashboard()
         with mock.patch.object(dashboard, "LOGS_DIR", logs):
             self.assertEqual(
-                ({}, {}),
+                ({}, {}, {"state": "available", "detail": None}),
                 dashboard._structured_log_snapshot(
                     {self.IDENTIFIER: "failing-agent"}))
         (logs / f"{self.IDENTIFIER}.jsonl.kept").rename(
             logs / f"{self.IDENTIFIER}.jsonl")
         with mock.patch.object(dashboard, "LOGS_DIR", logs):
-            errors, _ = dashboard._structured_log_snapshot(
+            errors, _, evidence = dashboard._structured_log_snapshot(
                 {self.IDENTIFIER: "failing-agent"})
         self.assertEqual({"failing-agent": 1}, errors)
+        self.assertEqual("available", evidence["state"])
 
     def test_asking_for_errors_spans_the_repository_not_one_file(self) -> None:
         """`--errors` with no name is a question about the repository.
@@ -1819,12 +1821,14 @@ class TestDashboardHealthPolicy(unittest.TestCase):
             with mock.patch.object(dashboard, "HEALTH_OK_PATH", beacon):
                 fresh = time.time() - 59 * 60
                 os.utime(beacon, (fresh, fresh))
-                self.assertEqual("ok", dashboard.system_health()["level"])
+                health = dashboard.system_health()
+                self.assertEqual("degraded", health["level"])
+                self.assertIn("smoketest unknown", health["text"])
 
                 stale = time.time() - 61 * 60
                 os.utime(beacon, (stale, stale))
                 health = dashboard.system_health()
-        self.assertEqual("down", health["level"])
+        self.assertEqual("stale", health["level"])
         self.assertIn("expected every five minutes", health["tip"])
         self.assertIn("unhealthy after one hour", health["tip"])
 
@@ -6024,6 +6028,83 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, gate)
         self.assertIn("tools/dashboard-readiness.py", self._gate_text())
+
+    def test_dashboard_readiness_plans_release_and_focused_ux_evidence(self) -> None:
+        gate = REPOSITORY / "tools" / "dashboard-readiness.py"
+
+        release = subprocess.run(
+            [sys.executable, str(gate), "--plan"],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(0, release.returncode, release.stderr)
+        self.assertEqual([
+            {
+                "mode": "normal",
+                "scenarios": [
+                    "startup", "layout", "continuity", "repositories",
+                    "disconnect",
+                ],
+                "viewports": ["desktop", "wide", "mobile"],
+            },
+            {
+                "mode": "all-repos",
+                "scenarios": ["startup", "aggregate"],
+                "viewports": [],
+            },
+            {
+                "mode": "dev",
+                "scenarios": ["startup"],
+                "viewports": [],
+            },
+        ], json.loads(release.stdout)["runs"])
+
+        focused = subprocess.run(
+            [
+                sys.executable, str(gate), "--plan", "--editable",
+                "--launch-mode", "normal", "--scenario", "continuity",
+                "--viewport", "desktop",
+            ],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(0, focused.returncode, focused.stderr)
+        self.assertEqual({
+            "artifact": "source",
+            "runs": [{
+                "mode": "normal",
+                "scenarios": ["startup", "continuity"],
+                "viewports": ["desktop"],
+            }],
+        }, json.loads(focused.stdout))
+
+        invalid = subprocess.run(
+            [sys.executable, str(gate), "--plan", "--viewport", "mobile"],
+            cwd=REPOSITORY, capture_output=True, text=True,
+        )
+        self.assertEqual(2, invalid.returncode)
+        self.assertIn(
+            "--viewport requires the layout or continuity scenario",
+            invalid.stderr,
+        )
+
+    def test_dashboard_readiness_preserves_watcher_observation_truth(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        assert_row = readiness["_assert_row"]
+
+        for liveness, label in (
+                ("missing", "Watcher missing"),
+                ("unavailable", "Watcher unavailable")):
+            with self.subTest(liveness=liveness):
+                assert_row({"agents": [{
+                    "name": "readiness-agent",
+                    "state": "started",
+                    "can_pause": True,
+                    "can_activate": False,
+                    "watcher_liveness": liveness,
+                    "unhealthy": True,
+                    "health": f"Failing: newest run; {label}",
+                    "action_reasons": "Start: Already active; Claim: unavailable",
+                }]}, "packaged", started=True)
 
 
 class TestRepositoryDiscoveryRoots(TempRepository):
