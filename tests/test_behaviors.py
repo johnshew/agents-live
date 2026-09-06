@@ -4763,6 +4763,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
             for item in dashboards
         ])
 
+    def test_local_deploy_reports_streamed_child_failure(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        with self.assertRaisesRegex(script["LocalDeployError"], "exited 17"):
+            script["_run"]([sys.executable, "-c", "raise SystemExit(17)"])
+
     def test_local_deploy_script_starts_in_an_isolated_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run(

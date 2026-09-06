@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep local deployment failures actionable and browser checks focus-safe.
+  Failed streamed commands report their exit status without masking it with an
+  output-handling error. Keyboard readiness checks wait for filter dialogs to
+  close before focusing the inventory splitter.
 - fix: retain model transcripts and submitted proposals when postprocessing fails. (#468)
   Failed runs keep their model telemetry and exact postprocessor input before
   postprocessing starts. Full transcript JSON includes recorded pipeline results

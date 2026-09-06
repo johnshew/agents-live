@@ -79,7 +79,7 @@ def _run(
         text=True, encoding="utf-8", errors="replace", check=False,
     )
     if check and completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
+        detail = (completed.stderr or "").strip() or (completed.stdout or "").strip()
         raise LocalDeployError(
             f"{' '.join(argv)} exited {completed.returncode}: {detail}")
     return completed

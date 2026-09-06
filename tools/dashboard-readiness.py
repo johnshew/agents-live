@@ -532,13 +532,14 @@ def _assert_operational_viewport(
                 page.get_by_role("option", name="started", exact=True).click()
                 page.get_by_role("button", name="Close filters", exact=True).click()
                 state_chip.wait_for()
+                page.get_by_role("dialog").wait_for(state="hidden")
                 splitter = page.get_by_role(
                     "separator", name="Resize-inventory-and-activity")
-                splitter.focus()
-                page.keyboard.press("End")
+                splitter.press("End")
                 if splitter.get_attribute("aria-valuenow") != "75":
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: keyboard split resize failed")
+                        f"{mode} {width}x{height}: keyboard split resize failed; "
+                        f"focused={page.evaluate('document.activeElement?.outerHTML')}")
                 refresh = page.get_by_role("button", name="Refresh")
                 refresh.focus()
                 page.keyboard.press("Enter")
