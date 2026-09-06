@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: accept the documented version-classification arguments.
+  CLI validation consumes positional values in order, so `versions classify`
+  validates the status instead of mistaking the version for it. Missing and
+  invalid statuses still fail without changing the recorded classification.
 - fix: show dashboard loading immediately and keep foreground shutdown quiet.
   Initial inventory and history collection runs off the UI thread after saved
   preferences are restored, without a duplicate scan. Startup announces one
