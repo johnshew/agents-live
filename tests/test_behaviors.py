@@ -5015,7 +5015,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with mock.patch.dict(scope, {"ROOT": checkout}):
                     destinations.append(script["_state_directory"]())
             self.assertEqual(destinations[0], destinations[1])
-            self.assertEqual(primary / ".git" / "agents-live-local-deploy", destinations[0])
+            self.assertEqual(
+                (primary / ".git" / "agents-live-local-deploy").resolve(), destinations[0])
 
     def test_local_deploy_builds_from_the_recorded_commit(self) -> None:
         script = runpy.run_path(
