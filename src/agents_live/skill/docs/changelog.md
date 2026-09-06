@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: restore Windows dashboards without persistent console windows.
+  Local deployment uses the native hidden-process policy, cleans up failed
+  or interrupted startup, and waits for the launcher to exit after shutdown.
 - fix: expose installed versions with truthful release labels and readable dates.
   The public command is `versions`, without a `generations` alias. Listings
   distinguish bake releases, explicitly recorded local release candidates,
