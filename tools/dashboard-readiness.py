@@ -842,11 +842,28 @@ def _assert_aggregate_run(port: int, directory: Path,
     identifier = payload["agents"][0].get("identifier")
     if not isinstance(identifier, str) or not identifier:
         raise ReadinessError(f"{mode}: fixture row has no canonical identifier")
+    all_repos = _api_all_repos(port)
+    repository_rows = [
+        row
+        for repository in (all_repos or {}).get("repositories", [])
+        for row in repository.get("rows", [])
+        if row.get("identifier") == identifier
+    ]
+    if len(repository_rows) != 1 or not repository_rows[0].get("can_run"):
+        raise ReadinessError(
+            f"{mode}: aggregate Run is unavailable: {repository_rows!r}")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             executable_path=str(_browser_executable()), headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
+            browser_errors: list[str] = []
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            page.on(
+                "console",
+                lambda message: browser_errors.append(message.text)
+                if message.type == "error" else None,
+            )
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
             row = page.get_by_role("row").filter(
                 has=page.get_by_text("readiness-agent", exact=True))
@@ -854,9 +871,18 @@ def _assert_aggregate_run(port: int, directory: Path,
                 raise ReadinessError(
                     f"{mode}: aggregate dashboard rendered {row.count()} "
                     "fixture rows")
-            row.get_by_role(
-                "button", name="Run this agent once now").focus()
-            page.keyboard.press("Enter")
+            run_button = row.get_by_role(
+                "button", name="Run this agent once now")
+            if not run_button.is_enabled():
+                raise ReadinessError(
+                    f"{mode}: aggregate Run rendered disabled: "
+                    f"{run_button.evaluate('element => element.outerHTML')}")
+            run_button.click()
+            page.wait_for_timeout(500)
+            if browser_errors:
+                raise ReadinessError(
+                    f"{mode}: aggregate Run raised browser errors: "
+                    f"{browser_errors!r}")
             _await_aggregate_run(directory, identifier, mode)
         finally:
             browser.close()
@@ -974,6 +1000,13 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
                 f"{mode}: disconnect passed in "
                 f"{time.perf_counter() - started:.1f}s")
         _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
+    except ReadinessError as exc:
+        _terminate(process)
+        output = process.stdout.read().strip() if process.stdout else ""
+        if output:
+            raise ReadinessError(
+                f"{exc}\ndashboard output:\n{output[-4000:]}") from exc
+        raise
     finally:
         _terminate(process)
 

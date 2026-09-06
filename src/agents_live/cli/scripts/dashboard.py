@@ -1526,6 +1526,13 @@ def _add_agent_information_slots(table) -> None:
 
 def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
     event_prefix = "aggregate-" if aggregate else ""
+    event_target = "$parent.$parent" if aggregate else "$parent"
+    event_args = (
+        "{identifier: props.row.identifier, "
+        "repository: props.row.repository, "
+        "repository_path: props.row.repository_path}"
+        if aggregate else "props.row"
+    )
     table.add_slot("header-cell-actions", '''
         <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
     ''')
@@ -1535,25 +1542,25 @@ def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
                :disable="!props.row.can_run"
                  :title="props.row.run_tip"
                :aria-label="'Run: ' + props.row.run_tip"
-                 @click="() => $parent.$emit('{event_prefix}run', props.row)" />
+                                 @click="() => {event_target}.$emit('{event_prefix}run', {event_args})" />
           <q-btn flat dense round size="xs" icon="power_settings_new"
                  :color="props.row.can_activate ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_activate"
                  :title="props.row.activate_tip"
                  :aria-label="'Start: ' + props.row.activate_tip"
-                 @click="() => $parent.$emit('{event_prefix}activate', props.row)" />
+                 @click="() => {event_target}.$emit('{event_prefix}activate', {event_args})" />
           <q-btn flat dense round size="xs" icon="stop"
                  :color="props.row.can_pause ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_pause"
                  :title="props.row.pause_tip"
                  :aria-label="'Stop: ' + props.row.pause_tip"
-                 @click="() => $parent.$emit('{event_prefix}pause', props.row)" />
+                 @click="() => {event_target}.$emit('{event_prefix}pause', {event_args})" />
           <q-btn flat dense round size="xs" icon="download"
                  :color="props.row.can_claim ? 'primary' : 'grey-7'"
                  :disable="!props.row.can_claim"
                  :title="props.row.claim_tip"
                  :aria-label="'Claim: ' + props.row.claim_tip"
-                 @click="() => $parent.$emit('{event_prefix}claim', props.row)" />
+                 @click="() => {event_target}.$emit('{event_prefix}claim', {event_args})" />
                     <div v-if="props.row.action_reasons"
                              class="text-caption text-grey-7"
                         style="max-width:20rem;white-space:normal"
