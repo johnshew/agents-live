@@ -2629,6 +2629,26 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertNotEqual(0, retired.returncode)
         self.assertIn("unknown_command", retired.stdout + retired.stderr)
 
+    def test_public_versions_classify_consumes_both_positionals(self) -> None:
+        from agents_live.cli import main as cli_main
+        from agents_live.cli.commands import generations
+
+        self._activate_generation("6.9.0")
+        with (
+            mock.patch.object(generations, "_require_self_managed"),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            for status in ("candidate", "rejected", "released"):
+                with self.subTest(status=status):
+                    self.assertEqual(0, cli_main(["versions", "classify", "6.9.0", status]))
+                    self.assertEqual(status, deploy.generation.release_status(
+                        deploy.generation.load("6.9.0")))
+            for arguments in (["6.9.0"], ["6.9.0", "invalid"]):
+                self.assertEqual(2, cli_main(["versions", "classify", *arguments]))
+            self.assertEqual("released", deploy.generation.release_status(
+                deploy.generation.load("6.9.0")))
+
     def test_generation_population_installs_only_agents_live(self) -> None:
         with (
             mock.patch.object(install_generation, "_run") as run,
