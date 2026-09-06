@@ -322,6 +322,13 @@ def _output(process: subprocess.Popen) -> str:
     return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
 
+def _watcher_health_label(liveness: object) -> str | None:
+    return {
+        "missing": "Watcher missing",
+        "unavailable": "Watcher unavailable",
+    }.get(liveness)
+
+
 def _assert_row(payload: dict, mode: str, *, started: bool,
                 expect_failure: bool = True) -> None:
     rows = payload["agents"]
@@ -344,10 +351,7 @@ def _assert_row(payload: dict, mode: str, *, started: bool,
             f"{mode}: can_activate is {row.get('can_activate')!r} for a "
             f"{expected_state} row")
     watcher_liveness = row.get("watcher_liveness")
-    watcher_health = {
-        "missing": "Watcher missing",
-        "unavailable": "Watcher unavailable",
-    }.get(watcher_liveness)
+    watcher_health = _watcher_health_label(watcher_liveness)
     if watcher_health is None:
         raise ReadinessError(
             f"{mode}: started watcher liveness is "
@@ -402,6 +406,7 @@ def _assert_operational_viewport(
     mode: str,
     scenarios: set[str],
     viewport_names: tuple[str, ...],
+    watcher_health: str,
 ) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -441,7 +446,7 @@ def _assert_operational_viewport(
                     "Attention in all registered repositories:", exact=False,
                 ).wait_for()
                 page.get_by_text("Failing: newest run", exact=False).wait_for()
-                page.get_by_text("Watcher missing", exact=False).wait_for()
+                page.get_by_text(watcher_health, exact=False).wait_for()
                 page.get_by_text("Start: Already active", exact=False).wait_for()
                 if body.locator(
                         ".host-service-panel, .repository-settings-panel").count():
@@ -938,13 +943,17 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         started = time.perf_counter()
         payload = _await_rows(process, port, mode)
         _assert_row(payload, mode, started=True)
+        watcher_health = _watcher_health_label(
+            payload["agents"][0].get("watcher_liveness"))
+        assert watcher_health is not None
         _say(
             f"{mode}: startup served a started row with Stop available in "
             f"{time.perf_counter() - started:.1f}s")
         visual_scenarios = set(scenarios) & {"layout", "continuity"}
         if visual_scenarios:
             _assert_operational_viewport(
-                port, directory, mode, visual_scenarios, viewport_names)
+                port, directory, mode, visual_scenarios, viewport_names,
+                watcher_health)
         if "aggregate" in scenarios:
             started = time.perf_counter()
             _assert_aggregate_run(port, directory, payload, mode)
@@ -954,7 +963,7 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         if "repositories" in scenarios:
             started = time.perf_counter()
             _assert_operational_viewport(
-                port, directory, mode, {"repositories"}, ())
+                port, directory, mode, {"repositories"}, (), watcher_health)
             _say(
                 f"{mode}: repositories passed in "
                 f"{time.perf_counter() - started:.1f}s")
