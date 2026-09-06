@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: enable workspace-confined Codex writes on native Windows.
+  Codex selects its supported unelevated Windows sandbox and receives the
+  repository root explicitly, allowing in-workspace changes while writes
+  outside the repository remain denied.
 - fix: keep actions working in virtualized dashboard tables.
   Aggregate Run, Start, Stop, and Claim controls now dispatch through the
   virtual-scroll wrapper while preserving repository-qualified targets.
