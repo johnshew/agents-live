@@ -1435,15 +1435,16 @@ class TestWindowsDetachedProcess(unittest.TestCase):
         ):
             found = WindowsProcesses().owned("watcher")
 
+        with mock.patch.object(
+            windowshost, "cli_executable_path",
+            return_value=Path("C:/tools/agents-live.exe"),
+        ):
+            desired = windowshost.WindowsHost().render(Subscription(
+                "0123456789abcdef01234567", "repo:C:/work/sample",
+                "agent:sample", "watch", "docs/** debounce 1s"))
         self.assertEqual([
-            ProcessRef(
-                42,
-                123.5,
-                "agents-live.exe",
-                "watcher",
-                "0123456789abcdef01234567",
-                "agents-live:v2:0123456789abcdef01234567",
-            ),
+            ProcessRef(42, 123.5, "agents-live.exe", "watcher",
+                       desired.key, desired.fingerprint),
         ], found)
 
     def test_termination_uses_native_process_policy(self) -> None:
@@ -3698,8 +3699,30 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     ),
                     Request(),
                 )
-                self.assertIn("--bare", launch.argv)
+                self.assertNotIn("--bare", launch.argv)
+                self.assertNotIn("--safe-mode", launch.argv)
+                self.assertIn("--disable-slash-commands", launch.argv)
+                self.assertEqual("", launch.argv[
+                    launch.argv.index("--setting-sources") + 1])
+                settings = json.loads(launch.argv[
+                    launch.argv.index("--settings") + 1])
+                self.assertTrue(settings["disableAllHooks"])
+                self.assertFalse(settings["autoMemoryEnabled"])
+                self.assertTrue(settings["disableClaudeAiConnectors"])
+                environment = dict(launch.env)
+                self.assertEqual("1", environment["CLAUDE_CODE_DISABLE_CLAUDE_MDS"])
+                self.assertEqual("1", environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"])
+                self.assertEqual("false", environment["CLAUDE_CODE_AUTO_CONNECT_IDE"])
+                self.assertEqual("false", environment["ENABLE_CLAUDEAI_MCP_SERVERS"])
+                self.assertEqual("0", environment["CLAUDE_CODE_SIMPLE"])
+                self.assertEqual("0", environment["CLAUDE_CODE_SAFE_MODE"])
                 self.assertEqual(1, launch.argv.count("--strict-mcp-config"))
+
+    def test_claude_classifies_authentication_failure(self) -> None:
+        category = providers.get("claude").failure(RawOutput(
+            1, '{"is_error":true,"result":"Not logged in / Please run /login"}',
+            ""))
+        self.assertEqual("authentication_failed", category)
 
     def test_copilot_explicitly_disables_prompt_mode_repository_code(self) -> None:
         launch = providers.get("copilot").prepare(
@@ -6462,6 +6485,24 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "--viewport requires the layout or continuity scenario",
             invalid.stderr,
         )
+
+    def test_dashboard_readiness_waits_for_new_action_completion(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        wait = readiness["_await_aggregate_run"]
+        with mock.patch.dict(wait.__globals__, {
+                "_aggregate_completions": mock.Mock(return_value={"old"})
+        }), mock.patch("time.monotonic", side_effect=[0, 0, 181]), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(readiness["ReadinessError"]):
+                wait(Path("fixture"), "agent", "dev", {"old"})
+        with mock.patch.dict(wait.__globals__, {
+                "_aggregate_completions": mock.Mock(
+                    side_effect=[{"old"}, {"old", "new"}])
+        }), mock.patch("time.monotonic", return_value=0), \
+                mock.patch("time.sleep") as pause:
+            wait(Path("fixture"), "agent", "dev", {"old"})
+            pause.assert_called_once()
 
     def test_dashboard_readiness_preserves_watcher_observation_truth(self) -> None:
         readiness = runpy.run_path(

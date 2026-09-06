@@ -102,10 +102,19 @@ when its name appears in `agents-live.mcps`; a missing or malformed named
 server fails the run before the provider starts. Repository hooks and project
 extensions have no unattended opt-in surface.
 
-Claude runs in `--bare` mode, so an Anthropic-hosted account must supply
-`ANTHROPIC_API_KEY`; subscription credentials are not read. Bedrock, Google
-Cloud's Agent Platform, and Microsoft Foundry retain their provider credential
-mechanisms. Copilot uses a fresh run-scoped configuration home. Secure
+Claude uses normal print mode with empty setting sources, disabled slash
+commands and hooks, strict explicit MCP configuration, and instruction,
+memory, connector, and IDE discovery disabled. Native subscription login is
+preserved without moving or extracting credentials. Explicit API-key and
+cloud-provider environment settings retain Claude's native precedence; an
+`ANTHROPIC_API_KEY` takes precedence over subscription login in print mode.
+Inherited `CLAUDE_CODE_SIMPLE` and `CLAUDE_CODE_SAFE_MODE` are disabled because
+they suppress subscription credentials or explicit MCP tools respectively.
+Managed settings remain authoritative: these controls do not override managed
+restrictions. Resolve conflicting policy with the administrator, not by
+dropping isolation flags. Native Windows validation uses Claude Code 2.1.263;
+unsupported CLI flags fail the run instead of falling back to an unisolated
+launch. Copilot uses a fresh run-scoped configuration home. Secure
 credential-store login continues to work; on a host without a credential
 store, supply `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` because
 credentials stored below the normal Copilot configuration home are not read.

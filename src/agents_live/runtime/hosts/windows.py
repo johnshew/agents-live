@@ -6,10 +6,12 @@ imports Windows APIs.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import tempfile
 import time
 from collections.abc import Sequence
+from hashlib import sha256
 from pathlib import Path
 
 from ...legacy import artifacts as legacy_artifacts
@@ -69,7 +71,7 @@ class WindowsTriggerStore:
             if not task["name"].startswith(self._PREFIX):
                 continue
             try:
-                argv = wintasks.parse_command_line(task["arguments"])
+                argv = _action_argv(task["command"], task["arguments"])
             except wintasks.ArgumentQuotingError:
                 continue
             metadata = artifacts.from_argv(argv)
@@ -78,7 +80,7 @@ class WindowsTriggerStore:
                     metadata.id,
                     metadata.scope,
                     "watch" if "watch-loop" in argv else "schedule",
-                    artifacts.PREFIX + metadata.id,
+                    _action_fingerprint(argv, task["working_dir"]),
                     json.dumps(task, sort_keys=True, default=str),
                     metadata.target,
                 ))
@@ -201,7 +203,6 @@ class WindowsHost:
             target = ""
         else:
             root, target = _address(subscription)
-        fingerprint = artifacts.PREFIX + subscription.key
         origin = None
         if subscription.kind == "schedule" and subscription.target != "runtime":
             origin = "boot" if parse_schedule(
@@ -244,7 +245,7 @@ class WindowsHost:
             subscription.key,
             subscription.scope,
             subscription.kind,
-            fingerprint,
+            _action_fingerprint(argv, root),
             rendered,
             watcher_argv,
             subscription.target,
@@ -265,6 +266,29 @@ class WindowsHost:
         return Health(problem is None, detail=() if problem is None else (problem,))
 
 
+def _action_argv(command: str, arguments: str) -> list[str]:
+    argv = [command, *wintasks.parse_command_line(
+        f'"agents-live-action" {arguments}')[1:]]
+    if ntpath.basename(command).casefold() in {"pythonw", "pythonw.exe"}:
+        if argv[1:4] == ["-P", "-m", "agents_live.runtime.hosts.hidden"]:
+            return argv[4:]
+    return argv
+
+
+def _action_fingerprint(argv: Sequence[str], root: str) -> str:
+    arguments = list(argv)
+    if arguments:
+        arguments[0] = ntpath.normcase(ntpath.normpath(arguments[0]))
+    if "watch-loop" in arguments and "--watch-expression" in arguments:
+        index = arguments.index("--watch-expression")
+        del arguments[index:index + 2]
+    material = json.dumps(
+        [arguments, ntpath.normcase(ntpath.normpath(root))],
+        separators=(",", ":"),
+    )
+    return artifacts.PREFIX + sha256(material.encode()).hexdigest()
+
+
 def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
     metadata = artifacts.from_argv(argv)
     if metadata is None or "watch-loop" not in argv:
@@ -272,5 +296,6 @@ def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
     return {
         "role": "watcher",
         "key": metadata.id,
-        "fingerprint": artifacts.PREFIX + metadata.id,
+        "fingerprint": _action_fingerprint(
+            argv, metadata.scope.removeprefix("repo:")),
     }

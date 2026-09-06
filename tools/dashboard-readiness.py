@@ -840,11 +840,12 @@ def _assert_operational_viewport(
                 has=page.get_by_text("readiness-agent", exact=True))
             other_page = browser.new_page()
             other_page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            last_row.get_by_role("button", name="Run this agent once now").click()
             identifier = next(row["identifier"] for row in repositories[0]["rows"]
                               if row["name"] == "readiness-agent")
+            completed = _aggregate_completions(directory, identifier)
+            last_row.get_by_role("button", name="Run this agent once now").click()
             try:
-                _await_aggregate_run(directory, identifier, mode)
+                _await_aggregate_run(directory, identifier, mode, completed)
             except ReadinessError as exc:
                 raise ReadinessError(
                     f"{exc}\nvisible activity:\n"
@@ -866,25 +867,34 @@ def _assert_operational_viewport(
     _say(f"{mode}: repository lifecycle and scale passed")
 
 
-def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
-    deadline = time.monotonic() + READY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        for log in directory.rglob("dashboard.jsonl"):
-            try:
-                records = [
-                    json.loads(line) for line in log.read_text(
-                        encoding="utf-8").splitlines() if line.strip()
-                ]
-            except (OSError, json.JSONDecodeError):
-                continue
-            if any(
+def _aggregate_completions(directory: Path, identifier: str) -> set[str]:
+    completed = set()
+    for log in directory.rglob("dashboard.jsonl"):
+        try:
+            records = [
+                json.loads(line) for line in log.read_text(
+                    encoding="utf-8").splitlines() if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError):
+            continue
+        completed.update(
+            record["run_id"] for record in records
+            if (
                     record.get("event") == "dashboard-action"
                     and record.get("status") == "success"
                     and record.get("repository") == str(directory)
                     and record.get("agent") == identifier
                     and str(record.get("message", "")).startswith("Run:")
-                    for record in records):
-                return
+                    and isinstance(record.get("run_id"), str)))
+    return completed
+
+
+def _await_aggregate_run(directory: Path, identifier: str, mode: str,
+                         completed: set[str]) -> None:
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _aggregate_completions(directory, identifier) - completed:
+            return
         time.sleep(POLL_INTERVAL_S)
     raise ReadinessError(
         f"{mode}: aggregate Run produced no repository-qualified evidence")
@@ -934,13 +944,14 @@ def _assert_aggregate_run(port: int, directory: Path,
                 raise ReadinessError(
                     f"{mode}: aggregate Run rendered disabled: "
                     f"{run_button.evaluate('element => element.outerHTML')}")
+            completed = _aggregate_completions(directory, identifier)
             run_button.click()
             page.wait_for_timeout(500)
             if browser_errors:
                 raise ReadinessError(
                     f"{mode}: aggregate Run raised browser errors: "
                     f"{browser_errors!r}")
-            _await_aggregate_run(directory, identifier, mode)
+            _await_aggregate_run(directory, identifier, mode, completed)
         finally:
             browser.close()
     _say(f"{mode}: aggregate Run kept repository-qualified evidence")
