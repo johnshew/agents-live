@@ -100,10 +100,22 @@ Copilot CLIs, install the candidate checkout or wheel, and run from PowerShell:
 ```powershell
 $env:AGENTS_LIVE_CODEX_CONFORMANCE = "1"
 $env:AGENTS_LIVE_COPILOT_CONFORMANCE = "1"
+$env:AGENTS_LIVE_CLAUDE_CONFORMANCE = "1"
 uv run --with-editable . python -m unittest `
   tests.test_seams.TestCodexLiveConformance `
-  tests.test_seams.TestCopilotLiveConformance -v
+  tests.test_seams.TestCopilotLiveConformance `
+  tests.test_seams.TestClaudeLiveConformance -v
 ```
+
+Claude conformance requires Code 2.1.263 or later and verifies the required
+isolation flags before running. Its native-login checks leave the credential
+store unchanged and cover plan reads and denied writes, structured writes,
+explicit stdio MCP effects, and authenticated HTTP pipeline get/put with an
+unauthenticated rejection. Its separate request-capture fixture uses a
+disposable configuration directory and a loopback endpoint with a dummy key;
+no fixture prompts are sent to a provider. That fixture checks user/project
+instruction, skill, memory, hook, and undeclared MCP isolation, not native
+subscription authentication or organization-managed policy enforcement.
 
 Do not treat the WSL/Linux pass as native Windows evidence. Record the native
 Windows CLI versions, candidate commit, and result in candidate acceptance. The

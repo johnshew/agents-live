@@ -5409,6 +5409,104 @@ class TestClaudeLiveConformance(unittest.TestCase):
         self.assertEqual({"status": "complete"}, completion.structured)
         self.assertEqual("allowed", (self.repo / "allowed.txt").read_text().strip())
 
+    def test_user_and_project_configuration_do_not_reach_request(self) -> None:
+        import http.server
+        import threading
+
+        captured = []
+
+        class Endpoint(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if self.path.startswith("/v1/messages"):
+                    captured.append(json.loads(body))
+                response = json.dumps({"type": "error", "error": {
+                    "type": "invalid_request_error", "message": "fixture complete",
+                }}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *args):
+                pass
+
+        home = self.repo / "fixture-home"
+        home.mkdir()
+        marker = "AMBIENT_" + os.urandom(16).hex()
+        for directory in (home, self.repo / ".claude"):
+            (directory / "CLAUDE.md").write_text(marker, encoding="utf-8")
+            skill = directory / "skills" / "ambient"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                f"---\nname: ambient\ndescription: {marker}\n---\n{marker}\n",
+                encoding="utf-8")
+            (directory / "settings.json").write_text(json.dumps({
+                "env": {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0",
+                        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"},
+                "hooks": {"SessionStart": [{"hooks": [{"type": "command",
+                    "command": subprocess.list2cmdline(
+                        [sys.executable, str(self.repo / "hook.py")])}]}]},
+            }), encoding="utf-8")
+        (self.repo / "CLAUDE.md").write_text(marker, encoding="utf-8")
+        memory = home / "projects" / "fixture" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "MEMORY.md").write_text(marker, encoding="utf-8")
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            spec = agent.ResolvedSpec(
+                "claude-isolation", "Reply complete.", "plan", (), (), (
+                    ("CLAUDE_CONFIG_DIR", str(home)),
+                    ("CLAUDE_CODE_PROJECT_DIR_NAME", "fixture"),
+                    ("ANTHROPIC_API_KEY", "fixture-not-a-credential"),
+                    ("ANTHROPIC_AUTH_TOKEN", ""),
+                    ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+                    ("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{server.server_port}"),
+                    ("CLAUDE_CODE_MAX_RETRIES", "0"),
+                ), "claude", "claude-sonnet-5", None)
+            launch = self.provider.prepare(spec, agent.Request())
+            completed = subprocess.run(
+                launch.argv, cwd=self.repo, input=launch.input_text,
+                capture_output=True, encoding="utf-8", timeout=60,
+                env={**os.environ, **dict(launch.env)})
+            self.assertNotEqual(0, completed.returncode)
+            self.assertTrue(captured, completed.stdout + completed.stderr)
+            self.assertNotIn(marker, json.dumps(captured))
+            names = [tool["name"] for request in captured
+                     for tool in request.get("tools", [])]
+            self.assertFalse(any(name.startswith("mcp__") for name in names), names)
+            self.assertFalse((self.repo / "hook-ran").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_authenticated_http_pipeline_get_put(self) -> None:
+        import urllib.error
+        import urllib.request
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        marker = "pipeline-" + os.urandom(16).hex()
+        with pipeline_runtime(None, [("/input", marker)]) as session:
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(session.endpoint.url, timeout=10)
+            self.assertIn(rejected.exception.code, (401, 403))
+            config = self.repo / "pipeline.json"
+            config.write_text(json.dumps({"mcpServers": {"pipeline": {
+                "type": "http", "url": session.endpoint.url,
+                "headers": {"Authorization": f"Bearer {session.endpoint.token}"},
+            }}}), encoding="utf-8")
+            self._run(
+                "pipeline", "Use mcp__pipeline__get to read /input. Use "
+                "mcp__pipeline__put to store that exact value at /output. "
+                "Then attempt to Write forbidden.txt. Return complete.",
+                environment=(("AGENTS_LIVE_CLAUDE_PIPELINE_MCP", str(config)),))
+            self.assertEqual((True, marker), session.snapshot("/output"))
+            self.assertFalse((self.repo / "forbidden.txt").exists())
+
     def test_explicit_stdio_mcp_executes(self) -> None:
         server = self.repo / "declared.py"
         server.write_text(
