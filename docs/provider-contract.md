@@ -45,7 +45,10 @@ Executable conformance combines the declared help surfaces, including nested
 subcommands such as `codex exec`, without learning the provider name. A provider with
 no executable of its own sets `executable` to `None` and is never probed nor
 offered an install command. The probe arguments are a tuple, so a CLI whose
-version lives behind a subcommand is described rather than special-cased.
+version lives behind a subcommand is described rather than special-cased. A
+provider may detect the native platform where that changes its CLI's
+capabilities or arguments; platform services and effects remain owned by the
+runtime host adapters.
 
 **Capabilities.** `ProviderCapabilities` names the definition modes,
 models, efforts, and MCP transports the integration supports, and whether
@@ -60,6 +63,9 @@ effort, and transport. A provider adds the rules only it can state, such as
 Claude's plan-mode tool restriction or Copilot's pipeline allow-list.
 Validation runs in `prepare`, before any process is launched, so an
 unsupported safety guarantee fails closed rather than silently degrading.
+The resolved specification also carries the absolute workspace path. A CLI
+that must receive its working directory as an argument can render it without
+inspecting process state or the filesystem.
 
 **Run-scoped artifacts.** `artifacts` returns a tuple of `RunArtifact`
 records describing the directories and files the run needs: an isolated

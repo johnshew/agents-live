@@ -149,6 +149,7 @@ def prepare(spec: AgentSpec, step: Step, ctx: StepContext) -> Launch:
         # guarantee holds either way and is never silently assumed.
         _resolved_output_schema(spec)
         if provider.capabilities.structured_output else None,
+        str(spec.root),
     )
     # Everything a provider cannot honor is refused here, before a
     # process exists: an unsupported mode reaching a CLI that ignores the

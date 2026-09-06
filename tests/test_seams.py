@@ -4,6 +4,7 @@ import ast
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import importlib
 import importlib.metadata
@@ -4941,9 +4942,10 @@ if __name__ == "__main__":
         auth = Path.home() / ".codex" / "auth.json"
         if not auth.is_file():
             self.skipTest("Codex file-backed authentication is unavailable")
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(tempfile.gettempdir()) / (
+            f"agents-live-codex-{os.getpid()}-{time.time_ns()}")
+        self.root.mkdir()
+        self.addCleanup(shutil.rmtree, self.root, True)
         self.repo = self.root / "repo"
         self.outside = self.root / "outside"
         self.home = self.root / "codex-home"
@@ -4958,6 +4960,7 @@ if __name__ == "__main__":
     def _run(
         self, spec: agent.ResolvedSpec, *, isolated_home: bool = True,
     ) -> tuple[agent.RawOutput, object]:
+        spec = dataclasses.replace(spec, cwd=str(self.repo))
         self.assertIsNone(self.provider.validate(spec))
         launch = self.provider.prepare(spec, agent.Request())
         environment = {**os.environ, **dict(launch.env)}
@@ -5022,10 +5025,15 @@ if __name__ == "__main__":
         self.assertEqual("blocked", completion.text)
         self.assertFalse((self.repo / "forbidden.txt").exists())
 
+        write_command = (
+            "PowerShell Set-Content" if sys.platform == "win32" else
+            "printf"
+        )
         write = agent.ResolvedSpec(
             "codex-write",
-            "First, as one operation, create allowed.txt with exactly allowed "
-            "followed by a newline, then read it back to verify it exists. "
+            f"First, as one shell operation, use {write_command} to create "
+            "allowed.txt with exactly allowed followed by a newline, then read "
+            "it back to verify it exists. "
             "Second, as a separate operation, attempt to create "
             "../outside/escape.txt. Do not combine the two operations in one "
             "command. After both attempts, reply with exactly complete.",
@@ -5036,6 +5044,8 @@ if __name__ == "__main__":
 
         self.assertEqual(0, raw.returncode, raw.stderr)
         self.assertEqual("complete", completion.text)
+        self.assertTrue(
+            (self.repo / "allowed.txt").is_file(), raw.stdout + raw.stderr)
         self.assertEqual("allowed\n", (self.repo / "allowed.txt").read_text())
         self.assertFalse((self.outside / "escape.txt").exists())
 
@@ -7063,10 +7073,13 @@ class TestArchitectureFitness(unittest.TestCase):
     def test_platform_detection_is_confined_to_host_adapters_in_new_seams(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         hosts = package / "runtime" / "hosts"
+        providers = package / "agent" / "providers"
         # Invariant 4 covers the package, not only the two ports: legacy/ is
-        # the one exception, and it is removed in 7.0.
+        # temporary, while providers may adapt their own CLI contract to the
+        # native platform without owning host services.
         for path in package.rglob("*.py"):
-            if hosts in path.parents or (package / "legacy") in path.parents:
+            if (hosts in path.parents or providers in path.parents
+                    or (package / "legacy") in path.parents):
                 continue
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("sys.platform", text, str(path))

@@ -232,7 +232,9 @@ product behavior and is removed in 7.0.
 2. Only immutable records built from primitives cross a port boundary.
 3. Host services never enter the agent port, and a provider receives only
    immutable descriptions of the run.
-4. Platform detection and platform APIs stay under `runtime/hosts/`.
+4. Platform services and platform APIs stay under `runtime/hosts/`. Provider
+  adapters may detect the native platform to describe CLI capabilities and
+  arguments, but they do not own host services.
 5. Started intent, ownership, and a live run are different facts.
 6. Convergence never removes an artifact whose desired state could not be
    computed.

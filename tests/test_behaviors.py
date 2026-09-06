@@ -551,17 +551,19 @@ class TestProviderRegistry(unittest.TestCase):
 
     def test_codex_uses_stdin_and_explicit_unattended_policy(self) -> None:
         provider = providers.get("codex")
-        launch = provider.prepare(
-            agent.ResolvedSpec(
-                "codex-plan", "Inspect without editing.", "plan", (), (), (),
-                "codex", "gpt-5.5", "high",
-            ),
-            agent.Request(),
-        )
+        with mock.patch("agents_live.agent.providers.codex.sys.platform", "win32"):
+            launch = provider.prepare(
+                agent.ResolvedSpec(
+                    "codex-plan", "Inspect without editing.", "plan", (), (), (),
+                    "codex", "gpt-5.5", "high", cwd="workspace",
+                ),
+                agent.Request(),
+            )
 
         self.assertEqual("Inspect without editing.", launch.input_text)
         self.assertNotIn("Inspect without editing.", launch.argv)
         self.assertEqual("read-only", launch.argv[launch.argv.index("--sandbox") + 1])
+        self.assertEqual("workspace", launch.argv[launch.argv.index("-C") + 1])
         self.assertEqual("never", launch.argv[launch.argv.index(
             "--ask-for-approval") + 1])
         for flag in ("--json", "--ephemeral", "--ignore-user-config",
@@ -572,6 +574,40 @@ class TestProviderRegistry(unittest.TestCase):
             "sandbox_workspace_write.exclude_slash_tmp=true", launch.argv)
         self.assertIn(
             "sandbox_workspace_write.exclude_tmpdir_env_var=true", launch.argv)
+        self.assertIn('windows.sandbox="unelevated"', launch.argv)
+
+        with mock.patch("agents_live.agent.providers.codex.sys.platform", "linux"):
+            linux_launch = provider.prepare(
+                agent.ResolvedSpec(
+                    "codex-plan", "Inspect without editing.", "plan", (), (), (),
+                    "codex", "gpt-5.5", "high", cwd="workspace",
+                ),
+                agent.Request(),
+            )
+        self.assertNotIn('windows.sandbox="unelevated"', linux_launch.argv)
+
+    def test_codex_receives_the_resolved_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            skill = root / "Agents" / "codex-root"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("\n".join((
+                "---",
+                "name: codex-root",
+                "description: Verify the resolved repository root.",
+                "metadata:",
+                '  agents-live.schema-version: "1"',
+                '  agents-live.selector: "codex"',
+                "---",
+                "Inspect the repository.",
+                "",
+            )), encoding="utf-8")
+
+            spec = agent.load("codex-root", root=root)
+            launch = agent.prepare(
+                spec, agent.Step.AGENT, agent.StepContext(agent.Request()))
+
+        self.assertEqual(str(root), launch.argv[launch.argv.index("-C") + 1])
 
     def test_codex_normalizes_documented_jsonl_events(self) -> None:
         stream = "\n".join((
