@@ -37,6 +37,7 @@ import subprocess
 import sys
 import time
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -133,6 +134,7 @@ _SCAN_CACHE: tuple[
     ],
 ] | None = None
 _PAGE_REFRESHES: dict[str, object] = {}
+_PAGE_LOGS: dict[str, object] = {}
 
 
 def _client_key() -> str | None:
@@ -727,6 +729,7 @@ class _ActionRequest:
     def __init__(self, label: str, script: str, args: list[str],
                  agent_name: str | None, timeout: float | None,
                  future: asyncio.Future[int], *,
+                 client=None,
                  repository: str | None = None,
                  repository_path: str | None = None) -> None:
         self.label = label
@@ -735,6 +738,7 @@ class _ActionRequest:
         self.agent_name = agent_name
         self.timeout = timeout
         self.future = future
+        self.client = client
         self.repository = repository
         self.repository_path = repository_path
         self.key = (self.repository_path or "", self.script, tuple(self.args))
@@ -753,7 +757,7 @@ _ACTION_RUNNING = False
 
 
 def _push_log(message: str) -> None:
-    log = globals().get("output_log")
+    log = _PAGE_LOGS.get(_client_key())
     if log is not None:
         _safe_ui(log.push, f"[{_local_time()}] {message}")
 
@@ -825,7 +829,7 @@ async def _execute_action(request: _ActionRequest) -> int:
     outcome = "completed" if ok else "timed out" if code == 124 else "failed"
     _push_log(
         f"{outcome}: {request.description} (exit {code}, {elapsed:.1f}s)")
-    log = globals().get("output_log")
+    log = _PAGE_LOGS.get(_client_key())
     if log is not None:
         for line in out.splitlines():
             _safe_ui(log.push, f"    {line}")
@@ -841,7 +845,8 @@ async def _process_action_queue() -> None:
             _ACTION_RUNNING = True
             started = time.monotonic()
             try:
-                code = await _execute_action(request)
+                with request.client if request.client is not None else nullcontext():
+                    code = await _execute_action(request)
             except Exception as exc:
                 code = -1
                 elapsed = time.monotonic() - started
@@ -851,10 +856,11 @@ async def _process_action_queue() -> None:
                     agent_name=request.agent_name,
                     repository=request.repository,
                     repository_path=request.repository_path)
-                _push_log(
-                    f"failed: {request.description} "
-                    f"(exit {code}, {elapsed:.1f}s): {exc}")
-                _safe_ui(_refresh_views, source="action completion")
+                with request.client if request.client is not None else nullcontext():
+                    _push_log(
+                        f"failed: {request.description} "
+                        f"(exit {code}, {elapsed:.1f}s): {exc}")
+                    _safe_ui(_refresh_views, source="action completion")
                 if not request.future.done():
                     request.future.set_result(code)
             else:
@@ -882,6 +888,7 @@ async def do_action(label: str, script: str, args: list[str],
     loop = asyncio.get_running_loop()
     request = _ActionRequest(
         label, script, list(args), agent_name, timeout, loop.create_future(),
+        client=ui.context.client if _client_key() is not None else None,
         repository=repository, repository_path=repository_path)
     if _ACTION_RUNNING or _ACTION_QUEUE:
         _push_log(f"queued: {request.description}")
@@ -1526,45 +1533,8 @@ def _add_agent_information_slots(table) -> None:
 
 
 def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
-    event_prefix = "aggregate-" if aggregate else ""
-    event_target = "$parent.$parent" if aggregate else "$parent"
-    event_args = (
-        "{identifier: props.row.identifier, "
-        "repository: props.row.repository, "
-        "repository_path: props.row.repository_path}"
-        if aggregate else "props.row"
-    )
     table.add_slot("header-cell-actions", '''
         <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
-    ''')
-    table.add_slot("body-cell-actions", f'''
-        <q-td :props="props" class="text-left" style="white-space:nowrap">
-          <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
-               :disable="!props.row.can_run"
-                 :title="props.row.run_tip"
-               :aria-label="'Run: ' + props.row.run_tip"
-                                 @click="() => {event_target}.$emit('{event_prefix}run', {event_args})" />
-          <q-btn flat dense round size="xs" icon="power_settings_new"
-                 :color="props.row.can_activate ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_activate"
-                 :title="props.row.activate_tip"
-                 :aria-label="'Start: ' + props.row.activate_tip"
-                 @click="() => {event_target}.$emit('{event_prefix}activate', {event_args})" />
-          <q-btn flat dense round size="xs" icon="stop"
-                 :color="props.row.can_pause ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_pause"
-                 :title="props.row.pause_tip"
-                 :aria-label="'Stop: ' + props.row.pause_tip"
-                 @click="() => {event_target}.$emit('{event_prefix}pause', {event_args})" />
-          <q-btn flat dense round size="xs" icon="download"
-                 :color="props.row.can_claim ? 'primary' : 'grey-7'"
-                 :disable="!props.row.can_claim"
-                 :title="props.row.claim_tip"
-                 :aria-label="'Claim: ' + props.row.claim_tip"
-                 @click="() => {event_target}.$emit('{event_prefix}claim', {event_args})" />
-          <span class="sr-only" v-if="props.row.action_reasons"
-                v-text="props.row.action_reasons"></span>
-        </q-td>
     ''')
     handlers = (
         (_run_aggregate_row, _activate_aggregate_row,
@@ -1572,9 +1542,21 @@ def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
         if aggregate else
         (_run_row, _activate_row, _pause_row, _claim_row)
     )
-    for event, handler in zip(
-            ("run", "activate", "pause", "claim"), handlers, strict=True):
-        table.on(event_prefix + event, handler)
+    actions = (
+        ("Run", "run", "play_arrow"),
+        ("Start", "activate", "power_settings_new"),
+        ("Stop", "pause", "stop"),
+        ("Claim", "claim", "download"),
+    )
+    with table.add_slot("body-cell-actions"):
+        with ui.element("q-td").props(":props=props").classes("text-left whitespace-nowrap"):
+            for (label, action, icon), handler in zip(actions, handlers, strict=True):
+                ui.button(icon=icon).props(
+                    "flat dense round size=xs "
+                    f':disable="!props.row.can_{action}" '
+                    f":title=props.row.{action}_tip "
+                    f":aria-label=\"'{label}: ' + props.row.{action}_tip\""
+                ).on("click", handler, js_handler="() => emit(props.row)")
 
 
 @ui.refreshable
@@ -1866,16 +1848,6 @@ def _refresh_views(*, source: str = "manual refresh") -> None:
         with hostruntime.enumeration_pass():
             _safe_ui(aggregate_refresh, source=source)
             _safe_ui(host_service_panel.refresh)
-        return
-    # One pass for the whole render: the summary, the table, and the
-    # header each ask every agent for its state, and without this they
-    # would each read the host's process table and task folder again.
-    with hostruntime.enumeration_pass():
-        summary = _refresh_summary()
-        agent_grid.refresh()
-        header_actions.refresh()
-        host_service_panel.refresh()
-    _push_log(summary)
 
 
 def _timer_after_first_interval(interval: float, callback) -> None:
@@ -2079,7 +2051,8 @@ def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
                         root, agents, reported_models=models)
                 ]
             except (OSError, ValueError, agent.DefinitionError,
-                    state.StartedStateUnavailable) as exc:
+                    state.StartedStateUnavailable,
+                    ownership.OwnershipUnavailableError) as exc:
                 detail = f"Discovery failed: {exc}"
                 if prior is not None:
                     group = copy.deepcopy(prior)
@@ -2384,7 +2357,19 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         "6px minmax(8rem,1fr);gap:0;min-height:0}"
         ".agent-panel{overflow:hidden;display:flex;flex-direction:column;border-top:1px solid "
         "rgba(127,127,127,.25);padding-top:.5rem}"
-        ".agent-toolbar{min-height:2.5rem}"
+        ".agent-toolbar{display:grid;grid-template-columns:minmax(9rem,12rem) "
+        "minmax(10rem,1fr) auto auto minmax(7rem,9rem) auto;gap:.5rem;align-items:center}"
+        ".agent-toolbar .q-field{min-width:0}"
+        ".agent-toolbar .q-field__control{height:36px;min-height:36px}"
+        ".agent-toolbar .q-field__marginal{height:36px}"
+        ".agent-toolbar .q-field__native{min-width:0}"
+        ".inventory-search .q-field__control{background:rgba(127,127,127,.06)}"
+        ".inventory-grouping{border:1px solid rgba(127,127,127,.3);border-radius:4px}"
+        ".inventory-grouping .q-btn{min-height:34px;width:34px;padding:4px}"
+        ".inventory-filters{max-width:calc(100vw - 24px);width:280px;padding:16px;gap:12px}"
+        ".inventory-filter-status{min-height:28px;gap:4px;align-items:center}"
+        ".inventory-filter-status .q-chip{margin:0 4px 0 0;max-width:100%}"
+        ".inventory-filter-status .q-chip__content{overflow:hidden;text-overflow:ellipsis}"
         ".agent-table-scroll{min-height:0;overflow:auto}"
         ".virtualized-agent-table{overflow:visible}"
         ".virtualized-agent-table .q-table__middle{overflow:visible}"
@@ -2404,7 +2389,12 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         ".dashboard-splitter:focus-visible{background:var(--q-primary);"
         "box-shadow:0 0 0 2px var(--q-primary)}"
         ".q-table th:nth-child(1),.q-table td:nth-child(1){text-align:left}"
+        "@media(max-width:900px){.agent-toolbar{grid-template-columns:minmax(0,1fr) auto auto "
+        "minmax(7rem,9rem) auto}.inventory-search{grid-column:1/-1;grid-row:1}}"
         "@media(max-width:640px){"
+        ".agent-toolbar{grid-template-columns:minmax(0,1fr) auto auto auto}"
+        ".inventory-sort{grid-column:1/4;grid-row:3}"
+        ".inventory-sort-direction{grid-column:4;grid-row:3}"
         ".dashboard-header{display:grid;grid-template-columns:minmax(0,1fr)}"
         ".dashboard-identity{flex-wrap:wrap}"
         ".dashboard-scope{max-width:100%}"
@@ -2477,61 +2467,76 @@ def _build_operational_page(page_state: dict | None = None) -> None:
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
         with ui.element("section").classes("agent-panel w-full min-h-0"):
-            with ui.row().classes(
-                    "agent-toolbar w-full items-center gap-2 no-wrap"):
+            with ui.element("div").classes("agent-toolbar w-full"):
                 repo_select = ui.select(
                     ["All", *repo_names], value=state_settings["repo"],
                     label="Repository scope",
                     on_change=lambda event: select_repo(event),
-                ).props("dense outlined options-dense").classes("min-w-48")
-                ui.input(
-                    "Search agents or repositories", value=filters["name"],
+                ).props("dense outlined options-dense").classes("inventory-scope")
+                search_input = ui.input(
+                    value=filters["name"], placeholder="Search agents or repositories",
                     on_change=lambda event: set_filter("name", event.value),
-                ).props("dense outlined clearable").classes("grow min-w-48")
+                ).props('dense outlined clearable aria-label="Search agents or repositories"').classes(
+                    "inventory-search")
+                with search_input.add_slot("prepend"):
+                    ui.icon("search", size="20px")
                 with ui.button(icon="filter_list").props(
-                        "flat round dense aria-label=Filters"):
-                    with ui.menu():
-                        with ui.column().classes("gap-2 p-2 min-w-48"):
-                            ui.label("Filters").classes("text-sm font-medium")
-                            ui.select(
-                                ["All", *sorted({row["state"] for row in snapshot["rows"]})],
-                                value=filters["state"], label="State",
-                                on_change=lambda event: set_filter("state", event.value),
-                            ).props("dense outlined options-dense").classes("w-full")
-                            ui.select(
-                                ["All", *sorted({row["owner"] for row in snapshot["rows"]})],
-                                value=filters["owner"], label="Owner",
-                                on_change=lambda event: set_filter("owner", event.value),
-                            ).props("dense outlined options-dense").classes("w-full")
-                            ui.select(
-                                ["All", *sorted({row["agent"] for row in snapshot["rows"]})],
-                                value=filters["runtime"], label="Runtime",
-                                on_change=lambda event: set_filter("runtime", event.value),
-                            ).props("dense outlined options-dense").classes("w-full")
-                            ui.checkbox(
+                        "flat round dense aria-label=Filters") as filter_button:
+                    ui.tooltip("Filter agents")
+                    with ui.menu().props("anchor=bottom-right self=top-right") as filter_menu:
+                        with ui.column().classes("inventory-filters"):
+                            with ui.row().classes("w-full items-center justify-between"):
+                                ui.label("Filters").classes("text-sm font-semibold")
+                                ui.button(icon="close", on_click=filter_menu.close).props(
+                                    'flat round dense aria-label="Close filters"')
+                            filter_controls = {}
+                            for key, field, label in (
+                                    ("state", "state", "State"),
+                                    ("owner", "owner", "Owner"),
+                                    ("runtime", "agent", "Runtime")):
+                                filter_controls[key] = ui.select(
+                                    ["All", *sorted({row[field] for row in snapshot["rows"]})],
+                                    value=filters[key], label=label,
+                                    on_change=lambda event, key=key: set_filter(key, event.value),
+                                ).props("dense outlined options-dense").classes("w-full")
+                            filter_controls["failing"] = ui.checkbox(
                                 "Failing only", value=filters["failing"],
                                 on_change=lambda event: set_filter(
                                     "failing", event.value),
                             ).props("dense")
-                            ui.checkbox(
-                                "Group by repository",
-                                value=state_settings["grouped"],
-                                on_change=lambda event: set_grouped(event),
-                            ).props("dense")
+                grouping = ui.element("q-btn-toggle").props(
+                    'dense unelevated toggle-color=primary aria-label="Inventory grouping"').classes(
+                    "inventory-grouping").on(
+                        "update:model-value", lambda event: set_grouped(event.args), [None])
+                grouping.props["options"] = [
+                    {"value": True, "icon": "view_agenda",
+                     "aria-label": "Group by repository", "title": "Group by repository"},
+                    {"value": False, "icon": "view_list",
+                     "aria-label": "Flat list", "title": "Flat list"},
+                ]
                 sort_labels = {
                     "Agent": "name", "State": "state", "Owner": "owner",
                     "Runtime": "agent", "Model": "model",
                     "List cost 24h": "cost_day", "List cost 1w": "cost_week",
                 }
-                current_sort = next(
-                    label for label, field in sort_labels.items()
-                    if field == state_settings["sort_by"])
-                ui.select(
-                    list(sort_labels), value=current_sort, label="Sort",
-                    on_change=lambda event: set_sort(sort_labels[event.value]),
-                ).props("dense outlined options-dense").classes("min-w-32")
+                sort_select = ui.select(
+                    {field: label for label, field in sort_labels.items()},
+                    value=state_settings["sort_by"], label="Sort",
+                    on_change=lambda event: set_sort(event.value),
+                ).props("dense outlined options-dense").classes("inventory-sort")
                 sort_direction = ui.button(icon="arrow_upward").props(
-                    "flat round dense aria-label=Reverse-sort")
+                    "flat round dense aria-label=Reverse-sort").classes("inventory-sort-direction")
+                sort_direction.tooltip("Reverse sort direction")
+            with ui.row().classes("inventory-filter-status w-full") as filter_status:
+                filter_chips = {}
+                for key, label in (("state", "State"), ("owner", "Owner"),
+                                   ("runtime", "Runtime"), ("failing", "Failing only")):
+                    filter_chips[key] = ui.chip(
+                        label, removable=True, color="grey-2", text_color="grey-9",
+                        on_value_change=lambda event, key=key: clear_filter(key) if not event.value else None,
+                    ).props("dense square")
+                ui.button("Clear filters", on_click=lambda: clear_filters()).props(
+                    "flat dense no-caps size=sm")
             inventory_summary = ui.label().classes(
                 "text-xs text-gray-500 px-1")
             selection_summary = ui.label().classes(
@@ -2549,16 +2554,76 @@ def _build_operational_page(page_state: dict | None = None) -> None:
 
         with ui.element("section").classes("dashboard-log-panel w-full"):
             activity_scope = ui.label().classes("text-sm text-gray-500")
-            global output_log
             output_log = ui.log(max_lines=300).classes(
                 "activity-log w-full grow font-mono text-xs")
 
     continuity_ready = False
+    inventory_views = {}
+    with inventory:
+        empty_inventory = ui.label("No registered repositories.").classes("text-sm font-medium")
+        deferred_select = ui.select(
+            {}, label="More repositories",
+            on_change=lambda event: expand_repository(event.value),
+        ).props("dense outlined options-dense clearable").classes("min-w-64 px-1")
+        inventory_body = ui.element("div").classes("all-repos-body w-full")
+
+    def persist_view() -> None:
+        if continuity_ready:
+            _safe_ui(ui.run_javascript,
+                     "window.agentsLiveContinuity?.setView("
+                     f"{json.dumps({'filters': filters, 'settings': state_settings})})")
+
+    def create_inventory_view(grouped: bool) -> dict:
+        with inventory_body:
+            with ui.element("section").classes("repository-group w-full") as section:
+                with ui.row().classes(
+                        "repository-heading w-full items-baseline gap-3 no-wrap") as heading:
+                    name = ui.label().classes("text-sm font-medium")
+                    path = ui.label().classes("repository-path grow text-xs text-gray-500")
+                    status = ui.label().classes("text-xs text-gray-500")
+                heading.set_visibility(grouped)
+                detail = ui.label().classes("text-sm text-orange-600 px-1")
+                empty = ui.label("No matching agents.").classes("text-sm text-gray-500 px-1")
+                columns = _AGGREGATE_COLUMNS if grouped else [
+                    {"name": "repository", "label": "Repository", "field": "repository"},
+                    *_AGGREGATE_COLUMNS,
+                ]
+                table = ui.table(
+                    columns=[{**column, "sortable": False} for column in columns],
+                    rows=[], row_key="repository_identifier",
+                    pagination={"rowsPerPage": 0}, selection="multiple",
+                ).classes("virtualized-agent-table w-full").props(
+                    "flat dense hide-bottom separator=none "
+                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
+                    ":virtual-scroll-target=\"'.agent-table-scroll'\"")
+                table.on_select(lambda event: set_selection(
+                    event.selection, {str(row['repository_identifier']) for row in table.rows}))
+                _add_agent_information_slots(table)
+                _add_agent_action_slots(table, aggregate=True)
+        return dict(section=section, name=name, path=path, status=status,
+                    detail=detail, empty=empty, table=table)
 
     def render_inventory(current: dict) -> None:
-        if continuity_ready:
-            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.capture()")
+        active_filters = 0
+        for key, control in filter_controls.items():
+            control.value = filters[key]
+            active = bool(filters[key]) if key == "failing" else filters[key] != "All"
+            chip = filter_chips[key]
+            chip.value = True
+            chip.text = "Failing only" if key == "failing" else f"{key.title()}: {filters[key]}"
+            chip.set_visibility(active)
+            active_filters += int(active)
+        filter_status.set_visibility(bool(active_filters))
+        filter_button.props(f"color={'primary' if active_filters else 'grey-7'}")
+        search_input.value = filters["name"]
+        grouping.props["model-value"] = state_settings["grouped"]
+        sort_select.value = state_settings["sort_by"]
+        sort_direction.props(
+            f"icon={'arrow_downward' if state_settings['descending'] else 'arrow_upward'}")
         visible_groups = _filtered_repo_groups(current["groups"], filters)
+        for group in visible_groups:
+            group["rows"] = _sorted_agent_rows(
+                group["rows"], state_settings["sort_by"], state_settings["descending"])
         visible_rows = sum(len(group["rows"]) for group in visible_groups)
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
@@ -2570,106 +2635,43 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         state_settings["selection"] = sorted(selected_keys)
         selection_summary.text = f"{len(selected_keys)} agents selected"
         attention_summary.text = _attention_summary(current)
-        inventory.clear()
-        with inventory:
-            with ui.element("div").classes("all-repos-body w-full"):
-                if not current["groups"]:
-                    ui.label("No registered repositories.").classes(
-                        "text-sm font-medium")
-                    ui.button("Open settings", icon="settings",
-                              on_click=settings_dialog.open).props(
-                        "dense flat no-caps")
-                elif state_settings.get("grouped", True):
-                    expanded = list(
-                        state_settings.get("expanded_repositories", []))
-                    mounted_groups, deferred_groups = _repository_window(
-                        visible_groups, expanded)
-                    if deferred_groups:
-                        ui.select(
-                            {
-                                group["name"]: (
-                                    f"{group['name']} | {len(group['rows'])} agents")
-                                for group in deferred_groups
-                            },
-                            label=f"Show one of {len(deferred_groups)} more repositories",
-                            on_change=lambda event: expand_repository(event.value),
-                        ).props("dense outlined options-dense clearable").classes(
-                            "min-w-64 px-1")
-                    for group in mounted_groups:
-                        with ui.element("section").classes(
-                                "repository-group w-full"):
-                            label = group["name"] + (
-                                " (default)" if group["default"] else "")
-                            with ui.row().classes(
-                                    "repository-heading w-full items-baseline gap-3 no-wrap"):
-                                ui.label(label).classes("text-sm font-medium")
-                                ui.label(group["path"]).classes(
-                                    "repository-path grow text-xs text-gray-500")
-                                ui.label(
-                                    "Stale" if group.get("stale") else
-                                    "Unavailable" if not group["available"] else
-                                    f"{group['collection']['state'].title()} | "
-                                    f"{len(group['rows'])} agents"
-                                ).classes("text-xs text-gray-500")
-                            if group["error"]:
-                                ui.label(group["error"]).classes(
-                                    "text-sm text-red-500 px-1")
-                            elif group["collection"]["detail"]:
-                                ui.label(group["collection"]["detail"]).classes(
-                                    "text-sm text-orange-600 px-1")
-                            if not group["rows"]:
-                                ui.label("No matching agents.").classes(
-                                    "text-sm text-gray-500 px-1")
-                            else:
-                                group_keys = {
-                                    str(row["repository_identifier"])
-                                    for row in group["rows"]
-                                }
-                                table = ui.table(
-                                    columns=_AGGREGATE_COLUMNS,
-                                    rows=group["rows"],
-                                    row_key="repository_identifier",
-                                    pagination={"rowsPerPage": 0},
-                                    selection="multiple",
-                                    on_select=lambda event, keys=group_keys:
-                                        set_selection(event.selection, keys),
-                                ).classes("virtualized-agent-table w-full").props(
-                                    "flat dense hide-bottom separator=none "
-                                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
-                                    ":virtual-scroll-target=\"'.agent-table-scroll'\"")
-                                table.selected = [
-                                    row for row in group["rows"]
-                                    if row["repository_identifier"] in selected_keys
-                                ]
-                                table.update()
-                                _add_agent_information_slots(table)
-                                _add_agent_action_slots(table, aggregate=True)
-                else:
-                    rows = _ungrouped_agent_rows(visible_groups)
-                    table = ui.table(
-                        columns=[
-                            {"name": "repository", "label": "Repository",
-                             "field": "repository", "sortable": True},
-                            *_AGGREGATE_COLUMNS,
-                        ], rows=rows, row_key="repository_identifier",
-                        pagination={"rowsPerPage": 0},
-                        selection="multiple",
-                        on_select=lambda event, keys={
-                            str(row["repository_identifier"]) for row in rows
-                        }: set_selection(event.selection, keys),
-                    ).classes("virtualized-agent-table w-full").props(
-                        "flat dense hide-bottom separator=none "
-                        f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
-                        ":virtual-scroll-target=\"'.agent-table-scroll'\"")
-                    table.selected = [
-                        row for row in rows
-                        if row["repository_identifier"] in selected_keys
-                    ]
-                    table.update()
-                    _add_agent_information_slots(table)
-                    _add_agent_action_slots(table, aggregate=True)
-        if continuity_ready:
-            _safe_ui(ui.run_javascript, "window.agentsLiveContinuity?.restore()")
+        grouped = state_settings.get("grouped", True)
+        mounted, deferred = _repository_window(
+            visible_groups, state_settings.get("expanded_repositories", [])) if grouped else ([], [])
+        desired = {(group["name"], group["path"]): group for group in mounted}
+        if not grouped and current["groups"]:
+            desired[None] = {"rows": _sorted_agent_rows(
+                _ungrouped_agent_rows(visible_groups), state_settings["sort_by"],
+                state_settings["descending"])}
+        empty_inventory.set_visibility(not current["groups"])
+        deferred_select.set_options({group["name"]: f"{group['name']} | {len(group['rows'])} agents"
+                                     for group in deferred})
+        deferred_select.set_visibility(bool(deferred))
+        deferred_select.label = f"Show one of {len(deferred)} more repositories"
+        for key in list(inventory_views):
+            if key not in desired:
+                inventory_views.pop(key)["section"].delete()
+        for key, group in desired.items():
+            if key not in inventory_views:
+                inventory_views[key] = create_inventory_view(grouped)
+            view = inventory_views[key]
+            if grouped:
+                view["name"].text = group["name"] + (" (default)" if group["default"] else "")
+                view["path"].text = group["path"]
+                view["status"].text = (
+                    "Stale" if group.get("stale") else
+                    "Unavailable" if not group["available"] else
+                    f"{group['collection']['state'].title()} | {len(group['rows'])} agents")
+                view["detail"].text = group["error"] or group["collection"]["detail"] or ""
+            view["detail"].set_visibility(bool(view["detail"].text))
+            view["empty"].set_visibility(not group["rows"])
+            table = view["table"]
+            table.rows = group["rows"]
+            table.selected = [row for row in group["rows"]
+                              if row["repository_identifier"] in selected_keys]
+            table.set_visibility(bool(group["rows"]))
+            table.update()
+        persist_view()
 
     def update_labels(current: dict) -> None:
         selected = current["scope"]
@@ -2707,6 +2709,9 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     f"{source} failed; showing the last coherent snapshot: {exc}")
             return
         snapshot = refreshed
+        for key, field in (("state", "state"), ("owner", "owner"), ("runtime", "agent")):
+            options = sorted(({row[field] for row in snapshot["rows"]} | {filters[key]}) - {"All"})
+            filter_controls[key].set_options(["All", *options], value=filters[key])
         repo_select.options = ["All", *repo_names]
         repo_select.value = state_settings["repo"]
         repo_select.update()
@@ -2725,38 +2730,54 @@ def _build_operational_page(page_state: dict | None = None) -> None:
     client_key = _client_key()
     if client_key is not None:
         _PAGE_REFRESHES[client_key] = rebuild
+        _PAGE_LOGS[client_key] = output_log
+
+        def release_page() -> None:
+            _PAGE_REFRESHES.pop(client_key, None)
+            _PAGE_LOGS.pop(client_key, None)
+
+        ui.context.client.on_delete(release_page)
 
     def select_repo(event) -> None:
+        if state_settings["repo"] == event.value:
+            return
         state_settings["repo"] = event.value
         rebuild()
 
     def set_filter(key: str, value) -> None:
+        if key == "name":
+            value = value or ""
+        if filters[key] == value:
+            return
         filters[key] = value
         render_inventory(snapshot)
 
-    async def set_selection(selected: list[dict], group_keys: set[str]) -> None:
-        persisted = await ui.run_javascript(
-            "return window.agentsLiveContinuity?.getSelection() || []")
+    def clear_filter(key: str) -> None:
+        set_filter(key, False if key == "failing" else "All")
+
+    def clear_filters() -> None:
+        filters.update(state="All", owner="All", runtime="All", failing=False)
+        render_inventory(snapshot)
+
+    def set_selection(selected: list[dict], group_keys: set[str]) -> None:
         current = set(state_settings.get("selection", []))
-        if isinstance(persisted, list):
-            current.update(str(key) for key in persisted)
         current.intersection_update(
             _canonical_selection_keys(snapshot["repository_groups"]))
         keys = _updated_selection_keys(
             sorted(current), selected, group_keys)
         state_settings["selection"] = keys
         selection_summary.text = f"{len(keys)} agents selected"
-        _safe_ui(
-            ui.run_javascript,
-            "window.agentsLiveContinuity?.setSelection("
-            f"{json.dumps(keys)})",
-        )
+        persist_view()
 
-    def set_grouped(event) -> None:
-        state_settings["grouped"] = bool(event.value)
+    def set_grouped(value: bool) -> None:
+        if state_settings["grouped"] == value:
+            return
+        state_settings["grouped"] = value
         render_inventory(snapshot)
 
     def expand_repository(name: str) -> None:
+        if not name:
+            return
         expanded = [
             value for value in state_settings.get(
                 "expanded_repositories", []) if value != name
@@ -2767,14 +2788,16 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         render_inventory(snapshot)
 
     def set_sort(field: str) -> None:
+        if state_settings["sort_by"] == field:
+            return
         state_settings["sort_by"] = field
-        rebuild(announce=False)
+        render_inventory(snapshot)
 
     def reverse_sort() -> None:
         state_settings["descending"] = not state_settings["descending"]
         sort_direction.props(
             f"icon={'arrow_downward' if state_settings['descending'] else 'arrow_upward'}")
-        rebuild(announce=False)
+        render_inventory(snapshot)
 
     sort_direction.on("click", reverse_sort)
     def tick_age() -> None:
@@ -2800,8 +2823,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                             const activity = scrollNode('.dashboard-log-panel .activity-log');
                             const active = document.activeElement;
                             this.state.inventoryScroll = inventory?.scrollTop || 0;
-                            this.state.search = document.querySelector(
-                                '[aria-label="Search agents or repositories"]')?.value || '';
                             if (activity) {
                                 this.state.activityAtBottom =
                                     activity.scrollHeight - activity.clientHeight - activity.scrollTop < 4;
@@ -2810,12 +2831,10 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                             this.state.focusLabel = active?.getAttribute?.('aria-label') || '';
                             write(this.state);
                         },
-                        setSelection(keys) {
-                            this.state.selection = keys;
+                        setView(view) {
+                            this.state.filters = view.filters;
+                            this.state.settings = view.settings;
                             write(this.state);
-                        },
-                        getSelection() {
-                            return this.state.selection || [];
                         },
                         setSettingsOpen(visible) {
                             this.state.settingsOpen = visible;
@@ -2824,7 +2843,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                         restore() {
                             const inventory = scrollNode('.agent-table-scroll');
                             const activity = scrollNode('.dashboard-log-panel .activity-log');
-                            const selectedToRestore = new Set(this.state.selection || []);
                             requestAnimationFrame(() => {
                                 if (inventory) inventory.scrollTop = this.state.inventoryScroll || 0;
                                 if (activity) activity.scrollTop = this.state.activityAtBottom
@@ -2833,38 +2851,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                                     const escaped = CSS.escape(this.state.focusLabel);
                                     document.querySelector(`[aria-label="${escaped}"]`)?.focus();
                                 }
-                                const search = document.querySelector(
-                                    '[aria-label="Search agents or repositories"]');
-                                if (search && search.value !== (this.state.search || '')) {
-                                    const setter = Object.getOwnPropertyDescriptor(
-                                        HTMLInputElement.prototype, 'value').set;
-                                    setter.call(search, this.state.search || '');
-                                    search.dispatchEvent(new Event('input', {bubbles: true}));
-                                    search.dispatchEvent(new Event('change', {bubbles: true}));
-                                }
-                                let selectionAttempts = 0;
-                                const restoreSelection = () => {
-                                    const restored = new Set();
-                                    document.querySelectorAll(
-                                        '.virtualized-agent-table tbody tr').forEach(row => {
-                                        const key = row.querySelector('[data-agent-key]')?.dataset.agentKey;
-                                        const checkbox = row.querySelector('[role=checkbox]');
-                                        if (selectedToRestore.has(key)) {
-                                            if (checkbox?.getAttribute('aria-checked') !== 'true') {
-                                                checkbox?.click();
-                                            }
-                                            if (checkbox?.getAttribute('aria-checked') === 'true') {
-                                                restored.add(key);
-                                            }
-                                        }
-                                    });
-                                    selectionAttempts += 1;
-                                    if (restored.size < selectedToRestore.size
-                                            && selectionAttempts < 20) {
-                                        setTimeout(restoreSelection, 100);
-                                    }
-                                };
-                                setTimeout(restoreSelection, 100);
                             });
                         },
                     };
@@ -2899,18 +2885,29 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                         splitter.addEventListener('pointerup', done);
                     });
                     window.addEventListener('beforeunload', () => controller.capture());
-                    controller.restore();
-                    if (controller.state.settingsOpen) {
-                        setTimeout(() => document.querySelector('[aria-label="Settings"]')?.click(), 0);
-                    }
+                    return controller.state;
                 })();
     '''
-    ui.timer(
-        0.1,
-        lambda: _safe_ui(ui.run_javascript, continuity_script),
-        once=True,
-    )
-    continuity_ready = True
+    async def restore_view() -> None:
+        nonlocal continuity_ready
+        saved = await ui.run_javascript(continuity_script)
+        if isinstance(saved, dict):
+            for key in filters:
+                if key in saved.get("filters", {}):
+                    filters[key] = saved["filters"][key]
+            for key in state_settings:
+                if key in saved.get("settings", {}):
+                    state_settings[key] = saved["settings"][key]
+            repo_select.value = state_settings["repo"]
+            search_input.value = filters["name"]
+            rebuild(announce=False)
+            if saved.get("settingsOpen"):
+                settings_dialog.open()
+        continuity_ready = True
+        persist_view()
+        _safe_ui(ui.run_javascript, "window.agentsLiveContinuity.restore()")
+
+    ui.timer(0.1, restore_view, once=True)
     _push_log(_operational_summary(snapshot, source="startup"))
     tick_age()
     ui.timer(1.0, tick_age)

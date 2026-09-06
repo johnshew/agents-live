@@ -1,7 +1,7 @@
 ---
 title: Dashboard Validation Plan
 description: Acceptance scenarios, evidence, and release gates for the Agents Live dashboard
-ms.date: 2026-08-29
+ms.date: 2026-09-06
 ms.topic: concept
 ---
 
@@ -51,6 +51,18 @@ Each implementation issue or pull request must record:
 The evidence record lives in the implementation issue while work is active and
 in the pull request before merge. Release acceptance links those records rather
 than copying their details into a new report.
+
+The dashboard-readiness continuity journey checks table identity through local
+filtering, sorting, and refresh; selection removal and retention across hidden
+rows and grouping; active filter removal; model restoration after reload; and
+toolbar bounds on desktop and mobile. Its repository journey checks 151-row
+virtualization, compact row height, one inventory scroll owner, bottom-row
+dispatch after sorting, and completion routing with two tabs open. These
+focused regressions do not claim the larger stress profiles below.
+
+Set `AGENTS_LIVE_READINESS_SCREENSHOTS` to a local artifact directory to capture
+the viewport images during a layout or continuity run. Keep machine-specific
+screenshots out of the exported tree.
 
 ## Environments
 

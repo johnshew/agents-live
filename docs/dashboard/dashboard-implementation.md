@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: concept
 ---
 
@@ -30,6 +30,23 @@ As of 2026-09-05:
 The generated release report remains the source for the latest branch, test,
 and installed-version details. This section explains why the dashboard work is
 part of the release plan.
+
+## v6.9 recovery
+
+The 6.9 recovery in [#461](https://github.com/johnshew/agents-live/issues/461)
+keeps one shared inventory scroll region and compact virtualized rows.
+Repository tables retain their identity through filtering, sorting, and
+refresh; only a scope or grouping change adds or removes affected views.
+Python page state owns selection, filters, grouping, and sorting. Session
+storage restores that model on reload without synthetic input or checkbox
+clicks. The toolbar exposes grouping, removable active filters, and one sort
+order, with responsive tracks rather than overflowing minimum widths.
+
+Row controls dispatch through their owning NiceGUI event handlers. Queued
+actions retain the initiating client, so completion refreshes and activity
+stay in that tab. Client deletion releases page registrations without
+cancelling durable action execution. Repository-local collection failures,
+including ownership loss during discovery, preserve stale rows explicitly.
 
 ## v6.6 decision
 
