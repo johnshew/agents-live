@@ -21,8 +21,8 @@ deferred = [105, 388, 434]
 promotion_decision = []
 
 [bake.recommendations]
-overall = "Finish native-Windows provider conformance, then prepare and accept the official 6.9.0 candidate."
+overall = "Keep 6.9.0 in bake while the rejected candidate's bugs are fixed and locally validated; move bake to main only after the newest bake is accepted."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-testing = "Version 6.8.0 passed installed operational acceptance on Windows. Native-Windows Copilot conformance passes; Codex sign-in, Codex conformance, and installed-candidate acceptance remain required before publication."
+testing = "The first 6.9.0 candidate was rejected after local bugs were found. Version 6.8.0 remains the last accepted installation; the newest 6.9.0 bake, Codex sign-in and conformance, and a newly prepared candidate still require acceptance before publication."

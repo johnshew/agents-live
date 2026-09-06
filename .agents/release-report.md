@@ -22,6 +22,14 @@ release channel only through one reviewable promotion pull request from bake to
 created by `tools/release.py` after bake moves into a clean, up-to-date `main`;
 it is not a third channel.
 
+If local testing rejects an official candidate before publication, do not add
+fixes to its temporary candidate branch. Reopen a `bake/v<version>-local`
+branch from current `origin/main`, update `.github/release-channels.toml`, and
+route focused fixes there. The report must then describe the rejected candidate
+in the bake recommendation while the last successfully tested deployment stays
+in the deployment fields. After the corrected bake moves to `main`, prepare a
+new candidate and replace the stale local candidate evidence.
+
 A bake may be published as a GitHub prerelease when another machine must test
 the exact validated bytes. This does not move the bake to the release channel:
 the tag retains its commit-qualified development version, the GitHub release

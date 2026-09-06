@@ -138,9 +138,13 @@ of the test.
 
 ## Deploy the current bake locally
 
-Use the focused local deployment workflow after pull requests have merged:
+Use the focused local deployment workflow after a pull request or direct
+administrative commit reaches the configured bake branch. Prefer pull requests
+for substantive fixes so review and CI evidence remain attached to each change:
 
 ```bash
+git switch <configured-bake-branch>
+git pull --ff-only origin <configured-bake-branch>
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
 
@@ -154,6 +158,12 @@ validated commit, artifact digest, and exact gate list. A later deployment of
 the same commit reuses that preparation evidence; a changed commit, wheel,
 platform, Python version, Test workflow, or gate list invalidates it
 mechanically.
+
+The optional `--allow-downgrade` bypasses only the guard against moving to a
+lower numeric `major.minor.patch` release. It is not needed when replacing a
+stable candidate with a commit-qualified bake on the same release line, or
+when moving between bakes on that release line. It does not bypass artifact,
+health, watcher, dashboard, or post-install identity checks.
 
 Before replacement, the workflow snapshots release-owned all-repository status
 and doctor contracts plus the selected repository's started watchers. It stops

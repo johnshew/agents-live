@@ -61,6 +61,30 @@ The standard loop for any change that lands as commits:
    (`git push origin --delete <branch>`) if the repository did not
    delete it already.
 
+### Active bake routing
+
+Before branching, inspect `.github/release-channels.toml`. When its configured
+`bake.branch` exists and contains work not yet in `main`, that branch is the
+integration target for the active bake cycle. Focused pull requests should
+target the bake branch instead of `main`; direct commits are acceptable for
+small administrative changes, but substantive fixes should retain PR review
+and CI evidence.
+
+After a change reaches the bake branch, deploy its exact synchronized commit:
+
+```bash
+git switch <configured-bake-branch>
+git pull --ff-only origin <configured-bake-branch>
+uv run --script tools/local-deploy.py --repo <live-repository>
+```
+
+The deployment creates and selects a commit-qualified
+`<target>.dev0+g<commit>` generation. `--allow-downgrade` is required only
+when intentionally moving to a lower numeric `major.minor.patch` release; it
+is not needed between a stable candidate and a bake on the same release line.
+When bake is approved, move it to `main` through one promotion pull request,
+then prepare a new official candidate from the resulting clean `main`.
+
 ## Rules
 
 - **Use `uv`, never plain `python3`.** The package requires Python
