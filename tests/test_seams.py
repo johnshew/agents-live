@@ -1237,8 +1237,7 @@ class TestReleaseTool(unittest.TestCase):
             "https://github.com/johnshew/agents-live/"
             "releases/download/v6.8.0")
         self.assertIn("## Quick install", notes)
-        self.assertIn(f"curl --proto '=https' --tlsv1.2 -LsSf "
-                      f"{root_url}/install.sh | sh", notes)
+        self.assertIn(f"curl -fsSL {root_url}/install.sh | sh", notes)
         self.assertIn(f"irm {root_url}/install.ps1 | iex", notes)
         self.assertNotIn("install.sh 6.8.0", notes)
         self.assertNotIn("install.ps1 6.8.0", notes)

@@ -15,7 +15,7 @@ if command -v uv >/dev/null 2>&1; then
   uv=$(command -v uv)
 else
   uv_installer="$temporary/uv-install.sh"
-  if ! curl --proto '=https' --tlsv1.2 -LsSf \
+  if ! curl -fsSL \
       https://astral.sh/uv/install.sh -o "$uv_installer"; then
     echo "agents-live: could not download uv; check proxy and TLS settings" >&2
     exit 1

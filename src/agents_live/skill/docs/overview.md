@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: overview
 ---
 
@@ -117,7 +117,7 @@ does not resolve Agents Live through a configured Python index:
 - [OpenAI Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
+curl -fsSL \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 agents-live init --repo /path/to/repository
 agents-live doctor

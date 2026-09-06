@@ -36,7 +36,7 @@ See [Installation](#installation) for required host tools and platform-specific
 instructions.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
+curl -fsSL \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 agents-live init
 agents-live start markdown-polisher
@@ -102,7 +102,7 @@ watchers, then run the latest stable installer:
 ```bash
 sudo apt-get update
 sudo apt-get install -y cron inotify-tools
-curl --proto '=https' --tlsv1.2 -LsSf \
+curl -fsSL \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 
 agents-live --repo /path/to/repository init

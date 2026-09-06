@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- docs: simplify curl-based install commands.
+  The README, packaged guidance, installer bootstrap, and generated release
+  notes now use the conventional `curl -fsSL` form.
+
 ## 6.9.0 - 2026-09-07
 
 - fix: accept slow healthy dashboard responses during installed candidate validation.
@@ -87,6 +91,11 @@ history is retained in the source repository.
   upgrade preflight still report every failed component. Provider wrappers
   must implement the complete contract explicitly; registration never infers
   delegate methods that could bypass the wrapper's own restrictions.
+=======
+- docs: simplify curl-based install commands.
+  The README, packaged guidance, installer bootstrap, and generated release
+  notes now use the conventional `curl -fsSL` form.
+>>>>>>> 70d81f2 (docs: simplify curl install commands)
 - fix: enable workspace-confined Codex writes on native Windows.
   Codex selects its supported unelevated Windows sandbox and receives the
   repository root explicitly, allowing in-workspace changes while writes
