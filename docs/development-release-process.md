@@ -62,10 +62,13 @@ requests targeting bake. After each change reaches bake, deploy the exact
 synchronized commit:
 
 ```bash
-git switch <configured-bake-branch>
 git pull --ff-only origin <configured-bake-branch>
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
+
+Run these commands from a clean checkout of the configured bake branch. Use the
+primary checkout only when it is already clean and on that branch; otherwise,
+use a dedicated worktree and remove it after deployment.
 
 Each deployment receives a commit-qualified version such as
 `<target>.dev0+g<commit>`. Keep fixing and redeploying until the newest bake

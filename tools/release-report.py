@@ -365,10 +365,15 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"- If requested work names `{release['branch']}`, confirm whether it "
         "is a bake fix, bake-to-release promotion, or independent post-release "
         "work before changing branches.",
+        f"- Use the primary checkout only when it is clean and already on "
+        f"`{bake['branch']}`; otherwise, create a dedicated worktree from that "
+        "branch and remove it when the task is complete.",
+        f"- Verify that work descends from `{bake['branch']}` before committing "
+        "or pushing.",
         "- After each change reaches bake, deploy its exact synchronized commit:",
+        f"  Run this from a clean checkout of `{bake['branch']}`.",
         "",
         "```bash",
-        f"git switch {bake['branch']}",
         f"git pull --ff-only origin {bake['branch']}",
         "uv run --script tools/local-deploy.py --repo <live-repository>",
         "```",

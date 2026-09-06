@@ -42,6 +42,11 @@ the active bake belongs to that bake. If an active bake exists but a request
 names `main`, ask whether the developer intends a bake fix, bake-to-release
 promotion, or independent post-release work before making changes.
 
+Use the primary checkout only when it is clean and already on the intended
+target branch. Otherwise, create a dedicated worktree from that target. Verify
+the target ancestry before committing or pushing, and always remove the
+worktree when the task is complete.
+
 Developer promotion intent is durable manifest state, not an inference from a
 conversation or a green build. While testing continues, set:
 

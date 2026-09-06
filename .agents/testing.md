@@ -143,12 +143,14 @@ administrative commit reaches the configured bake branch. Prefer pull requests
 for substantive fixes so review and CI evidence remain attached to each change:
 
 ```bash
-git switch <configured-bake-branch>
 git pull --ff-only origin <configured-bake-branch>
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
 
-The command requires the clean bake branch configured in
+Run these commands from a clean checkout of the configured bake branch, using
+the primary checkout when it is already clean and on that branch or a dedicated
+worktree otherwise. Remove a temporary worktree after deployment. The command
+requires the clean bake branch configured in
 `.github/release-channels.toml`, fast-forwards it from `origin`, and prepares
 one commit-and-digest-addressed development wheel. The archived build copy is
 stamped as `<target>.dev0+g<commit>` without changing tracked release versions.

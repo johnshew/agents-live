@@ -6294,6 +6294,40 @@ class TestWindowsTaskScheduling(unittest.TestCase):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def test_branch_work_guidance_preserves_checkout_isolation(self) -> None:
+        repository = Path(__file__).parents[1]
+        guidance = {
+            path: (repository / path).read_text(encoding="utf-8")
+            for path in (
+                "AGENTS.md",
+                ".agents/release-report.md",
+                ".agents/testing.md",
+                "docs/development-release-process.md",
+                "tools/release-report.py",
+            )
+        }
+        for path, text in guidance.items():
+            with self.subTest(path=path):
+                self.assertIn("worktree", text.lower())
+                self.assertIn("remove", text.lower())
+
+        self.assertIn("before committing or pushing", guidance["AGENTS.md"])
+        self.assertIn(
+            "before committing or pushing", guidance[".agents/release-report.md"])
+        self.assertIn("before committing ", guidance["tools/release-report.py"])
+        self.assertIn("or pushing.", guidance["tools/release-report.py"])
+        for path in (
+            "AGENTS.md",
+            ".agents/testing.md",
+            "docs/development-release-process.md",
+        ):
+            self.assertNotIn(
+                "git switch <configured-bake-branch>", guidance[path])
+        self.assertNotIn(
+            'f"git switch {bake[\'branch\']}"',
+            guidance["tools/release-report.py"],
+        )
+
     def test_long_lived_process_creation_stays_with_host_owners(self) -> None:
         package = Path(__file__).parents[1] / "src" / "agents_live"
         allowed = {

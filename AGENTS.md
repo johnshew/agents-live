@@ -57,9 +57,10 @@ The standard loop for any change that lands as commits:
   required routing context, not as a release-only document.
 2. Investigate in place; reads and searches are fine in the primary
    checkout.
-3. Branch in the primary checkout. Tool-generated branch names are
-   fine; the branch is disposable. Commit or land in-flight work before
-   switching, because the checkout is shared.
+3. Use the primary checkout only when it is clean and already on the intended
+  target branch. Otherwise, create a dedicated worktree from that target;
+  verify its ancestry before committing or pushing, and remove it when the
+  task is complete.
 4. Edit, then run the smoke tests and the release audit (Quick
    commands above).
 5. Commit, push, and open a pull request. Reference an issue only when
@@ -91,10 +92,12 @@ and the report's ordered next actions.
 After a change reaches the bake branch, deploy its exact synchronized commit:
 
 ```bash
-git switch <configured-bake-branch>
 git pull --ff-only origin <configured-bake-branch>
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
+
+Run these commands from a clean checkout of the configured bake branch, using
+the primary checkout or a dedicated worktree according to the workflow above.
 
 The deployment creates and selects a commit-qualified
 `<target>.dev0+g<commit>` generation. `--allow-downgrade` is required only
@@ -158,15 +161,11 @@ a new agent receives the same answer from either entry point.
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.
-- **Do branch work in the primary checkout, not a worktree.** A pull
-  request is developed on a branch here, where the developer's editor
-  already points. Two costs come with that and are yours to manage.
-  The checkout is shared, so never discard another agent's uncommitted
-  work. And a file the developer has open does not reload when a tool
-  rewrites it, so before editing a file this branch has already
-  rewritten, confirm the editor is not holding a stale copy: compare
-  the on-disk line count against what a read returns past that point.
-  A worktree still earns its keep when two branches must exist at once.
+- **Isolate branch work when the primary checkout is occupied.** Use the
+  primary checkout only when it is clean and already on the intended target
+  branch. Otherwise, create a dedicated worktree from that target. Verify the
+  target ancestry before committing or pushing, and always remove the worktree
+  when the task is complete.
 - **Keep every commit meaningful and reviewable.** Plans belong in the
   session, issue, or PR description, never in empty or planning-only
   commits. Before the first push, fold superseded fixes and documentation
