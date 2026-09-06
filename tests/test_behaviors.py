@@ -1750,6 +1750,19 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         self.assertEqual('{"ok": true}', completion.text)
         self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
 
+    def test_copilot_json_keeps_answer_accompanying_task_completion(self) -> None:
+        stream = "\n".join(json.dumps(event) for event in [
+            {"type": "assistant.message", "data": {
+                "content": '{"marker":"acceptance"}',
+                "toolRequests": [{"name": "task_complete"}],
+            }},
+            {"type": "session.task_complete", "data": {
+                "summary": "Replied with the requested JSON object.",
+            }},
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"marker":"acceptance"}', completion.text)
+
     def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
         self,
     ) -> None:

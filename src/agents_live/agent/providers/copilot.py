@@ -251,6 +251,7 @@ def _usage(stdout: str) -> tuple[tuple[str, str | None], ...]:
 def _json_completion(stdout: str) -> Completion | None:
     assistant_messages: list[str] = []
     final_answers: list[str] = []
+    completion_messages: list[str] = []
     task_summary = ""
     nano_aiu: Decimal | None = None
     recognized = False
@@ -277,7 +278,9 @@ def _json_completion(stdout: str) -> Completion | None:
                         and request.get("name") == "task_complete"
                         for request in tool_requests
                     )
-                    if not completes_task:
+                    if completes_task:
+                        completion_messages.append(content.strip())
+                    else:
                         assistant_messages.append(content.strip())
         elif event_type == "session.task_complete" and isinstance(data, dict):
             recognized = True
@@ -304,7 +307,7 @@ def _json_completion(stdout: str) -> Completion | None:
             ("ai_credits", str(credits)),
             ("list_cost_usd", str(credits * Decimal("0.01"))),
         )
-    answers = final_answers or assistant_messages
+    answers = final_answers or assistant_messages or completion_messages
     text = answers[-1] if answers else task_summary
     return Completion(text, usage=usage)
 
