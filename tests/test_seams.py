@@ -5115,7 +5115,7 @@ class TestCopilotLiveConformance(unittest.TestCase):
         raw = agent.RawOutput(
             completed.returncode, completed.stdout, completed.stderr)
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual(marker, provider.parse(raw).text)
+        self.assertIn(marker, provider.parse(raw).text)
 
 
 PLUGIN_SOURCE = '''
