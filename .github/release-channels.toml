@@ -21,13 +21,14 @@ decision = "continue-bake"
 delivered = [374, 424, 446, 447, 455, 461, 468]
 partial = []
 deferred = [105, 388, 434]
-promotion_decision = [463, 470]
+promotion_decision = [463, 473, 474]
 
 [bake.recommendations]
-overall = "Keep 6.9.0 in bake for user testing. The dashboard and transcript fixes are installed and validated; resolve the remaining readiness investigation and workload MCP gate before requesting promotion."
+overall = "Integrate and deploy the readiness, Windows generation convergence, and Claude subscription fixes. Complete installed workload and provider acceptance before promoting the exact validated bake commit."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-"463" = "Keep the intermittent development-readiness investigation open. The newest packaged normal and development gates passed, but one passing run does not establish that the original intermittent failure is fixed."
-"470" = "Fix explicitly declared workload MCP availability before the blocked workflow resumes. Do not broaden its tool policy, enable ambient tools, or bypass its live gate."
+"463" = "The gate accepted a prior scenario's Run completion. New-completion correlation now has a regression that fails without the guard; the full packaged normal, all-repositories, and development sequence passed. Integrate and validate the commit-qualified bake artifact."
+"473" = "Action fingerprints now detect stale Windows generation executables, changed arguments, and working directories. Verify installed task actions and watcher convergence after deployment."
+"474" = "Isolated non-bare Claude source launches passed native subscription plan, write, schema, and explicit stdio MCP checks. Complete packaged and installed workload acceptance, policy isolation coverage, and supported-version validation before closing the issue or restoring the schedule."
 testing = "The commit-qualified bake is installed and its packaged dashboard, restoration, model display, and real Copilot plan transcript-retention checks passed. Real pipeline retention passed on the preceding bake with unchanged retention code. User bake acceptance, native provider release conformance, and a newly prepared official candidate are still required before publication."
