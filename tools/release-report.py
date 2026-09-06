@@ -219,11 +219,18 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "does not belong to the current bake"
     )
     release_actions = []
+    if not runtime_current:
+        release_actions.append(
+            "The version installed for testing is not the newest bake. "
+            "Fix outstanding bake defects, then install and test the current "
+            "bake before considering promotion.")
     if bake_moved:
         release_actions.append(
             "Bake has moved into `main`. Prepare, install, and accept the official candidate.")
     elif not promotion:
-        release_actions.append("We have not opened a pull request to move bake into `main`.")
+        release_actions.append(
+            "After the newest bake is accepted, open a pull request to move "
+            "bake into `main`.")
     else:
         release_actions.append(
             "The pull request to move bake into `main` must pass its checks and be merged.")
@@ -231,11 +238,6 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         release_actions.append(
             "We still need to decide how to handle "
             f"{', '.join(_link(repository, 'issues', n) for n in decisions)}.")
-    if not runtime_current:
-        release_actions.append(
-            "The version installed for testing is not the newest bake. "
-            "Install and test the current bake before release.")
-
     recommendation_lines = [
         f"- {_link(repository, 'issues', number)}: "
         f"{recommendations[str(number)]}"
@@ -258,10 +260,13 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
             f"Install and test a version built from `{bake_sha[:8]}`.")
     if not bake_moved:
         next_actions.append(
+            "Keep fixing and redeploying bake until its newest commit satisfies "
+            "every recommendation and is accepted for promotion.")
+        next_actions.append(
             "Make sure the changelog describes everything included in bake.")
         if not promotion:
             next_actions.append(
-                f"Open one pull request from `{bake['branch']}` to "
+                f"Only then, open one pull request from `{bake['branch']}` to "
                 f"`{release['branch']}`.")
         next_actions.append(
             "After the Ubuntu and Windows checks pass, merge it into `main`.")
@@ -277,6 +282,21 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         "All bake changes are in `main`."
         if bake_moved else "Work is still being tested. It contains changes not yet in `main`."
     )
+    active_bake_guidance = [] if bake_moved else [
+        "",
+        "## How to improve the current bake",
+        "",
+        f"- Commit small, simple fixes directly to `{bake['branch']}`.",
+        "- For larger work, create a focused branch and open a pull request "
+        f"targeting `{bake['branch']}`.",
+        "- After each change reaches bake, deploy its exact synchronized commit:",
+        "",
+        "```bash",
+        f"git switch {bake['branch']}",
+        f"git pull --ff-only origin {bake['branch']}",
+        "uv run --script tools/local-deploy.py --repo <live-repository>",
+        "```",
+    ]
 
     lines = [
         "---",
@@ -321,6 +341,7 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"{bake['version']}. When it is ready, we move it to `main` through one pull request.",
         "- `release` is the work approved for the next public version. After it reaches "
         "`main`, `tools/release.py` builds it, runs the final tests, and publishes it.",
+        *active_bake_guidance,
         "",
         "## Version installed for testing",
         "",
