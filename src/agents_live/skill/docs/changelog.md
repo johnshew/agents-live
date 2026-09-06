@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: show dashboard loading immediately and keep foreground shutdown quiet.
+  Initial inventory and history collection runs off the UI thread after saved
+  preferences are restored, without a duplicate scan. Startup announces one
+  URL, Ctrl+C requests cooperative shutdown, and unused inventory-selection
+  checkboxes are removed while per-row actions remain available.
 - fix: restore Windows dashboards without persistent console windows.
   Local deployment uses the native hidden-process policy, cleans up failed
   or interrupted startup, and waits for the launcher to exit after shutdown.
@@ -26,7 +31,7 @@ history is retained in the source repository.
   instead of repeatedly abandoning responses before they can finish.
 - fix: keep dashboard inventory compact and stable while filtering and refreshing. (#461)
   One shared scroll region contains compact virtualized rows. Responsive search,
-  visible grouping, removable filters, and one sort order preserve selection
+  visible grouping, removable filters, and one sort order preserve view state
   through refresh and reload without rebuilding tables or simulating clicks.
   Repository ownership loss retains an explicit stale snapshot.
 - fix: report partial plugin failures without blocking healthy components.
@@ -60,7 +65,7 @@ history is retained in the source repository.
 - feat: make one dashboard the operational view for every registered repository. (#422, #423, #424, #455)
   Repository groups, health, activity, and eligible actions now share one
   coherent snapshot. Full-screen settings preserve the current investigation,
-  unavailable data remains explicit, and filters, selections, layout, and
+  unavailable data remains explicit, and filters, layout, and
   activity position survive refresh and reconnect while rendering stays bounded
   as repositories and agents grow.
 - fix: enforce provider execution options consistently.

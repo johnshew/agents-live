@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -430,6 +431,7 @@ def _assert_operational_viewport(
                 body = page.locator(".dashboard-body")
                 body.wait_for(state="visible")
                 groups = page.locator(".repository-group")
+                groups.first.wait_for(state="visible")
                 if groups.count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: rendered {groups.count()} "
@@ -496,43 +498,14 @@ def _assert_operational_viewport(
                 search.fill("readiness")
                 table_id = page.locator(".virtualized-agent-table").get_attribute("id")
                 page.wait_for_function("window.agentsLiveContinuity !== undefined")
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
-                if row_checkbox.get_attribute("aria-checked") != "true":
-                    row_checkbox.click()
-                page.get_by_text("1 agents selected", exact=True).wait_for()
+                if page.locator(".repository-group [role=checkbox]").count():
+                    raise ReadinessError(f"{mode}: unused inventory selection controls are visible")
                 search.fill("no matching agent")
                 page.get_by_text("0 of 1 agents", exact=False).wait_for()
-                page.get_by_text("1 agents selected", exact=True).wait_for()
                 search.fill("readiness")
                 page.get_by_text("readiness-agent", exact=True).wait_for()
                 if page.locator(".virtualized-agent-table").get_attribute("id") != table_id:
                     raise ReadinessError(f"{mode}: filtering replaced the inventory table")
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
-                try:
-                    page.wait_for_function("""() => document.querySelector(
-                        '.repository-group tbody [role=checkbox]')
-                        ?.getAttribute('aria-checked') === 'true'""")
-                except PlaywrightTimeoutError as exc:
-                    filtered_state = page.evaluate("""() => ({
-                        persisted: JSON.parse(sessionStorage.getItem(
-                            'agents-live-dashboard-view') || '{}').settings?.selection || [],
-                        rows: Array.from(document.querySelectorAll(
-                            '.repository-group tbody tr')).map(row => ({
-                                key: row.querySelector('[data-agent-key]')
-                                    ?.dataset.agentKey || null,
-                                checked: row.querySelector('[role=checkbox]')
-                                    ?.getAttribute('aria-checked') || null,
-                            })),
-                    })""")
-                    raise ReadinessError(
-                        f"{mode} {width}x{height}: filtered selection did not "
-                        f"restore: {filtered_state}") from exc
-                row_checkbox.click()
-                page.get_by_text("0 agents selected", exact=True).wait_for()
-                row_checkbox.click()
-                page.get_by_text("1 agents selected", exact=True).wait_for()
                 page.get_by_role("button", name="Reverse-sort", exact=True).click()
                 page.wait_for_function("() => JSON.parse(sessionStorage.getItem("
                                        "'agents-live-dashboard-view')).settings.descending === true")
@@ -542,8 +515,6 @@ def _assert_operational_viewport(
                 page.locator(".repository-heading").wait_for(state="hidden")
                 page.get_by_role("button", name="Group by repository", exact=True).click()
                 page.locator(".repository-heading").wait_for(state="visible")
-                page.wait_for_function("() => document.querySelector("
-                    "'.repository-group tbody [role=checkbox]')?.getAttribute('aria-checked') === 'true'")
                 table_id = page.locator(".virtualized-agent-table").get_attribute("id")
                 page.get_by_role("button", name="Filters", exact=True).click()
                 page.get_by_label("State", exact=True).click()
@@ -571,20 +542,18 @@ def _assert_operational_viewport(
                 page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
                 if page.locator(".virtualized-agent-table").get_attribute("id") != table_id:
                     raise ReadinessError(f"{mode}: refresh replaced the inventory table")
-                if search.input_value() != "readiness" \
-                        or row_checkbox.get_attribute("aria-checked") != "true":
+                if search.input_value() != "readiness":
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: refresh lost filter or selection")
+                    f"{mode} {width}x{height}: refresh lost filter")
                 if page.evaluate(
                         "document.activeElement?.getAttribute('aria-label')") != "Refresh":
                     raise ReadinessError(
                         f"{mode} {width}x{height}: refresh did not restore focus")
                 persisted = page.evaluate("""() => JSON.parse(sessionStorage.getItem(
                     'agents-live-dashboard-view') || '{}')""")
-                if len(persisted.get("settings", {}).get("selection", [])) != 1:
+                if "selection" in persisted.get("settings", {}):
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: selection was not persisted "
-                        "before reconnect")
+                        f"{mode} {width}x{height}: unused selection state was persisted")
                 page.reload(wait_until="networkidle")
                 page.wait_for_function("window.agentsLiveContinuity !== undefined")
                 page.locator(".inventory-filter-status .q-chip").filter(has_text="State: started").wait_for()
@@ -593,37 +562,14 @@ def _assert_operational_viewport(
                     raise ReadinessError(f"{mode}: reloaded filter control disagrees with saved state")
                 page.get_by_role("button", name="Close filters", exact=True).click()
                 search = page.get_by_label("Search agents or repositories")
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
                 splitter = page.get_by_role(
                     "separator", name="Resize-inventory-and-activity")
-                try:
-                    page.wait_for_function("""() => document.querySelector(
-                        '.repository-group tbody [role=checkbox]')
-                        ?.getAttribute('aria-checked') === 'true'""")
-                except PlaywrightTimeoutError as exc:
-                    reconnect_state = page.evaluate("""() => ({
-                        persisted: JSON.parse(sessionStorage.getItem(
-                            'agents-live-dashboard-view') || '{}').settings?.selection || [],
-                        rows: Array.from(document.querySelectorAll(
-                            '.repository-group tbody tr')).map(row => ({
-                                key: row.querySelector('[data-agent-key]')
-                                    ?.dataset.agentKey || null,
-                                checked: row.querySelector('[role=checkbox]')
-                                    ?.getAttribute('aria-checked') || null,
-                            })),
-                    })""")
-                    raise ReadinessError(
-                        f"{mode} {width}x{height}: reconnect selection "
-                        f"did not restore: {reconnect_state}") from exc
                 search_value = search.input_value()
-                selected_value = row_checkbox.get_attribute("aria-checked")
                 split_value = splitter.get_attribute("aria-valuenow")
-                if search_value != "readiness" or selected_value != "true" \
-                    or split_value != "75":
+                if search_value != "readiness" or split_value != "75":
                     raise ReadinessError(
                     f"{mode} {width}x{height}: reconnect lost view state "
-                    f"(search={search_value!r}, selected={selected_value!r}, "
+                    f"(search={search_value!r}, "
                     f"split={split_value!r})")
                 activity = page.locator(".dashboard-log-panel .activity-log")
                 activity.evaluate("""element => {
@@ -683,6 +629,7 @@ def _assert_operational_viewport(
                 page.reload(wait_until="networkidle")
                 settings = page.locator(".dashboard-settings")
                 settings.wait_for(state="visible")
+                page.get_by_text("Loading agents...", exact=True).wait_for(state="hidden")
                 page.get_by_role("button", name="Close-settings").focus()
                 page.keyboard.press("Enter")
                 settings.wait_for(state="hidden")
@@ -1051,25 +998,66 @@ def _terminate(process: subprocess.Popen) -> None:
             process.wait(timeout=SHUTDOWN_GRACE_S)
 
 
+def _assert_interrupt_shutdown(process: subprocess.Popen, port: int, mode: str) -> None:
+    if os.name == "nt":
+        interrupt = """
+import ctypes
+import sys
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.FreeConsole()
+if not kernel.AttachConsole(int(sys.argv[1])):
+    raise ctypes.WinError(ctypes.get_last_error())
+kernel.SetConsoleCtrlHandler(None, True)
+if not kernel.GenerateConsoleCtrlEvent(0, 0):
+    raise ctypes.WinError(ctypes.get_last_error())
+"""
+        sent = subprocess.run(
+            [sys.executable, "-c", interrupt, str(process.pid)],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        if sent.returncode:
+            raise ReadinessError(f"{mode}: could not send Ctrl+C: {sent.stderr}")
+    else:
+        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+    try:
+        output, _ = process.communicate(timeout=SHUTDOWN_GRACE_S)
+    except subprocess.TimeoutExpired as exc:
+        raise ReadinessError(f"{mode}: Ctrl+C did not stop the dashboard tree") from exc
+    if any(marker in output for marker in ("Traceback", "CancelledError", "KeyboardInterrupt")):
+        raise ReadinessError(f"{mode}: Ctrl+C produced shutdown errors:\n{output}")
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise ReadinessError(f"{mode}: dashboard still answers after Ctrl+C")
+    _say(f"{mode}: Ctrl+C closed the process tree without a traceback")
+
+
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-    *, dev: bool, source: bool, all_repos: bool = False,
+    *, dev: bool, source: bool, all_repos: bool = False, direct: bool = False,
     scenarios: tuple[str, ...] = SCENARIO_ORDER,
     viewport_names: tuple[str, ...] = tuple(VIEWPORTS)) -> None:
     mode = ("source" if source else "packaged") + (" --dev" if dev else "")
+    if direct:
+        mode += " direct server"
     if all_repos:
         mode += " all-repositories"
     port = _free_port()
-    argv = [*launcher, "--repo", str(directory), "dashboard",
+    argv = [*launcher, *([] if direct else ["--repo", str(directory), "dashboard"]),
             "--port", str(port)]
     if all_repos:
         argv.append("--all-repos")
     if dev:
         argv.append("--dev")
+    options = {"start_new_session": True}
+    if os.name == "nt":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        options = {"creationflags": subprocess.CREATE_NEW_CONSOLE, "startupinfo": startup}
     _say(f"{mode}: starting on port {port}")
     process = subprocess.Popen(
         argv, cwd=directory, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        **({} if os.name == "nt" else {"start_new_session": True}))
+        **options)
     check_started = time.perf_counter()
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1107,16 +1095,49 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
             _say(
                 f"{mode}: disconnect passed in "
                 f"{time.perf_counter() - started:.1f}s")
+        if not dev and not all_repos:
+            if direct:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as browser_tools:
+                    browser = browser_tools.chromium.launch(
+                        executable_path=str(_browser_executable()), headless=True)
+                    try:
+                        page = browser.new_page()
+                        page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+                        page.locator(".dashboard-body").wait_for(state="visible")
+                        _assert_interrupt_shutdown(process, port, mode)
+                    finally:
+                        browser.close()
+            else:
+                _assert_interrupt_shutdown(process, port, mode)
         _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
     except (ReadinessError, PlaywrightTimeoutError) as exc:
         _terminate(process)
-        output = process.stdout.read().strip() if process.stdout else ""
+        output = process.stdout.read().strip() if process.stdout and not process.stdout.closed else ""
         if output:
             raise ReadinessError(
                 f"{exc}\ndashboard output:\n{output[-4000:]}") from exc
         raise
     finally:
         _terminate(process)
+
+
+def _direct_launcher(python: list[str], directory: Path) -> list[str]:
+    located = subprocess.run(
+        [*python, "-c", "import agents_live; from pathlib import Path; "
+         "print(Path(agents_live.__file__).parent / 'cli/scripts/dashboard.py')"],
+        capture_output=True, text=True, check=True)
+    script = Path(located.stdout.strip())
+    metadata = script.read_text(encoding="utf-8").split("# /// script\n", 1)[1].split("# ///", 1)[0]
+    dependencies = tomllib.loads("\n".join(line.removeprefix("# ")
+                                         for line in metadata.splitlines()))["dependencies"]
+    environment = directory / "direct-runtime"
+    executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    subprocess.run(["uv", "venv", str(environment)],
+                   capture_output=True, text=True, check=True)
+    subprocess.run(["uv", "pip", "install", "--python", str(executable), *dependencies],
+                   capture_output=True, text=True, check=True)
+    return [str(executable), str(script)]
 
 
 def _plan(args: argparse.Namespace) -> dict:
@@ -1213,6 +1234,11 @@ def main() -> int:
                 scenarios=tuple(run["scenarios"]),
                 viewport_names=tuple(run["viewports"]),
             )
+            if run["mode"] == "normal":
+                _seed_started_state(python, directory, environment)
+                _check(_direct_launcher(python, directory), directory, environment,
+                       dev=False, source=args.editable, direct=True,
+                       scenarios=("startup",), viewport_names=())
     _say(f"ok in {time.perf_counter() - total_started:.1f}s")
     return 0
 

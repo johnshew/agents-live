@@ -32,6 +32,7 @@ import copy
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -113,7 +114,6 @@ def _new_page_state() -> dict:
             "grouped": True,
             "sort_by": "name",
             "descending": False,
-            "selection": [],
             "expanded_repositories": [],
             "settings_open": False,
         },
@@ -2217,23 +2217,6 @@ def _filtered_repo_groups(groups: list[dict], filters: dict) -> list[dict]:
     return filtered
 
 
-def _canonical_selection_keys(groups: list[dict]) -> set[str]:
-    return {
-        str(row["repository_identifier"])
-        for group in groups for row in group["rows"]
-    }
-
-
-def _updated_selection_keys(current: list[str], selected: list[dict],
-                            scope_keys: set[str]) -> list[str]:
-    keys = set(current) - scope_keys
-    keys.update(
-        str(row["repository_identifier"])
-        for row in selected if row.get("repository_identifier")
-    )
-    return sorted(keys)
-
-
 def _repository_window(groups: list[dict], expanded: list[str],
                        limit: int = MAX_RENDERED_REPOSITORIES
                        ) -> tuple[list[dict], list[dict]]:
@@ -2334,7 +2317,12 @@ def _build_operational_page(page_state: dict | None = None) -> None:
     ui.dark_mode().auto()
     state_settings = page_state["all_repos"]
     filters = page_state["filters"]
-    snapshot = operational_snapshot(settings=state_settings)
+    snapshot = {
+        "groups": [], "repository_groups": [], "rows": [],
+        "health": {"text": "loading", "tip": "Collecting current state"},
+        "scope": state_settings["repo"], "errors": {}, "activity": {},
+    }
+    loading = True
     repo_names = _registered_repository_names()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
@@ -2459,8 +2447,9 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             refresh_age = ui.label().classes("text-sm text-gray-500")
             ui.button(icon="health_and_safety", on_click=health_check).props(
                 "flat round dense aria-label=Run-health-check")
-            ui.button(icon="refresh", on_click=lambda: rebuild()).props(
+            refresh_button = ui.button(icon="refresh", on_click=lambda: rebuild()).props(
                 "flat round dense aria-label=Refresh")
+            refresh_button.disable()
             ui.button(icon="settings", on_click=settings_dialog.open).classes(
                 "settings-trigger").props(
                     "flat round dense aria-label=Settings")
@@ -2473,6 +2462,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     label="Repository scope",
                     on_change=lambda event: select_repo(event),
                 ).props("dense outlined options-dense").classes("inventory-scope")
+                repo_select.disable()
                 search_input = ui.input(
                     value=filters["name"], placeholder="Search agents or repositories",
                     on_change=lambda event: set_filter("name", event.value),
@@ -2539,9 +2529,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     "flat dense no-caps size=sm")
             inventory_summary = ui.label().classes(
                 "text-xs text-gray-500 px-1")
-            selection_summary = ui.label().classes(
-                "text-xs text-gray-500 px-1").props(
-                    "role=status aria-live=polite")
             attention_summary = ui.label().classes(
                 "text-xs text-orange-600 px-1")
             inventory = ui.element("div").classes(
@@ -2560,7 +2547,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
     continuity_ready = False
     inventory_views = {}
     with inventory:
-        empty_inventory = ui.label("No registered repositories.").classes("text-sm font-medium")
+        empty_inventory = ui.label("Loading agents...").classes("text-sm font-medium").props(
+            "role=status aria-live=polite")
         deferred_select = ui.select(
             {}, label="More repositories",
             on_change=lambda event: expand_repository(event.value),
@@ -2591,13 +2579,11 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 table = ui.table(
                     columns=[{**column, "sortable": False} for column in columns],
                     rows=[], row_key="repository_identifier",
-                    pagination={"rowsPerPage": 0}, selection="multiple",
+                    pagination={"rowsPerPage": 0},
                 ).classes("virtualized-agent-table w-full").props(
                     "flat dense hide-bottom separator=none "
                     f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
                     ":virtual-scroll-target=\"'.agent-table-scroll'\"")
-                table.on_select(lambda event: set_selection(
-                    event.selection, {str(row['repository_identifier']) for row in table.rows}))
                 _add_agent_information_slots(table)
                 _add_agent_action_slots(table, aggregate=True)
         return dict(section=section, name=name, path=path, status=status,
@@ -2628,12 +2614,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
             f"{len(visible_groups)} repositories")
-        selected_keys = set(state_settings.get("selection", []))
-        available_keys = _canonical_selection_keys(
-            current["repository_groups"])
-        selected_keys.intersection_update(available_keys)
-        state_settings["selection"] = sorted(selected_keys)
-        selection_summary.text = f"{len(selected_keys)} agents selected"
         attention_summary.text = _attention_summary(current)
         grouped = state_settings.get("grouped", True)
         mounted, deferred = _repository_window(
@@ -2643,7 +2623,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             desired[None] = {"rows": _sorted_agent_rows(
                 _ungrouped_agent_rows(visible_groups), state_settings["sort_by"],
                 state_settings["descending"])}
-        empty_inventory.set_visibility(not current["groups"])
+        empty_inventory.text = "Loading agents..." if loading else "No registered repositories."
+        empty_inventory.set_visibility(loading or not current["groups"])
         deferred_select.set_options({group["name"]: f"{group['name']} | {len(group['rows'])} agents"
                                      for group in deferred})
         deferred_select.set_visibility(bool(deferred))
@@ -2667,8 +2648,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             view["empty"].set_visibility(not group["rows"])
             table = view["table"]
             table.rows = group["rows"]
-            table.selected = [row for row in group["rows"]
-                              if row["repository_identifier"] in selected_keys]
             table.set_visibility(bool(group["rows"]))
             table.update()
         persist_view()
@@ -2693,13 +2672,16 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             if refresh_error else health["tip"])
 
     def rebuild(*, announce: bool = True,
-                source: str = "manual refresh") -> None:
-        nonlocal snapshot
+            source: str = "manual refresh", collected: dict | None = None) -> None:
+        nonlocal snapshot, loading
+        if loading and collected is None:
+            return
         try:
             repo_names = _registered_repository_names()
             if state_settings.get("repo") not in ["All", *repo_names]:
                 state_settings["repo"] = "All"
-            refreshed = operational_snapshot(snapshot, settings=state_settings)
+            refreshed = (collected if collected is not None else
+                         operational_snapshot(snapshot, settings=state_settings))
         except (OSError, ValueError, agent.DefinitionError,
                 state.StartedStateUnavailable) as exc:
             snapshot = {**snapshot, "refresh_error": str(exc)}
@@ -2709,6 +2691,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     f"{source} failed; showing the last coherent snapshot: {exc}")
             return
         snapshot = refreshed
+        loading = False
         for key, field in (("state", "state"), ("owner", "owner"), ("runtime", "agent")):
             options = sorted(({row[field] for row in snapshot["rows"]} | {filters[key]}) - {"All"})
             filter_controls[key].set_options(["All", *options], value=filters[key])
@@ -2758,16 +2741,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
     def clear_filters() -> None:
         filters.update(state="All", owner="All", runtime="All", failing=False)
         render_inventory(snapshot)
-
-    def set_selection(selected: list[dict], group_keys: set[str]) -> None:
-        current = set(state_settings.get("selection", []))
-        current.intersection_update(
-            _canonical_selection_keys(snapshot["repository_groups"]))
-        keys = _updated_selection_keys(
-            sorted(current), selected, group_keys)
-        state_settings["selection"] = keys
-        selection_summary.text = f"{len(keys)} agents selected"
-        persist_view()
 
     def set_grouped(value: bool) -> None:
         if state_settings["grouped"] == value:
@@ -2889,7 +2862,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 })();
     '''
     async def restore_view() -> None:
-        nonlocal continuity_ready
+        nonlocal continuity_ready, loading
         saved = await ui.run_javascript(continuity_script)
         if isinstance(saved, dict):
             for key in filters:
@@ -2900,15 +2873,28 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     state_settings[key] = saved["settings"][key]
             repo_select.value = state_settings["repo"]
             search_input.value = filters["name"]
-            rebuild(announce=False)
             if saved.get("settingsOpen"):
                 settings_dialog.open()
+        def collect_initial() -> dict:
+            with hostruntime.enumeration_pass():
+                return operational_snapshot(settings=copy.deepcopy(state_settings))
+
+        try:
+            collected = await ng_run.io_bound(collect_initial)
+        except Exception as exc:
+            loading = False
+            empty_inventory.text = f"Could not load agents: {exc}"
+            return
+        finally:
+            refresh_button.enable()
+            repo_select.enable()
+        rebuild(announce=False, collected=collected)
         continuity_ready = True
         persist_view()
         _safe_ui(ui.run_javascript, "window.agentsLiveContinuity.restore()")
+        _push_log(_operational_summary(snapshot, source="startup"))
 
     ui.timer(0.1, restore_view, once=True)
-    _push_log(_operational_summary(snapshot, source="startup"))
     tick_age()
     ui.timer(1.0, tick_age)
     _timer_after_first_interval(
@@ -2986,6 +2972,14 @@ def _select_port(requested: int | str) -> tuple[int | None, str | None]:
     return None, f"no available port from {DEFAULT_PORT} through {MAX_PORT}"
 
 
+def _request_dashboard_shutdown(_signum, _frame) -> None:
+    from nicegui import server
+    instance = getattr(server.Server, "instance", None)
+    if instance is None:
+        raise KeyboardInterrupt
+    instance.should_exit = True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native", action="store_true", help="Open a desktop window")
@@ -3032,7 +3026,6 @@ def main() -> None:
         assert selected_port is not None
         args.port = selected_port
         os.environ[SELECTED_PORT_ENV] = str(args.port)
-        print(f"Dashboard URL: http://{DASHBOARD_HOST}:{args.port}")
         # Recorded by the launching process, not the server: under --dev
         # the reloader child holds the socket but comes and goes, while
         # this process owns the port for the whole run. Stopping it takes
@@ -3042,6 +3035,8 @@ def main() -> None:
 
     build_page()
     app.on_exception(lambda exc: _safe_ui(ui.notify, f"error: {exc}", type="negative"))
+    previous_interrupt = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _request_dashboard_shutdown)
     try:
         ui.run(
             host=DASHBOARD_HOST,
@@ -3063,6 +3058,8 @@ def main() -> None:
         # conventional interrupt status; this child owns its own shutdown
         # and must not dump a traceback on the way out (#249).
         pass
+    finally:
+        signal.signal(signal.SIGINT, previous_interrupt)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

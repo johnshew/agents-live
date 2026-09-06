@@ -53,8 +53,8 @@ in the pull request before merge. Release acceptance links those records rather
 than copying their details into a new report.
 
 The dashboard-readiness continuity journey checks table identity through local
-filtering, sorting, and refresh; selection removal and retention across hidden
-rows and grouping; active filter removal; model restoration after reload; and
+filtering, sorting, and refresh; absence of nonfunctional row-selection
+controls; active filter removal; model restoration after reload; and
 toolbar bounds on desktop and mobile. Its repository journey checks 151-row
 virtualization, compact row height, one inventory scroll owner, bottom-row
 dispatch after sorting, and completion routing with two tabs open. These
