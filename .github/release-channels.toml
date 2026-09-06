@@ -10,22 +10,24 @@ name = "bake"
 branch = "bake/v6.9.0-local"
 version = "6.9.0"
 promotes_to = "release"
-deployed_version = "6.8.0"
-deployed_commit = "186f3abbba03717637b71ae02e3e3d2b39ea4549"
-validated_on = "2026-09-05"
+deployed_version = "6.9.0.dev0+g26831209"
+deployed_commit = "268312093e973f7b6f6dbb90e287f3d187f4c3e5"
+validated_on = "2026-09-06"
 
 [bake.promotion]
 decision = "continue-bake"
 
 [bake.issues]
-delivered = [374, 424, 446, 447, 455]
+delivered = [374, 424, 446, 447, 455, 461, 468]
 partial = []
 deferred = [105, 388, 434]
-promotion_decision = []
+promotion_decision = [463, 470]
 
 [bake.recommendations]
-overall = "Keep 6.9.0 in bake while the rejected candidate's bugs are fixed and locally validated; move bake to main only after the newest bake is accepted."
+overall = "Keep 6.9.0 in bake for user testing. The dashboard and transcript fixes are installed and validated; resolve the remaining readiness investigation and workload MCP gate before requesting promotion."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-testing = "The first 6.9.0 candidate was rejected after local bugs were found. Version 6.8.0 remains the last accepted installation; the newest 6.9.0 bake, Codex sign-in and conformance, and a newly prepared candidate still require acceptance before publication."
+"463" = "Keep the intermittent development-readiness investigation open. The newest packaged normal and development gates passed, but one passing run does not establish that the original intermittent failure is fixed."
+"470" = "Fix explicitly declared workload MCP availability before the blocked workflow resumes. Do not broaden its tool policy, enable ambient tools, or bypass its live gate."
+testing = "The commit-qualified bake is installed and its packaged dashboard, restoration, model display, and real Copilot plan transcript-retention checks passed. Real pipeline retention passed on the preceding bake with unchanged retention code. User bake acceptance, native provider release conformance, and a newly prepared official candidate are still required before publication."
