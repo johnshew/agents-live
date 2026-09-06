@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain Copilot answers sent in the same message as task completion.
+  When no separate answer exists, completion parsing keeps the message content
+  instead of replacing valid JSON with the prose task summary. Explicit final
+  answers and separately emitted answers retain priority.
 - fix: keep local deployment failures actionable and browser checks focus-safe.
   Failed streamed commands report their exit status without masking it with an
   output-handling error. Keyboard readiness checks wait for filter dialogs to
