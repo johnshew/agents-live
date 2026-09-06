@@ -4970,6 +4970,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "os_name": os.name,
                 "architecture": script["platform"].machine(),
                 "gates": [list(command) for command in script["LOCAL_GATES"]],
+                "python": sys.version,
             }
             receipt.write_text(json.dumps(payload), encoding="utf-8")
             with mock.patch.dict(scope, {
@@ -4980,6 +4981,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(
                     (wheel.resolve(), "digest"),
                     prepared("abc123", "1.2.3"))
+                with mock.patch.dict(scope, {"_run": mock.Mock()}) as _scope:
+                    self.assertEqual((wheel.resolve(), "digest"),
+                                     script["_prepare_artifact"]("abc123", "1.2.3"))
+                    scope["_run"].assert_not_called()
+                payload["python"] = "different-interpreter"
+                receipt.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(prepared("abc123", "1.2.3"))
+                payload["python"] = sys.version
                 payload["gates"] = [["stale-gate"]]
                 receipt.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(prepared("abc123", "1.2.3"))
@@ -4988,6 +4997,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 payload["platform"] = "different-platform"
                 receipt.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(prepared("abc123", "1.2.3"))
+
+    def test_local_deploy_worktrees_share_preparation_storage(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["_state_directory"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            primary = Path(temporary) / "primary"
+            sibling = Path(temporary) / "sibling"
+            subprocess.run(["git", "init", "-q", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit",
+                            "--allow-empty", "-qm", "fixture"], check=True)
+            subprocess.run(["git", "-C", str(primary), "worktree", "add", "--detach",
+                            str(sibling)], capture_output=True, check=True)
+            destinations = []
+            for checkout in (primary, sibling):
+                with mock.patch.dict(scope, {"ROOT": checkout}):
+                    destinations.append(script["_state_directory"]())
+            self.assertEqual(destinations[0], destinations[1])
+            self.assertEqual(
+                (primary / ".git" / "agents-live-local-deploy").resolve(), destinations[0])
 
     def test_local_deploy_builds_from_the_recorded_commit(self) -> None:
         script = runpy.run_path(

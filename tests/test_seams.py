@@ -3966,6 +3966,193 @@ class TestTranscriptRetrieval(TempRepository):
         self.assertIn("run_id", header)
         self.assertIn("has_transcript", header)
 
+    def test_post_failure_keeps_previously_persisted_model_transcript(self) -> None:
+        proposal = {"summary": "retained proposal"}
+        schema = {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": False,
+        }
+        for name, mode, returncode, timed_out, category in (
+            ("post-crash", "plan", 1, False, "post_processor_crash"),
+            ("post-timeout", "plan", 0, True, "timeout"),
+            ("pipeline-crash", "pipeline", 1, False, "post_processor_crash"),
+            ("pipeline-timeout", "pipeline", 0, True, "timeout"),
+        ):
+            with self.subTest(name=name):
+                metadata = [
+                    'agents-live.selector: "fake"',
+                    'agents-live.post-processor: "post.py"',
+                    f'agents-live.mode: "{mode}"',
+                ]
+                body = "Do the work."
+                if mode == "pipeline":
+                    metadata.append('agents-live.result-path: "/output/result"')
+                    body += (
+                        "\n\n```put /output/result/$schema\n"
+                        f"{json.dumps(schema)}\n```\n"
+                        f"\n```put /output/result\n{json.dumps(proposal)}\n```"
+                    )
+                else:
+                    metadata.append(f"agents-live.output-schema: '{json.dumps(schema)}'")
+                directory = self.skill(name, metadata, body=body, version="2")
+                (directory / "post.py").write_text(
+                    "raise SystemExit(1)\n", encoding="utf-8")
+                provider_output = json.dumps({
+                    "text": "retained proposal", "structured": proposal,
+                })
+                calls = []
+                processor_logs = []
+
+                def run_child(argv, **kwargs):
+                    calls.append(argv)
+                    if len(calls) == 1:
+                        return ChildResult(argv, 0, provider_output, "")
+                    artifacts = list((
+                        paths.repo_state_dir(self.root) / "runs" / name
+                    ).glob("*-agent-1.json"))
+                    self.assertEqual(1, len(artifacts))
+                    saved = json.loads(artifacts[0].read_text(encoding="utf-8"))
+                    self.assertEqual(provider_output, saved["stdout"])
+                    self.assertEqual(kwargs["input_text"], saved["postprocessor_input"])
+                    self.assertEqual(proposal, json.loads(kwargs["input_text"]))
+                    if mode == "pipeline":
+                        self.assertEqual(proposal, saved["pipeline_result"]["value"])
+                    log = Path(kwargs["env"]["AGENTS_LIVE_LOG"])
+                    log.write_text('{"message":"post entered"}\n', encoding="utf-8")
+                    processor_logs.append(log)
+                    return ChildResult(
+                        argv, returncode, "", "post failed", timed_out=timed_out)
+
+                runner = mock.Mock(run_child=run_child)
+                with mock.patch.object(processor_check, "diagnose", return_value=None):
+                    result = dispatch(
+                        Firing(name, str(self.root), "manual"), runner=runner)
+
+                self.assertFalse(result.ok)
+                self.assertEqual(category, result.category, result)
+                self.assertEqual(2, len(calls))
+                item = self._json(result.run_id)["transcripts"][0]
+                self.assertEqual("available", item["transcript_state"])
+                self.assertEqual("retained proposal", item["final"])
+                self.assertEqual(proposal, item["structured"])
+                self.assertEqual(proposal, json.loads(item["postprocessor_input"]))
+                self.assertEqual(
+                    {"message": "post entered"},
+                    json.loads(processor_logs[0].read_text(encoding="utf-8")),
+                )
+                if mode == "pipeline":
+                    self.assertEqual("published", result.result_status)
+                    self.assertEqual(proposal, result.structured)
+                    self.assertEqual({
+                        "path": "/output/result", "present": True, "value": proposal,
+                    }, item["pipeline_result"])
+                    journal = (
+                        paths.repo_state_dir(self.root) / "runs" / name /
+                        f"{result.run_id}-pipeline.jsonl"
+                    )
+                    entries = [json.loads(line) for line in
+                               journal.read_text(encoding="utf-8").splitlines()]
+                    self.assertTrue(any(entry.get("op") == "seed" for entry in entries))
+                    self.assertTrue(any(entry.get("op") == "final-state" for entry in entries))
+
+
+class TestTranscriptAcceptance(TempRepository):
+    def _cli(self, *arguments: str) -> subprocess.CompletedProcess:
+        installed = os.environ.get("AGENTS_LIVE_TRANSCRIPT_CLI")
+        launcher = [installed] if installed else [sys.executable, "-m", "agents_live.cli"]
+        return subprocess.run(
+            [*launcher, "--repo", str(self.root), *arguments],
+            capture_output=True, text=True, encoding="utf-8", timeout=240)
+
+    def _post_skill(self, name: str, selector: str, *, fail: bool = True,
+                   mode: str = "plan", recording: bool = True) -> Path:
+        metadata = [
+            f'agents-live.selector: "{selector}"',
+            'agents-live.post-processor: "post.py"',
+            f'agents-live.mode: "{mode}"',
+            f'agents-live.transcript: "{str(recording).lower()}"',
+        ]
+        body = "Reply with exactly TRANSCRIPT_ACCEPTANCE_468."
+        if mode == "pipeline":
+            metadata.append('agents-live.result-path: "/output/result"')
+            body = (
+                'Use the pipeline tool to put {"marker":"TRANSCRIPT_ACCEPTANCE_468"} '
+                'at /output/result. Then reply with TRANSCRIPT_ACCEPTANCE_468. '
+                'Do not call other tools.')
+        directory = self.skill(name, metadata, body=body, version="2")
+        (directory / "post.py").write_text(
+            "import pathlib, sys\n"
+            "payload = sys.stdin.read()\n"
+            "pathlib.Path(__file__).with_name('submitted.txt').write_text(payload, encoding='utf-8')\n"
+            "print('deliberate acceptance failure', file=sys.stderr)\n"
+            f"raise SystemExit({17 if fail else 0})\n", encoding="utf-8")
+        return directory
+
+    def _transcript(self, run_id: str, *, summary: bool = False) -> dict:
+        completed = self._cli("logs", "transcript", run_id,
+                              *(["--summary"] if summary else []), "--json")
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        return json.loads(completed.stdout)["transcripts"][0]
+
+    def test_cli_transcript_survives_process_cleanup_and_preserves_status(self) -> None:
+        for name, selector, fail, recording, crash, expected in (
+            ("post-failed", "fake", True, True, False, "available"),
+            ("completed", "fake", False, True, False, "available"),
+            ("model-failed", "fake", True, True, True, "available"),
+            ("no-model", "none", True, True, False, "no_model_call"),
+            ("disabled", "fake", True, False, False, "disabled"),
+        ):
+            with self.subTest(name=name):
+                directory = self._post_skill(name, selector, fail=fail, recording=recording)
+                with mock.patch.dict(os.environ, {"AGENTS_LIVE_FAKE_ACTION": "crash" if crash else "success"}):
+                    completed = self._cli("run", name, "--json")
+                self.assertEqual(1 if fail else 0, completed.returncode, completed.stderr)
+                result = json.loads(completed.stdout)
+                item = self._transcript(result["run_id"])
+                self.assertEqual(expected, item["transcript_state"])
+                self.assertEqual("error" if fail else "ok", item["status"])
+                if expected == "available":
+                    self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["prompt"])
+                    if not crash:
+                        self.assertEqual((directory / "submitted.txt").read_text(encoding="utf-8"),
+                                         item["postprocessor_input"])
+                        self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["final"])
+                    else:
+                        self.assertNotIn("postprocessor_input", item)
+                if fail and not crash:
+                    self.assertEqual("post_processor_crash", result["category"])
+                self.assertNotIn("postprocessor_input", self._transcript(result["run_id"], summary=True))
+
+    def test_live_copilot_postfailure_retains_transcript_and_proposal(self) -> None:
+        if os.environ.get("AGENTS_LIVE_TRANSCRIPT_CONFORMANCE") != "1":
+            self.skipTest("live transcript conformance is opt-in")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True, timeout=30)
+        for mode in ("plan", "pipeline"):
+            with self.subTest(mode=mode):
+                name = f"live-transcript-{mode}"
+                directory = self._post_skill(name, "copilot", mode=mode)
+                completed = self._cli("run", name, "--json")
+                self.assertEqual(1, completed.returncode, completed.stderr)
+                result = json.loads(completed.stdout)
+                self.assertEqual("post_processor_crash", result["category"], result["message"])
+                item = self._transcript(result["run_id"])
+                self.assertEqual("error", item["status"])
+                self.assertEqual("available", item["transcript_state"])
+                self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["prompt"])
+                self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["final"])
+                self.assertEqual((directory / "submitted.txt").read_text(encoding="utf-8"),
+                                 item["postprocessor_input"])
+                if mode == "pipeline":
+                    self.assertTrue(item["tool_calls"])
+                    self.assertEqual({"marker": "TRANSCRIPT_ACCEPTANCE_468"},
+                                     item["pipeline_result"]["value"])
+                    self.assertTrue(item["pipeline_result"]["present"])
+                version = self._cli("--version")
+                self.assertEqual(0, version.returncode)
+                print(f"Transcript acceptance: {version.stdout.strip()}; mode={mode}; run_id={result['run_id']}")
+
 
 class TestAgentPipeline(TempRepository):
     def test_model_run_records_when_transcripts_are_disabled(self) -> None:
@@ -5771,9 +5958,22 @@ class TestDashboardRepositorySurface(TempRepository):
         summary = dashboard._operational_summary(snapshot)
         self.assertIn("all registered repositories", summary)
         self.assertIn("1 partial", summary)
+        self.assertIn("Attention in all registered repositories", summary)
         attention = dashboard._attention_summary(snapshot)
         self.assertIn("Attention in all registered repositories", attention)
         self.assertIn("1 failing agents", attention)
+
+    def test_dashboard_model_shows_reported_configured_and_default_values(self) -> None:
+        dashboard = self._dashboard_module()
+        row = {"runtime": "copilot", "identifier": "sample-123", "name": "sample",
+               "model": "configured-model"}
+        for reports, expected in (({}, "configured-model"),
+                                  ({"sample": "legacy-model"}, "legacy-model"),
+                                  ({"sample-123": "reported-model"}, "reported-model")):
+            with self.subTest(reports=reports):
+                self.assertEqual(expected, dashboard._agent_model(row, reports))
+        self.assertEqual("default", dashboard._agent_model({**row, "model": None}, {}))
+        self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}, {}))
 
     def test_dashboard_attention_includes_degraded_host_health(self) -> None:
         dashboard = self._dashboard_module()

@@ -1193,7 +1193,7 @@ def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
     runtime = agent.get("runtime") or "agency copilot"
     if runtime == "none":
         return "-"
-        return (reported_models.get(agent["identifier"])
+    return (reported_models.get(agent["identifier"])
             or reported_models.get(agent["name"])
             or agent.get("model") or "default")
 
@@ -2273,7 +2273,7 @@ def _operational_summary(snapshot: dict, *, source: str | None = None) -> str:
         prefix +
         f"Snapshot for {scope}: {len(groups)} repositories, {len(rows)} agents, "
         f"{failing} failing, {unavailable} unavailable, {partial} partial; "
-        f"errors in last hour: {errors}"
+        f"errors in last hour: {errors}; {_attention_summary(snapshot)}"
     )
 
 
@@ -2529,8 +2529,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     "flat dense no-caps size=sm")
             inventory_summary = ui.label().classes(
                 "text-xs text-gray-500 px-1")
-            attention_summary = ui.label().classes(
-                "text-xs text-orange-600 px-1")
             inventory = ui.element("div").classes(
                 "w-full grow min-h-0 agent-table-scroll")
 
@@ -2614,7 +2612,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
             f"{len(visible_groups)} repositories")
-        attention_summary.text = _attention_summary(current)
         grouped = state_settings.get("grouped", True)
         mounted, deferred = _repository_window(
             visible_groups, state_settings.get("expanded_repositories", [])) if grouped else ([], [])

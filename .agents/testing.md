@@ -161,6 +161,21 @@ the same commit reuses that preparation evidence; a changed commit, wheel,
 platform, Python version, Test workflow, or gate list invalidates it
 mechanically.
 
+Preparation evidence and immutable wheels live under the common Git directory,
+shared by all worktrees. Moving to a clean worktree must not trigger a repeat
+of an already successful build or dashboard gate for the same commit, digest,
+platform, interpreter, and gate list. A valid receipt skips both commands.
+Never delete this common artifact storage when removing a worktree.
+
+Do not repeat a passing check simply because work moved from implementation to
+release or to another agent. Record the command, tested revision or artifact
+digest, environment, and result; rerun only when a relevant input changed or
+the earlier result failed or is unavailable. A newly stamped bake wheel is a
+new artifact, so its first check is not covered by an ordinary-version wheel.
+Post-install identity, watcher, and dashboard restoration checks validate the
+changed installation and are not substitutes for, or repetitions of, the
+artifact tests.
+
 The optional `--allow-downgrade` bypasses only the guard against moving to a
 lower numeric `major.minor.patch` release. It is not needed when replacing a
 stable candidate with a commit-qualified bake on the same release line, or

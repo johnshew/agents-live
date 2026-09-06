@@ -444,10 +444,13 @@ def _assert_operational_viewport(
                         or page.get_by_role("button", name="Filters").count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: compact controls are absent")
-                page.get_by_text(
+                page.locator(".activity-log").get_by_text(
                     "Attention in all registered repositories:", exact=False,
                 ).wait_for()
+                if page.locator(".agent-panel").get_by_text("Attention in", exact=False).count():
+                    raise ReadinessError(f"{mode}: attention diagnostics consume inventory space")
                 page.get_by_text("Failing: newest run", exact=False).wait_for()
+                groups.locator("td").filter(has_text=re.compile(r"^echo$")).first.wait_for()
                 page.get_by_text(watcher_health, exact=False).wait_for()
                 start_button = page.get_by_role("button", name="Start: Already active", exact=True)
                 start_button.wait_for()
