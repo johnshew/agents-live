@@ -361,29 +361,26 @@ def _start_dashboard(dashboard: Dashboard) -> None:
     if dashboard.repository is not None:
         argv.extend(("--repo", dashboard.repository))
     argv.extend(("dashboard", "--port", str(dashboard.port), *dashboard.modes))
-    options: dict[str, object] = {}
-    if os.name == "nt":
-        options["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
-    else:
-        options["start_new_session"] = True
-    process = subprocess.Popen(
+    process = hostruntime.spawn_detached(
         argv, cwd=dashboard.repository or ROOT, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, **options)
-    deadline = time.monotonic() + READY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise LocalDeployError(
-                f"dashboard on {dashboard.port} exited {process.returncode}")
-        try:
-            _await_api_rows(
-                dashboard.port, timeout_s=max(0.001, deadline - time.monotonic()))
-        except LocalDeployError:
-            continue
-        return
-    _terminate_dashboard_tree(process, dashboard.port)
-    raise LocalDeployError(
-        f"dashboard on {dashboard.port} did not serve agent rows")
+        stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise LocalDeployError(
+                    f"dashboard on {dashboard.port} exited {process.returncode}")
+            try:
+                _await_api_rows(
+                    dashboard.port, timeout_s=max(0.001, deadline - time.monotonic()))
+            except LocalDeployError:
+                continue
+            return
+        raise LocalDeployError(
+            f"dashboard on {dashboard.port} did not serve agent rows")
+    except BaseException:
+        _terminate_dashboard_tree(process, dashboard.port)
+        raise
 
 
 def _terminate_dashboard_tree(
@@ -392,7 +389,11 @@ def _terminate_dashboard_tree(
     managed = _installed_run("dashboard", "stop", "--port", str(port))
     if managed.returncode == 0:
         _await_port_closed(port)
-        return
+        try:
+            process.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            pass
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(process.pid)],
@@ -400,8 +401,11 @@ def _terminate_dashboard_tree(
     else:
         with contextlib.suppress(ProcessLookupError, OSError):
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
+    try:
         process.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise LocalDeployError(
+            f"dashboard launcher {process.pid} did not exit after cleanup") from exc
     _await_port_closed(port)
 
 
