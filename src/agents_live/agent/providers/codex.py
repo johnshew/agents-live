@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Mapping
 
 from ..values import (
@@ -83,6 +84,8 @@ class CodexProvider(ProviderBase):
             "--config", "sandbox_workspace_write.exclude_slash_tmp=true",
             "--config", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
         ]
+        if sys.platform == "win32":
+            argv.extend(("--config", 'windows.sandbox="unelevated"'))
         if spec.model:
             argv.extend(("--model", spec.model))
         if spec.effort:
@@ -92,6 +95,8 @@ class CodexProvider(ProviderBase):
         schema = environment.get(OUTPUT_SCHEMA)
         if spec.output_schema is not None and schema:
             argv.extend(("--output-schema", schema))
+        if spec.cwd is not None:
+            argv.extend(("-C", spec.cwd))
         return Launch(
             tuple(argv),
             spec.env,

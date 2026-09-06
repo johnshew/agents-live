@@ -292,6 +292,7 @@ class ResolvedSpec:
     model: str | None
     effort: str | None
     output_schema: dict | None = None
+    cwd: str | None = None
 
 
 @dataclass(frozen=True)
