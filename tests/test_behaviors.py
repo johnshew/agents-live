@@ -5150,6 +5150,50 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 start(dashboard)
         cleanup.assert_called_once_with(process, 8231)
 
+    def test_local_deploy_uses_native_hidden_spawn_policy(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        start = script["_start_dashboard"]
+        scope = start.__globals__
+        process = mock.Mock()
+        process.poll.return_value = None
+        dashboard = script["Dashboard"](8231, 100, "C:/repo", ())
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: Path("agents-live"),
+            "_await_api_rows": mock.Mock(return_value={"agents": [{"name": "ok"}]}),
+        }), mock.patch.object(scope["hostruntime"], "spawn_detached",
+                              return_value=process) as spawn:
+            start(dashboard)
+        spawn.assert_called_once_with(
+            ["agents-live", "--repo", "C:/repo", "dashboard", "--port", "8231"],
+            cwd="C:/repo", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_local_deploy_cleans_interrupted_startup(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        start = script["_start_dashboard"]
+        scope = start.__globals__
+        process = mock.Mock()
+        process.poll.return_value = None
+        cleanup = mock.Mock()
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: Path("agents-live"),
+            "_await_api_rows": mock.Mock(side_effect=KeyboardInterrupt),
+            "_terminate_dashboard_tree": cleanup,
+        }), mock.patch.object(scope["hostruntime"], "spawn_detached", return_value=process):
+            with self.assertRaises(KeyboardInterrupt):
+                start(script["Dashboard"](8231, 100, "C:/repo", ()))
+        cleanup.assert_called_once_with(process, 8231)
+
+    def test_local_deploy_waits_for_launcher_after_managed_stop(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        terminate = script["_terminate_dashboard_tree"]
+        process = mock.Mock()
+        with mock.patch.dict(terminate.__globals__, {
+            "_installed_run": mock.Mock(return_value=subprocess.CompletedProcess([], 0)),
+            "_await_port_closed": mock.Mock(),
+        }):
+            terminate(process, 8231)
+        process.wait.assert_called_once_with(timeout=10)
+
     def test_local_deploy_attempts_every_dashboard_restart(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
