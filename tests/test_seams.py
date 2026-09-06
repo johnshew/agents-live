@@ -5817,6 +5817,20 @@ class TestDashboardRepositorySurface(TempRepository):
                 return_value=contextlib.nullcontext()),
         ):
             dashboard._build_operational_page()
+            collect_agents.assert_not_called()
+            initial = next(
+                call.args[1] for call in dashboard.ui.timer.call_args_list
+                if call.args and call.args[0] == 0.1)
+            with (
+                mock.patch.object(dashboard.ng_run, "io_bound",
+                                  new=mock.AsyncMock(side_effect=lambda function: function())),
+            ):
+                async def restore() -> None:
+                    future = asyncio.get_running_loop().create_future()
+                    future.set_result({})
+                    with mock.patch.object(dashboard.ui, "run_javascript", return_value=future):
+                        await initial()
+                asyncio.run(restore())
             periodic = next(
                 call.args[1] for call in dashboard.ui.timer.call_args_list
                 if call.args and call.args[0] == 600.0)
@@ -6045,7 +6059,7 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual(["remote-agent"], [row["name"] for row in stale["rows"]])
         self.assertIn(
             selected_key,
-            dashboard._canonical_selection_keys(after["repository_groups"]),
+            {row["repository_identifier"] for row in after["rows"]},
         )
         self.assertIn("not an existing directory", stale["error"])
 
@@ -6055,7 +6069,6 @@ class TestDashboardRepositorySurface(TempRepository):
         second = dashboard._new_page_state()
 
         first["all_repos"]["repo"] = "first"
-        first["all_repos"]["selection"].append("first/agent")
         first["filters"]["name"] = "only-first"
         first["all_repos"]["settings_open"] = True
 
@@ -6070,26 +6083,12 @@ class TestDashboardRepositorySurface(TempRepository):
                 settings=second["all_repos"])["scope"],
         )
         self.assertEqual("All", second["all_repos"]["repo"])
-        self.assertEqual([], second["all_repos"]["selection"])
+        self.assertNotIn("selection", second["all_repos"])
         self.assertEqual("", second["filters"]["name"])
         self.assertFalse(second["all_repos"]["settings_open"])
         self.assertEqual("All", dashboard.STATE["all_repos"]["repo"])
-        self.assertEqual([], dashboard.STATE["all_repos"]["selection"])
+        self.assertNotIn("selection", dashboard.STATE["all_repos"])
         self.assertEqual("", dashboard.STATE["filters"]["name"])
-
-    def test_dashboard_semantic_selection_retains_hidden_repository_keys(
-        self,
-    ) -> None:
-        dashboard = self._dashboard_module()
-
-        selected = dashboard._updated_selection_keys(
-            ["hidden/agent-1", "visible/agent-1"],
-            [{"repository_identifier": "visible/agent-2"}],
-            {"visible/agent-1", "visible/agent-2"},
-        )
-
-        self.assertEqual(
-            ["hidden/agent-1", "visible/agent-2"], selected)
 
     def test_dashboard_repository_window_bounds_mounted_groups(self) -> None:
         dashboard = self._dashboard_module()
@@ -6559,7 +6558,7 @@ class TestArchitectureFitness(unittest.TestCase):
         ):
             dashboard.main()
 
-        self.assertIn("Dashboard URL: http://127.0.0.1:8233", stdout.getvalue())
+        self.assertNotIn("Dashboard URL:", stdout.getvalue())
         record.assert_called_once_with(8233, os.getpid(), dashboard.REPO_ROOT)
         self.assertEqual(8233, run.call_args.kwargs["port"])
 
