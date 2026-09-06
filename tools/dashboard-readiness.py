@@ -941,7 +941,7 @@ def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
 
 def _assert_aggregate_run(port: int, directory: Path,
                           payload: dict, mode: str) -> None:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     identifier = payload["agents"][0].get("identifier")
     if not isinstance(identifier, str) or not identifier:
@@ -971,6 +971,8 @@ def _assert_aggregate_run(port: int, directory: Path,
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
             row = page.get_by_role("row").filter(
                 has=page.get_by_text("readiness-agent", exact=True))
+            expect(row).to_have_count(1, timeout=15000)
+            expect(row).to_be_visible(timeout=15000)
             if row.count() != 1:
                 raise ReadinessError(
                     f"{mode}: aggregate dashboard rendered {row.count()} "
