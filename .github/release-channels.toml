@@ -15,13 +15,14 @@ deployed_commit = "186f3abbba03717637b71ae02e3e3d2b39ea4549"
 validated_on = "2026-09-05"
 
 [bake.issues]
-delivered = [374, 446, 447]
+delivered = [374, 424, 446, 447, 455]
 partial = []
-deferred = []
-promotion_decision = [424, 455]
+deferred = [105, 388, 434]
+promotion_decision = []
 
 [bake.recommendations]
-overall = "Merge the dashboard cleanup, confirm its issues close, and finish native-Windows candidate validation before preparing 6.9.0."
-"424" = "Include the completed continuity and bounded-rendering work in 6.9.0 after the dashboard pull request passes both host matrices."
-"455" = "Include the completed repository settings workflow in 6.9.0 after the dashboard pull request passes both host matrices."
-testing = "Version 6.8.0 passed installed operational acceptance on Windows. The 6.9 provider and dashboard changes still require signed-in native-Windows provider conformance and installed-candidate acceptance before publication."
+overall = "Finish native-Windows provider conformance, then prepare and accept the official 6.9.0 candidate."
+"105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
+"388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
+"434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
+testing = "Version 6.8.0 passed installed operational acceptance on Windows. Native-Windows Copilot conformance passes; Codex sign-in, Codex conformance, and installed-candidate acceptance remain required before publication."
