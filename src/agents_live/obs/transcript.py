@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
+# dependencies = ["PyYAML"]
 # ///
 """Retrieve and normalize recorded provider conversations."""
 from __future__ import annotations
@@ -190,6 +191,11 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
     })
     if structured is not None:
         base["structured"] = structured
+    pipeline_result = envelope.get("pipeline_result")
+    if isinstance(pipeline_result, dict):
+        base["pipeline_result"] = pipeline_result
+    if "postprocessor_input" in envelope:
+        base["postprocessor_input"] = envelope["postprocessor_input"]
     return base, raw
 
 
@@ -203,7 +209,7 @@ def _clip(value: object) -> object:
 def _summary(item: dict[str, object]) -> dict[str, object]:
     return {
         key: value for key, value in item.items()
-        if key not in {"turns", "structured"}
+        if key not in {"turns", "structured", "pipeline_result", "postprocessor_input"}
     } | {
         "prompt": _clip(item.get("prompt")),
         "final": _clip(item.get("final")),

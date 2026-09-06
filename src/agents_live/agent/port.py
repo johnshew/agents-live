@@ -333,10 +333,11 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
     for step in (Step.PRE, Step.AGENT, Step.POST):
         result = results.get(step)
         if result is not None and not result.ok:
+            telemetry = results.get(Step.AGENT) or result
             return Outcome(
                 False, "failed", result.text, result.structured,
                 result.category or "agent_error", result.message,
-                result.usage, result.transcript,
+                telemetry.usage, telemetry.transcript,
             )
     pre = results.get(Step.PRE)
     if pre is not None and pre.skip:

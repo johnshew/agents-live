@@ -215,6 +215,18 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                         ),
                     ),
                 )
+                model_result = results.get(Step.AGENT)
+                if config.transcript and model_result and model_result.transcript:
+                    transcript = Path(model_result.transcript)
+                    envelope = json.loads(transcript.read_text(encoding="utf-8"))
+                    envelope["postprocessor_input"] = launch.input_text
+                    if published is not None:
+                        envelope["pipeline_result"] = {
+                            "path": config.result_path,
+                            "present": published[0],
+                            "value": published[1] if published[0] else None,
+                        }
+                    _write_json(transcript, envelope)
                 results[Step.POST] = _run(
                     spec, Step.POST, launch, runner, run_id=run_id,
                     scratch=scratch)
@@ -341,27 +353,31 @@ def _write_transcript(spec, run_id: str, attempt: int, launch, raw, provider_ref
     directory = repo_state_dir(spec.root) / "runs" / spec.name
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{run_id}-agent-{attempt}.json"
+    _write_json(destination, {
+        "argv": list(raw.argv),
+        "prompt": launch.prompt,
+        "provider": launch.provider,
+        "provider_transcript": provider_ref,
+        "returncode": raw.returncode,
+        "stderr": raw.stderr,
+        "stdout": raw.stdout,
+        "timed_out": raw.timed_out,
+    })
+    return destination
+
+
+def _write_json(destination: Path, payload: object) -> None:
     descriptor, temporary = tempfile.mkstemp(
-        dir=directory, prefix=f".{run_id}.", text=True)
+        dir=destination.parent, prefix=f".{destination.stem}.", text=True)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump({
-                "argv": list(raw.argv),
-                "prompt": launch.prompt,
-                "provider": launch.provider,
-                "provider_transcript": provider_ref,
-                "returncode": raw.returncode,
-                "stderr": raw.stderr,
-                "stdout": raw.stdout,
-                "timed_out": raw.timed_out,
-            }, stream, ensure_ascii=False, sort_keys=True)
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    return destination
 
 
 def _finish(
