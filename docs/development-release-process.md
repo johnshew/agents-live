@@ -78,6 +78,21 @@ If an active bake exists but requested work names `main`, confirm whether the
 developer intends a bake fix, release promotion, or independent post-release
 work. Do not bypass the active bake by assumption.
 
+## Validation evidence
+
+Run each gate once for its tested inputs, and carry its passing evidence into
+the next phase. Do not rerun unchanged tests at an agent handoff or immediately
+before a command that already owns those gates. Record the command, revision
+or artifact digest, environment, and result; a failed, missing, or invalidated
+record requires a new check. CI platform checks still prove their own platform.
+
+Bake deployment builds and validates its commit-stamped artifact only when no
+matching preparation receipt exists. Receipts and wheels are shared across
+worktrees in the common Git directory and survive worktree cleanup. Release
+preparation owns candidate gates; publication verifies their receipts without
+rerunning them. Installing an artifact changes live state, so post-install
+identity, watcher restoration, and dashboard readiness remain required.
+
 ## Promotion approval
 
 Developer approval must be recorded for the exact validated bake commit:

@@ -64,6 +64,13 @@ Semantic versioning; the version lives in `pyproject.toml`.
 
 ## Gates (all must pass)
 
+The commands below describe the gates, not a sequence to run before
+`--prepare`. Preparation owns their execution and records the results. Do not
+manually repeat a passing gate for unchanged inputs, or run the entire list
+and then immediately ask preparation to run it again. Use focused checks while
+developing; use receipt-bound preparation once the release version is stamped.
+Publication consumes those receipts instead of rerunning local tests.
+
 ```bash
 uv run --script tools/pre-release-audit.py
 uv run --with-editable . python -m unittest discover -s tests -v
@@ -84,8 +91,8 @@ The framework smoketest must pass end to end: it exercises the real
 trigger/run/status loop in this checkout, catching integration breaks
 the unit suite cannot. It uses whichever agent CLI this host can launch,
 preferring `copilot`, so the gate does not require a particular vendor's
-CLI to be installed. `tools/release.py` runs all of these gates
-itself during `--prepare` and `--publish`.
+CLI to be installed. `tools/release.py` runs these gates during `--prepare`;
+`--publish` verifies the preparation and installed-acceptance receipts.
 
 `uv build` resolves its build backend from PyPI, so on a network that
 intercepts TLS it fails with `HandshakeFailure` while every other gate

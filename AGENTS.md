@@ -61,8 +61,10 @@ The standard loop for any change that lands as commits:
   target branch. Otherwise, create a dedicated worktree from that target;
   verify its ancestry before committing or pushing, and remove it when the
   task is complete.
-4. Edit, then run the smoke tests and the release audit (Quick
-   commands above).
+4. Edit, then run the smoke tests and the release audit (Quick commands above).
+  Reuse passing evidence when the tested inputs and environment are unchanged;
+  do not rerun gates merely at a handoff or before preparation runs them itself.
+  See `.agents/testing.md` for artifact and installed-state boundaries.
 5. Commit, push, and open a pull request. Reference an issue only when
    one already covers the work.
 6. After checks pass, merge with `gh pr merge <n> --merge`.

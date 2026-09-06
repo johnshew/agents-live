@@ -41,7 +41,7 @@ from agents_live.runtime.hosts.processes import watchers_on_host  # noqa: E402
 
 RELEASE = runpy.run_path(str(ROOT / "tools" / "release.py"))
 RELEASE_ERROR = RELEASE["ReleaseError"]
-LOCAL_PREPARATION_SCHEMA = 1
+LOCAL_PREPARATION_SCHEMA = 2
 LOCAL_DEPLOYMENT_SCHEMA = 1
 READY_TIMEOUT_S = 180.0
 LOCAL_GATES = (
@@ -126,9 +126,10 @@ def _require_unchanged_checkout(commit: str) -> None:
 
 
 def _state_directory() -> Path:
-    value = _git("rev-parse", "--git-path", "agents-live-local-deploy")
+    value = _git("rev-parse", "--git-common-dir")
     path = Path(value)
-    return path if path.is_absolute() else ROOT / path
+    common = path if path.is_absolute() else ROOT / path
+    return common.resolve() / "agents-live-local-deploy"
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -156,6 +157,7 @@ def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
         "os_name": os.name,
         "architecture": platform.machine(),
         "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
     }
     if any(payload.get(key) != value for key, value in expected.items()) \
             or not wheel.is_file():
@@ -211,6 +213,7 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         "os_name": os.name,
         "architecture": platform.machine(),
         "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
     })
     return artifact.resolve(), digest
 
