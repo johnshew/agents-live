@@ -2546,6 +2546,89 @@ class TestInstallationGenerations(unittest.TestCase):
     before the pointer moves, and a collector that keeps the rollback.
     """
 
+    def test_generation_listing_separates_channel_source_and_local_dates(self) -> None:
+        from agents_live.cli.commands import generations
+
+        self._activate_generation("6.9.0.dev0+g123abcd")
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, generations.main(["list"]))
+        row = json.loads(output.getvalue())["versions"][0]
+        self.assertEqual("bake", row["channel"])
+        self.assertIn("source", row)
+        self.assertTrue(row["validated"].endswith("Z"))
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, generations.main(["list"]))
+        rendered = output.getvalue()
+        self.assertIn("Validated", rendered)
+        self.assertIn("bake", rendered)
+        self.assertNotIn("T", rendered.splitlines()[-1].split("  ")[-1].split()[0])
+        self.assertNotIn("+00:00", rendered)
+
+    def test_generation_release_status_is_explicit_and_preserves_artifact(self) -> None:
+        self._activate_generation("6.9.0")
+        built = deploy.generation.load("6.9.0")
+        self.assertIsNone(deploy.generation.release_status(built))
+        for status in ("candidate", "rejected", "released"):
+            deploy.generation.classify(built.name, status)
+            self.assertEqual(status, deploy.generation.release_status(built))
+            self.assertEqual(built, deploy.generation.load(built.name))
+        bake = self._activate_generation("6.9.0.dev0+g123abcd")
+        with self.assertRaises(deploy.generation.GenerationError):
+            deploy.generation.classify(bake.name, "released")
+
+    def test_generation_activation_records_previous_and_selected_versions(self) -> None:
+        from agents_live.obs import admin
+        self._activate_generation("6.8.0")
+        with mock.patch.object(admin, "record") as record:
+            self._activate_generation("6.9.0.dev0+g123abcd")
+        record.assert_called_once_with(
+            "generation.activate", installation_root=str(self.root),
+            previous="6.8.0", generation="6.9.0.dev0+g123abcd")
+
+    def test_generation_listing_names_candidate_and_rejected_status(self) -> None:
+        from agents_live.cli.commands import generations
+        self._activate_generation("6.9.0")
+        built = deploy.generation.load("6.9.0")
+        from dataclasses import replace
+        candidate = replace(built, provenance=deploy.generation.Provenance(
+            "local-artifact", "candidate.whl", "a" * 64),
+            validated="2026-09-06T12:30:00+02:00")
+        with mock.patch.object(deploy.generation, "load", return_value=candidate):
+            deploy.generation.classify("6.9.0", "rejected")
+            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    generations.main(["list"])
+                row = json.loads(output.getvalue())["versions"][0]
+            self.assertEqual("release-candidate", row["channel"])
+            self.assertEqual("local-artifact", row["source"])
+            self.assertEqual("rejected", row["status"])
+            self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
+            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    generations.main(["list"])
+            self.assertIn("local release candidate (rejected)", output.getvalue())
+
+    def test_public_versions_command_replaces_generations(self) -> None:
+        self._activate_generation("6.9.0.dev0+g123abcd")
+        result = subprocess.run(
+            [sys.executable, "-m", "agents_live.cli", "--json", "versions", "list"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = json.loads(result.stdout)["versions"]
+        self.assertEqual("6.9.0.dev0+g123abcd", rows[0]["version"])
+        self.assertEqual("bake", rows[0]["channel"])
+        retired = subprocess.run(
+            [sys.executable, "-m", "agents_live.cli", "--json", "generations", "list"],
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(0, retired.returncode)
+        self.assertIn("unknown_command", retired.stdout + retired.stderr)
+
     def test_generation_population_installs_only_agents_live(self) -> None:
         with (
             mock.patch.object(install_generation, "_run") as run,
@@ -2565,7 +2648,8 @@ class TestInstallationGenerations(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve() / "install"
         patched = mock.patch.dict(
             os.environ,
-            {deploy.layout.ENV_INSTALL_ROOT: str(self.root)},
+            {deploy.layout.ENV_INSTALL_ROOT: str(self.root),
+             "XDG_STATE_HOME": str(Path(self.temporary.name) / "state")},
         )
         patched.start()
         self.addCleanup(patched.stop)
@@ -5008,10 +5092,39 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = wait.__globals__
         responses = iter((None, {"agents": []}, {"agents": [{"name": "ok"}]}))
         with mock.patch.dict(scope, {
-            "_api": lambda _port: next(responses),
+            "_api": lambda _port, **_kwargs: next(responses),
         }), mock.patch.object(scope["time"], "sleep", return_value=None):
             self.assertEqual(
                 [{"name": "ok"}], wait(8231, timeout_s=10)["agents"])
+
+    def test_local_deploy_accepts_slow_healthy_dashboard_response(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(2.2)
+                self.send_response(200)
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(b'{"agents": [{"name": "healthy"}]}')
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            self.assertEqual(
+                [{"name": "healthy"}], script["_await_api_rows"](
+                    server.server_port, timeout_s=3)["agents"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
     def test_local_deploy_cleans_the_dashboard_tree_after_readiness_failure(
             self) -> None:

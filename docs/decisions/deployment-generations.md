@@ -1,7 +1,7 @@
 ---
 title: Generation-Based Deployment Decision
 description: Why installation writes immutable version directories and selects one with a current directory link
-ms.date: 2026-09-04
+ms.date: 2026-09-06
 ms.topic: concept
 ---
 
@@ -39,6 +39,7 @@ An installation owns this layout:
     versions/<version>/       complete immutable environment
     current/                  link to the active version directory
     owner.json                installation owner
+    release-status/<version>.json  explicit local release decision
 ```
 
 The directory key is the package's complete PEP 440 version, not its release
@@ -55,6 +56,23 @@ POSIX.
 on POSIX. It is the only active-generation fact. There is no second pointer
 file to disagree with it, and Agents Live does not guess the newest installed
 version when the link is missing or invalid.
+
+Release status is separate from artifact provenance. `local-artifact` and
+`github-release` describe the source, not whether a stable-numbered wheel is a
+candidate. `upgrade --from <wheel> --candidate` records candidate intent;
+`versions classify <version> candidate|rejected|released` records an explicit
+decision for an installed generation. The decision lives outside its immutable
+directory and is bound to the complete validation record, so removing and
+rebuilding the same version cannot inherit an unrelated decision. Development
+versions are always bake releases and cannot receive a release classification.
+An unclassified local stable-numbered build remains unclassified.
+
+`versions list` separates release, source, and validation time. Human output
+uses compact local dates with timezone abbreviations. JSON keeps ISO-8601 UTC
+timestamps and reports release `channel`, explicit `status`, and artifact
+`source` separately; consumers that formerly read provenance from `channel`
+must use `source`. Successful activations record previous and selected versions
+plus the installation root in the administrative timeline.
 
 Agents Live uses the console entry points generated inside each Python
 environment. It does not build or publish a separate native launcher. Changing

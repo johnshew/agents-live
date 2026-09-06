@@ -11,6 +11,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: expose installed versions with truthful release labels and readable dates.
+  The public command is `versions`, without a `generations` alias. Listings
+  distinguish bake releases, explicitly recorded local release candidates,
+  rejected candidates, and artifact sources. Human validation dates use the
+  local timezone; JSON uses UTC and the `versions`, `version`, `channel`,
+  `status`, and `source` fields. Successful selections are recorded in the
+  administrative timeline without modifying immutable version files.
+- fix: restore dashboards whose healthy API response takes more than two seconds.
+  Local deployment lets readiness requests use the remaining startup deadline
+  instead of repeatedly abandoning responses before they can finish.
 - fix: keep dashboard inventory compact and stable while filtering and refreshing. (#461)
   One shared scroll region contains compact virtualized rows. Responsive search,
   visible grouping, removable filters, and one sort order preserve selection

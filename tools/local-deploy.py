@@ -333,10 +333,10 @@ def _stop_dashboard(dashboard: Dashboard) -> None:
             f"could not stop dashboard on {dashboard.port}: {detail}")
 
 
-def _api(port: int) -> dict | None:
+def _api(port: int, *, timeout_s: float = READY_TIMEOUT_S) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/agents", timeout=timeout_s) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else None
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
@@ -348,7 +348,7 @@ def _await_api_rows(
 ) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        payload = _api(port)
+        payload = _api(port, timeout_s=max(0.001, deadline - time.monotonic()))
         if payload and payload.get("agents"):
             return payload
         time.sleep(0.5)
@@ -376,7 +376,8 @@ def _start_dashboard(dashboard: Dashboard) -> None:
             raise LocalDeployError(
                 f"dashboard on {dashboard.port} exited {process.returncode}")
         try:
-            _await_api_rows(dashboard.port, timeout_s=1.0)
+            _await_api_rows(
+                dashboard.port, timeout_s=max(0.001, deadline - time.monotonic()))
         except LocalDeployError:
             continue
         return

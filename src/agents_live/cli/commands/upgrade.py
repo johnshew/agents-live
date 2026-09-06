@@ -90,6 +90,7 @@ def _wheel_identity(wheel: Path) -> tuple[str, str]:
 
 def _upgrade_self_managed(
     source: Path | None,
+    *, candidate: bool = False,
 ) -> int:
     """Activate a new immutable generation through the stable current path."""
     if source is None:
@@ -104,6 +105,8 @@ def _upgrade_self_managed(
         return 1
     try:
         version, digest = _wheel_identity(source)
+        if candidate and ".dev" in version:
+            raise ValueError("a bake wheel cannot be installed as a release candidate")
         provenance = deploy.generation.Provenance(
             "local-artifact", source.name, digest)
         try:
@@ -121,6 +124,8 @@ def _upgrade_self_managed(
                     "artifact bytes and will not be overwritten")
             install_generation.validate(built)
         install_generation.activate_generation(built)
+        if candidate:
+            deploy.generation.classify(version, "candidate")
         deploy.ownership.write_record(deploy.ownership.SELF)
     except (OSError, ValueError, deploy.generation.GenerationError) as exc:
         preflight.emit_failure("upgrade", str(exc))
@@ -215,7 +220,12 @@ def main() -> int:
         help="Install the runtime from a local project directory or built "
              "artifact instead of PyPI",
     )
+    parser.add_argument("--candidate", action="store_true",
+                        help="Record a local wheel as a release candidate")
     args = parser.parse_args()
+    if args.candidate and (not args.source or args.skills_only):
+        preflight.emit_failure("upgrade", "--candidate requires --from and a runtime upgrade")
+        return 1
     print(f"Installed agents-live version: {__version__}")
 
     source: Path | None = None
@@ -274,7 +284,7 @@ def main() -> int:
                 code="unsupported_installation",
             )
             return 1
-        runtime_status = _upgrade_self_managed(source)
+        runtime_status = _upgrade_self_managed(source, candidate=args.candidate)
         if runtime_status != 0:
             return runtime_status
         stable_command = deploy.layout.command_path("agents-live")

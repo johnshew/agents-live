@@ -290,7 +290,7 @@ be present. The wheel contains only the installable package and its metadata.
 Show the installed version and run the same read-only checks consumers use:
 
 ```bash
-agents-live generations list
+agents-live versions list
 agents-live --repo ~/repos/<target-project> doctor
 agents-live --repo ~/repos/<target-project> status
 agents-live --repo ~/repos/<target-project> dashboard --help
@@ -300,7 +300,7 @@ Check PyPI and upgrade when a newer version is available:
 
 ```bash
 agents-live upgrade
-agents-live generations list
+agents-live versions list
 agents-live --repo ~/repos/<target-project> doctor
 ```
 

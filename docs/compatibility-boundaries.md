@@ -46,7 +46,7 @@ by moving a directory link.
 This is not a breaking change for supported installations. The public
 bootstrap already migrates a legacy uv tool installation, and a command run
 from a package-manager environment refuses self-upgrade with guidance pointing
-at the bootstrap. The new `generations` command exposes selection, deliberate
+at the bootstrap. The `versions` command exposes selection, deliberate
 inactive-version removal, and policy-driven collection. Retirement is tracked under
 [#334](https://github.com/johnshew/agents-live/issues/334).
 

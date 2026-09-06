@@ -1131,7 +1131,7 @@ def _print_plan(current: str, target: str, minimum_bump: str) -> None:
         *(shlex.join(command) for command in _gate_commands()),
         f"git commit -m 'chore(build): bump version to {tag}' ...",
         f"git tag -a {tag}",
-        "agents-live upgrade --from <target wheel>  # bootstrap candidate",
+        "agents-live upgrade --from <target wheel> --candidate  # bootstrap candidate",
         "uv run --script tools/release.py --accept-candidate "
         "--repo <live-repository> --agent <safe-agent-identifier> "
         "--cost-agent <safe-provider-agent-identifier> --yes",
@@ -1224,7 +1224,7 @@ def prepare(bump: str) -> None:
     receipt = _write_preparation(target, wheel)
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
     print(f"  preparation receipt: {receipt}")
-    print(f"  agents-live upgrade --from {wheel}")
+    print(f"  agents-live upgrade --from {wheel} --candidate")
     print("  uv run --script tools/release.py --accept-candidate "
             "--repo <live-repository> --agent <safe-agent-identifier> "
             "--cost-agent <safe-provider-agent-identifier> --yes")
@@ -1392,7 +1392,7 @@ def accept_candidate(
     if installed != version:
         raise ReleaseError(
             f"installed tool is {installed}, but prepared candidate is {version}; "
-            f"bootstrap it first with `agents-live upgrade --from {wheel}`")
+            f"bootstrap it first with `agents-live upgrade --from {wheel} --candidate`")
 
     _run_operational_acceptance(root, agent_id, cost_agent, preflight=True)
 
@@ -1444,7 +1444,7 @@ def accept_candidate(
     before_contract = _status_contract(before_status)
 
     completed = _installed_run(
-        ["--repo", str(root), "upgrade", "--from", str(wheel)])
+        ["--repo", str(root), "upgrade", "--from", str(wheel), "--candidate"])
     if completed.stdout:
         print(completed.stdout.rstrip())
     if completed.stderr:
@@ -1520,6 +1520,7 @@ def publish() -> None:
         tag, notes, create=True, assets=(manifest, *accepted_artifacts),
         resume_draft=resume_draft)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
+    print(f"Record the local release decision: agents-live versions classify {version} released")
 
 
 def main(argv: list[str] | None = None) -> int:
