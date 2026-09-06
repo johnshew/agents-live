@@ -7,7 +7,7 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "feat/dashboard-6.9-cleanup"
+branch = "bake/v6.9.0-local"
 version = "6.9.0"
 promotes_to = "release"
 deployed_version = "6.8.0"
