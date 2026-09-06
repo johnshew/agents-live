@@ -210,6 +210,7 @@ def _import(plugin: Plugin):
 def _attach(module) -> str:
     """Hand a loaded module's exposed objects to the seams they name."""
     attached = []
+    errors = []
     providers = None
     for attribute in PROVIDER_ATTRS:
         if hasattr(module, attribute):
@@ -219,12 +220,23 @@ def _attach(module) -> str:
         candidates = (
             providers if isinstance(providers, (list, tuple)) else [providers])
         for candidate in candidates:
-            provider_plugins.register(candidate)
-            attached.append(f"provider {candidate.name}")
+            try:
+                provider_plugins.register(candidate)
+                attached.append(f"provider {candidate.name}")
+            except Exception as exc:
+                errors.append(f"provider {getattr(candidate, 'name', '?')}: {exc}")
     registry = getattr(module, OWNERSHIP_ATTR, None)
     if registry is not None:
-        ownership.use_backend(registry)
-        attached.append("ownership registry")
+        try:
+            ownership.use_backend(registry)
+            attached.append("ownership registry")
+        except Exception as exc:
+            errors.append(f"ownership registry: {exc}")
+    if errors:
+        detail = "; ".join(errors)
+        if attached:
+            detail += f"; attached: {', '.join(attached)}"
+        raise PluginError(detail)
     if not attached:
         raise PluginError(
             f"exposes none of {', '.join((*PROVIDER_ATTRS, OWNERSHIP_ATTR))}")

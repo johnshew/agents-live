@@ -6004,6 +6004,21 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertIsNone(setting["agent_count"])
         self.assertIn("catalog temporarily unreadable", setting["error"])
 
+    def test_dashboard_refresh_preserves_rows_when_ownership_disappears(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("local-agent", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        before = dashboard.operational_snapshot()
+        with mock.patch.object(
+                dashboard, "_agent_rows_for",
+                side_effect=ownership.OwnershipUnavailableError("repository disappeared")):
+            after = dashboard.operational_snapshot(before)
+        group = after["repository_groups"][0]
+        self.assertTrue(group["stale"])
+        self.assertEqual("stale", group["collection"]["state"])
+        self.assertEqual(["local-agent"], [row["name"] for row in group["rows"]])
+        self.assertIn("repository disappeared", group["error"])
+
     def test_dashboard_refresh_preserves_missing_repository_rows_as_stale(
         self,
     ) -> None:
@@ -7025,7 +7040,7 @@ class TestArchitectureFitness(unittest.TestCase):
                         dashboard.__file__, run_name="__mp_main__")
                 self.assertEqual(0, stopped.exception.code)
 
-    def test_dashboard_abbreviates_windows_timezones_and_timestamps_refresh(self) -> None:
+    def test_dashboard_abbreviates_windows_timezones_and_timestamps_activity(self) -> None:
         class MountainTime(tzinfo):
             def utcoffset(self, moment):
                 return self.dst(moment) + timedelta(hours=-7)
@@ -7052,16 +7067,10 @@ class TestArchitectureFitness(unittest.TestCase):
 
         output = mock.Mock()
         with (
-            mock.patch.object(dashboard, "output_log", output, create=True),
-            mock.patch.object(dashboard, "_refresh_summary", return_value="summary"),
-            mock.patch.object(dashboard.agent_grid, "refresh", create=True),
-            mock.patch.object(dashboard.header_actions, "refresh", create=True),
-            mock.patch.object(dashboard.host_service_panel, "refresh", create=True),
-            mock.patch.object(
-                dashboard.hostruntime, "enumeration_pass",
-                return_value=contextlib.nullcontext()),
+            mock.patch.dict(dashboard._PAGE_LOGS, {"page": output}),
+            mock.patch.object(dashboard, "_client_key", return_value="page"),
         ):
-            dashboard._refresh_views()
+            dashboard._push_log("summary")
         rendered = output.push.call_args.args[0]
         self.assertRegex(rendered, r"^\[\d{2}:\d{2}:\d{2} [A-Z]+\] summary$")
 

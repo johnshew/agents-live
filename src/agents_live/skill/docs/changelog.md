@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: reference
 ---
 
@@ -11,13 +11,25 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep dashboard inventory compact and stable while filtering and refreshing. (#461)
+  One shared scroll region contains compact virtualized rows. Responsive search,
+  visible grouping, removable filters, and one sort order preserve selection
+  through refresh and reload without rebuilding tables or simulating clicks.
+  Repository ownership loss retains an explicit stale snapshot.
+- fix: report partial plugin failures without blocking healthy components.
+  Providers and ownership registries attach independently, but doctor and
+  upgrade preflight still report every failed component. Provider wrappers
+  must implement the complete contract explicitly; registration never infers
+  delegate methods that could bypass the wrapper's own restrictions.
 - fix: enable workspace-confined Codex writes on native Windows.
   Codex selects its supported unelevated Windows sandbox and receives the
   repository root explicitly, allowing in-workspace changes while writes
   outside the repository remain denied.
 - fix: keep actions working in virtualized dashboard tables.
-  Aggregate Run, Start, Stop, and Claim controls now dispatch through the
-  virtual-scroll wrapper while preserving repository-qualified targets.
+  Run, Start, Stop, and Claim controls use scoped event handlers and preserve
+  repository-qualified targets and disabled reasons. Queued action completion
+  refreshes and logs to the initiating tab, with page registrations released
+  on teardown.
 - feat: add OpenAI Codex as a self-contained provider. (#447)
   Codex supports plan and workspace-confined write runs, explicit models and
   reasoning effort, native output schemas, selected stdio and HTTP MCP servers,
