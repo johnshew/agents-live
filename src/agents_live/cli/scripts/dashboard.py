@@ -1517,9 +1517,10 @@ def _add_agent_information_slots(table) -> None:
     if any(column["name"] == "health" for column in _AGENT_COLUMNS):
         table.add_slot("body-cell-health", '''
                 <q-td :props="props">
-                    <span :class="props.row.unhealthy ? 'text-red text-weight-medium' : 'text-grey-7'">
+                    <div class="ellipsis" style="max-width:18rem" :title="props.row.health"
+                         :class="props.row.unhealthy ? 'text-red text-weight-medium' : 'text-grey-7'">
                         {{ props.row.health }}
-                    </span>
+                    </div>
                 </q-td>
         ''')
 
@@ -1537,7 +1538,7 @@ def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
         <q-th :props="props" class="text-left">{{ props.col.label }}</q-th>
     ''')
     table.add_slot("body-cell-actions", f'''
-        <q-td :props="props" class="text-left">
+        <q-td :props="props" class="text-left" style="white-space:nowrap">
           <q-btn flat dense round size="xs" color="primary" icon="play_arrow"
                :disable="!props.row.can_run"
                  :title="props.row.run_tip"
@@ -1561,10 +1562,8 @@ def _add_agent_action_slots(table, *, aggregate: bool = False) -> None:
                  :title="props.row.claim_tip"
                  :aria-label="'Claim: ' + props.row.claim_tip"
                  @click="() => {event_target}.$emit('{event_prefix}claim', {event_args})" />
-                    <div v-if="props.row.action_reasons"
-                             class="text-caption text-grey-7"
-                        style="max-width:20rem;white-space:normal"
-                        v-text="props.row.action_reasons"></div>
+          <span class="sr-only" v-if="props.row.action_reasons"
+                v-text="props.row.action_reasons"></span>
         </q-td>
     ''')
     handlers = (
@@ -2387,7 +2386,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         "rgba(127,127,127,.25);padding-top:.5rem}"
         ".agent-toolbar{min-height:2.5rem}"
         ".agent-table-scroll{min-height:0;overflow:auto}"
-        ".virtualized-agent-table{max-height:22rem;overflow:auto}"
+        ".virtualized-agent-table{overflow:visible}"
+        ".virtualized-agent-table .q-table__middle{overflow:visible}"
         ".all-repos-body{display:flex;flex-direction:column;gap:.75rem;padding-right:.25rem}"
         ".repository-group{overflow:visible}"
         ".repository-heading{position:sticky;top:0;z-index:2;min-width:0;"
@@ -2635,7 +2635,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                                         set_selection(event.selection, keys),
                                 ).classes("virtualized-agent-table w-full").props(
                                     "flat dense hide-bottom separator=none "
-                                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
+                                    ":virtual-scroll-target=\"'.agent-table-scroll'\"")
                                 table.selected = [
                                     row for row in group["rows"]
                                     if row["repository_identifier"] in selected_keys
@@ -2658,7 +2659,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                         }: set_selection(event.selection, keys),
                     ).classes("virtualized-agent-table w-full").props(
                         "flat dense hide-bottom separator=none "
-                        f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE}")
+                        f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
+                        ":virtual-scroll-target=\"'.agent-table-scroll'\"")
                     table.selected = [
                         row for row in rows
                         if row["repository_identifier"] in selected_keys
