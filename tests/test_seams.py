@@ -4074,7 +4074,7 @@ class TestTranscriptAcceptance(TempRepository):
             f'agents-live.mode: "{mode}"',
             f'agents-live.transcript: "{str(recording).lower()}"',
         ]
-        body = "Reply with exactly TRANSCRIPT_ACCEPTANCE_468."
+        body = 'Reply with exactly this JSON object: {"marker":"TRANSCRIPT_ACCEPTANCE_468"}.'
         if mode == "pipeline":
             metadata.append('agents-live.result-path: "/output/result"')
             body = (
@@ -4125,33 +4125,38 @@ class TestTranscriptAcceptance(TempRepository):
                     self.assertEqual("post_processor_crash", result["category"])
                 self.assertNotIn("postprocessor_input", self._transcript(result["run_id"], summary=True))
 
-    def test_live_copilot_postfailure_retains_transcript_and_proposal(self) -> None:
+    def _check_live_copilot_postfailure(self, mode: str) -> None:
         if os.environ.get("AGENTS_LIVE_TRANSCRIPT_CONFORMANCE") != "1":
             self.skipTest("live transcript conformance is opt-in")
         subprocess.run(["git", "init", "-q", str(self.root)], check=True, timeout=30)
-        for mode in ("plan", "pipeline"):
-            with self.subTest(mode=mode):
-                name = f"live-transcript-{mode}"
-                directory = self._post_skill(name, "copilot", mode=mode)
-                completed = self._cli("run", name, "--json")
-                self.assertEqual(1, completed.returncode, completed.stderr)
-                result = json.loads(completed.stdout)
-                self.assertEqual("post_processor_crash", result["category"], result["message"])
-                item = self._transcript(result["run_id"])
-                self.assertEqual("error", item["status"])
-                self.assertEqual("available", item["transcript_state"])
-                self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["prompt"])
-                self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["final"])
-                self.assertEqual((directory / "submitted.txt").read_text(encoding="utf-8"),
-                                 item["postprocessor_input"])
-                if mode == "pipeline":
-                    self.assertTrue(item["tool_calls"])
-                    self.assertEqual({"marker": "TRANSCRIPT_ACCEPTANCE_468"},
-                                     item["pipeline_result"]["value"])
-                    self.assertTrue(item["pipeline_result"]["present"])
-                version = self._cli("--version")
-                self.assertEqual(0, version.returncode)
-                print(f"Transcript acceptance: {version.stdout.strip()}; mode={mode}; run_id={result['run_id']}")
+        name = f"live-transcript-{mode}"
+        directory = self._post_skill(name, "copilot", mode=mode)
+        completed = self._cli("run", name, "--json")
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        result = json.loads(completed.stdout)
+        item = self._transcript(result["run_id"])
+        self.assertEqual("post_processor_crash", result["category"],
+                 f"{result['message']}; final={item.get('final')!r}")
+        self.assertEqual("error", item["status"])
+        self.assertEqual("available", item["transcript_state"])
+        self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["prompt"])
+        self.assertIn("TRANSCRIPT_ACCEPTANCE_468", item["final"])
+        self.assertEqual((directory / "submitted.txt").read_text(encoding="utf-8"),
+                         item["postprocessor_input"])
+        if mode == "pipeline":
+            self.assertTrue(item["tool_calls"])
+            self.assertEqual({"marker": "TRANSCRIPT_ACCEPTANCE_468"},
+                             item["pipeline_result"]["value"])
+            self.assertTrue(item["pipeline_result"]["present"])
+        version = self._cli("--version")
+        self.assertEqual(0, version.returncode)
+        print(f"Transcript acceptance: {version.stdout.strip()}; mode={mode}; run_id={result['run_id']}")
+
+    def test_live_copilot_plan_postfailure_retains_transcript_and_proposal(self) -> None:
+        self._check_live_copilot_postfailure("plan")
+
+    def test_live_copilot_pipeline_postfailure_retains_transcript_and_proposal(self) -> None:
+        self._check_live_copilot_postfailure("pipeline")
 
 
 class TestAgentPipeline(TempRepository):
