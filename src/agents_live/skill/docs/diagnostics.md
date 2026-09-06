@@ -123,11 +123,11 @@ active one, then switches the stable `current` link. Running watchers do not
 block activation; they finish work on their immutable generation and restart
 from `current` at the next idle version check.
 
-Use `agents-live generations list` to compare installed and active versions.
+Use `agents-live versions list` to compare installed and active versions.
 If activation selected an unsuitable release, run `agents-live generations
 activate VERSION` to select a retained validated generation. Use `generations
 remove VERSION` to discard an inactive candidate before rebuilding that exact
-version, or `generations collect` to remove older inactive and unheld versions.
+version, or `versions collect` to remove older inactive and unheld versions.
 
 A package-manager or checkout command cannot replace itself. If `upgrade`
 reports an unsupported installation, run the verified release bootstrap once

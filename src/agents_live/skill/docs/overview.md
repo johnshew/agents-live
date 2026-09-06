@@ -169,9 +169,9 @@ therefore coexist on the same release line. Source plugins remain in their
 declaring repositories and load directly into the selected runtime; they are
 not installed into a generation. When a generation is selected, its own command
 converges native triggers and still-started watchers; work already running may
-finish on the immutable version where it began. Use `agents-live generations list` to inspect the store,
-`generations activate VERSION` to roll back, `generations remove VERSION` to
-discard an inactive candidate, and `generations collect` to retain the active
+finish on the immutable version where it began. Use `agents-live versions list` to inspect the store,
+`versions activate VERSION` to roll back, `versions remove VERSION` to
+discard an inactive candidate, and `versions collect` to retain the active
 version plus one rollback while removing older unheld versions.
 
 The package also installs `al` as an exact shorthand for `agents-live`, so
