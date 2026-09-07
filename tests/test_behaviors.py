@@ -474,6 +474,37 @@ class TestPluginDeclarations(unittest.TestCase):
         self.assertEqual("source-provider", register.call_args.args[0].name)
         use_backend.assert_called_once()
 
+    def test_partial_plugin_failure_preserves_components_and_reports_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = root / "plugin.py"
+            source.write_text(
+                "from agents_live.agent.providers import FAKE\n"
+                "class Broken:\n"
+                "    name = 'broken-provider'\n"
+                "class Registry:\n"
+                "    def registry_file_exists(self, **kwargs): return True\n"
+                "    def load_owners(self, **kwargs): return {'agent': '*'}\n"
+                "    def set_owner(self, *args, **kwargs): pass\n"
+                "    def remove_owner(self, *args, **kwargs): pass\n"
+                "PROVIDERS = (Broken(), FAKE)\n"
+                "OWNERSHIP_REGISTRY = Registry()\n",
+                encoding="utf-8")
+            self._project(root, source)
+            with (
+                mock.patch.object(ownership, "_backend_cache", None),
+                mock.patch.object(ownership, "_backend_resolved", False),
+            ):
+                loaded = plugins.load([root])
+                self.assertEqual({'agent': '*'}, ownership._backend().load_owners())
+                self.assertIs(providers.FAKE, providers.get("fake"))
+                self.assertFalse(loaded[0].ok)
+                self.assertIn("broken-provider", loaded[0].detail)
+                self.assertIn("ownership registry", loaded[0].detail)
+                self.assertFalse(plugins.checks(root)[0][1])
+                self.assertTrue(plugins.compatibility_errors(
+                    [root], runtime_requirement="agents-live==6.9.0"))
+
     def test_a_wheel_declaration_names_the_source_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -832,6 +863,21 @@ class TestProviderRegistry(unittest.TestCase):
                     providers.register(candidate)
                 self.assertIn(method, str(caught.exception))
                 self.assertIn("provider contract", str(caught.exception))
+
+    def test_registration_does_not_infer_a_wrappers_contract(self) -> None:
+        for attribute in ("_delegate", "delegate"):
+            with self.subTest(attribute=attribute):
+                candidate = type("Wrapper", (), {
+                    "name": f"plan-only-wrapper-{attribute}",
+                    "capabilities": agent.ProviderCapabilities(frozenset({"plan"})),
+                    "cli": agent.ProviderCli(),
+                    attribute: providers.CLAUDE,
+                })()
+                self.addCleanup(providers._providers.pop, candidate.name, None)
+                with self.assertRaisesRegex(ValueError, "validate"):
+                    providers.register(candidate)
+                self.assertNotIn(candidate.name, providers.names())
+                self.assertFalse(hasattr(candidate, "validate"))
 
     def test_a_second_provider_cannot_take_a_registered_name(self) -> None:
         existing = providers.get("fake")
@@ -1389,16 +1435,37 @@ class TestWindowsDetachedProcess(unittest.TestCase):
         ):
             found = WindowsProcesses().owned("watcher")
 
+        with mock.patch.object(
+            windowshost, "cli_executable_path",
+            return_value=Path("C:/tools/agents-live.exe"),
+        ):
+            desired = windowshost.WindowsHost().render(Subscription(
+                "0123456789abcdef01234567", "repo:C:/work/sample",
+                "agent:sample", "watch", "docs/** debounce 1s"))
         self.assertEqual([
-            ProcessRef(
-                42,
-                123.5,
-                "agents-live.exe",
-                "watcher",
-                "0123456789abcdef01234567",
-                "agents-live:v2:0123456789abcdef01234567",
-            ),
+            ProcessRef(42, 123.5, "agents-live.exe", "watcher",
+                       desired.key, desired.fingerprint),
         ], found)
+
+    def test_python_launcher_child_retains_generation_fingerprint(self) -> None:
+        metadata = artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", "repo:C:/work/sample", "agent:sample"))
+        arguments = (
+            " --repo C:/work/sample internal watch-loop "
+            f"--metadata {metadata} sample")
+        command = "C:/tools/current/agents-live.exe" + arguments
+        with (
+            mock.patch.object(hostruntime, "process_command_lines", return_value=[
+                (41, command),
+                (42, "C:/tools/current/python.exe " + command),
+                (43, "C:/tools/old/python.exe C:/tools/old/agents-live.exe" + arguments),
+            ]),
+            mock.patch.object(hostruntime, "process_start_time", return_value=123.5),
+        ):
+            found = WindowsProcesses().owned("watcher")
+        self.assertEqual(3, len(found))
+        self.assertEqual(found[0].fingerprint, found[1].fingerprint)
+        self.assertNotEqual(found[0].fingerprint, found[2].fingerprint)
 
     def test_termination_uses_native_process_policy(self) -> None:
         reference = ProcessRef(
@@ -1703,6 +1770,19 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
         self.assertEqual('{"ok": true}', completion.text)
         self.assertEqual("2.5", dict(completion.usage)["ai_credits"])
+
+    def test_copilot_json_keeps_answer_accompanying_task_completion(self) -> None:
+        stream = "\n".join(json.dumps(event) for event in [
+            {"type": "assistant.message", "data": {
+                "content": '{"marker":"acceptance"}',
+                "toolRequests": [{"name": "task_complete"}],
+            }},
+            {"type": "session.task_complete", "data": {
+                "summary": "Replied with the requested JSON object.",
+            }},
+        ])
+        completion = providers.get("copilot").parse(RawOutput(0, stream, ""))
+        self.assertEqual('{"marker":"acceptance"}', completion.text)
 
     def test_copilot_json_uses_final_checkpoint_and_task_summary_fallback(
         self,
@@ -2500,6 +2580,109 @@ class TestInstallationGenerations(unittest.TestCase):
     before the pointer moves, and a collector that keeps the rollback.
     """
 
+    def test_generation_listing_separates_channel_source_and_local_dates(self) -> None:
+        from agents_live.cli.commands import generations
+
+        self._activate_generation("6.9.0.dev0+g123abcd")
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, generations.main(["list"]))
+        row = json.loads(output.getvalue())["versions"][0]
+        self.assertEqual("bake", row["channel"])
+        self.assertIn("source", row)
+        self.assertTrue(row["validated"].endswith("Z"))
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, generations.main(["list"]))
+        rendered = output.getvalue()
+        self.assertIn("Validated", rendered)
+        self.assertIn("bake", rendered)
+        self.assertNotIn("T", rendered.splitlines()[-1].split("  ")[-1].split()[0])
+        self.assertNotIn("+00:00", rendered)
+
+    def test_generation_release_status_is_explicit_and_preserves_artifact(self) -> None:
+        self._activate_generation("6.9.0")
+        built = deploy.generation.load("6.9.0")
+        self.assertIsNone(deploy.generation.release_status(built))
+        for status in ("candidate", "rejected", "released"):
+            deploy.generation.classify(built.name, status)
+            self.assertEqual(status, deploy.generation.release_status(built))
+            self.assertEqual(built, deploy.generation.load(built.name))
+        bake = self._activate_generation("6.9.0.dev0+g123abcd")
+        with self.assertRaises(deploy.generation.GenerationError):
+            deploy.generation.classify(bake.name, "released")
+
+    def test_generation_activation_records_previous_and_selected_versions(self) -> None:
+        from agents_live.obs import admin
+        self._activate_generation("6.8.0")
+        with mock.patch.object(admin, "record") as record:
+            self._activate_generation("6.9.0.dev0+g123abcd")
+        record.assert_called_once_with(
+            "generation.activate", installation_root=str(self.root),
+            previous="6.8.0", generation="6.9.0.dev0+g123abcd")
+
+    def test_generation_listing_names_candidate_and_rejected_status(self) -> None:
+        from agents_live.cli.commands import generations
+        self._activate_generation("6.9.0")
+        built = deploy.generation.load("6.9.0")
+        from dataclasses import replace
+        candidate = replace(built, provenance=deploy.generation.Provenance(
+            "local-artifact", "candidate.whl", "a" * 64),
+            validated="2026-09-06T12:30:00+02:00")
+        with mock.patch.object(deploy.generation, "load", return_value=candidate):
+            deploy.generation.classify("6.9.0", "rejected")
+            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    generations.main(["list"])
+                row = json.loads(output.getvalue())["versions"][0]
+            self.assertEqual("release-candidate", row["channel"])
+            self.assertEqual("local-artifact", row["source"])
+            self.assertEqual("rejected", row["status"])
+            self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
+            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    generations.main(["list"])
+            self.assertIn("local release candidate (rejected)", output.getvalue())
+
+    def test_public_versions_command_replaces_generations(self) -> None:
+        self._activate_generation("6.9.0.dev0+g123abcd")
+        result = subprocess.run(
+            [sys.executable, "-m", "agents_live.cli", "--json", "versions", "list"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = json.loads(result.stdout)["versions"]
+        self.assertEqual("6.9.0.dev0+g123abcd", rows[0]["version"])
+        self.assertEqual("bake", rows[0]["channel"])
+        retired = subprocess.run(
+            [sys.executable, "-m", "agents_live.cli", "--json", "generations", "list"],
+            capture_output=True, text=True, check=False)
+        self.assertNotEqual(0, retired.returncode)
+        self.assertIn("unknown_command", retired.stdout + retired.stderr)
+
+    def test_public_versions_classify_consumes_both_positionals(self) -> None:
+        from agents_live.cli import main as cli_main
+        from agents_live.cli.commands import generations
+
+        self._activate_generation("6.9.0")
+        with (
+            mock.patch.object(generations, "_require_self_managed"),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            for status in ("candidate", "rejected", "released"):
+                with self.subTest(status=status):
+                    self.assertEqual(0, cli_main(["versions", "classify", "6.9.0", status]))
+                    self.assertEqual(status, deploy.generation.release_status(
+                        deploy.generation.load("6.9.0")))
+            for arguments in (["6.9.0"], ["6.9.0", "invalid"]):
+                self.assertEqual(2, cli_main(["versions", "classify", *arguments]))
+            self.assertEqual("released", deploy.generation.release_status(
+                deploy.generation.load("6.9.0")))
+
     def test_generation_population_installs_only_agents_live(self) -> None:
         with (
             mock.patch.object(install_generation, "_run") as run,
@@ -2519,7 +2702,8 @@ class TestInstallationGenerations(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve() / "install"
         patched = mock.patch.dict(
             os.environ,
-            {deploy.layout.ENV_INSTALL_ROOT: str(self.root)},
+            {deploy.layout.ENV_INSTALL_ROOT: str(self.root),
+             "XDG_STATE_HOME": str(Path(self.temporary.name) / "state")},
         )
         patched.start()
         self.addCleanup(patched.stop)
@@ -3535,8 +3719,30 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     ),
                     Request(),
                 )
-                self.assertIn("--bare", launch.argv)
+                self.assertNotIn("--bare", launch.argv)
+                self.assertNotIn("--safe-mode", launch.argv)
+                self.assertIn("--disable-slash-commands", launch.argv)
+                self.assertEqual("", launch.argv[
+                    launch.argv.index("--setting-sources") + 1])
+                settings = json.loads(launch.argv[
+                    launch.argv.index("--settings") + 1])
+                self.assertTrue(settings["disableAllHooks"])
+                self.assertFalse(settings["autoMemoryEnabled"])
+                self.assertTrue(settings["disableClaudeAiConnectors"])
+                environment = dict(launch.env)
+                self.assertEqual("1", environment["CLAUDE_CODE_DISABLE_CLAUDE_MDS"])
+                self.assertEqual("1", environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"])
+                self.assertEqual("false", environment["CLAUDE_CODE_AUTO_CONNECT_IDE"])
+                self.assertEqual("false", environment["ENABLE_CLAUDEAI_MCP_SERVERS"])
+                self.assertEqual("0", environment["CLAUDE_CODE_SIMPLE"])
+                self.assertEqual("0", environment["CLAUDE_CODE_SAFE_MODE"])
                 self.assertEqual(1, launch.argv.count("--strict-mcp-config"))
+
+    def test_claude_classifies_authentication_failure(self) -> None:
+        category = providers.get("claude").failure(RawOutput(
+            1, '{"is_error":true,"result":"Not logged in / Please run /login"}',
+            ""))
+        self.assertEqual("authentication_failed", category)
 
     def test_copilot_explicitly_disables_prompt_mode_repository_code(self) -> None:
         launch = providers.get("copilot").prepare(
@@ -4613,6 +4819,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
             for item in dashboards
         ])
 
+    def test_local_deploy_reports_streamed_child_failure(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        with self.assertRaisesRegex(script["LocalDeployError"], "exited 17"):
+            script["_run"]([sys.executable, "-c", "raise SystemExit(17)"])
+
     def test_local_deploy_script_starts_in_an_isolated_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run(
@@ -4671,6 +4882,77 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertIn("Awaiting promotion decision", rows[0])
         self.assertIn("| open | required |", rows[0])
+
+    def test_release_report_requires_current_developer_promotion_approval(
+            self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "release-report.py"))
+        promotion_state = script["_promotion_state"]
+        development_state = script["_development_state"]
+        commit = "a" * 40
+
+        approved, message = promotion_state({
+            "promotion": {"decision": "continue-bake"},
+        }, commit)
+        self.assertFalse(approved)
+        self.assertIn("remain in bake", message)
+
+        approved, message = promotion_state({
+            "promotion": {
+                "decision": "approved",
+                "commit": commit,
+                "decided_on": "2026-09-06",
+            },
+        }, commit)
+        self.assertTrue(approved)
+        self.assertIn("approved bake", message)
+
+        approved, message = promotion_state({
+            "promotion": {
+                "decision": "approved",
+                "commit": "b" * 40,
+                "decided_on": "2026-09-06",
+            },
+        }, commit)
+        self.assertFalse(approved)
+        self.assertIn("Revalidate it", message)
+
+        with self.assertRaisesRegex(
+                script["ReportError"], "full commit and decided_on date"):
+            promotion_state({
+                "promotion": {
+                    "decision": "approved",
+                    "commit": "abc123",
+                },
+            }, commit)
+
+        self.assertEqual("baking", development_state(
+            bake_moved=False,
+            promotion_approved=False,
+            promotion_open=False,
+        )[0])
+        self.assertEqual("promotion approved", development_state(
+            bake_moved=False,
+            promotion_approved=True,
+            promotion_open=False,
+        )[0])
+        self.assertEqual("promotion proposed", development_state(
+            bake_moved=False,
+            promotion_approved=True,
+            promotion_open=True,
+        )[0])
+        invalid_state, invalid_detail = development_state(
+            bake_moved=False,
+            promotion_approved=False,
+            promotion_open=True,
+        )
+        self.assertEqual("baking", invalid_state)
+        self.assertIn("do not merge", invalid_detail)
+        self.assertEqual("ready for candidate", development_state(
+            bake_moved=True,
+            promotion_approved=True,
+            promotion_open=False,
+        )[0])
 
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
@@ -4749,6 +5031,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "os_name": os.name,
                 "architecture": script["platform"].machine(),
                 "gates": [list(command) for command in script["LOCAL_GATES"]],
+                "python": sys.version,
             }
             receipt.write_text(json.dumps(payload), encoding="utf-8")
             with mock.patch.dict(scope, {
@@ -4759,6 +5042,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(
                     (wheel.resolve(), "digest"),
                     prepared("abc123", "1.2.3"))
+                with mock.patch.dict(scope, {"_run": mock.Mock()}) as _scope:
+                    self.assertEqual((wheel.resolve(), "digest"),
+                                     script["_prepare_artifact"]("abc123", "1.2.3"))
+                    scope["_run"].assert_not_called()
+                payload["python"] = "different-interpreter"
+                receipt.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(prepared("abc123", "1.2.3"))
+                payload["python"] = sys.version
                 payload["gates"] = [["stale-gate"]]
                 receipt.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(prepared("abc123", "1.2.3"))
@@ -4767,6 +5058,26 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 payload["platform"] = "different-platform"
                 receipt.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(prepared("abc123", "1.2.3"))
+
+    def test_local_deploy_worktrees_share_preparation_storage(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["_state_directory"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            primary = Path(temporary) / "primary"
+            sibling = Path(temporary) / "sibling"
+            subprocess.run(["git", "init", "-q", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit",
+                            "--allow-empty", "-qm", "fixture"], check=True)
+            subprocess.run(["git", "-C", str(primary), "worktree", "add", "--detach",
+                            str(sibling)], capture_output=True, check=True)
+            destinations = []
+            for checkout in (primary, sibling):
+                with mock.patch.dict(scope, {"ROOT": checkout}):
+                    destinations.append(script["_state_directory"]())
+            self.assertEqual(destinations[0], destinations[1])
+            self.assertEqual(
+                (primary / ".git" / "agents-live-local-deploy").resolve(), destinations[0])
 
     def test_local_deploy_builds_from_the_recorded_commit(self) -> None:
         script = runpy.run_path(
@@ -4891,10 +5202,39 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = wait.__globals__
         responses = iter((None, {"agents": []}, {"agents": [{"name": "ok"}]}))
         with mock.patch.dict(scope, {
-            "_api": lambda _port: next(responses),
+            "_api": lambda _port, **_kwargs: next(responses),
         }), mock.patch.object(scope["time"], "sleep", return_value=None):
             self.assertEqual(
                 [{"name": "ok"}], wait(8231, timeout_s=10)["agents"])
+
+    def test_local_deploy_accepts_slow_healthy_dashboard_response(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(2.2)
+                self.send_response(200)
+                self.end_headers()
+                with contextlib.suppress(OSError):
+                    self.wfile.write(b'{"agents": [{"name": "healthy"}]}')
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            self.assertEqual(
+                [{"name": "healthy"}], script["_await_api_rows"](
+                    server.server_port, timeout_s=3)["agents"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
 
     def test_local_deploy_cleans_the_dashboard_tree_after_readiness_failure(
             self) -> None:
@@ -4919,6 +5259,50 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     script["LocalDeployError"], "did not serve"):
                 start(dashboard)
         cleanup.assert_called_once_with(process, 8231)
+
+    def test_local_deploy_uses_native_hidden_spawn_policy(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        start = script["_start_dashboard"]
+        scope = start.__globals__
+        process = mock.Mock()
+        process.poll.return_value = None
+        dashboard = script["Dashboard"](8231, 100, "C:/repo", ())
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: Path("agents-live"),
+            "_await_api_rows": mock.Mock(return_value={"agents": [{"name": "ok"}]}),
+        }), mock.patch.object(scope["hostruntime"], "spawn_detached",
+                              return_value=process) as spawn:
+            start(dashboard)
+        spawn.assert_called_once_with(
+            ["agents-live", "--repo", "C:/repo", "dashboard", "--port", "8231"],
+            cwd="C:/repo", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_local_deploy_cleans_interrupted_startup(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        start = script["_start_dashboard"]
+        scope = start.__globals__
+        process = mock.Mock()
+        process.poll.return_value = None
+        cleanup = mock.Mock()
+        with mock.patch.dict(scope, {
+            "_installed_cli": lambda: Path("agents-live"),
+            "_await_api_rows": mock.Mock(side_effect=KeyboardInterrupt),
+            "_terminate_dashboard_tree": cleanup,
+        }), mock.patch.object(scope["hostruntime"], "spawn_detached", return_value=process):
+            with self.assertRaises(KeyboardInterrupt):
+                start(script["Dashboard"](8231, 100, "C:/repo", ()))
+        cleanup.assert_called_once_with(process, 8231)
+
+    def test_local_deploy_waits_for_launcher_after_managed_stop(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        terminate = script["_terminate_dashboard_tree"]
+        process = mock.Mock()
+        with mock.patch.dict(terminate.__globals__, {
+            "_installed_run": mock.Mock(return_value=subprocess.CompletedProcess([], 0)),
+            "_await_port_closed": mock.Mock(),
+        }):
+            terminate(process, 8231)
+        process.wait.assert_called_once_with(timeout=10)
 
     def test_local_deploy_attempts_every_dashboard_restart(self) -> None:
         script = runpy.run_path(
@@ -6121,6 +6505,24 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "--viewport requires the layout or continuity scenario",
             invalid.stderr,
         )
+
+    def test_dashboard_readiness_waits_for_new_action_completion(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        wait = readiness["_await_aggregate_run"]
+        with mock.patch.dict(wait.__globals__, {
+                "_aggregate_completions": mock.Mock(return_value={"old"})
+        }), mock.patch("time.monotonic", side_effect=[0, 0, 181]), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(readiness["ReadinessError"]):
+                wait(Path("fixture"), "agent", "dev", {"old"})
+        with mock.patch.dict(wait.__globals__, {
+                "_aggregate_completions": mock.Mock(
+                    side_effect=[{"old"}, {"old", "new"}])
+        }), mock.patch("time.monotonic", return_value=0), \
+                mock.patch("time.sleep") as pause:
+            wait(Path("fixture"), "agent", "dev", {"old"})
+            pause.assert_called_once()
 
     def test_dashboard_readiness_preserves_watcher_observation_truth(self) -> None:
         readiness = runpy.run_path(

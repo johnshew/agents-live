@@ -41,7 +41,7 @@ from agents_live.runtime.hosts.processes import watchers_on_host  # noqa: E402
 
 RELEASE = runpy.run_path(str(ROOT / "tools" / "release.py"))
 RELEASE_ERROR = RELEASE["ReleaseError"]
-LOCAL_PREPARATION_SCHEMA = 1
+LOCAL_PREPARATION_SCHEMA = 2
 LOCAL_DEPLOYMENT_SCHEMA = 1
 READY_TIMEOUT_S = 180.0
 LOCAL_GATES = (
@@ -79,7 +79,7 @@ def _run(
         text=True, encoding="utf-8", errors="replace", check=False,
     )
     if check and completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
+        detail = (completed.stderr or "").strip() or (completed.stdout or "").strip()
         raise LocalDeployError(
             f"{' '.join(argv)} exited {completed.returncode}: {detail}")
     return completed
@@ -126,9 +126,10 @@ def _require_unchanged_checkout(commit: str) -> None:
 
 
 def _state_directory() -> Path:
-    value = _git("rev-parse", "--git-path", "agents-live-local-deploy")
+    value = _git("rev-parse", "--git-common-dir")
     path = Path(value)
-    return path if path.is_absolute() else ROOT / path
+    common = path if path.is_absolute() else ROOT / path
+    return common.resolve() / "agents-live-local-deploy"
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -156,6 +157,7 @@ def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
         "os_name": os.name,
         "architecture": platform.machine(),
         "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
     }
     if any(payload.get(key) != value for key, value in expected.items()) \
             or not wheel.is_file():
@@ -211,6 +213,7 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         "os_name": os.name,
         "architecture": platform.machine(),
         "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
     })
     return artifact.resolve(), digest
 
@@ -333,10 +336,10 @@ def _stop_dashboard(dashboard: Dashboard) -> None:
             f"could not stop dashboard on {dashboard.port}: {detail}")
 
 
-def _api(port: int) -> dict | None:
+def _api(port: int, *, timeout_s: float = READY_TIMEOUT_S) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/agents", timeout=timeout_s) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else None
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
@@ -348,7 +351,7 @@ def _await_api_rows(
 ) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        payload = _api(port)
+        payload = _api(port, timeout_s=max(0.001, deadline - time.monotonic()))
         if payload and payload.get("agents"):
             return payload
         time.sleep(0.5)
@@ -361,28 +364,26 @@ def _start_dashboard(dashboard: Dashboard) -> None:
     if dashboard.repository is not None:
         argv.extend(("--repo", dashboard.repository))
     argv.extend(("dashboard", "--port", str(dashboard.port), *dashboard.modes))
-    options: dict[str, object] = {}
-    if os.name == "nt":
-        options["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
-    else:
-        options["start_new_session"] = True
-    process = subprocess.Popen(
+    process = hostruntime.spawn_detached(
         argv, cwd=dashboard.repository or ROOT, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, **options)
-    deadline = time.monotonic() + READY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise LocalDeployError(
-                f"dashboard on {dashboard.port} exited {process.returncode}")
-        try:
-            _await_api_rows(dashboard.port, timeout_s=1.0)
-        except LocalDeployError:
-            continue
-        return
-    _terminate_dashboard_tree(process, dashboard.port)
-    raise LocalDeployError(
-        f"dashboard on {dashboard.port} did not serve agent rows")
+        stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise LocalDeployError(
+                    f"dashboard on {dashboard.port} exited {process.returncode}")
+            try:
+                _await_api_rows(
+                    dashboard.port, timeout_s=max(0.001, deadline - time.monotonic()))
+            except LocalDeployError:
+                continue
+            return
+        raise LocalDeployError(
+            f"dashboard on {dashboard.port} did not serve agent rows")
+    except BaseException:
+        _terminate_dashboard_tree(process, dashboard.port)
+        raise
 
 
 def _terminate_dashboard_tree(
@@ -391,7 +392,11 @@ def _terminate_dashboard_tree(
     managed = _installed_run("dashboard", "stop", "--port", str(port))
     if managed.returncode == 0:
         _await_port_closed(port)
-        return
+        try:
+            process.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            pass
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(process.pid)],
@@ -399,8 +404,11 @@ def _terminate_dashboard_tree(
     else:
         with contextlib.suppress(ProcessLookupError, OSError):
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
+    try:
         process.wait(timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise LocalDeployError(
+            f"dashboard launcher {process.pid} did not exit after cleanup") from exc
     _await_port_closed(port)
 
 

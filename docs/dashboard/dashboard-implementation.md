@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: concept
 ---
 
@@ -30,6 +30,32 @@ As of 2026-09-05:
 The generated release report remains the source for the latest branch, test,
 and installed-version details. This section explains why the dashboard work is
 part of the release plan.
+
+## v6.9 recovery
+
+The 6.9 recovery in [#461](https://github.com/johnshew/agents-live/issues/461)
+keeps one shared inventory scroll region and compact virtualized rows.
+Repository tables retain their identity through filtering, sorting, and
+refresh; only a scope or grouping change adds or removes affected views.
+Python page state owns filters, grouping, and sorting. Session storage
+restores that model on reload without synthetic input. Inventory checkboxes
+are absent until there is an operation for a selected set of rows.
+The toolbar exposes grouping, removable active filters, and one sort
+order, with responsive tracks rather than overflowing minimum widths.
+
+The page renders a loading shell before collecting inventory and history in
+a worker thread. Restoring saved preferences does not run a second initial
+scan. Scope and refresh controls wait for that first scan; failure exposes
+the error and enables a retry. NiceGUI announces the startup URL once.
+Foreground Ctrl+C requests cooperative server shutdown. Readiness verifies
+quiet exit and port closure through both the CLI and the direct server with
+an active browser, using an isolated hidden console on Windows.
+
+Row controls dispatch through their owning NiceGUI event handlers. Queued
+actions retain the initiating client, so completion refreshes and activity
+stay in that tab. Client deletion releases page registrations without
+cancelling durable action execution. Repository-local collection failures,
+including ownership loss during discovery, preserve stale rows explicitly.
 
 ## v6.6 decision
 
@@ -145,10 +171,10 @@ acceptance, and prove progressive rendering and degraded-data isolation at the
 supported scale.
 
 The #424 implementation now preserves repository scope, search and facet
-filters, stable sorting and grouping, selected rows, the inventory/activity
+filters, stable sorting and grouping, the inventory/activity
 allocation, settings context, keyboard focus, and activity follow position
 through manual and periodic refresh. Browser-session state restores the
-browser-owned split, search, selection, settings, focus, and non-bottom
+browser-owned split, search, settings, focus, and non-bottom
 activity position after a reconnect; operational truth still comes from the
 single server snapshot. Refresh failure retains that last coherent snapshot,
 marks it stale with the failure reason, and recovers on the next successful
@@ -158,7 +184,7 @@ Quasar virtual scrolling bounds active row elements, and repository settings
 derive from the same collected groups used by the operational page instead of
 running a second agent discovery pass. The adjustable separator supports
 pointer, Arrow Up, Arrow Down, Home, and End operation at short desktop
-heights. Selection, health, eligibility, progress, and failures retain textual
+heights. Health, eligibility, progress, and failures retain textual
 labels in addition to color.
 
 Editable native-Windows evidence is the focused

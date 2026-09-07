@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -430,6 +431,7 @@ def _assert_operational_viewport(
                 body = page.locator(".dashboard-body")
                 body.wait_for(state="visible")
                 groups = page.locator(".repository-group")
+                groups.first.wait_for(state="visible")
                 if groups.count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: rendered {groups.count()} "
@@ -442,12 +444,18 @@ def _assert_operational_viewport(
                         or page.get_by_role("button", name="Filters").count() != 1:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: compact controls are absent")
-                page.get_by_text(
+                page.locator(".activity-log").get_by_text(
                     "Attention in all registered repositories:", exact=False,
                 ).wait_for()
+                if page.locator(".agent-panel").get_by_text("Attention in", exact=False).count():
+                    raise ReadinessError(f"{mode}: attention diagnostics consume inventory space")
                 page.get_by_text("Failing: newest run", exact=False).wait_for()
+                groups.locator("td").filter(has_text=re.compile(r"^echo$")).first.wait_for()
                 page.get_by_text(watcher_health, exact=False).wait_for()
-                page.get_by_text("Start: Already active", exact=False).wait_for()
+                start_button = page.get_by_role("button", name="Start: Already active", exact=True)
+                start_button.wait_for()
+                if start_button.is_enabled():
+                    raise ReadinessError(f"{mode}: started agent offers Start")
                 if body.locator(
                         ".host-service-panel, .repository-settings-panel").count():
                     raise ReadinessError(
@@ -463,6 +471,20 @@ def _assert_operational_viewport(
                 if agent_box["y"] < 0 or log_box["y"] + log_box["height"] > height:
                     raise ReadinessError(
                         f"{mode} {width}x{height}: operational regions overflow")
+                toolbar_boxes = page.locator(".agent-toolbar > *").evaluate_all(
+                    "elements => elements.map(element => { const bounds = element.getBoundingClientRect(); "
+                    "return {left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom}; })")
+                for index, bounds in enumerate(toolbar_boxes):
+                    if bounds["left"] < 0 or bounds["right"] > width:
+                        raise ReadinessError(f"{mode} {width}x{height}: toolbar control overflows")
+                    for other in toolbar_boxes[index + 1:]:
+                        if min(bounds["right"], other["right"]) > max(bounds["left"], other["left"]) + 1 \
+                                and min(bounds["bottom"], other["bottom"]) > max(bounds["top"], other["top"]) + 1:
+                            raise ReadinessError(f"{mode} {width}x{height}: toolbar controls overlap")
+                if screenshot_dir := os.environ.get("AGENTS_LIVE_READINESS_SCREENSHOTS"):
+                    destination = Path(screenshot_dir)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    page.screenshot(path=str(destination / f"{mode}-{viewport_name}.png"))
                 if "continuity" not in scenarios \
                         or viewport_name != continuity_viewport:
                     page.close()
@@ -477,97 +499,81 @@ def _assert_operational_viewport(
                     f"{repository_name} | {directory}", exact=True).wait_for()
                 search = page.get_by_label("Search agents or repositories")
                 search.fill("readiness")
+                table_id = page.locator(".virtualized-agent-table").get_attribute("id")
                 page.wait_for_function("window.agentsLiveContinuity !== undefined")
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
-                if row_checkbox.get_attribute("aria-checked") != "true":
-                    row_checkbox.click()
-                page.get_by_text("1 agents selected", exact=True).wait_for()
+                if page.locator(".repository-group [role=checkbox]").count():
+                    raise ReadinessError(f"{mode}: unused inventory selection controls are visible")
                 search.fill("no matching agent")
                 page.get_by_text("0 of 1 agents", exact=False).wait_for()
-                page.get_by_text("1 agents selected", exact=True).wait_for()
                 search.fill("readiness")
                 page.get_by_text("readiness-agent", exact=True).wait_for()
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
-                try:
-                    page.wait_for_function("""() => document.querySelector(
-                        '.repository-group tbody [role=checkbox]')
-                        ?.getAttribute('aria-checked') === 'true'""")
-                except PlaywrightTimeoutError as exc:
-                    filtered_state = page.evaluate("""() => ({
-                        persisted: JSON.parse(sessionStorage.getItem(
-                            'agents-live-dashboard-view') || '{}').selection || [],
-                        rows: Array.from(document.querySelectorAll(
-                            '.repository-group tbody tr')).map(row => ({
-                                key: row.querySelector('[data-agent-key]')
-                                    ?.dataset.agentKey || null,
-                                checked: row.querySelector('[role=checkbox]')
-                                    ?.getAttribute('aria-checked') || null,
-                            })),
-                    })""")
-                    raise ReadinessError(
-                        f"{mode} {width}x{height}: filtered selection did not "
-                        f"restore: {filtered_state}") from exc
+                if page.locator(".virtualized-agent-table").get_attribute("id") != table_id:
+                    raise ReadinessError(f"{mode}: filtering replaced the inventory table")
+                page.get_by_role("button", name="Reverse-sort", exact=True).click()
+                page.wait_for_function("() => JSON.parse(sessionStorage.getItem("
+                                       "'agents-live-dashboard-view')).settings.descending === true")
+                if page.locator(".virtualized-agent-table").get_attribute("id") != table_id:
+                    raise ReadinessError(f"{mode}: sorting replaced the inventory table")
+                page.get_by_role("button", name="Flat list", exact=True).click()
+                page.locator(".repository-heading").wait_for(state="hidden")
+                page.get_by_role("button", name="Group by repository", exact=True).click()
+                page.locator(".repository-heading").wait_for(state="visible")
+                table_id = page.locator(".virtualized-agent-table").get_attribute("id")
+                page.get_by_role("button", name="Filters", exact=True).click()
+                page.get_by_label("State", exact=True).click()
+                page.get_by_role("option", name="started", exact=True).click()
+                page.get_by_role("button", name="Close filters", exact=True).click()
+                state_chip = page.locator(".inventory-filter-status .q-chip").filter(has_text="State: started")
+                state_chip.wait_for()
+                state_chip.locator(".q-chip__icon--remove").click()
+                page.locator(".inventory-filter-status").wait_for(state="hidden")
+                page.get_by_role("button", name="Filters", exact=True).click()
+                page.get_by_label("State", exact=True).click()
+                page.get_by_role("option", name="started", exact=True).click()
+                page.get_by_role("button", name="Close filters", exact=True).click()
+                state_chip.wait_for()
+                page.get_by_role("dialog").wait_for(state="hidden")
                 splitter = page.get_by_role(
                     "separator", name="Resize-inventory-and-activity")
-                splitter.focus()
-                page.keyboard.press("End")
+                splitter.press("End")
                 if splitter.get_attribute("aria-valuenow") != "75":
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: keyboard split resize failed")
+                        f"{mode} {width}x{height}: keyboard split resize failed; "
+                        f"focused={page.evaluate('document.activeElement?.outerHTML')}")
                 refresh = page.get_by_role("button", name="Refresh")
                 refresh.focus()
                 page.keyboard.press("Enter")
                 page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
-                if search.input_value() != "readiness" \
-                        or row_checkbox.get_attribute("aria-checked") != "true":
+                if page.locator(".virtualized-agent-table").get_attribute("id") != table_id:
+                    raise ReadinessError(f"{mode}: refresh replaced the inventory table")
+                if search.input_value() != "readiness":
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: refresh lost filter or selection")
+                    f"{mode} {width}x{height}: refresh lost filter")
                 if page.evaluate(
                         "document.activeElement?.getAttribute('aria-label')") != "Refresh":
                     raise ReadinessError(
                         f"{mode} {width}x{height}: refresh did not restore focus")
                 persisted = page.evaluate("""() => JSON.parse(sessionStorage.getItem(
                     'agents-live-dashboard-view') || '{}')""")
-                if len(persisted.get("selection", [])) != 1:
+                if "selection" in persisted.get("settings", {}):
                     raise ReadinessError(
-                        f"{mode} {width}x{height}: selection was not persisted "
-                        "before reconnect")
+                        f"{mode} {width}x{height}: unused selection state was persisted")
                 page.reload(wait_until="networkidle")
                 page.wait_for_function("window.agentsLiveContinuity !== undefined")
+                page.locator(".inventory-filter-status .q-chip").filter(has_text="State: started").wait_for()
+                page.get_by_role("button", name="Filters", exact=True).click()
+                if page.get_by_label("State", exact=True).input_value() != "started":
+                    raise ReadinessError(f"{mode}: reloaded filter control disagrees with saved state")
+                page.get_by_role("button", name="Close filters", exact=True).click()
                 search = page.get_by_label("Search agents or repositories")
-                row_checkbox = page.locator(
-                    ".repository-group tbody [role=checkbox]").first
                 splitter = page.get_by_role(
                     "separator", name="Resize-inventory-and-activity")
-                try:
-                    page.wait_for_function("""() => document.querySelector(
-                        '.repository-group tbody [role=checkbox]')
-                        ?.getAttribute('aria-checked') === 'true'""")
-                except PlaywrightTimeoutError as exc:
-                    reconnect_state = page.evaluate("""() => ({
-                        persisted: JSON.parse(sessionStorage.getItem(
-                            'agents-live-dashboard-view') || '{}').selection || [],
-                        rows: Array.from(document.querySelectorAll(
-                            '.repository-group tbody tr')).map(row => ({
-                                key: row.querySelector('[data-agent-key]')
-                                    ?.dataset.agentKey || null,
-                                checked: row.querySelector('[role=checkbox]')
-                                    ?.getAttribute('aria-checked') || null,
-                            })),
-                    })""")
-                    raise ReadinessError(
-                        f"{mode} {width}x{height}: reconnect selection "
-                        f"did not restore: {reconnect_state}") from exc
                 search_value = search.input_value()
-                selected_value = row_checkbox.get_attribute("aria-checked")
                 split_value = splitter.get_attribute("aria-valuenow")
-                if search_value != "readiness" or selected_value != "true" \
-                    or split_value != "75":
+                if search_value != "readiness" or split_value != "75":
                     raise ReadinessError(
                     f"{mode} {width}x{height}: reconnect lost view state "
-                    f"(search={search_value!r}, selected={selected_value!r}, "
+                    f"(search={search_value!r}, "
                     f"split={split_value!r})")
                 activity = page.locator(".dashboard-log-panel .activity-log")
                 activity.evaluate("""element => {
@@ -627,6 +633,7 @@ def _assert_operational_viewport(
                 page.reload(wait_until="networkidle")
                 settings = page.locator(".dashboard-settings")
                 settings.wait_for(state="visible")
+                page.get_by_text("Loading agents...", exact=True).wait_for(state="hidden")
                 page.get_by_role("button", name="Close-settings").focus()
                 page.keyboard.press("Enter")
                 settings.wait_for(state="hidden")
@@ -798,11 +805,60 @@ def _assert_operational_viewport(
                 )
             page.get_by_role("button", name="Refresh").click()
             page.get_by_text("151 of 151 agents", exact=False).wait_for()
+            inventory = page.locator(".agent-table-scroll")
+            inventory.evaluate("element => { element.scrollTop = 0; }")
+            page.get_by_text("readiness-agent", exact=True).wait_for()
             rendered_rows = page.locator(
-                ".virtualized-agent-table tbody tr").count()
-            if rendered_rows >= 151:
+                ".virtualized-agent-table [data-agent-key]").count()
+            if not 0 < rendered_rows < 151:
                 raise ReadinessError(
-                    f"{mode}: virtual table rendered all {rendered_rows} rows")
+                    f"{mode}: virtual table mounted {rendered_rows} of 151 rows")
+            layout = page.evaluate("""() => {
+                const inventory = document.querySelector('.agent-table-scroll');
+                const nested = [...inventory.querySelectorAll('*')].filter(element =>
+                    /(auto|scroll)/.test(getComputedStyle(element).overflowY)
+                    && element.scrollHeight > element.clientHeight);
+                const rows = [...inventory.querySelectorAll('[data-agent-key]')]
+                    .map(element => element.closest('tr').getBoundingClientRect().height);
+                return {nested: nested.length, tallest: Math.max(...rows)};
+            }""")
+            if layout["nested"] or layout["tallest"] > 40:
+                raise ReadinessError(f"{mode}: inventory is not compact: {layout}")
+            inventory.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+            page.get_by_text("scale-149", exact=True).wait_for()
+            page.get_by_role("button", name="Refresh").click()
+            page.get_by_text("manual refresh: Snapshot", exact=False).last.wait_for()
+            page.get_by_text("scale-149", exact=True).wait_for()
+            inventory.evaluate("element => { element.scrollTop = 0; }")
+            page.get_by_text("readiness-agent", exact=True).wait_for()
+            page.get_by_role("button", name="Reverse-sort").click()
+            page.wait_for_function("""() => document.querySelector(
+                '.virtualized-agent-table [data-agent-key]')?.textContent.trim()
+                === 'scale-149'""")
+            inventory.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+            last_row = page.get_by_role("row").filter(
+                has=page.get_by_text("readiness-agent", exact=True))
+            other_page = browser.new_page()
+            other_page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+            identifier = next(row["identifier"] for row in repositories[0]["rows"]
+                              if row["name"] == "readiness-agent")
+            completed = _aggregate_completions(directory, identifier)
+            last_row.get_by_role("button", name="Run this agent once now").click()
+            try:
+                _await_aggregate_run(directory, identifier, mode, completed)
+            except ReadinessError as exc:
+                raise ReadinessError(
+                    f"{exc}\nvisible activity:\n"
+                    f"{page.locator('.activity-log').inner_text()}") from exc
+            try:
+                page.get_by_text("action completion: Snapshot", exact=False).last.wait_for()
+            except PlaywrightTimeoutError as exc:
+                raise ReadinessError(
+                    f"{mode}: missing action completion refresh\n"
+                    f"{page.locator('.activity-log').inner_text()}") from exc
+            if "completed: Run" in other_page.locator(".activity-log").inner_text():
+                raise ReadinessError(f"{mode}: action wrote into another tab's activity")
+            other_page.close()
             for index in range(150):
                 shutil.rmtree(scale_root / f"scale-{index:03d}")
             page.close()
@@ -811,25 +867,34 @@ def _assert_operational_viewport(
     _say(f"{mode}: repository lifecycle and scale passed")
 
 
-def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
-    deadline = time.monotonic() + READY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        for log in directory.rglob("dashboard.jsonl"):
-            try:
-                records = [
-                    json.loads(line) for line in log.read_text(
-                        encoding="utf-8").splitlines() if line.strip()
-                ]
-            except (OSError, json.JSONDecodeError):
-                continue
-            if any(
+def _aggregate_completions(directory: Path, identifier: str) -> set[str]:
+    completed = set()
+    for log in directory.rglob("dashboard.jsonl"):
+        try:
+            records = [
+                json.loads(line) for line in log.read_text(
+                    encoding="utf-8").splitlines() if line.strip()
+            ]
+        except (OSError, json.JSONDecodeError):
+            continue
+        completed.update(
+            record["run_id"] for record in records
+            if (
                     record.get("event") == "dashboard-action"
                     and record.get("status") == "success"
                     and record.get("repository") == str(directory)
                     and record.get("agent") == identifier
                     and str(record.get("message", "")).startswith("Run:")
-                    for record in records):
-                return
+                    and isinstance(record.get("run_id"), str)))
+    return completed
+
+
+def _await_aggregate_run(directory: Path, identifier: str, mode: str,
+                         completed: set[str]) -> None:
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _aggregate_completions(directory, identifier) - completed:
+            return
         time.sleep(POLL_INTERVAL_S)
     raise ReadinessError(
         f"{mode}: aggregate Run produced no repository-qualified evidence")
@@ -837,7 +902,7 @@ def _await_aggregate_run(directory: Path, identifier: str, mode: str) -> None:
 
 def _assert_aggregate_run(port: int, directory: Path,
                           payload: dict, mode: str) -> None:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     identifier = payload["agents"][0].get("identifier")
     if not isinstance(identifier, str) or not identifier:
@@ -867,6 +932,8 @@ def _assert_aggregate_run(port: int, directory: Path,
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
             row = page.get_by_role("row").filter(
                 has=page.get_by_text("readiness-agent", exact=True))
+            expect(row).to_have_count(1, timeout=15000)
+            expect(row).to_be_visible(timeout=15000)
             if row.count() != 1:
                 raise ReadinessError(
                     f"{mode}: aggregate dashboard rendered {row.count()} "
@@ -877,13 +944,14 @@ def _assert_aggregate_run(port: int, directory: Path,
                 raise ReadinessError(
                     f"{mode}: aggregate Run rendered disabled: "
                     f"{run_button.evaluate('element => element.outerHTML')}")
+            completed = _aggregate_completions(directory, identifier)
             run_button.click()
             page.wait_for_timeout(500)
             if browser_errors:
                 raise ReadinessError(
                     f"{mode}: aggregate Run raised browser errors: "
                     f"{browser_errors!r}")
-            _await_aggregate_run(directory, identifier, mode)
+            _await_aggregate_run(directory, identifier, mode, completed)
         finally:
             browser.close()
     _say(f"{mode}: aggregate Run kept repository-qualified evidence")
@@ -945,26 +1013,69 @@ def _terminate(process: subprocess.Popen) -> None:
             process.wait(timeout=SHUTDOWN_GRACE_S)
 
 
+def _assert_interrupt_shutdown(process: subprocess.Popen, port: int, mode: str) -> None:
+    if os.name == "nt":
+        interrupt = """
+import ctypes
+import sys
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.FreeConsole()
+if not kernel.AttachConsole(int(sys.argv[1])):
+    raise ctypes.WinError(ctypes.get_last_error())
+kernel.SetConsoleCtrlHandler(None, True)
+if not kernel.GenerateConsoleCtrlEvent(0, 0):
+    raise ctypes.WinError(ctypes.get_last_error())
+"""
+        sent = subprocess.run(
+            [sys.executable, "-c", interrupt, str(process.pid)],
+            capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        if sent.returncode:
+            raise ReadinessError(f"{mode}: could not send Ctrl+C: {sent.stderr}")
+    else:
+        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+    try:
+        output, _ = process.communicate(timeout=SHUTDOWN_GRACE_S)
+    except subprocess.TimeoutExpired as exc:
+        raise ReadinessError(f"{mode}: Ctrl+C did not stop the dashboard tree") from exc
+    if any(marker in output for marker in ("Traceback", "CancelledError", "KeyboardInterrupt")):
+        raise ReadinessError(f"{mode}: Ctrl+C produced shutdown errors:\n{output}")
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise ReadinessError(f"{mode}: dashboard still answers after Ctrl+C")
+    _say(f"{mode}: Ctrl+C closed the process tree without a traceback")
+
+
 def _check(launcher: list[str], directory: Path, environment: dict[str, str],
-    *, dev: bool, source: bool, all_repos: bool = False,
+    *, dev: bool, source: bool, all_repos: bool = False, direct: bool = False,
     scenarios: tuple[str, ...] = SCENARIO_ORDER,
     viewport_names: tuple[str, ...] = tuple(VIEWPORTS)) -> None:
     mode = ("source" if source else "packaged") + (" --dev" if dev else "")
+    if direct:
+        mode += " direct server"
     if all_repos:
         mode += " all-repositories"
     port = _free_port()
-    argv = [*launcher, "--repo", str(directory), "dashboard",
+    argv = [*launcher, *([] if direct else ["--repo", str(directory), "dashboard"]),
             "--port", str(port)]
     if all_repos:
         argv.append("--all-repos")
     if dev:
         argv.append("--dev")
+    options = {"start_new_session": True}
+    if os.name == "nt":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        options = {"creationflags": subprocess.CREATE_NEW_CONSOLE, "startupinfo": startup}
     _say(f"{mode}: starting on port {port}")
     process = subprocess.Popen(
         argv, cwd=directory, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        **({} if os.name == "nt" else {"start_new_session": True}))
+        **options)
     check_started = time.perf_counter()
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     try:
         started = time.perf_counter()
         payload = _await_rows(process, port, mode)
@@ -999,16 +1110,49 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
             _say(
                 f"{mode}: disconnect passed in "
                 f"{time.perf_counter() - started:.1f}s")
+        if not dev and not all_repos:
+            if direct:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as browser_tools:
+                    browser = browser_tools.chromium.launch(
+                        executable_path=str(_browser_executable()), headless=True)
+                    try:
+                        page = browser.new_page()
+                        page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
+                        page.locator(".dashboard-body").wait_for(state="visible")
+                        _assert_interrupt_shutdown(process, port, mode)
+                    finally:
+                        browser.close()
+            else:
+                _assert_interrupt_shutdown(process, port, mode)
         _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
-    except ReadinessError as exc:
+    except (ReadinessError, PlaywrightTimeoutError) as exc:
         _terminate(process)
-        output = process.stdout.read().strip() if process.stdout else ""
+        output = process.stdout.read().strip() if process.stdout and not process.stdout.closed else ""
         if output:
             raise ReadinessError(
                 f"{exc}\ndashboard output:\n{output[-4000:]}") from exc
         raise
     finally:
         _terminate(process)
+
+
+def _direct_launcher(python: list[str], directory: Path) -> list[str]:
+    located = subprocess.run(
+        [*python, "-c", "import agents_live; from pathlib import Path; "
+         "print(Path(agents_live.__file__).parent / 'cli/scripts/dashboard.py')"],
+        capture_output=True, text=True, check=True)
+    script = Path(located.stdout.strip())
+    metadata = script.read_text(encoding="utf-8").split("# /// script\n", 1)[1].split("# ///", 1)[0]
+    dependencies = tomllib.loads("\n".join(line.removeprefix("# ")
+                                         for line in metadata.splitlines()))["dependencies"]
+    environment = directory / "direct-runtime"
+    executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    subprocess.run(["uv", "venv", str(environment)],
+                   capture_output=True, text=True, check=True)
+    subprocess.run(["uv", "pip", "install", "--python", str(executable), *dependencies],
+                   capture_output=True, text=True, check=True)
+    return [str(executable), str(script)]
 
 
 def _plan(args: argparse.Namespace) -> dict:
@@ -1105,6 +1249,11 @@ def main() -> int:
                 scenarios=tuple(run["scenarios"]),
                 viewport_names=tuple(run["viewports"]),
             )
+            if run["mode"] == "normal":
+                _seed_started_state(python, directory, environment)
+                _check(_direct_launcher(python, directory), directory, environment,
+                       dev=False, source=args.editable, direct=True,
+                       scenarios=("startup",), viewport_names=())
     _say(f"ok in {time.perf_counter() - total_started:.1f}s")
     return 0
 

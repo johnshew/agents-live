@@ -100,10 +100,25 @@ Copilot CLIs, install the candidate checkout or wheel, and run from PowerShell:
 ```powershell
 $env:AGENTS_LIVE_CODEX_CONFORMANCE = "1"
 $env:AGENTS_LIVE_COPILOT_CONFORMANCE = "1"
+$env:AGENTS_LIVE_CLAUDE_CONFORMANCE = "1"
 uv run --with-editable . python -m unittest `
   tests.test_seams.TestCodexLiveConformance `
-  tests.test_seams.TestCopilotLiveConformance -v
+  tests.test_seams.TestCopilotLiveConformance `
+  tests.test_seams.TestClaudeLiveConformance -v
 ```
+
+Claude conformance requires Code 2.1.263 or later and verifies the required
+isolation flags before running. Its native-login checks leave the credential
+store unchanged and cover plan reads and denied writes, structured writes,
+explicit stdio and project HTTP MCP effects, and authenticated HTTP pipeline
+get/put with an unauthenticated rejection. Its separate request-capture fixture uses a
+disposable configuration directory and a loopback endpoint with a dummy key;
+no fixture prompts are sent to a provider. That fixture checks user/project
+instruction, skill, plugin metadata, memory, hook, and undeclared MCP isolation.
+A non-isolated control must load the instruction and plugin markers and run
+both the ordinary and plugin hooks. This does not prove native subscription authentication,
+IDE discovery suppression, or organization-managed
+policy enforcement; those remain separate acceptance boundaries.
 
 Do not treat the WSL/Linux pass as native Windows evidence. Record the native
 Windows CLI versions, candidate commit, and result in candidate acceptance. The
@@ -138,13 +153,19 @@ of the test.
 
 ## Deploy the current bake locally
 
-Use the focused local deployment workflow after pull requests have merged:
+Use the focused local deployment workflow after a pull request or direct
+administrative commit reaches the configured bake branch. Prefer pull requests
+for substantive fixes so review and CI evidence remain attached to each change:
 
 ```bash
+git pull --ff-only origin <configured-bake-branch>
 uv run --script tools/local-deploy.py --repo <live-repository>
 ```
 
-The command requires the clean bake branch configured in
+Run these commands from a clean checkout of the configured bake branch, using
+the primary checkout when it is already clean and on that branch or a dedicated
+worktree otherwise. Remove a temporary worktree after deployment. The command
+requires the clean bake branch configured in
 `.github/release-channels.toml`, fast-forwards it from `origin`, and prepares
 one commit-and-digest-addressed development wheel. The archived build copy is
 stamped as `<target>.dev0+g<commit>` without changing tracked release versions.
@@ -154,6 +175,27 @@ validated commit, artifact digest, and exact gate list. A later deployment of
 the same commit reuses that preparation evidence; a changed commit, wheel,
 platform, Python version, Test workflow, or gate list invalidates it
 mechanically.
+
+Preparation evidence and immutable wheels live under the common Git directory,
+shared by all worktrees. Moving to a clean worktree must not trigger a repeat
+of an already successful build or dashboard gate for the same commit, digest,
+platform, interpreter, and gate list. A valid receipt skips both commands.
+Never delete this common artifact storage when removing a worktree.
+
+Do not repeat a passing check simply because work moved from implementation to
+release or to another agent. Record the command, tested revision or artifact
+digest, environment, and result; rerun only when a relevant input changed or
+the earlier result failed or is unavailable. A newly stamped bake wheel is a
+new artifact, so its first check is not covered by an ordinary-version wheel.
+Post-install identity, watcher, and dashboard restoration checks validate the
+changed installation and are not substitutes for, or repetitions of, the
+artifact tests.
+
+The optional `--allow-downgrade` bypasses only the guard against moving to a
+lower numeric `major.minor.patch` release. It is not needed when replacing a
+stable candidate with a commit-qualified bake on the same release line, or
+when moving between bakes on that release line. It does not bypass artifact,
+health, watcher, dashboard, or post-install identity checks.
 
 Before replacement, the workflow snapshots release-owned all-repository status
 and doctor contracts plus the selected repository's started watchers. It stops
@@ -278,7 +320,7 @@ be present. The wheel contains only the installable package and its metadata.
 Show the installed version and run the same read-only checks consumers use:
 
 ```bash
-agents-live generations list
+agents-live versions list
 agents-live --repo ~/repos/<target-project> doctor
 agents-live --repo ~/repos/<target-project> status
 agents-live --repo ~/repos/<target-project> dashboard --help
@@ -288,7 +330,7 @@ Check PyPI and upgrade when a newer version is available:
 
 ```bash
 agents-live upgrade
-agents-live generations list
+agents-live versions list
 agents-live --repo ~/repos/<target-project> doctor
 ```
 

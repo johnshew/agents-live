@@ -294,26 +294,32 @@ COMMANDS = (
             Arg(("--skills-only",), "Refresh only skill payloads.", hidden=True),
             Arg(("--from",), "Install the runtime from a local path "
                 "instead of PyPI.", kind="value"),
+            Arg(("--candidate",), "Record the local wheel as a release candidate."),
         ),
     ),
     Cmd(
-        "generations", "Manage installed runtime generations.",
+        "versions", "Manage installed runtime versions.",
         "cli.commands.generations", "in-process", root="none", json=True,
         update_notice=False, subcommand_required=True,
         subcommands=(
-            Cmd("list", "List installed generations.",
+            Cmd("list", "List installed versions.",
                 "cli.commands.generations", "in-process", root="none"),
-            Cmd("activate", "Select an installed generation.",
+            Cmd("classify", "Record a version's release status.",
                 "cli.commands.generations", "in-process", root="none",
-                args=(Arg(("version",), "Generation version.",
+                args=(Arg(("version",), "Installed version.", kind="positional", required=True),
+                      Arg(("status",), "Release status.", kind="positional", required=True,
+                          choices=("candidate", "rejected", "released")))),
+            Cmd("activate", "Select an installed version.",
+                "cli.commands.generations", "in-process", root="none",
+                args=(Arg(("version",), "Installed version.",
                           kind="positional", required=True),)),
-            Cmd("remove", "Remove one inactive generation.",
+            Cmd("remove", "Remove one inactive version.",
                 "cli.commands.generations", "in-process", root="none",
-                args=(Arg(("version",), "Generation version.",
+                args=(Arg(("version",), "Installed version.",
                           kind="positional", required=True),)),
-            Cmd("collect", "Remove old inactive generations.",
+            Cmd("collect", "Remove old inactive versions.",
                 "cli.commands.generations", "in-process", root="none",
-                args=(Arg(("--retain",), "Inactive generations to retain.",
+                args=(Arg(("--retain",), "Inactive versions to retain.",
                           kind="value", default=1),)),
         ),
     ),
@@ -854,11 +860,29 @@ def validation_error(command: Cmd, argv: list[str]) -> str | None:
                 for flag in current.requires_one_of
             ]
             return f"{current.name} requires " + ", or ".join(options)
+    value_flags = {flag for argument in current.args if argument.kind == "value"
+                   for flag in argument.flags}
+    positional_values = []
+    skip_value = False
+    literal = False
+    for token in argv:
+        if skip_value:
+            skip_value = False
+        elif literal:
+            positional_values.append(token)
+        elif token == "--":
+            literal = True
+        elif token in value_flags:
+            skip_value = True
+        elif not token.startswith("-"):
+            positional_values.append(token)
+    position = 0
     for argument in current.args:
         if argument.hidden:
             continue
         if argument.kind == "positional":
-            values = [value for value in argv if not value.startswith("-")]
+            values = positional_values[position:position + 1]
+            position += 1
             if argument.required and not values:
                 return f"{argument.flags[0]} is required"
             if values and argument.choices and values[0] not in argument.choices:

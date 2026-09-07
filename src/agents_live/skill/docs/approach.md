@@ -76,7 +76,10 @@ provider and fake CLI exercise the same path deterministically. Providers
 receive a narrow immutable projection, not trigger or repository state.
 Unattended launches do not implicitly run repository-controlled hooks,
 workspace MCP servers, or project extensions, and provider project
-instructions are disabled. Claude uses bare mode; Copilot uses a fresh
+instructions are disabled. Claude uses isolated non-bare print mode with
+empty setting sources, disabled hooks and slash commands, strict MCP
+configuration, and explicit instruction, memory, connector, and IDE opt-outs,
+preserving native authentication and managed-policy precedence. Copilot uses a fresh
 run-scoped configuration home and explicit prompt-mode opt-out environment
 values. Only MCP servers named by `agents-live.mcps` are added to a
 non-pipeline session.

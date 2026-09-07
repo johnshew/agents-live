@@ -1,6 +1,7 @@
 """Immutable records for the pure agent port."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -224,6 +225,19 @@ class ProviderCli:
     probe_argv: tuple[str, ...] = ()
     help_argvs: tuple[tuple[str, ...], ...] = (("--help",),)
     install_commands: tuple[tuple[str, str], ...] = ()
+    minimum_version: tuple[int, int, int] | None = None
+
+    def version_error(self, output: str) -> str | None:
+        if self.minimum_version is None:
+            return None
+        match = re.fullmatch(r"\s*(\d+)\.(\d+)\.(\d+)(?: \([^\r\n]+\))?\s*", output)
+        if match and tuple(int(part) for part in match.groups()) >= self.minimum_version:
+            return None
+        minimum = ".".join(str(part) for part in self.minimum_version)
+        return (
+            f"{self.executable} requires version {minimum} or newer for isolated "
+            "unattended execution; update the native CLI and run agents-live doctor"
+        )
 
     def install_command(self, host: str) -> str | None:
         for candidate, command in self.install_commands:

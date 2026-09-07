@@ -1,7 +1,7 @@
 ---
 title: Why the provider contract is shaped this way
 description: The complete provider integration contract, the ownership boundary it preserves, and the migration from the 6.8 protocol
-ms.date: 2026-09-05
+ms.date: 2026-09-07
 ms.topic: concept
 ---
 
@@ -49,6 +49,13 @@ version lives behind a subcommand is described rather than special-cased. A
 provider may detect the native platform where that changes its CLI's
 capabilities or arguments; platform services and effects remain owned by the
 runtime host adapters.
+
+An integration that depends on a minimum native version declares
+`cli.minimum_version` as a three-integer tuple. Its probe must return a dotted
+three-part version, optionally followed by a parenthesized product name.
+Dispatch runs this bounded probe before sending any model prompt; doctor
+checks the same requirement. An old, failed, timed-out, or unrecognized probe
+refuses execution rather than assuming that isolation controls exist.
 
 **Capabilities.** `ProviderCapabilities` names the definition modes,
 models, efforts, and MCP transports the integration supports, and whether
@@ -148,6 +155,20 @@ the member that is missing.
    generic JSON one.
 
 `prepare` and `parse` are unchanged.
+
+Wrapping another provider does not change this contract. The wrapper declares
+its own `capabilities` and `cli` and explicitly implements every method.
+Registration never inspects a `delegate` or `_delegate` attribute, copies bound
+methods, or supplies legacy `models` and `efforts` properties. A wrapper with
+narrower capabilities validates those restrictions before applying its
+delegate's semantic rules; forwarding the delegate's bound `validate` alone
+would validate the wrong capability record.
+
+Plugin attachment attempts each provider and ownership registry independently.
+A broken component does not prevent healthy components from attaching, but
+the plugin result remains failed and names both failures and successful
+attachments. Doctor and upgrade preflight must not turn partial attachment
+into a healthy plugin result.
 
 ## Consequences
 

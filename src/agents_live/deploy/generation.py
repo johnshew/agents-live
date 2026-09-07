@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import paths
+from ..obs import admin
 from ..runtime.hosts import system as hostruntime
 from . import layout, ownership, plan, pointer
 
@@ -134,6 +135,43 @@ def load(name: str, *, root: Path | None = None) -> Generation:
     return Generation(generation_name, target, validated, version, provenance)
 
 
+def release_status(generation: Generation, *, root: Path | None = None) -> str | None:
+    record = (root or layout.installation_root()) / "release-status" / f"{generation.name}.json"
+    try:
+        document = json.loads(record.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise GenerationError(f"cannot read release status for {generation.name}: {exc}") from exc
+    if not isinstance(document, dict) or document.get("status") not in {
+        "candidate", "rejected", "released",
+    }:
+        raise GenerationError(f"invalid release status for {generation.name}")
+    if document.get("validation") != _record(generation):
+        return None
+    return document["status"]
+
+
+def classify(name: str, status: str, *, root: Path | None = None) -> None:
+    if status not in {"candidate", "rejected", "released"}:
+        raise GenerationError(f"invalid release status: {status}")
+    install_root = root or layout.installation_root()
+    try:
+        with hostruntime.exclusive_lock(
+                layout.deployment_lock_path(install_root), blocking=False):
+            generation = load(name, root=install_root)
+            if ".dev" in generation.name:
+                raise GenerationError("bake generations cannot be classified as releases")
+            record = install_root / "release-status" / f"{generation.name}.json"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(record, json.dumps({
+                "status": status,
+                "validation": _record(generation),
+            }, indent=2) + "\n")
+    except hostruntime.LockBusy as exc:
+        raise GenerationError("another generation operation owns the installation lock") from exc
+
+
 def build(
     name: str,
     *,
@@ -217,7 +255,14 @@ def activate(generation: Generation, *, root: Path | None = None) -> pointer.Poi
                 raise GenerationError(
                     f"could not activate generation {generation.name}: {exc}"
                 ) from exc
-            return pointer.read(layout.current_path(install_root))
+            selected = pointer.read(layout.current_path(install_root))
+            admin.record(
+                "generation.activate",
+                installation_root=str(install_root),
+                previous=previous.generation if previous is not None else None,
+                generation=selected.generation,
+            )
+            return selected
     except hostruntime.LockBusy as exc:
         raise GenerationError(
             "another generation operation owns the installation lock") from exc

@@ -30,6 +30,7 @@ class ClaudeProvider(ProviderBase):
         executable="claude",
         probe_argv=("--version",),
         install_commands=(("windows", "winget install Anthropic.ClaudeCode"),),
+        minimum_version=(2, 1, 263),
     )
     capabilities = ProviderCapabilities(
         modes=frozenset({"plan", "write", "pipeline"}),
@@ -87,6 +88,15 @@ class ClaudeProvider(ProviderBase):
 
     def prepare(self, spec: ResolvedSpec, request: Request) -> Launch:
         environment = dict(spec.env)
+        environment.update({
+            "CLAUDE_CODE_SIMPLE": "0",
+            "CLAUDE_CODE_SAFE_MODE": "0",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "CLAUDE_CODE_AUTO_CONNECT_IDE": "false",
+            "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+        })
         tools = list(spec.allow_tools)
         if spec.mode == "plan":
             tools = tools or sorted(PLAN_TOOLS)
@@ -100,8 +110,14 @@ class ClaudeProvider(ProviderBase):
         else:
             mode = ["--dangerously-skip-permissions"]
         argv = [
-            "claude", "-p", "--bare", "--strict-mcp-config",
+            "claude", "-p", "--strict-mcp-config",
             "--output-format", "json",
+            "--setting-sources", "", "--disable-slash-commands",
+            "--settings", json.dumps({
+                "disableAllHooks": True,
+                "autoMemoryEnabled": False,
+                "disableClaudeAiConnectors": True,
+            }, sort_keys=True, separators=(",", ":")),
             "--append-system-prompt", "Follow the loaded Agent Skill exactly.",
             *mode,
         ]
@@ -109,6 +125,7 @@ class ClaudeProvider(ProviderBase):
             argv.extend(("--model", spec.model))
         if spec.effort:
             argv.extend(("--effort", spec.effort))
+            environment["CLAUDE_CODE_EFFORT_LEVEL"] = spec.effort
         if spec.output_schema is not None:
             argv.extend((
                 "--json-schema",
@@ -120,7 +137,7 @@ class ClaudeProvider(ProviderBase):
                 argv.extend(("--mcp-config", config))
         return Launch(
             tuple(argv),
-            spec.env,
+            tuple(sorted(environment.items())),
             # On stdin, not in argv: Windows caps a command line at 32767
             # characters, so a prompt passed as an argument is the one
             # handoff with a hard limit. `-p` with no text reads stdin.
@@ -129,6 +146,15 @@ class ClaudeProvider(ProviderBase):
             provider=self.name,
             prompt=spec.prompt,
         )
+
+    def failure(self, raw: RawOutput) -> str | None:
+        text = f"{raw.stderr}\n{raw.stdout}".casefold()
+        if raw.returncode != 0 and any(phrase in text for phrase in (
+            "not logged in", "please run /login", "invalid api key",
+            "authentication_error", "authentication failed",
+        )):
+            return "authentication_failed"
+        return super().failure(raw)
 
     def parse(self, raw: RawOutput) -> Completion:
         try:

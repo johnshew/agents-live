@@ -17,6 +17,7 @@ work on it.
 | When you are... | Read first |
 |---|---|
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
+| Understanding the development and release state machine | [docs/development-release-process.md](docs/development-release-process.md) |
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
 | Adding, changing, or deleting a test | [docs/testing-methodology.md](docs/testing-methodology.md) |
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
@@ -42,15 +43,28 @@ uv run --script tools/release.py --publish --yes          # publish prepared
 
 The standard loop for any change that lands as commits:
 
-1. Read the guide matching the task (table above) and check
-   `gh issue list` for related backlog.
+1. Read the guide matching the task (table above), check `gh issue list` for
+  related backlog, then refresh and read the release report before choosing a
+  target branch:
+
+  ```bash
+  git fetch origin --prune
+  uv run --script tools/release-report.py
+  ```
+
+  The generated `.reports/release-report.md` identifies the active release
+  phase, configured bake branch, tested version, and next action. Treat it as
+  required routing context, not as a release-only document.
 2. Investigate in place; reads and searches are fine in the primary
    checkout.
-3. Branch in the primary checkout. Tool-generated branch names are
-   fine; the branch is disposable. Commit or land in-flight work before
-   switching, because the checkout is shared.
-4. Edit, then run the smoke tests and the release audit (Quick
-   commands above).
+3. Use the primary checkout only when it is clean and already on the intended
+  target branch. Otherwise, create a dedicated worktree from that target;
+  verify its ancestry before committing or pushing, and remove it when the
+  task is complete.
+4. Edit, then run the smoke tests and the release audit (Quick commands above).
+  Reuse passing evidence when the tested inputs and environment are unchanged;
+  do not rerun gates merely at a handoff or before preparation runs them itself.
+  See `.agents/testing.md` for artifact and installed-state boundaries.
 5. Commit, push, and open a pull request. Reference an issue only when
    one already covers the work.
 6. After checks pass, merge with `gh pr merge <n> --merge`.
@@ -60,6 +74,48 @@ The standard loop for any change that lands as commits:
    switch to `main` and fast-forward. Delete the head branch
    (`git push origin --delete <branch>`) if the repository did not
    delete it already.
+
+### Active bake routing
+
+Use the generated release report together with `.github/release-channels.toml`.
+When the configured `bake.branch` exists and contains work not yet in `main`,
+that branch is the integration target for the active bake cycle. Being asked
+to change the bake branch is sufficient evidence that the work belongs to the
+bake. Focused pull requests should target the bake branch instead of `main`;
+direct commits are acceptable for small administrative changes, but
+substantive fixes should retain PR review and CI evidence.
+
+If an active bake exists but a request names `main`, do not assume the change
+should bypass bake. Ask whether the intent is to fix the current bake, perform
+release promotion, or make independent post-release work before editing or
+branching. A request to prepare or publish a release follows `.agents/release.md`
+and the report's ordered next actions.
+
+After a change reaches the bake branch, deploy its exact synchronized commit:
+
+```bash
+git pull --ff-only origin <configured-bake-branch>
+uv run --script tools/local-deploy.py --repo <live-repository>
+```
+
+Run these commands from a clean checkout of the configured bake branch, using
+the primary checkout or a dedicated worktree according to the workflow above.
+
+The deployment creates and selects a commit-qualified
+`<target>.dev0+g<commit>` generation. `--allow-downgrade` is required only
+when intentionally moving to a lower numeric `major.minor.patch` release; it
+is not needed between a stable candidate and a bake on the same release line.
+When the developer approves bake promotion, update `[bake.promotion]` in
+`.github/release-channels.toml` to `decision = "approved"` and record the exact
+full bake `commit` plus `decided_on = "YYYY-MM-DD"`. Approval applies only to
+that commit; new bake changes require renewed validation and approval. Then
+move the approved bake to `main` through one promotion pull request and prepare
+a new official candidate from the resulting clean `main`.
+
+Keep these instructions, `.agents/release-report.md`, and
+`tools/release-report.py` aligned. When branch-routing or release-cycle guidance
+changes, update the report policy and generated wording in the same change so
+a new agent receives the same answer from either entry point.
 
 ## Rules
 
@@ -107,15 +163,11 @@ The standard loop for any change that lands as commits:
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.
-- **Do branch work in the primary checkout, not a worktree.** A pull
-  request is developed on a branch here, where the developer's editor
-  already points. Two costs come with that and are yours to manage.
-  The checkout is shared, so never discard another agent's uncommitted
-  work. And a file the developer has open does not reload when a tool
-  rewrites it, so before editing a file this branch has already
-  rewritten, confirm the editor is not holding a stale copy: compare
-  the on-disk line count against what a read returns past that point.
-  A worktree still earns its keep when two branches must exist at once.
+- **Isolate branch work when the primary checkout is occupied.** Use the
+  primary checkout only when it is clean and already on the intended target
+  branch. Otherwise, create a dedicated worktree from that target. Verify the
+  target ancestry before committing or pushing, and always remove the worktree
+  when the task is complete.
 - **Keep every commit meaningful and reviewable.** Plans belong in the
   session, issue, or PR description, never in empty or planning-only
   commits. Before the first push, fold superseded fixes and documentation

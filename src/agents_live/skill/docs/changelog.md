@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-05
+ms.date: 2026-09-07
 ms.topic: reference
 ---
 
@@ -11,13 +11,84 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: replace stale Windows scheduled executables during generation convergence. (#473)
+  Scheduled agents, maintenance, and watchers compare their effective action
+  and working directory with the selected generation instead of retaining
+  an old executable whenever the subscription key is unchanged.
+  Native Windows console launchers and their Python children share a
+  fingerprint, avoiding false watcher degradation and restart churn.
+- fix: preserve native Claude subscription authentication in isolated print mode.
+  Explicit configuration, instruction, hook, memory, connector, and IDE
+  discovery controls replace bare mode without extracting credentials or
+  silently selecting API-key billing. Authentication failures receive a
+  specific category, and explicit effort overrides inherited effort values.
+  Dispatch and doctor require Claude Code 2.1.263 or newer. Version probes
+  fail closed before prompt delivery and consume the agent timeout budget.
+- fix: wait for the newly requested dashboard readiness action. (#463)
+  Aggregate checks exclude completion IDs from earlier scenarios before
+  accepting Run success, preventing stale evidence from racing the next
+  mode's seeded failure assertion.
+- fix: retain Copilot answers sent in the same message as task completion.
+  When no separate answer exists, completion parsing keeps the message content
+  instead of replacing valid JSON with the prose task summary. Explicit final
+  answers and separately emitted answers retain priority.
+- fix: keep local deployment failures actionable and browser checks focus-safe.
+  Failed streamed commands report their exit status without masking it with an
+  output-handling error. Keyboard readiness checks wait for filter dialogs to
+  close before focusing the inventory splitter.
+- fix: retain model transcripts and submitted proposals when postprocessing fails. (#468)
+  Failed runs keep their model telemetry and exact postprocessor input before
+  postprocessing starts. Full transcript JSON includes recorded pipeline results
+  while summary output omits proposal content; disabled recording stays disabled.
+- fix: restore dashboard model values and move aggregate attention into Activity.
+  Inventory shows reported or configured models, with an explicit default for
+  unspecified models, while handlers show a dash. Aggregate attention no longer
+  occupies a separate inventory banner; per-agent health indicators remain.
+- fix: reuse deployment preparation evidence across worktrees.
+  Validated wheels and receipts live in shared Git storage and include Python
+  identity. Release guidance reuses passing checks for unchanged inputs instead
+  of repeating suites at handoffs; changed artifacts still require validation.
+- fix: accept the documented version-classification arguments.
+  CLI validation consumes positional values in order, so `versions classify`
+  validates the status instead of mistaking the version for it. Missing and
+  invalid statuses still fail without changing the recorded classification.
+- fix: show dashboard loading immediately and keep foreground shutdown quiet.
+  Initial inventory and history collection runs off the UI thread after saved
+  preferences are restored, without a duplicate scan. Startup announces one
+  URL, Ctrl+C requests cooperative shutdown, and unused inventory-selection
+  checkboxes are removed while per-row actions remain available.
+- fix: restore Windows dashboards without persistent console windows.
+  Local deployment uses the native hidden-process policy, cleans up failed
+  or interrupted startup, and waits for the launcher to exit after shutdown.
+- fix: expose installed versions with truthful release labels and readable dates.
+  The public command is `versions`, without a `generations` alias. Listings
+  distinguish bake releases, explicitly recorded local release candidates,
+  rejected candidates, and artifact sources. Human validation dates use the
+  local timezone; JSON uses UTC and the `versions`, `version`, `channel`,
+  `status`, and `source` fields. Successful selections are recorded in the
+  administrative timeline without modifying immutable version files.
+- fix: restore dashboards whose healthy API response takes more than two seconds.
+  Local deployment lets readiness requests use the remaining startup deadline
+  instead of repeatedly abandoning responses before they can finish.
+- fix: keep dashboard inventory compact and stable while filtering and refreshing. (#461)
+  One shared scroll region contains compact virtualized rows. Responsive search,
+  visible grouping, removable filters, and one sort order preserve view state
+  through refresh and reload without rebuilding tables or simulating clicks.
+  Repository ownership loss retains an explicit stale snapshot.
+- fix: report partial plugin failures without blocking healthy components.
+  Providers and ownership registries attach independently, but doctor and
+  upgrade preflight still report every failed component. Provider wrappers
+  must implement the complete contract explicitly; registration never infers
+  delegate methods that could bypass the wrapper's own restrictions.
 - fix: enable workspace-confined Codex writes on native Windows.
   Codex selects its supported unelevated Windows sandbox and receives the
   repository root explicitly, allowing in-workspace changes while writes
   outside the repository remain denied.
 - fix: keep actions working in virtualized dashboard tables.
-  Aggregate Run, Start, Stop, and Claim controls now dispatch through the
-  virtual-scroll wrapper while preserving repository-qualified targets.
+  Run, Start, Stop, and Claim controls use scoped event handlers and preserve
+  repository-qualified targets and disabled reasons. Queued action completion
+  refreshes and logs to the initiating tab, with page registrations released
+  on teardown.
 - feat: add OpenAI Codex as a self-contained provider. (#447)
   Codex supports plan and workspace-confined write runs, explicit models and
   reasoning effort, native output schemas, selected stdio and HTTP MCP servers,
@@ -35,7 +106,7 @@ history is retained in the source repository.
 - feat: make one dashboard the operational view for every registered repository. (#422, #423, #424, #455)
   Repository groups, health, activity, and eligible actions now share one
   coherent snapshot. Full-screen settings preserve the current investigation,
-  unavailable data remains explicit, and filters, selections, layout, and
+  unavailable data remains explicit, and filters, layout, and
   activity position survive refresh and reconnect while rendering stays bounded
   as repositories and agents grow.
 - fix: enforce provider execution options consistently.

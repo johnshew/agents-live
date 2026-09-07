@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: reference
 ---
 
@@ -21,6 +21,19 @@ agents-live stop <name>
 machine-readable output where a command supports it.
 
 ## Lifecycle
+
+`versions list` shows release classification separately from source and
+validation time. Text uses short local dates with a timezone; JSON uses UTC
+and separate `channel`, `status`, and `source` fields. `local-artifact` is a
+source, not a release classification. Local stable-numbered artifacts without
+an explicit decision are shown as unclassified.
+
+Use `upgrade --from <wheel> --candidate` when installing a local release
+candidate. Record a decision with `versions classify <version> rejected`
+or `versions classify <version> released`. Classification changes no
+generation files and selects no runtime. Development versions are shown as
+bake releases. `versions activate <version>` explicitly selects a runtime;
+successful selections appear as `generation.activate` administrative events.
 
 ### `run`
 
@@ -208,7 +221,7 @@ that ran the agent.
   the prior generation without blocking activation. A package-manager or
   checkout command cannot replace itself; run the official bootstrap once to
   establish the self-managed installation.
-- `generations list|activate|remove|collect` manages the immutable version
+- `versions list|classify|activate|remove|collect` manages the immutable version
   store. `activate VERSION` selects a validated installed generation for
   rollback or recovery. `remove VERSION` deletes one inactive, unheld
   generation. `collect [--retain N]` removes older inactive generations while

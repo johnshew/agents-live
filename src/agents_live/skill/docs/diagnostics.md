@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-09-05
+ms.date: 2026-09-06
 ms.topic: troubleshooting
 ---
 
@@ -123,11 +123,11 @@ active one, then switches the stable `current` link. Running watchers do not
 block activation; they finish work on their immutable generation and restart
 from `current` at the next idle version check.
 
-Use `agents-live generations list` to compare installed and active versions.
+Use `agents-live versions list` to compare installed and active versions.
 If activation selected an unsuitable release, run `agents-live generations
 activate VERSION` to select a retained validated generation. Use `generations
 remove VERSION` to discard an inactive candidate before rebuilding that exact
-version, or `generations collect` to remove older inactive and unheld versions.
+version, or `versions collect` to remove older inactive and unheld versions.
 
 A package-manager or checkout command cannot replace itself. If `upgrade`
 reports an unsupported installation, run the verified release bootstrap once
@@ -345,6 +345,20 @@ calls. `--json` returns the same provider-neutral fields in a `transcripts`
 array. `--summary` limits the prompt and final text to 6,000 characters each
 and lists at most 100 tool names. Use `--raw` with one run ID only when the
 normalized view omits provider detail needed for diagnosis.
+
+With transcript recording enabled, provider output is saved before
+postprocessing. A postprocessor crash or timeout retains the model transcript
+and usage even though the run fails. For pipeline runs with a declared result
+path, the snapshot handed to the postprocessor is also saved before that step.
+Full `--json` output includes `pipeline_result` with `path`, `present`, and
+`value`; `present` distinguishes an unpublished value from published JSON null.
+Full output also includes `postprocessor_input`, the exact stdin submitted to
+the postprocessor, captured before it starts. These proposal fields are omitted
+from `--summary`; they may contain sensitive task content and should not be
+copied into public issues. Disabling transcript recording disables these
+captures too. Missing historical artifacts are not reconstructed.
+Processor logs and the pipeline journal
+remain subject to normal retention; the journal records operations, not values.
 
 `transcript_state` distinguishes `available`, `no_model_call`, `disabled`,
 `missing`, `corrupt`, `invalid_path`, and `unknown`. `unknown` is retained for

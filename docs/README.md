@@ -23,6 +23,9 @@ this directory is installed by `agents-live init` or `upgrade`.
 
 ## Contents
 
+- [development-release-process.md](development-release-process.md) - the
+  state machine for bake development, promotion approval, candidate
+  acceptance, rejection, and public release.
 - [architecture.md](architecture.md) - normative current package ownership,
   runtime flow, state, compatibility boundary, and invariants.
 - [testing-methodology.md](testing-methodology.md) - what earns a test, which
