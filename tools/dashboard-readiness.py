@@ -410,7 +410,7 @@ def _assert_operational_viewport(
     watcher_health: str,
 ) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     all_repos = _api_all_repos(port)
     repositories = all_repos.get("repositories", []) if all_repos else []
@@ -763,22 +763,21 @@ def _assert_operational_viewport(
                     f"{sorted(mounted_names)} and deferred "
                     f"{sorted(deferred_names)} with an invalid selector")
             scope.click()
-            for name in sorted(registered_names):
-                if page.get_by_role("option", name=name, exact=True).count() != 1:
-                    raise ReadinessError(
-                        f"{mode}: repository scope omitted {name}")
+            expect(page.get_by_role("option")).to_have_count(
+                len(registered_names) + 1, timeout=15000)
+            for name in sorted(registered_names | {"All"}):
+                option = page.get_by_role("option", name=name, exact=True)
+                expect(option).to_have_count(1, timeout=15000)
+                expect(option).to_be_visible(timeout=15000)
             page.keyboard.press("Escape")
             deferred_selector.click()
-            first_deferred = sorted(deferred_names)[0]
-            page.get_by_role(
-                "option", name=f"{first_deferred} | 1 agents", exact=True
-            ).wait_for()
+            expect(page.get_by_role("option")).to_have_count(
+                len(deferred_names), timeout=15000)
             for name in sorted(deferred_names):
-                if page.get_by_role(
-                        "option", name=f"{name} | 1 agents", exact=True
-                ).count() != 1:
-                    raise ReadinessError(
-                        f"{mode}: deferred repository selector omitted {name}")
+                option = page.get_by_role(
+                    "option", name=f"{name} | 1 agents", exact=True)
+                expect(option).to_have_count(1, timeout=15000)
+                expect(option).to_be_visible(timeout=15000)
             selected_deferred = sorted(deferred_names)[-1]
             page.get_by_role(
                 "option", name=f"{selected_deferred} | 1 agents",

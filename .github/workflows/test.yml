@@ -114,6 +114,7 @@ jobs:
     outputs:
       name: ${{ steps.wheel.outputs.name }}
       sha256: ${{ steps.wheel.outputs.sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -129,7 +130,8 @@ jobs:
           test -n "$wheel"
           echo "name=$(basename "$wheel")" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$wheel" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - id: upload
+        uses: actions/upload-artifact@v4
         with:
           name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/*
@@ -158,7 +160,8 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - uses: actions/download-artifact@v4
         with:
-          name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.wheel.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - shell: bash
         env:
@@ -186,7 +189,8 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - uses: actions/download-artifact@v4
         with:
-          name: exact-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.wheel.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - shell: bash
         env:
