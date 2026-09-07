@@ -333,7 +333,7 @@ def _interpret(
             skip = signals.control.get("skip") is True
             note = signals.control.get("message")
             if skip and isinstance(note, str) and note:
-                message = note
+                message = "\n".join(part for part in (note, message) if part)
         return StepResult(step, True, skip=skip, text=text, message=message)
     assert completion is not None
     if not completion.text and completion.structured is None:
@@ -365,7 +365,8 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
             )
     pre = results.get(Step.PRE)
     if pre is not None and pre.skip:
-        return Outcome(True, "skipped", pre.text, message=pre.message)
+        return Outcome(True, "success", pre.text, pre.structured,
+                       message=pre.message, usage=pre.usage, transcript=pre.transcript)
     final = results.get(Step.POST) or results.get(Step.AGENT) or pre
     telemetry = results.get(Step.AGENT) or final
     return Outcome(

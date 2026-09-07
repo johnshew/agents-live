@@ -39,6 +39,20 @@ duration, status, category when available, usage, and transcript reference.
 inference. A failed version probe and an ordinary preprocessor skip both
 report false. Ordinary skip still ends the invocation without postprocessing.
 
+Successful preprocessor early finishes are completed runs, not skipped firings:
+status is `success` (`ok` in `logs`), with
+`completion_reason=preprocessor_skip`. Output, diagnostics, and the control
+message are retained together. The terminal summary is capped at 4096
+characters; `processor_record` references the full captured work record in the
+run directory, retained for the configured retention period. It is a
+`pre-processor` event, not a second terminal event or provider transcript.
+Processor-authored structured logs and output files remain unchanged.
+
+```bash
+agents-live logs --columns run_id,status,completion_reason,model_called,processor_record
+agents-live logs --log <processor_record> --columns run_id,phase,status,message --format jsonl
+```
+
 Provider usage survives timeouts, nonzero exits, invalid output, retries,
 postprocessor failures, and later resource failures when it was available.
 Run-level usage adds the same reported counter across attempts exactly once.

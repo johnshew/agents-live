@@ -1,7 +1,7 @@
 ---
 title: Writing a processor
 description: The contract between Agents Live and a pre- or post-processor
-ms.date: 2026-09-05
+ms.date: 2026-09-07
 ms.topic: reference
 ---
 
@@ -243,6 +243,22 @@ stdin is literal model output.
 
 For a scheduled audit that usually finds nothing, skipping is also most of the
 cost.
+
+A pre-processor can also complete deterministic work, including validation,
+application, and reporting, then request skip. Factor shared work into a helper
+when both processors need it. Skip means omit the remaining steps, not discard
+what already ran; it never runs the post-processor without the model.
+
+A successful pre-processor early finish records run status `success` (`ok` in
+`logs`), `completion_reason=preprocessor_skip`, and `model_called=false`.
+Its control message is kept alongside stdout/stderr diagnostics and its result.
+The terminal summary is bounded, but `processor_record` points to a run-local
+record containing the full captured output and diagnostics. Query that record
+with `agents-live logs --log <processor_record> --format jsonl`; the output file
+and processor-written log remain intact under normal run retention. No provider
+transcript is manufactured. A nonzero exit, timeout, or later resource failure
+still fails the run even when skip was requested. Firings blocked before
+execution remain `skipped`.
 
 ## Class 2: pipeline aware
 

@@ -150,8 +150,11 @@ pre-processor -> agent -> post-processor
   arguments, so a class 0 processor runs with none.
 - Pre-processor output is appended to the agent prompt under a
   `Pre-processor context:` heading.
-- Write `{"skip": true}` to the file at `AGENTS_LIVE_CONTROL` to skip the agent
-  call (status `skipped`). Under `schema-version: "1"` a pre-processor did this
+- Write `{"skip": true}` to the file at `AGENTS_LIVE_CONTROL` to finish
+  successfully after the pre-processor, without running the agent or
+  post-processor. Completed work is recorded as `success`, with
+  `completion_reason=preprocessor_skip`; dispatch gates that execute no work
+  remain `skipped`. Under `schema-version: "1"` a pre-processor requests this
   by printing the same object to stdout; version 2 never parses stdout.
 - With selector `none`, pre-processor output pipes directly to post-processor (deterministic pipeline).
 - Watchers ignore `.*` and `__pycache__/` to prevent loops; logs live

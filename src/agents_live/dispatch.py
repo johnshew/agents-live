@@ -80,6 +80,8 @@ def dispatch(
             ("post_duration_s", accounting.durations.get(Step.POST)),
             ("attempt", len(accounting.attempts)),
             ("attempts", accounting.attempts),
+            ("completion_reason", accounting.completion_reason if result.ok else None),
+            ("processor_record", accounting.processor_record),
             ("model_called", model_called),
             ("transcript_state", transcript_state),
         ),
@@ -91,6 +93,8 @@ def dispatch(
 class _Accounting:
     identifier: str
     transcript_enabled: bool = True
+    completion_reason: str | None = None
+    processor_record: str | None = None
     durations: dict[Step, float] = field(default_factory=dict)
     attempts: list[dict] = field(default_factory=list)
 
@@ -245,6 +249,18 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                     spec, Step.PRE, launch, runner, run_id=run_id,
                     scratch=scratch, accounting=accounting)
                 if not results[Step.PRE].ok or results[Step.PRE].skip:
+                    if results[Step.PRE].ok:
+                        accounting.completion_reason = "preprocessor_skip"
+                        completed = results[Step.PRE]
+                        record_path = scratch / "pre-completion.jsonl"
+                        obs.record(record_path, obs.create(
+                            "pre-processor", "success", repository=firing.root,
+                            agent=firing.agent_id, run_id=run_id, origin=firing.origin,
+                            message="\n".join(part for part in (
+                                completed.message.strip(), completed.text.strip()) if part),
+                            attributes=(("duration_s", accounting.durations[Step.PRE]),),
+                        ))
+                        accounting.processor_record = str(record_path)
                     return finish(snapshot())
 
             if shape.has_agent:
