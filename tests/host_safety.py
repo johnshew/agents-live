@@ -26,7 +26,7 @@ def _audit(event: str, arguments: tuple) -> None:
     command = " ".join(str(item) for item in argv) if not isinstance(argv, str) else argv
     parts = system.split_command_line(argv) if isinstance(argv, str) else argv
     executable = executable or (parts[0] if parts else "")
-    name = Path(str(executable)).name.lower().removesuffix(".exe")
+    name = Path(str(executable).strip('"')).name.lower().removesuffix(".exe")
     tokens = command.lower()
     scheduler = (
         name == "crontab" and not re.search(r"(?:^|\s)-l(?:\s|$)", tokens)
