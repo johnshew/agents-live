@@ -116,8 +116,8 @@ disposable configuration directory and a loopback endpoint with a dummy key;
 no fixture prompts are sent to a provider. That fixture checks user/project
 instruction, skill, plugin metadata, memory, hook, and undeclared MCP isolation.
 A non-isolated control must load the instruction and plugin markers and run
-the ordinary hook. This does not prove native subscription authentication,
-plugin-hook execution isolation, IDE discovery suppression, or organization-managed
+both the ordinary and plugin hooks. This does not prove native subscription authentication,
+IDE discovery suppression, or organization-managed
 policy enforcement; those remain separate acceptance boundaries.
 
 Do not treat the WSL/Linux pass as native Windows evidence. Record the native

@@ -5543,6 +5543,18 @@ class TestClaudeLiveConformance(unittest.TestCase):
             (manifest / "plugin.json").write_text(json.dumps({
                 "name": "ambient-plugin", "description": plugin_marker,
             }), encoding="utf-8")
+            hook_script = plugin / "fixture_hook.py"
+            hook_script.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(self.repo / 'plugin-hook-ran')!r}).touch()\n",
+                encoding="utf-8")
+            hooks = plugin / "hooks"
+            hooks.mkdir()
+            (hooks / "hooks.json").write_text(json.dumps({
+                "hooks": {"SessionStart": [{"hooks": [{"type": "command",
+                    "command": subprocess.list2cmdline([
+                        Path(sys.executable).as_posix(), hook_script.as_posix()])}]}]},
+            }), encoding="utf-8")
             (plugin / "SKILL.md").write_text(
                 f"---\nname: ambient-plugin\ndescription: {plugin_marker}\n---\n"
                 f"{plugin_marker}\n",
@@ -5571,6 +5583,7 @@ class TestClaudeLiveConformance(unittest.TestCase):
                     ("CLAUDE_CODE_OAUTH_TOKEN", ""),
                     ("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{server.server_port}"),
                     ("CLAUDE_CODE_MAX_RETRIES", "0"),
+                    ("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL", "1"),
                 ), "claude", "claude-sonnet-5", None)
             launch = self.provider.prepare(spec, agent.Request())
             completed = subprocess.run(
@@ -5585,6 +5598,7 @@ class TestClaudeLiveConformance(unittest.TestCase):
                      for tool in request.get("tools", [])]
             self.assertFalse(any(name.startswith("mcp__") for name in names), names)
             self.assertFalse((self.repo / "hook-ran").exists())
+            self.assertFalse((self.repo / "plugin-hook-ran").exists())
             captured.clear()
             control_env = {**os.environ, **dict(spec.env),
                            "CLAUDE_CODE_SIMPLE": "0", "CLAUDE_CODE_SAFE_MODE": "0",
@@ -5602,6 +5616,7 @@ class TestClaudeLiveConformance(unittest.TestCase):
             self.assertIn(marker, json.dumps(captured))
             self.assertIn(plugin_marker, json.dumps(captured))
             self.assertTrue((self.repo / "hook-ran").exists())
+            self.assertTrue((self.repo / "plugin-hook-ran").exists())
         finally:
             server.shutdown()
             server.server_close()
