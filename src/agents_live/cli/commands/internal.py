@@ -440,7 +440,14 @@ def _runtime_is_current() -> bool:
     remains the fallback outside the supported self-managed installation.
     """
     try:
-        return deploy.pointer.read().generation == __version__
+        active = deploy.pointer.read().generation
+        running = (
+            deploy.layout.generation_of(sys.executable)
+            or deploy.layout.generation_of(__file__)
+        )
+        if running is not None:
+            return active == running
+        return active == __version__
     except (deploy.pointer.PointerError, OSError):
         pass
     try:

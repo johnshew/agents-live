@@ -20,7 +20,7 @@ def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
     config = spec.execution
     if config is None:
         return None
-    return {
+    policy: dict[str, object] = {
         "selector": config.selector.canonical,
         "provider": config.selector.provider,
         "model": config.selector.model,
@@ -31,6 +31,16 @@ def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
         "pre_processor": config.pre_processor,
         "post_processor": config.post_processor,
     }
+    schedule_diagnostics = []
+    for schedule in config.schedules:
+        try:
+            from ...runtime.hosts import task_scheduler
+            schedule_diagnostics.append(task_scheduler.diagnostics(schedule))
+        except Exception:
+            pass
+    if schedule_diagnostics:
+        policy["schedule_diagnostics"] = schedule_diagnostics
+    return policy
 
 
 def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:

@@ -36,11 +36,15 @@ One owned Task Scheduler artifact represents one runtime subscription. All
 tasks live under `\AgentsLive\` and carry a structured marker containing
 scope, subscription identity, fingerprint, and process role.
 
-Calendar schedules use exact native triggers when Task Scheduler can express
-them. Other supported cron expressions use a bounded coarse repetition plus a
-dueness check. Dueness atomically claims the minute, so a coarse trigger cannot
-run the same logical firing twice. `@reboot` maps to a logon trigger because
-tasks run in the developer's interactive session.
+Each cron expression compiles to exactly one native Windows trigger. Exact
+native scheduling is used whenever a calendar trigger with a bounded repetition
+can preserve cron semantics, resetting repetition at the expression's natural
+period boundary (daily, weekly, or monthly). When an expression cannot fit
+exactly in one trigger, the lowest-frequency single-trigger superset is chosen
+and dispatch-time dueness claims the minute. Dueness atomically claims the
+minute, so a covering trigger cannot run the same logical firing twice.
+`@reboot` maps to a logon trigger because tasks run in the developer's
+interactive session.
 
 Task actions pin the installed CLI path and an explicit repository. They do
 not depend on the Task Scheduler service's PATH or working directory.

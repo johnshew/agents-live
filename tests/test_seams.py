@@ -2917,6 +2917,54 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
                     deploy.layout.current_path(), replacement, root=root)
                 self.assertFalse(internal._runtime_is_current())
 
+    def test_watcher_distinguishes_running_generation_directory_from_package_version(self) -> None:
+        """A bake watcher must retire when stable activates, even if __version__ matches (#490)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bake_gen = "6.9.0.dev0+gd0e9b36c"
+            stable_gen = "6.9.0"
+            with mock.patch.dict(os.environ, {deploy.layout.ENV_INSTALL_ROOT: str(root)}):
+                bake_dir = deploy.layout.generation_dir(bake_gen, root=root)
+                stable_dir = deploy.layout.generation_dir(stable_gen, root=root)
+                bake_dir.mkdir(parents=True)
+                stable_dir.mkdir(parents=True)
+
+                # Mock watcher executing inside the bake generation directory
+                fake_exe = bake_dir / "Scripts" / "python.exe"
+                with (
+                    mock.patch.object(sys, "executable", str(fake_exe)),
+                    mock.patch.object(internal, "__version__", "6.9.0"),
+                ):
+                    hostruntime.replace_directory_link(
+                        deploy.layout.current_path(root), bake_dir, root=root)
+                    self.assertTrue(internal._runtime_is_current())
+
+                    hostruntime.replace_directory_link(
+                        deploy.layout.current_path(root), stable_dir, root=root)
+                    self.assertFalse(internal._runtime_is_current())
+
+    def test_versions_activate_converges_generation(self) -> None:
+        """versions activate converges the host through the selected generation (#490)."""
+        from agents_live.cli.commands import generations, install_generation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(os.environ, {deploy.layout.ENV_INSTALL_ROOT: str(root)}):
+                gen = deploy.generation.build(
+                    "6.9.0",
+                    root=root,
+                    populate=lambda staging: (staging / "bin").mkdir(parents=True),
+                    validate=lambda _staging: None,
+                )
+                with (
+                    mock.patch.object(generations, "_require_self_managed"),
+                    mock.patch.object(install_generation, "activate_generation") as mock_activate,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    exit_code = generations.main(["activate", "6.9.0"])
+                    self.assertEqual(0, exit_code)
+                    mock_activate.assert_called_once()
+                    self.assertEqual("6.9.0", mock_activate.call_args[0][0].name)
+
     def test_dispatch_budget_counts_atomically_and_recovers_stale_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "budget.json"
@@ -6914,6 +6962,233 @@ class TestWindowsTaskScheduling(unittest.TestCase):
             "<StartBoundary>2026-08-24T00:00:00-06:00</StartBoundary>",
             task_xml,
         )
+
+    def test_each_cron_expression_creates_exactly_one_trigger(self) -> None:
+        """Every valid cron expression must compile to exactly one native trigger (#488)."""
+        expressions = (
+            "0 3 * * *",
+            "0 */12 * * *",
+            "0 */5 * * *",
+            "*/15 * * * *",
+            "15 9 * * MON-FRI",
+            "0 9 1 * *",
+            "@daily",
+            "@weekly",
+            "@monthly",
+            "@yearly",
+            "@annually",
+            "@midnight",
+            "@hourly",
+            "@reboot",
+            "0 8,12,17 * * *",
+            "*/7 * * * *",
+            "1,7,22,58 * * * *",
+            "*/10 9-17 * * MON-FRI",
+            "0 0 1,15 * MON",
+            "0 9 1 JAN,JUN *",
+            "0 0 29 2 *",
+            "0 0 31 * *",
+            "0 0 * * 0",
+            "0 0 * * 7",
+        )
+        for expr in expressions:
+            with self.subTest(expression=expr):
+                triggers_list = task_scheduler.translate(expr)
+                self.assertEqual(1, len(triggers_list), f"{expr} produced {len(triggers_list)} triggers")
+
+    def test_stepped_twelve_hour_creates_daily_midnight_trigger_with_pt12h_repetition_bounded_to_p1d(self) -> None:
+        """0 */12 * * * creates one daily midnight trigger with PT12H repetition for P1D (#488)."""
+        triggers_list = task_scheduler.translate("0 */12 * * *")
+        self.assertEqual(1, len(triggers_list))
+        trig = triggers_list[0]
+        self.assertEqual("daily", trig["kind"])
+        self.assertEqual(0, trig["hour"])
+        self.assertEqual(0, trig["minute"])
+        self.assertEqual("PT12H", trig["interval"])
+        self.assertEqual("P1D", trig["duration"])
+        self.assertEqual(720, trig["interval_minutes"])
+        self.assertEqual(1440, trig["duration_minutes"])
+        self.assertTrue(trig["exact"])
+        self.assertIsNone(trig["fallback_reason"])
+
+        # Over 1 day, it produces exactly 2 firings (00:00 and 12:00) with 0 extra not-due wakes
+        start = datetime(2026, 9, 8, 0, 0)
+        end = datetime(2026, 9, 8, 23, 59)
+        due, native = task_scheduler.simulate_firings(trig, "0 */12 * * *", start, end)
+        self.assertEqual(
+            [datetime(2026, 9, 8, 0, 0), datetime(2026, 9, 8, 12, 0)],
+            due,
+        )
+        self.assertEqual(due, native)
+
+    def test_common_exact_cases(self) -> None:
+        """Verify common exact cases have exact=True and matching firings (#488)."""
+        cases = [
+            ("0 3 * * *", "daily", 3, 0, None, None, True),
+            ("0 */12 * * *", "daily", 0, 0, "PT12H", "P1D", True),
+            ("0 */5 * * *", "daily", 0, 0, "PT5H", "P1D", True),
+            ("*/15 * * * *", "daily", 0, 0, "PT15M", "P1D", True),
+            ("15 9 * * MON-FRI", "weekly", 9, 15, None, None, True),
+            ("0 9 1 * *", "monthly", 9, 0, None, None, True),
+            ("@daily", "daily", 0, 0, None, None, True),
+        ]
+        for expr, expected_kind, h, m, interval, duration, exact in cases:
+            with self.subTest(expression=expr):
+                trig = task_scheduler.translate(expr)[0]
+                self.assertEqual(expected_kind, trig["kind"])
+                self.assertEqual(h, trig["hour"])
+                self.assertEqual(m, trig["minute"])
+                self.assertEqual(interval, trig.get("interval"))
+                self.assertEqual(duration, trig.get("duration"))
+                self.assertEqual(exact, trig["exact"])
+
+    def test_covering_fallbacks_cannot_miss_due_time(self) -> None:
+        """Fallback triggers must cover all due times without missing any (#488)."""
+        fallbacks = (
+            ("*/7 * * * *", datetime(2026, 9, 8, 0, 0), datetime(2026, 9, 8, 23, 59)),
+            ("1,7,22,58 * * * *", datetime(2026, 9, 8, 0, 0), datetime(2026, 9, 8, 23, 59)),
+            ("0 8,12,17 * * *", datetime(2026, 9, 8, 0, 0), datetime(2026, 9, 8, 23, 59)),
+            ("*/10 9-17 * * MON-FRI", datetime(2026, 9, 7, 0, 0), datetime(2026, 9, 13, 23, 59)),
+        )
+        for expr, start, end in fallbacks:
+            with self.subTest(expression=expr):
+                trig = task_scheduler.translate(expr)[0]
+                due, native = task_scheduler.simulate_firings(trig, expr, start, end)
+                self.assertTrue(due, "Must have due firings")
+                due_set = set(due)
+                native_set = set(native)
+                self.assertTrue(
+                    due_set.issubset(native_set),
+                    f"{expr} missed due firings: {due_set - native_set}",
+                )
+
+        # 0 8,12,17 * * * wakes only in the 08:00-17:00 window (10 wakes), not overnight
+        trig_hours = task_scheduler.translate("0 8,12,17 * * *")[0]
+        self.assertFalse(trig_hours["exact"])
+        self.assertEqual("PT1H", trig_hours["interval"])
+        self.assertEqual(8, trig_hours["hour"])
+        _, native_hours = task_scheduler.simulate_firings(
+            trig_hours, "0 8,12,17 * * *", datetime(2026, 9, 8, 0, 0), datetime(2026, 9, 8, 23, 59))
+        self.assertEqual(10, len(native_hours))
+        self.assertTrue(all(8 <= t.hour <= 17 for t in native_hours))
+
+        # */10 9-17 * * MON-FRI does not wake on weekends or overnight
+        trig_weekday = task_scheduler.translate("*/10 9-17 * * MON-FRI")[0]
+        self.assertEqual("weekly", trig_weekday["kind"])
+        self.assertEqual((1, 2, 3, 4, 5), trig_weekday["weekdays"])
+        self.assertEqual(9, trig_weekday["hour"])
+        self.assertEqual("PT10M", trig_weekday["interval"])
+        _, native_wk = task_scheduler.simulate_firings(
+            trig_weekday, "*/10 9-17 * * MON-FRI", datetime(2026, 9, 7, 0, 0), datetime(2026, 9, 13, 23, 59))
+        self.assertTrue(all(t.weekday() < 5 for t in native_wk), "No weekend wakeups")
+        self.assertTrue(all(9 <= t.hour <= 17 for t in native_wk), "No overnight wakeups")
+
+    def test_calendar_edge_cases_and_normalization(self) -> None:
+        """Day-of-month/day-of-week OR, months, leap days, and Sunday normalization (#488)."""
+        # Both DOM and DOW restricted -> daily trigger with dispatch filtering (OR semantics)
+        trig_or = task_scheduler.translate("0 0 1,15 * MON")[0]
+        self.assertEqual("daily", trig_or["kind"])
+        self.assertFalse(trig_or["exact"])
+        self.assertIn("combined day-of-month and day-of-week", trig_or["fallback_reason"])
+
+        # Selected months
+        trig_months = task_scheduler.translate("0 9 1 JAN,JUN *")[0]
+        self.assertEqual("monthly", trig_months["kind"])
+        self.assertEqual((1, 6), trig_months["months"])
+        self.assertEqual((1,), trig_months["days"])
+        self.assertTrue(trig_months["exact"])
+
+        # Leap day (day 29 of Feb)
+        trig_leap = task_scheduler.translate("0 0 29 2 *")[0]
+        self.assertEqual("monthly", trig_leap["kind"])
+        self.assertEqual((2,), trig_leap["months"])
+        self.assertEqual((29,), trig_leap["days"])
+
+        # Month end (day 31)
+        trig_31 = task_scheduler.translate("0 0 31 * *")[0]
+        self.assertEqual("monthly", trig_31["kind"])
+        self.assertEqual((31,), trig_31["days"])
+
+        # Sunday 0 and 7 identical
+        trig_sun0 = task_scheduler.translate("0 0 * * 0")[0]
+        trig_sun7 = task_scheduler.translate("0 0 * * 7")[0]
+        self.assertEqual((0,), trig_sun0["weekdays"])
+        self.assertEqual((0,), trig_sun7["weekdays"])
+        self.assertEqual(trig_sun0, trig_sun7)
+
+    def test_boundary_prevents_duplicate_midnight_firing(self) -> None:
+        """Bounded repetition must not fire twice at the midnight boundary (#488)."""
+        trig = task_scheduler.translate("0 */12 * * *")[0]
+        start = datetime(2026, 9, 8, 0, 0)
+        end = datetime(2026, 9, 9, 23, 59)
+        _, native = task_scheduler.simulate_firings(trig, "0 */12 * * *", start, end)
+        # 48 hours has exactly 4 firings: 00:00 and 12:00 on day 1, 00:00 and 12:00 on day 2
+        self.assertEqual(4, len(native))
+        self.assertEqual(
+            [
+                datetime(2026, 9, 8, 0, 0),
+                datetime(2026, 9, 8, 12, 0),
+                datetime(2026, 9, 9, 0, 0),
+                datetime(2026, 9, 9, 12, 0),
+            ],
+            native,
+        )
+
+    def test_translation_diagnostics_observability(self) -> None:
+        """Diagnostics expose canonical expression, kind, interval, duration, exactness, and firings (#488)."""
+        diag_12h = task_scheduler.diagnostics("0 */12 * * *")
+        self.assertEqual("0 */12 * * *", diag_12h["canonical"])
+        self.assertEqual("daily", diag_12h["native_trigger"]["kind"])
+        self.assertEqual("PT12H", diag_12h["native_trigger"]["interval"])
+        self.assertEqual("P1D", diag_12h["native_trigger"]["duration"])
+        self.assertTrue(diag_12h["exact"])
+        self.assertIsNone(diag_12h["fallback_reason"])
+        self.assertEqual(2, diag_12h["estimated_native_firings"])
+        self.assertEqual(2, diag_12h["estimated_due_firings"])
+        self.assertEqual("day", diag_12h["period"])
+        self.assertIn("2 native firing(s) per day", diag_12h["summary"])
+
+        diag_irreg = task_scheduler.diagnostics("0 8,12,17 * * *")
+        self.assertFalse(diag_irreg["exact"])
+        self.assertEqual(10, diag_irreg["estimated_native_firings"])
+        self.assertEqual(3, diag_irreg["estimated_due_firings"])
+        self.assertIn("irregular hour list", diag_irreg["fallback_reason"])
+
+    @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
+    def test_installed_windows_task_scheduler_round_trip(self) -> None:
+        """Installed Task Scheduler XML preserves Repetition in CalendarTrigger and matches signature (#488)."""
+        if task_scheduler.probe() is not None:
+            self.skipTest("Task Scheduler is not accessible on this host")
+        name = "test_roundtrip_488"
+        path = f"{task_scheduler.TASK_FOLDER}\\{name}"
+        document = task_scheduler.build_task_xml(
+            command=r"C:\Windows\System32\cmd.exe",
+            arguments="/c exit 0",
+            working_dir=r"C:\Temp",
+            schedules=["0 */12 * * *"],
+            description="Round trip test",
+            uri=path,
+            user_id=task_scheduler.current_user_id(),
+        )
+        handle, xml_file = tempfile.mkstemp(suffix=".xml")
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(document.encode("utf-16"))
+            code, out, err = task_scheduler._run(["/Create", "/TN", path, "/XML", xml_file, "/F"])
+            self.assertEqual(0, code, f"schtasks create failed: {err}")
+            registered = task_scheduler.read_definition(path)
+            self.assertIsNotNone(registered)
+            assert registered is not None
+            self.assertIn("<Repetition>", registered)
+            self.assertIn("<Interval>PT12H</Interval>", registered)
+            self.assertIn("<Duration>P1D</Duration>", registered)
+            self.assertEqual(
+                task_scheduler.trigger_signature(["0 */12 * * *"]),
+                task_scheduler._definition_signature(registered),
+            )
+        finally:
+            Path(xml_file).unlink(missing_ok=True)
+            task_scheduler._run(["/Delete", "/TN", path, "/F"])
 
 
 

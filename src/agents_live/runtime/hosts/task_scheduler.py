@@ -395,65 +395,216 @@ def agent_of_task_name(name: str, root: Path | str) -> str | None:
 # Schedules
 # ---------------------------------------------------------------------------
 
-def translate(schedule: str) -> list[dict[str, object]]:
-    """Native triggers that fire at least whenever *schedule* says.
+def _format_duration(minutes: int) -> str:
+    """Format minutes as an ISO-8601 duration string."""
+    if minutes % 1440 == 0:
+        return f"P{minutes // 1440}D"
+    hours = minutes // 60
+    rem_m = minutes % 60
+    if hours > 0 and rem_m == 0:
+        return f"PT{hours}H"
+    if hours > 0:
+        return f"PT{hours}H{rem_m}M"
+    return f"PT{rem_m}M"
 
-    Exact wherever cron maps cleanly onto a trigger. Everywhere else the
-    trigger is a superset - a repetition on a minute step that covers
-    every minute the expression can name - and the dueness check in
-    Dispatch-time schedule claiming declines the fires
-    that are not real firing times. Guaranteeing a superset is much
-    easier than guaranteeing exactness, which is why no valid
-    expression is refused (docs/windows-support.md, Scheduling on
-    Windows).
+
+def _format_interval(minutes: int) -> str:
+    """Format interval minutes as an ISO-8601 duration string."""
+    if minutes % 1440 == 0:
+        return f"P{minutes // 1440}D"
+    if minutes % 60 == 0:
+        return f"PT{minutes // 60}H"
+    return f"PT{minutes}M"
+
+
+def translate(schedule: str) -> list[dict[str, object]]:
+    """Native trigger that fires at least whenever *schedule* says.
+
+    Compile each cron expression into exactly one native Windows Task Scheduler
+    trigger. Prefer an exact calendar trigger with a bounded repetition that
+    resets at the cron expression's natural period boundary. When one trigger
+    cannot preserve the expression exactly, install the lowest-frequency single-
+    trigger superset and retain dispatch-time cron filtering.
     """
     text = schedule.strip()
     if text == triggers.BOOT:
         return [{"kind": "boot"}]
     text = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
     try:
-        minutes, _hours, days, _months, weekdays = triggers.schedule_fields(text)
+        minutes, hours, days, months, weekdays = triggers.schedule_fields(text)
     except triggers.ScheduleSyntaxError as exc:
         raise ScheduleNotTranslatable(str(exc)) from exc
-    minute, hour, day_of_month, month, day_of_week = text.split()
 
-    exact_time = (len(minutes) == 1 and hour.isdigit()
-                  and month == "*")
-    if exact_time:
-        clock = {"hour": int(hour), "minute": next(iter(minutes))}
-        if (day_of_month, day_of_week) == ("*", "*"):
-            return [{"kind": "daily", **clock}]
-        if day_of_month == "*" and len(weekdays) == 1:
-            return [{"kind": "weekly", "weekday": next(iter(weekdays)), **clock}]
-        if day_of_week == "*" and len(days) == 1:
-            return [{"kind": "monthly", "day": next(iter(days)), **clock}]
+    minute_token, hour_token, dom_token, month_token, dow_token = text.split()
+    dom_restricted = dom_token != "*"
+    dow_restricted = dow_token != "*"
+    month_restricted = month_token != "*"
 
-    if (day_of_month, month, day_of_week) == ("*", "*", "*"):
-        step = _INTERVAL_MINUTE.fullmatch(minute)
-        if step and hour == "*" and 60 % int(step.group(1)) == 0:
-            return [{"kind": "interval", "minutes": int(step.group(1)),
-                     "anchor_minute": 0}]
-        if len(minutes) == 1 and hour == "*":
-            return [{"kind": "interval", "minutes": 60,
-                     "anchor_minute": next(iter(minutes))}]
+    # 1. Determine Calendar Kind and Calendar Exactness
+    if dom_restricted and dow_restricted:
+        cal_kind = "daily"
+        cal_exact = False
+        cal_fallback = (
+            "combined day-of-month and day-of-week restrictions cannot be "
+            "represented in a single calendar trigger; covered with daily trigger and dispatch filtering"
+        )
+    elif dow_restricted and not dom_restricted:
+        cal_kind = "weekly"
+        if month_restricted:
+            cal_exact = False
+            cal_fallback = (
+                "month restriction cannot be combined with weekly trigger; "
+                "covered with weekly trigger and dispatch filtering"
+            )
+        else:
+            cal_exact = True
+            cal_fallback = None
+    elif (dom_restricted or month_restricted) and not dow_restricted:
+        cal_kind = "monthly"
+        cal_exact = True
+        cal_fallback = None
+    else:
+        cal_kind = "daily"
+        cal_exact = True
+        cal_fallback = None
 
-    return [_covering_interval(minutes)]
+    # 2. Determine Time Pattern, Repetition, Interval, and Duration
+    sorted_hours = sorted(hours)
+    sorted_minutes = sorted(minutes)
+    len_h = len(sorted_hours)
+    len_m = len(sorted_minutes)
+
+    if len_h == 1 and len_m == 1:
+        start_hour = sorted_hours[0]
+        start_minute = sorted_minutes[0]
+        interval = None
+        duration = None
+        interval_minutes = None
+        duration_minutes = None
+        time_exact = True
+        time_fallback = None
+    elif len_m == 1:
+        start_minute = sorted_minutes[0]
+        h0 = sorted_hours[0]
+        step_h = sorted_hours[1] - h0 if len_h > 1 else 1
+        is_arithmetic = (len_h > 1) and all(
+            sorted_hours[i] - sorted_hours[i - 1] == step_h for i in range(1, len_h)
+        )
+        if is_arithmetic:
+            start_hour = h0
+            interval_minutes = step_h * 60
+            interval = _format_interval(interval_minutes)
+            if h0 == 0 and (len_h * step_h >= 24):
+                duration_minutes = 1440
+                duration = "P1D"
+            else:
+                span_h = sorted_hours[-1] - h0
+                duration_minutes = span_h * 60 + 1
+                duration = _format_duration(duration_minutes)
+            time_exact = True
+            time_fallback = None
+        else:
+            start_hour = sorted_hours[0]
+            step_gcd = sorted_hours[1] - sorted_hours[0]
+            for i in range(2, len_h):
+                step_gcd = gcd(step_gcd, sorted_hours[i] - sorted_hours[i - 1])
+            interval_minutes = step_gcd * 60
+            interval = _format_interval(interval_minutes)
+            span_h = sorted_hours[-1] - sorted_hours[0]
+            duration_minutes = span_h * 60 + 1
+            duration = _format_duration(duration_minutes)
+            time_exact = False
+            time_fallback = (
+                "irregular hour list; covered with common hour step and dispatch filtering"
+            )
+    else:
+        step_m = sorted_minutes[1] - sorted_minutes[0] if len_m > 1 else 1
+        is_divisor_minute_step = (
+            sorted_minutes[0] == 0
+            and 60 % step_m == 0
+            and sorted_minutes == list(range(0, 60, step_m))
+        )
+        is_contiguous_hours = (
+            sorted_hours == list(range(sorted_hours[0], sorted_hours[-1] + 1))
+        )
+        if is_divisor_minute_step and is_contiguous_hours:
+            start_hour = sorted_hours[0]
+            start_minute = 0
+            interval_minutes = step_m
+            interval = _format_interval(interval_minutes)
+            if len_h == 24:
+                duration_minutes = 1440
+                duration = "P1D"
+            else:
+                duration_minutes = (sorted_hours[-1] - sorted_hours[0]) * 60 + sorted_minutes[-1] + 1
+                duration = _format_duration(duration_minutes)
+            time_exact = True
+            time_fallback = None
+        else:
+            candidate_divisors = (60, 30, 20, 15, 12, 10, 6, 5, 4, 3, 2, 1)
+            best_d = 1
+            best_anchor = 0
+            for d in candidate_divisors:
+                phases = {m % d for m in minutes}
+                if len(phases) == 1:
+                    best_d = d
+                    best_anchor = next(iter(phases))
+                    break
+            start_hour = sorted_hours[0]
+            start_minute = best_anchor
+            interval_minutes = best_d
+            interval = _format_interval(interval_minutes)
+            if len_h == 24:
+                duration_minutes = 1440
+                duration = "P1D"
+            else:
+                duration_minutes = (sorted_hours[-1] - sorted_hours[0]) * 60 + (sorted_minutes[-1] - best_anchor) + 1
+                duration = _format_duration(duration_minutes)
+            time_exact = False
+            if _INTERVAL_MINUTE.fullmatch(minute_token):
+                time_fallback = (
+                    "non-divisor minute step drifts across hours; covered with safe divisor step"
+                )
+            else:
+                time_fallback = (
+                    "irregular minute list; covered with greatest safe divisor step"
+                )
+
+    exact = cal_exact and time_exact
+    fallback_reason = cal_fallback or time_fallback
+
+    trigger: dict[str, object] = {
+        "kind": cal_kind,
+        "hour": start_hour,
+        "minute": start_minute,
+        "exact": exact,
+        "fallback_reason": fallback_reason,
+    }
+    if cal_kind == "weekly":
+        trigger["weekdays"] = tuple(sorted(weekdays))
+        trigger["weekday"] = sorted(weekdays)[0]
+    elif cal_kind == "monthly":
+        trigger["days"] = tuple(sorted(days))
+        trigger["day"] = sorted(days)[0]
+        trigger["months"] = tuple(sorted(months))
+
+    if interval is not None:
+        trigger["interval"] = interval
+        trigger["interval_minutes"] = interval_minutes
+        if duration is not None:
+            trigger["duration"] = duration
+            trigger["duration_minutes"] = duration_minutes
+
+    return [trigger]
 
 
 def _covering_interval(minutes: set[int]) -> dict[str, object]:
-    """A repetition whose fires include every minute in *minutes*.
-
-    The step is the largest one that still lands on all of them: the
-    greatest common divisor of their offsets from the earliest, folded
-    against the hour so the repetition keeps its phase across hours.
-    A wider expression costs more declined fires, never a missed one.
-    """
+    """A repetition whose fires include every minute in *minutes*."""
     anchor = min(minutes)
     step = 60
     for value in minutes:
         step = gcd(step, value - anchor)
     return {"kind": "interval", "minutes": step, "anchor_minute": anchor % step}
-
 
 
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
@@ -464,14 +615,30 @@ def _boundary(trigger: dict[str, object], now: datetime) -> str:
     a past anchor would run the agent once the moment it is registered.
     """
     start = now.replace(second=0, microsecond=0)
-    if trigger["kind"] in ("daily", "weekly", "monthly"):
-        start = start.replace(hour=int(trigger["hour"]),
-                              minute=int(trigger["minute"]))
+    if trigger["kind"] == "boot":
+        return start.isoformat(timespec="seconds")
+    target_hour = int(trigger["hour"])
+    target_minute = int(trigger["minute"])
+    start = start.replace(hour=target_hour, minute=target_minute)
+    if trigger["kind"] == "daily":
         if start <= now:
             start += timedelta(days=1)
         return start.isoformat(timespec="seconds")
-    step = int(trigger["minutes"])
-    anchor = int(trigger["anchor_minute"])
+    if trigger["kind"] == "weekly":
+        weekdays = set(trigger.get("weekdays") or [int(trigger["weekday"])])
+        while start <= now or ((start.weekday() + 1) % 7) not in weekdays:
+            start += timedelta(days=1)
+        return start.isoformat(timespec="seconds")
+    if trigger["kind"] == "monthly":
+        days = set(trigger.get("days") or [int(trigger["day"])])
+        months = set(trigger.get("months") or list(range(1, 13)))
+        attempts = 0
+        while (start <= now or start.month not in months or start.day not in days) and attempts < 1461:
+            start += timedelta(days=1)
+            attempts += 1
+        return start.isoformat(timespec="seconds")
+    step = int(trigger.get("minutes") or trigger.get("interval_minutes") or 60)
+    anchor = int(trigger.get("anchor_minute") or target_minute)
     start = start.replace(minute=0) + timedelta(minutes=anchor)
     while start <= now:
         start += timedelta(minutes=step)
@@ -500,33 +667,48 @@ def _append_trigger(parent: ET.Element, trigger: dict[str, object],
         _child(element, "Enabled", "true")
         _child(element, "UserId", user_id)
         return
+
+    element = _child(parent, "CalendarTrigger")
+    _child(element, "StartBoundary", _boundary(trigger, now))
+    _child(element, "Enabled", "true")
+
+    if trigger.get("interval"):
+        repetition = _child(element, "Repetition")
+        _child(repetition, "Interval", str(trigger["interval"]))
+        if trigger.get("duration"):
+            _child(repetition, "Duration", str(trigger["duration"]))
+        _child(repetition, "StopAtDurationEnd", "false")
+
     if trigger["kind"] == "daily":
-        element = _child(parent, "CalendarTrigger")
-        _child(element, "StartBoundary", _boundary(trigger, now))
-        _child(element, "Enabled", "true")
         schedule = _child(element, "ScheduleByDay")
         _child(schedule, "DaysInterval", "1")
         return
     if trigger["kind"] == "weekly":
-        element = _child(parent, "CalendarTrigger")
-        _child(element, "StartBoundary", _boundary(trigger, now))
-        _child(element, "Enabled", "true")
         schedule = _child(element, "ScheduleByWeek")
         days = _child(schedule, "DaysOfWeek")
-        _child(days, _WEEKDAY_ELEMENTS[int(trigger["weekday"])])
+        weekdays = trigger.get("weekdays")
+        if weekdays is None:
+            weekdays = (int(trigger["weekday"]),)
+        for wd in weekdays:
+            _child(days, _WEEKDAY_ELEMENTS[wd])
         _child(schedule, "WeeksInterval", "1")
         return
     if trigger["kind"] == "monthly":
-        element = _child(parent, "CalendarTrigger")
-        _child(element, "StartBoundary", _boundary(trigger, now))
-        _child(element, "Enabled", "true")
         schedule = _child(element, "ScheduleByMonth")
-        days = _child(schedule, "DaysOfMonth")
-        _child(days, "Day", str(int(trigger["day"])))
-        months = _child(schedule, "Months")
-        for name in _MONTH_ELEMENTS:
-            _child(months, name)
+        days_elem = _child(schedule, "DaysOfMonth")
+        days = trigger.get("days")
+        if days is None:
+            days = (int(trigger["day"]),)
+        for d in days:
+            _child(days_elem, "Day", str(d))
+        months_elem = _child(schedule, "Months")
+        months = trigger.get("months")
+        if months is None:
+            months = tuple(range(1, 13))
+        for m in months:
+            _child(months_elem, _MONTH_ELEMENTS[m - 1])
         return
+
     element = _child(parent, "TimeTrigger")
     _child(element, "StartBoundary", _boundary(trigger, now))
     _child(element, "Enabled", "true")
@@ -840,16 +1022,20 @@ def _signature_of(trigger: dict[str, object]) -> tuple:
     if kind == "interval":
         return ("interval", int(trigger["minutes"]),
                 int(trigger["anchor_minute"]))
+    rep_interval = trigger.get("interval_minutes")
+    rep_duration = trigger.get("duration_minutes")
+    rep_part = (int(rep_interval), int(rep_duration or 0)) if rep_interval is not None else ()
     if kind == "weekly":
-        return ("weekly", int(trigger["weekday"]), int(trigger["hour"]),
-                int(trigger["minute"]))
+        weekdays = tuple(sorted(trigger.get("weekdays") or [int(trigger["weekday"])]))
+        return ("weekly", weekdays, int(trigger["hour"]), int(trigger["minute"]), *rep_part)
     if kind == "monthly":
-        return ("monthly", int(trigger["day"]), int(trigger["hour"]),
-                int(trigger["minute"]))
-    return ("daily", int(trigger["hour"]), int(trigger["minute"]))
+        days = tuple(sorted(trigger.get("days") or [int(trigger["day"])]))
+        months = tuple(sorted(trigger.get("months") or list(range(1, 13))))
+        return ("monthly", days, months, int(trigger["hour"]), int(trigger["minute"]), *rep_part)
+    return ("daily", int(trigger["hour"]), int(trigger["minute"]), *rep_part)
 
 
-_ISO_INTERVAL = re.compile(r"P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?\Z")
+_ISO_INTERVAL = re.compile(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?\Z")
 
 
 def _interval_minutes(interval: str) -> int | None:
@@ -884,7 +1070,9 @@ def _definition_signature(document: str) -> list[tuple]:
             continue
         boundary = element.findtext(f"{{{_NS}}}StartBoundary", default="")
         try:
-            start = datetime.strptime(boundary, "%Y-%m-%dT%H:%M:%S")
+            start = datetime.fromisoformat(boundary)
+            if start.tzinfo is not None:
+                start = start.astimezone()
         except ValueError:
             continue
         if tag == "TimeTrigger":
@@ -894,25 +1082,175 @@ def _definition_signature(document: str) -> list[tuple]:
                 continue
             found.append(("interval", minutes, start.minute % minutes))
             continue
+
+        rep_part = ()
+        rep_elem = element.find(f"{{{_NS}}}Repetition")
+        if rep_elem is not None:
+            interval_str = rep_elem.findtext(f"{{{_NS}}}Interval", default="")
+            duration_str = rep_elem.findtext(f"{{{_NS}}}Duration", default="")
+            int_mins = _interval_minutes(interval_str)
+            dur_mins = _interval_minutes(duration_str) if duration_str else 0
+            if int_mins is not None:
+                rep_part = (int_mins, dur_mins)
+
         if element.find(f".//{{{_NS}}}ScheduleByWeek") is not None:
-            days = element.find(f".//{{{_NS}}}DaysOfWeek")
-            weekday = next(
-                (index for index, name in enumerate(_WEEKDAY_ELEMENTS)
-                 if days is not None
-                 and days.find(f"{{{_NS}}}{name}") is not None),
-                None)
-            if weekday is None:
-                continue
-            found.append(("weekly", weekday, start.hour, start.minute))
+            days_elem = element.find(f".//{{{_NS}}}DaysOfWeek")
+            weekdays = tuple(sorted(
+                index for index, name in enumerate(_WEEKDAY_ELEMENTS)
+                if days_elem is not None and days_elem.find(f"{{{_NS}}}{name}") is not None
+            ))
+            found.append(("weekly", weekdays, start.hour, start.minute, *rep_part))
             continue
         if element.find(f".//{{{_NS}}}ScheduleByMonth") is not None:
-            day = element.findtext(f".//{{{_NS}}}Day", default="")
-            if not day.isdigit():
-                continue
-            found.append(("monthly", int(day), start.hour, start.minute))
+            days = tuple(sorted(
+                int(d.text) for d in element.findall(f".//{{{_NS}}}DaysOfMonth/{{{_NS}}}Day")
+                if d.text and d.text.isdigit()
+            ))
+            months = tuple(sorted(
+                index for index, name in enumerate(_MONTH_ELEMENTS, 1)
+                if element.find(f".//{{{_NS}}}Months/{{{_NS}}}{name}") is not None
+            ))
+            found.append(("monthly", days, months, start.hour, start.minute, *rep_part))
             continue
-        found.append(("daily", start.hour, start.minute))
+        found.append(("daily", start.hour, start.minute, *rep_part))
     return sorted(found)
+
+
+def simulate_firings(
+    trigger: dict[str, object],
+    schedule: str,
+    start: datetime,
+    end: datetime,
+) -> tuple[list[datetime], list[datetime]]:
+    """Simulate due firings and native Task Scheduler firings over a range.
+
+    Returns (due_firings, native_firings).
+    """
+    due: list[datetime] = []
+    curr = start
+    while curr <= end:
+        if triggers.schedule_matches(schedule, curr):
+            due.append(curr)
+        curr += timedelta(minutes=1)
+
+    native: list[datetime] = []
+    day_step = timedelta(days=1)
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_day = end.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day <= end_day:
+        active = False
+        kind = trigger["kind"]
+        if kind == "daily":
+            active = True
+        elif kind == "weekly":
+            weekdays = set(trigger.get("weekdays") or [trigger.get("weekday")])
+            active = ((day.weekday() + 1) % 7) in weekdays
+        elif kind == "monthly":
+            days = set(trigger.get("days") or [trigger.get("day")])
+            months = set(trigger.get("months") or list(range(1, 13)))
+            active = (day.day in days) and (day.month in months)
+
+        if active:
+            fire_time = day.replace(
+                hour=int(trigger["hour"]), minute=int(trigger["minute"]),
+                tzinfo=start.tzinfo,
+            )
+            if start <= fire_time <= end:
+                native.append(fire_time)
+            if trigger.get("interval_minutes"):
+                int_m = int(trigger["interval_minutes"])
+                dur_m = int(trigger.get("duration_minutes") or 1440)
+                offset = int_m
+                while offset < dur_m:
+                    rep_time = fire_time + timedelta(minutes=offset)
+                    if start <= rep_time <= end:
+                        native.append(rep_time)
+                    offset += int_m
+        day += day_step
+    return due, native
+
+
+def diagnostics(schedule: str, now: datetime | None = None) -> dict[str, object]:
+    """Expose translation details for a cron expression on Windows.
+
+    Reports:
+    - canonical: the normalized cron expression
+    - native_trigger: kind, interval, duration, and boundary
+    - exact: whether native firings match cron without extra wake-ups
+    - fallback_reason: why covering was chosen if not exact
+    - estimated_native_firings: estimated native firings over representative period
+    - estimated_due_firings: estimated due firings over representative period
+    - period: description of representative period (day, week, month, year)
+    - summary: readable one-line explanation
+    """
+    now = now or datetime.now().astimezone()
+    text = schedule.strip()
+    canonical = triggers._SPECIAL_SCHEDULES.get(text.lower(), text)
+    triggers_list = translate(schedule)
+    trig = triggers_list[0]
+    if trig["kind"] == "boot":
+        return {
+            "canonical": triggers.BOOT,
+            "native_trigger": {
+                "kind": "boot",
+                "interval": None,
+                "duration": None,
+                "boundary": "on logon",
+            },
+            "exact": True,
+            "fallback_reason": None,
+            "estimated_native_firings": 1,
+            "estimated_due_firings": 1,
+            "period": "boot",
+            "summary": "exact logon trigger",
+        }
+
+    boundary_str = _boundary(trig, now)
+    exact = bool(trig.get("exact", True))
+    fallback_reason = trig.get("fallback_reason")
+
+    kind = trig["kind"]
+    if kind == "weekly":
+        period_name = "week"
+        ref_start = datetime(2026, 9, 7, 0, 0, tzinfo=now.tzinfo)
+        ref_end = ref_start + timedelta(days=7) - timedelta(seconds=1)
+    elif kind == "monthly":
+        period_name = "year"
+        ref_start = datetime(2026, 1, 1, 0, 0, tzinfo=now.tzinfo)
+        ref_end = datetime(2026, 12, 31, 23, 59, 59, tzinfo=now.tzinfo)
+    else:
+        period_name = "day"
+        ref_start = datetime(2026, 9, 8, 0, 0, tzinfo=now.tzinfo)
+        ref_end = datetime(2026, 9, 8, 23, 59, 59, tzinfo=now.tzinfo)
+
+    due_list, native_list = simulate_firings(trig, canonical, ref_start, ref_end)
+    native_count = len(native_list)
+    due_count = len(due_list)
+
+    if exact:
+        summary = f"exact translation with {native_count} native firing(s) per {period_name}"
+    else:
+        reason_text = f": {fallback_reason}" if fallback_reason else ""
+        summary = (
+            f"covering translation with {native_count} native firing(s) per {period_name} "
+            f"({due_count} due){reason_text}"
+        )
+
+    return {
+        "canonical": canonical,
+        "native_trigger": {
+            "kind": kind,
+            "interval": trig.get("interval"),
+            "duration": trig.get("duration"),
+            "boundary": boundary_str,
+        },
+        "exact": exact,
+        "fallback_reason": fallback_reason,
+        "estimated_native_firings": native_count,
+        "estimated_due_firings": due_count,
+        "period": period_name,
+        "summary": summary,
+    }
 
 
 def install(spec: triggers.TriggerSpec) -> str:
