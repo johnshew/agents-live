@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: recover interrupted release preparation without bypassing validation. (#481)
+  Preparation can resume after candidate commit failures, reusing only an exact
+  valid receipt or rerunning all gates. Artifact replacement retains prior
+  evidence, and recovery refuses remote or conflicting tags.
+- fix: recognize completed release cycles in channel reports. (#485)
+  Published versions no longer receive candidate preparation or republication
+  instructions. Reports direct subsequent work to separately configured later
+  bake cycles without claiming to verify PyPI or proxy availability.
 - docs: simplify curl-based install commands.
   The README, packaged guidance, installer bootstrap, and generated release
   notes now use the conventional `curl -fsSL` form.
