@@ -99,10 +99,10 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _api(port: int) -> dict | None:
+def _api(port: int, *, timeout_s: float = 2.0) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/agents", timeout=timeout_s) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else None
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
@@ -127,10 +127,15 @@ def _await_api(
                 observe()
             raise OperationalError(
                 f"dashboard exited {process.returncode} before readiness")
-        payload = _api(port)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        payload = _api(port, timeout_s=remaining)
         if payload and payload.get("agents"):
             return payload
-        time.sleep(0.5)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.5, remaining))
     if observe is not None:
         observe()
     raise OperationalError("dashboard did not serve agent rows")

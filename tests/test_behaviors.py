@@ -5236,6 +5236,45 @@ class TestCrossModuleAgreements(unittest.TestCase):
             server.server_close()
             worker.join()
 
+    def test_candidate_acceptance_waits_for_slow_dashboard_within_deadline(
+            self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "candidate-operational.py"))
+        wait = script["_await_api"]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                threading.Event().wait(2.2)
+                with contextlib.suppress(OSError):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"agents": [{"name": "healthy"}]}')
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        process = mock.Mock(poll=mock.Mock(return_value=None))
+        try:
+            with mock.patch.dict(wait.__globals__, {"READY_TIMEOUT_S": 4}):
+                self.assertEqual(
+                    [{"name": "healthy"}],
+                    wait(process, server.server_port)["agents"])
+            with mock.patch.dict(wait.__globals__, {"READY_TIMEOUT_S": 0.2}):
+                started = time.monotonic()
+                with self.assertRaisesRegex(
+                        script["OperationalError"], "did not serve agent rows"):
+                    wait(process, server.server_port)
+                self.assertLess(time.monotonic() - started, 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
     def test_local_deploy_cleans_the_dashboard_tree_after_readiness_failure(
             self) -> None:
         script = runpy.run_path(
