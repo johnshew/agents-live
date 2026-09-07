@@ -4461,7 +4461,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     for artifact in artifacts:
                         self.assertTrue(artifact.is_absolute())
                         self.assertEqual(
-                            wheel.parent / artifact.name,
+                            (wheel.parent / artifact.name).resolve(),
                             artifact.resolve())
                     self.assertEqual(preparation["wheel"], acceptance["wheel"])
                     manifest = release["_write_artifact_manifest"](version, preparation)
@@ -4488,7 +4488,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     uploaded = write_notes.call_args.kwargs["assets"]
                     self.assertEqual(manifest, uploaded[0])
                     self.assertEqual(
-                        [wheel.parent / name for name in names],
+                        [(wheel.parent / name).resolve() for name in names],
                         [artifact.resolve() for artifact in uploaded[1:]])
                     for name in names:
                         artifact = wheel.parent / name
