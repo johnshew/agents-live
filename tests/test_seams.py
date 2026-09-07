@@ -4245,6 +4245,8 @@ class TestAgentPipeline(TempRepository):
             f"agents-live.output-schema: '{json.dumps(schema)}'",
         ])
         runner = RecordingRunner([ChildResult(
+            ("claude", "--version"), 0, "2.1.263 (Claude Code)", "",
+        ), ChildResult(
             ("claude",), 0,
             json.dumps({
                 "result": "The requested output is attached.",
@@ -4258,8 +4260,8 @@ class TestAgentPipeline(TempRepository):
 
         self.assertTrue(result.ok, result)
         self.assertEqual({"summary": "done"}, result.structured)
-        schema_index = runner.argv[0].index("--json-schema")
-        self.assertEqual(schema, json.loads(runner.argv[0][schema_index + 1]))
+        schema_index = runner.argv[1].index("--json-schema")
+        self.assertEqual(schema, json.loads(runner.argv[1][schema_index + 1]))
 
     def test_claude_schema_rejection_has_a_distinct_category(self) -> None:
         self.skill("claude-schema-rejected", [
@@ -4267,6 +4269,8 @@ class TestAgentPipeline(TempRepository):
             "agents-live.output-schema: '{\"type\": \"object\"}'",
         ])
         runner = RecordingRunner([ChildResult(
+            ("claude", "--version"), 0, "2.1.263 (Claude Code)", "",
+        ), ChildResult(
             ("claude",), 1, "", "Invalid --json-schema value",
         )])
 
@@ -4907,6 +4911,7 @@ class TestAgentPipeline(TempRepository):
             'agents-live.mcps: "[\\"repo-tool\\"]"',
         ])
         runner = RecordingRunner([
+            ChildResult(("claude", "--version"), 0, "2.1.263 (Claude Code)", ""),
             ChildResult(("claude",), 1, "", "provider failed"),
         ])
 
@@ -5336,6 +5341,95 @@ if __name__ == "__main__":
                 capture_output=True, text=True, check=True).stdout)
 
 
+class TestProviderVersionGate(unittest.TestCase):
+    def test_unsupported_cli_never_receives_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "provider.py"
+            script.write_text(
+                "import os, sys\nfrom pathlib import Path\n"
+                "if '--version' in sys.argv:\n"
+                "    print(os.environ['FIXTURE_VERSION'])\n"
+                "    sys.exit(int(os.environ.get('FIXTURE_EXIT', '0')))\n"
+                "Path('received.txt').write_text(sys.stdin.read())\n"
+                "print('complete')\n", encoding="utf-8")
+            provider = providers.get("claude")
+            cli = dataclasses.replace(
+                provider.cli, executable=sys.executable,
+                probe_argv=(str(script), "--version"))
+            fixture_provider = mock.Mock(cli=cli)
+            for version, exit_code, accepted in (
+                ("2.1.262 (Claude Code)", "0", False),
+                ("unrecognized version", "0", False),
+                ("2.1.263-preview", "0", False),
+                ("2.1.263 (Claude Code)", "1", False),
+                ("2.1.263 (Claude Code)", "0", True),
+                ("2.2.0 (Claude Code)", "0", True),
+            ):
+                with self.subTest(version=version, exit_code=exit_code):
+                    received = root / "received.txt"
+                    received.unlink(missing_ok=True)
+                    launch = agent.Launch(
+                        (sys.executable, str(script), "-p"),
+                        env=(("FIXTURE_VERSION", version), ("FIXTURE_EXIT", exit_code)),
+                        cwd=str(root), input_text="private prompt", provider="claude")
+                    with (
+                        mock.patch.object(providers, "get", return_value=fixture_provider),
+                        mock.patch.object(agent, "interpret", return_value=agent.StepResult(
+                            agent.Step.AGENT, True)) as interpret,
+                    ):
+                        result = dispatch_module._run(
+                            mock.Mock(execution=None), agent.Step.AGENT, launch,
+                            LocalChildRunner(), run_id="version-gate")
+                    self.assertEqual(accepted, result.ok)
+                    self.assertEqual(accepted, received.exists())
+                    self.assertEqual(int(accepted), interpret.call_count)
+                    if accepted:
+                        self.assertEqual("private prompt", received.read_text())
+                    else:
+                        self.assertEqual("cli_version_unsupported", result.category)
+                        self.assertIn("2.1.263", result.message)
+                        self.assertIn("agents-live doctor", result.message)
+                        self.assertNotIn("private prompt", result.message)
+
+    def test_probe_timeout_fails_closed(self) -> None:
+        runner = mock.Mock()
+        runner.run_child.return_value = ChildResult(
+            ("claude", "--version"), 0, "2.1.263 (Claude Code)", "", timed_out=True)
+        launch = agent.Launch(("claude", "-p"), input_text="prompt", provider="claude")
+        result = dispatch_module._run(
+            None, agent.Step.AGENT, launch, runner, run_id="version-timeout")
+        self.assertFalse(result.ok)
+        self.assertEqual(1, runner.run_child.call_count)
+        self.assertNotIn("input_text", runner.run_child.call_args.kwargs)
+
+    def test_version_probe_uses_the_agent_timeout_budget(self) -> None:
+        runner = mock.Mock()
+        runner.run_child.return_value = ChildResult(
+            ("claude", "--version"), 0, "2.1.263 (Claude Code)", "")
+        launch = agent.Launch(("claude", "-p"), timeout=5, provider="claude")
+        with (
+            mock.patch.object(dispatch_module.time, "monotonic", side_effect=[10, 12]),
+            mock.patch.object(agent, "interpret", return_value=agent.StepResult(
+                agent.Step.AGENT, True)),
+        ):
+            result = dispatch_module._run(
+                mock.Mock(execution=None), agent.Step.AGENT, launch, runner,
+                run_id="version-budget")
+        self.assertTrue(result.ok)
+        self.assertEqual(5, runner.run_child.call_args_list[0].kwargs["timeout"])
+        self.assertEqual(3, runner.run_child.call_args_list[1].kwargs["timeout"])
+
+    def test_doctor_rejects_unsupported_version(self) -> None:
+        cli = providers.get("claude").cli
+        for version, accepted in (("2.1.262 (Claude Code)", False),
+                                  ("2.1.263 (Claude Code)", True)):
+            with mock.patch.object(doctor.subprocess, "run", return_value=mock.Mock(
+                    returncode=0, stdout=version)):
+                result = doctor._probe_check("claude", "claude", cli)
+            self.assertEqual(accepted, result["ok"])
+
+
 class TestClaudeLiveConformance(unittest.TestCase):
     def setUp(self) -> None:
         if os.environ.get("AGENTS_LIVE_CLAUDE_CONFORMANCE") != "1":
@@ -5435,12 +5529,23 @@ class TestClaudeLiveConformance(unittest.TestCase):
         home = self.repo / "fixture-home"
         home.mkdir()
         marker = "AMBIENT_" + os.urandom(16).hex()
+        plugin_marker = "PLUGIN_" + os.urandom(16).hex()
         for directory in (home, self.repo / ".claude"):
             (directory / "CLAUDE.md").write_text(marker, encoding="utf-8")
             skill = directory / "skills" / "ambient"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text(
                 f"---\nname: ambient\ndescription: {marker}\n---\n{marker}\n",
+                encoding="utf-8")
+            plugin = directory / "skills" / "ambient-plugin"
+            manifest = plugin / ".claude-plugin"
+            manifest.mkdir(parents=True)
+            (manifest / "plugin.json").write_text(json.dumps({
+                "name": "ambient-plugin", "description": plugin_marker,
+            }), encoding="utf-8")
+            (plugin / "SKILL.md").write_text(
+                f"---\nname: ambient-plugin\ndescription: {plugin_marker}\n---\n"
+                f"{plugin_marker}\n",
                 encoding="utf-8")
             (directory / "settings.json").write_text(json.dumps({
                 "env": {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0",
@@ -5475,10 +5580,28 @@ class TestClaudeLiveConformance(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode)
             self.assertTrue(captured, completed.stdout + completed.stderr)
             self.assertNotIn(marker, json.dumps(captured))
+            self.assertNotIn(plugin_marker, json.dumps(captured))
             names = [tool["name"] for request in captured
                      for tool in request.get("tools", [])]
             self.assertFalse(any(name.startswith("mcp__") for name in names), names)
             self.assertFalse((self.repo / "hook-ran").exists())
+            captured.clear()
+            control_env = {**os.environ, **dict(spec.env),
+                           "CLAUDE_CODE_SIMPLE": "0", "CLAUDE_CODE_SAFE_MODE": "0",
+                           "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "0",
+                           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+                           "CLAUDE_CODE_AUTO_CONNECT_IDE": "false",
+                           "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL": "1",
+                           }
+            control = subprocess.run(
+                [launch.argv[0], "-p", "--output-format", "json",
+                 "--model", "claude-sonnet-5"],
+                cwd=self.repo, input="Reply complete.", capture_output=True,
+                encoding="utf-8", timeout=60, env=control_env)
+            self.assertTrue(captured, control.stdout + control.stderr)
+            self.assertIn(marker, json.dumps(captured))
+            self.assertIn(plugin_marker, json.dumps(captured))
+            self.assertTrue((self.repo / "hook-ran").exists())
         finally:
             server.shutdown()
             server.server_close()
@@ -5506,6 +5629,27 @@ class TestClaudeLiveConformance(unittest.TestCase):
                 environment=(("AGENTS_LIVE_CLAUDE_PIPELINE_MCP", str(config)),))
             self.assertEqual((True, marker), session.snapshot("/output"))
             self.assertFalse((self.repo / "forbidden.txt").exists())
+
+    def test_explicit_project_http_mcp_executes(self) -> None:
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        marker = "project-http-" + os.urandom(16).hex()
+        with pipeline_runtime(None, [("/input", marker)]) as session:
+            artifacts = self.provider.artifacts(agent.ProviderRuntime(
+                "write", (McpServer("declared", {
+                    "type": "http", "url": session.endpoint.url,
+                    "headers": {"Authorization": f"Bearer {session.endpoint.token}"},
+                }),)))
+            self.assertEqual(1, len(artifacts))
+            artifact = artifacts[0]
+            config = self.repo / artifact.relative_path
+            config.write_text(artifact.text, encoding="utf-8")
+            self._run(
+                "write", "Use mcp__declared__get to read /input, then use "
+                "mcp__declared__put to store that exact value at /output. "
+                "Do not use any other tools. Return complete.",
+                environment=tuple((name, str(config)) for name in artifact.env))
+            self.assertEqual((True, marker), session.snapshot("/output"))
 
     def test_explicit_stdio_mcp_executes(self) -> None:
         server = self.repo / "declared.py"

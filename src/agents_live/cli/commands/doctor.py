@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ... import agent, deploy, paths, runtime, state
 from ...agent import providers
+from ...agent.values import ProviderCli
 from ...runtime.hosts import system as hostruntime
 from ...state import ownership, registry as repos
 from .. import agent_view, lifecycle, update_check
@@ -209,12 +210,12 @@ def _provider_cli_checks(names: set[str]) -> list[dict[str, object]]:
                 "detail": f"{exc}{remedy}",
             })
         else:
-            checks.append(_probe_check(name, executable, cli.probe_argv))
+            checks.append(_probe_check(name, executable, cli))
     return checks
 
 
 def _probe_check(
-        name: str, executable: str, probe_argv: tuple[str, ...],
+        name: str, executable: str, cli: ProviderCli,
 ) -> dict[str, object]:
     """Run the command the provider says proves its CLI answers.
 
@@ -222,7 +223,7 @@ def _probe_check(
     that make it report itself, including a nested subcommand, so doctor
     learns that the CLI is broken here rather than during a run.
     """
-    argv = [executable, *probe_argv]
+    argv = [executable, *cli.probe_argv]
     printable = " ".join(argv)
     try:
         probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
@@ -238,6 +239,9 @@ def _probe_check(
             "ok": False,
             "detail": f"`{printable}` exited {probe.returncode}",
         }
+    error = cli.version_error(probe.stdout)
+    if error:
+        return {"check": f"provider CLI {name}", "ok": False, "detail": error}
     return {
         "check": f"provider CLI {name}",
         "ok": True,

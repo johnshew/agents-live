@@ -277,12 +277,35 @@ def _run(
 ):
     environment = os.environ.copy()
     environment.update(launch.env)
+    timeout = launch.timeout
+    if step is Step.AGENT and launch.provider:
+        from .agent.providers import get as get_provider
+        cli = get_provider(launch.provider).cli
+        if cli.minimum_version is not None:
+            probe_started = time.monotonic()
+            probe = runner.run_child(
+                (launch.argv[0], *cli.probe_argv),
+                cwd=launch.cwd,
+                env=environment,
+                timeout=min(launch.timeout or 30, 30),
+            )
+            error = cli.version_error(
+                probe.stdout if probe.returncode == 0 and not probe.timed_out else "")
+            if error:
+                return agent.StepResult(
+                    step, False, category="cli_version_unsupported", message=error)
+            if timeout is not None:
+                timeout -= time.monotonic() - probe_started
+                if timeout <= 0:
+                    return agent.StepResult(
+                        step, False, retryable=True, category="timeout",
+                        message="provider version probe exhausted the agent timeout")
     raw = runner.run_child(
         launch.argv,
         cwd=launch.cwd,
         env=environment,
         input_text=launch.input_text,
-        timeout=launch.timeout,
+        timeout=timeout,
         use_pty=launch.use_pty,
     )
     interpreted = agent.interpret(
