@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import agent, runtime, state
+from ..runtime import handoff
+from ..runtime.hosts import system as hostruntime
 from ..state import ownership, registry as repos
 
 
@@ -224,6 +226,23 @@ def collect(
 
 
 def converge(
+    *,
+    additions: dict[Path, set[str]] | None = None,
+    removals: dict[Path, set[str]] | None = None,
+    selected_roots: Iterable[Path] | None = None,
+    dry_run: bool = False,
+) -> runtime.Converged:
+    try:
+        with handoff.gate():
+            return _converge(
+                additions=additions, removals=removals,
+                selected_roots=selected_roots, dry_run=dry_run)
+    except hostruntime.LockBusy as exc:
+        raise CollectionUnavailable(
+            "runtime activation or convergence is in progress; retry shortly") from exc
+
+
+def _converge(
     *,
     additions: dict[Path, set[str]] | None = None,
     removals: dict[Path, set[str]] | None = None,

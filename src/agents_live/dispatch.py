@@ -16,6 +16,8 @@ from . import agent, obs, runtime, state
 from .agent import Outcome, RawOutput, Request, Step, StepContext
 from .runtime import ChildRunner, parse_schedule
 from .runtime.budget import claim as claim_budget
+from .runtime import handoff
+from .runtime.hosts import system as hostruntime
 from .runtime.hosts.processes import pid_exists
 
 # An unreadable lock is only abandoned once it outlives any plausible run.
@@ -84,8 +86,12 @@ def dispatch(
             return _skip(events, firing, run_id, "not-due")
 
     lock = _RunLock(root, firing.agent_id)
-    if not lock.acquire():
-        return _skip(events, firing, run_id, "already-running")
+    try:
+        with handoff.gate():
+            if not lock.acquire():
+                return _skip(events, firing, run_id, "already-running")
+    except hostruntime.LockBusy:
+        return _skip(events, firing, run_id, "runtime-activation")
     try:
         budget = claim_budget(
             _budget_path(root), now=(now.timestamp() if now is not None else None))

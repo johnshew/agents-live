@@ -2567,6 +2567,208 @@ class TestPromptFitsTheHostCommandLine(unittest.TestCase):
         self.assertEqual("42", result.stdout.strip())
 
 
+class TestActivationHandoff(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.install = self.root / "installation"
+        patch = mock.patch.dict(os.environ, {
+            deploy.layout.ENV_INSTALL_ROOT: str(self.install)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.host = MemoryHost()
+        self.previous_host = runtime.current()
+        runtime.configure(self.host)
+        self.addCleanup(runtime.configure, self.previous_host)
+        patch = mock.patch.object(install_generation, "WATCHER_GRACE_SECONDS", 0)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.projects = [self.root, self.root / "second"]
+        self.intent = {}
+        for index, project in enumerate(self.projects):
+            project.mkdir(exist_ok=True)
+            (project / ".agents-live.toml").write_text(
+                'ownership = "registry"\n' if index else "", encoding="utf-8")
+            self.skill(f"watcher-{index}", [
+                'agents-live.selector: "copilot"',
+                'agents-live.watch: "src/** debounce 1s"',
+                'agents-live.schedule: "0 9 * * *"',
+            ], root=project)
+            identifier = agent.load(f"watcher-{index}", root=project).identifier
+            self.intent[project] = frozenset({identifier})
+            state.replace(project, {identifier})
+        patch = mock.patch.object(ownership, "load_owners", return_value={
+            identifier: ownership.current_owner_id()})
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(repos, "load", return_value={
+            "repos": {str(index): str(project)
+                      for index, project in enumerate(self.projects)},
+            "default_repo": None,
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.old, self.new = [deploy.generation.build(
+            version, populate=lambda target: target.mkdir(parents=True),
+            validate=lambda target: None,
+        ) for version in ("6.9.0", "6.9.1")]
+        deploy.generation.activate(self.old)
+        self.assertFalse(lifecycle.converge().failed)
+        self.before = self.host.trigger_store.list()
+
+    def assert_restored(self, version: str) -> None:
+        self.assertEqual(version, deploy.pointer.read().generation)
+        self.assertEqual(
+            {item.key: item for item in self.before},
+            {item.key: item for item in self.host.trigger_store.list()})
+        self.assertEqual(2, len(self.host.supervisor.owned("watcher")))
+        for project, expected in self.intent.items():
+            self.assertEqual(expected, state.load(project).agents)
+
+    def maintain(self, command, **kwargs):
+        self.assertEqual(["internal", "maintain"], command[1:])
+        selected = deploy.generation.load(deploy.pointer.read().generation)
+        self.assertEqual(str(install_generation.executable(selected)), command[0])
+        self.assertFalse(lifecycle.converge().failed)
+        return ""
+
+    def test_public_activation_quiesces_then_restores_all_started_agents(self) -> None:
+        from agents_live.cli.commands import generations
+
+        replace = deploy.generation._replace_current
+
+        def select(target, **kwargs):
+            self.assertEqual([], self.host.trigger_store.list())
+            self.assertEqual([], self.host.supervisor.owned("watcher"))
+            replace(target, **kwargs)
+
+        with (
+            mock.patch.object(generations, "_require_self_managed"),
+            mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+            mock.patch.object(deploy.generation, "_replace_current", side_effect=select),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(0, generations.main(["activate", self.new.name]))
+        self.assert_restored(self.new.name)
+
+    def test_active_work_refuses_before_withdrawing_any_trigger(self) -> None:
+        from agents_live.dispatch import _RunLock
+
+        lock = _RunLock(self.root, next(iter(self.intent[self.root])))
+        self.assertTrue(lock.acquire())
+        try:
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "work is running"):
+                install_generation.activate_generation(self.new)
+            self.assert_restored(self.old.name)
+        finally:
+            lock.release()
+
+    def test_unreadable_run_lock_refuses_without_mutation(self) -> None:
+        lock = paths.repo_state_dir(self.root) / "locks" / "unknown.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text("{", encoding="ascii")
+        with self.assertRaisesRegex(deploy.generation.GenerationError, "cannot verify"):
+            install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_convergence_failure_restores_previous_selection_and_intent(self) -> None:
+        def maintain(command, **kwargs):
+            if command[0] == str(install_generation.executable(self.new)):
+                raise deploy.generation.GenerationError("new maintenance failed")
+            return self.maintain(command, **kwargs)
+
+        with mock.patch.object(install_generation, "_run", side_effect=maintain):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "new maintenance failed"):
+                install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_trigger_removal_failure_restores_previous_runtime(self) -> None:
+        remove = self.host.trigger_store.remove
+        count = 0
+
+        def failing_remove(key):
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise OSError("trigger store unavailable")
+            remove(key)
+
+        with (
+            mock.patch.object(self.host.trigger_store, "remove", side_effect=failing_remove),
+            mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+        ):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "trigger store unavailable"):
+                install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_unavailable_process_inventory_refuses_without_mutation(self) -> None:
+        with mock.patch.object(hostruntime, "process_command_lines", return_value=[]):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "process inventory"):
+                install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_lingering_watcher_prevents_pointer_switch(self) -> None:
+        with (
+            mock.patch.object(self.host.supervisor, "terminate"),
+            mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+        ):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "did not stop"):
+                install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_late_old_runtime_job_prevents_pointer_switch(self) -> None:
+        from agents_live.dispatch import _RunLock
+
+        lock = _RunLock(self.root, next(iter(self.intent[self.root])))
+        remove = self.host.trigger_store.remove
+
+        def remove_and_launch(key):
+            remove(key)
+            lock.acquire()
+
+        try:
+            with (
+                mock.patch.object(self.host.trigger_store, "remove", side_effect=remove_and_launch),
+                mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+            ):
+                with self.assertRaisesRegex(deploy.generation.GenerationError, "work is running"):
+                    install_generation.activate_generation(self.new)
+            self.assert_restored(self.old.name)
+        finally:
+            lock.release()
+
+    def test_failed_target_maintenance_stops_new_watchers_before_rollback(self) -> None:
+        def maintain(command, **kwargs):
+            self.maintain(command, **kwargs)
+            if command[0] == str(install_generation.executable(self.new)):
+                raise deploy.generation.GenerationError("partial maintenance")
+
+        replace = deploy.generation._replace_current
+
+        def select(target, **kwargs):
+            self.assertEqual([], self.host.supervisor.owned("watcher"))
+            replace(target, **kwargs)
+
+        with (
+            mock.patch.object(install_generation, "_run", side_effect=maintain),
+            mock.patch.object(deploy.generation, "_replace_current", side_effect=select),
+        ):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "partial maintenance"):
+                install_generation.activate_generation(self.new)
+        self.assert_restored(self.old.name)
+
+    def test_launch_gate_blocks_dispatch_and_convergence(self) -> None:
+        from agents_live.runtime import handoff
+
+        identifier = next(iter(self.intent[self.root]))
+        with handoff.gate():
+            outcome = dispatch(Firing(identifier, str(self.root), "manual"))
+            self.assertEqual("skipped", outcome.status)
+            self.assertEqual("runtime-activation", outcome.message)
+            with self.assertRaises(lifecycle.CollectionUnavailable):
+                lifecycle.converge()
+        self.assert_restored(self.old.name)
+
+
 class TestInstallationGenerations(unittest.TestCase):
     """Where an installation may write, and what it may never guess.
 
