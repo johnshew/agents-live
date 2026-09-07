@@ -4123,7 +4123,23 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("src/agents_live/skill/templates/*", workflow)
 
     def test_ci_parallelizes_source_and_exact_wheel_readiness(self) -> None:
+        import yaml
+
         workflow = self._workflow_text("test.yml")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        self.assertEqual(
+            "${{ steps.upload.outputs.artifact-id }}",
+            jobs["wheel"]["outputs"]["artifact-id"])
+        upload = next(step for step in jobs["wheel"]["steps"]
+                      if step.get("id") == "upload")
+        self.assertEqual("actions/upload-artifact@v4", upload["uses"])
+        for job in ("readiness", "bootstrap-readiness"):
+            download = next(step["with"] for step in jobs[job]["steps"]
+                            if step.get("uses") == "actions/download-artifact@v4")
+            self.assertEqual("${{ needs.wheel.outputs.artifact-id }}",
+                             download["artifact-ids"])
+            self.assertTrue(download["merge-multiple"])
+            self.assertNotIn("name", download)
         self.assertRegex(workflow, r"(?m)^  source:")
         self.assertRegex(workflow, r"(?m)^  wheel:")
         self.assertRegex(workflow, r"(?m)^  readiness:")
