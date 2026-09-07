@@ -7,32 +7,27 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "bake/v6.9.0-local"
-version = "6.9.0"
+branch = "bake/v6.9.1-local"
+version = "6.9.1"
 promotes_to = "release"
 deployed_version = "6.9.0.dev0+gd0e9b36c"
 deployed_commit = "d0e9b36c3b5c1c3e207538f5f7fdee09a2622ba1"
 validated_on = "2026-09-07"
 
 [bake.promotion]
-decision = "approved"
-commit = "d0e9b36c3b5c1c3e207538f5f7fdee09a2622ba1"
-decided_on = "2026-09-07"
+decision = "continue-bake"
 
 [bake.issues]
-delivered = [374, 424, 446, 447, 455, 461, 463, 468, 473]
-partial = [474]
-deferred = [105, 388, 434, 477, 478]
+delivered = [480, 481, 485, 488, 490, 491, 494, 495]
+partial = []
+deferred = [105, 388, 434, 478, 489]
 promotion_decision = []
 
 [bake.recommendations]
-overall = "The developer approved the tested 6.9 bake for promotion, accepting the documented Claude isolation edge cases and intermittent skill-refresh recovery. Move the approved bake into main through the promotion pull request, then prepare and validate the official candidate. Keep the 6.10 accounting and deterministic-bypass work separate."
+overall = "Integrate and validate the completed fixes for 6.9.1. The developer requested a patch release; planned accounting and deterministic model-bypass features remain in 6.10. Preserve the published 6.9.0 release and require exact-candidate acceptance before publishing 6.9.1."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-"463" = "Completed in bake: a regression proves that earlier Run completions cannot satisfy a new action, and the installed commit-qualified artifact passed the full packaged normal, all-repositories, and development sequence."
-"473" = "Completed in bake: all ten installed subscription tasks use the selected generation, the started watcher reports alive, and an installed doctor repair pass preserved the same watcher process identities after launcher-child normalization."
-"474" = "Closed with developer-approved acceptance of the confirmed subscription and isolation fix. Native plan, write, schema, stdio and HTTP MCP, authenticated pipeline, version enforcement, and ambient instruction/plugin/hook controls passed. IDE discovery lacks a conclusive positive control and organization-managed policy enforcement remains untested; reopen on observed activation, policy violations, or regression. No managed-policy bypass or cross-platform installed-Claude guarantee is claimed."
-"477" = "Closed at developer direction as intermittent with no identified root cause. Rollback preserved the previous payload; subsequent refresh and supported deployment succeeded with receipts. Recovery is not a code fix. The developer accepted this release risk; reopen on recurrence."
-"478" = "The complete timing/accounting, log summaries, deterministic bypass, and downstream confirmed-delta sequence belongs to 6.10. Do not add it to the 6.9 candidate or replace its acceptance runtime with the 6.10 bake."
-testing = "The exact installed bake passed packaged dashboard readiness, a real subscription-backed workload through the enforced version gate, all-repository doctor, watcher convergence, and supported deployment with a success receipt. Candidate preflight passed after the authorized managed-dashboard shutdown. Native provider conformance on the official candidate and receipt-bound preparation and installed acceptance remain required before publication."
+"478" = "Keep accounting, usage summaries, and deterministic model bypass in the planned 6.10 feature release; they are not prerequisites for the requested 6.9.1 fixes."
+"489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
+testing = "Deployment fields retain the last tested bake baseline, not proof of 6.9.1 acceptance. Validate the integrated source and exact packaged artifact, then require installed candidate replacement, watcher restoration, dashboard operations, and provider cost evidence before publication. Verify public PyPI artifacts separately from managed-proxy propagation."

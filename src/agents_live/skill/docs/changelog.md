@@ -19,6 +19,12 @@ history is retained in the source repository.
   Published versions no longer receive candidate preparation or republication
   instructions. Reports direct subsequent work to separately configured later
   bake cycles without claiming to verify PyPI or proxy availability.
+- fix: validate release receipts from linked worktrees. (#480)
+  Preparation, acceptance, and resumable checkpoints identify preserved
+  artifacts by canonical absolute paths, including Git storage outside the
+  checkout. Manifest and publication consumers retain exact file hashes, and
+  missing artifacts report their location instead of raising a path error.
+  Older relative-path receipts remain stale and require fresh evidence.
 - docs: simplify curl-based install commands.
   The README, packaged guidance, installer bootstrap, and generated release
   notes now use the conventional `curl -fsSL` form.
