@@ -568,7 +568,7 @@ def _candidate_wheel(version: str) -> Path:
     wheel = ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl"
     if not wheel.is_file():
         raise ReleaseError(
-            f"prepared wheel is missing: {wheel.relative_to(ROOT)}; "
+            f"prepared wheel is missing: {wheel.resolve()}; "
             "rerun --prepare"
         )
     return wheel
@@ -586,7 +586,7 @@ def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
     sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
     if not sdist.is_file():
         raise ReleaseError(
-            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+            f"prepared source distribution is missing: {sdist.resolve()}")
     destination = _artifact_store_dir(version)
     if destination.exists():
         shutil.rmtree(destination)
@@ -654,15 +654,15 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     sdist = wheel.parent / f"agents_live-{version}.tar.gz"
     if not sdist.is_file():
         raise ReleaseError(
-            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+            f"prepared source distribution is missing: {sdist.resolve()}")
     installers = []
     for name in BOOTSTRAP_ASSETS:
         path = wheel.parent / name
         if not path.is_file():
             raise ReleaseError(
-                f"prepared bootstrap asset is missing: {path.relative_to(ROOT)}")
+                f"prepared bootstrap asset is missing: {path.resolve()}")
         installers.append({
-            "path": path.relative_to(ROOT).as_posix(),
+            "path": path.resolve().as_posix(),
             "sha256": _sha256(path),
         })
     return {
@@ -671,9 +671,9 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
         "base_commit": _git("rev-parse", "HEAD^"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
-        "sdist": sdist.relative_to(ROOT).as_posix(),
+        "sdist": sdist.resolve().as_posix(),
         "sdist_sha256": _sha256(sdist),
         "installers": installers,
     }
@@ -909,7 +909,7 @@ def _write_candidate_acceptance(
         "tag": f"v{version}",
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
         "repo": str(repo),
         **_evidence_identity(),
@@ -947,7 +947,7 @@ def _check_candidate_acceptance(version: str) -> dict:
         "tag": f"v{version}",
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
         **_evidence_identity(),
     }

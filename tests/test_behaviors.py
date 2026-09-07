@@ -4392,6 +4392,144 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         release["ReleaseError"], "stale.*wheel_sha256"):
                     check("1.2.3")
 
+    def test_release_receipts_consume_real_worktree_artifacts(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        scope = release["_write_preparation"].__globals__
+        version = "1.2.3"
+        with tempfile.TemporaryDirectory() as temporary:
+            primary = Path(temporary) / "primary"
+            sibling = Path(temporary) / "linked checkout"
+            subprocess.run(["git", "init", "-q", str(primary)], check=True)
+            for message in ("base", "candidate"):
+                subprocess.run([
+                    "git", "-C", str(primary), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit",
+                    "--allow-empty", "-qm", message,
+                ], check=True)
+            subprocess.run([
+                "git", "-C", str(primary), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "tag",
+                "-a", f"v{version}", "-m", "candidate",
+            ], check=True)
+            subprocess.run([
+                "git", "-C", str(primary), "worktree", "add", "--detach",
+                str(sibling),
+            ], capture_output=True, check=True)
+            for checkout in (primary, sibling):
+                with self.subTest(linked=checkout == sibling), mock.patch.dict(
+                    scope, {"ROOT": checkout},
+                ):
+                    workflow = checkout / ".github" / "workflows" / "test.yml"
+                    workflow.parent.mkdir(parents=True)
+                    workflow.write_text("fixture workflow", encoding="utf-8")
+                    dist = checkout / "dist"
+                    dist.mkdir()
+                    names = (
+                        f"agents_live-{version}-py3-none-any.whl",
+                        f"agents_live-{version}.tar.gz",
+                        *release["BOOTSTRAP_ASSETS"],
+                    )
+                    for name in names:
+                        (dist / name).write_bytes(name.encode())
+                    wheel = release["_preserve_release_artifacts"](
+                        version, dist / names[0])
+                    self.assertEqual(checkout == primary, wheel.is_relative_to(checkout))
+                    shutil.rmtree(dist)
+                    self.assertEqual(wheel, release["_candidate_wheel"](version))
+                    preparation_path = release["_write_preparation"](version, wheel)
+                    preparation = release["_check_preparation"](version)
+                    acceptance_path = release["_write_candidate_acceptance"](
+                        version, checkout, wheel, operation_id=None,
+                        watchers=((str(checkout), "watcher"),),
+                        operational_agent="sample", cost_agent="cost-sample")
+                    acceptance = release["_check_candidate_acceptance"](version)
+                    checkpoint_path = release["_write_acceptance_checkpoint"](
+                        version, checkout, wheel, operation_id=None,
+                        contract=((str(checkout), "watcher", "started", True),),
+                        watchers=((str(checkout), "watcher"),),
+                        operational_agent="sample", cost_agent="cost-sample")
+
+                    def check_checkpoint():
+                        return release["_check_acceptance_checkpoint"](
+                            version, checkout, wheel, "sample", "cost-sample")
+
+                    checkpoint = check_checkpoint()
+                    artifacts = (
+                        Path(preparation["wheel"]), Path(preparation["sdist"]),
+                        *(Path(asset["path"]) for asset in preparation["installers"]),
+                    )
+                    for artifact in artifacts:
+                        self.assertTrue(artifact.is_absolute())
+                        self.assertEqual(
+                            wheel.parent / artifact.name,
+                            artifact.resolve())
+                    self.assertEqual(preparation["wheel"], acceptance["wheel"])
+                    manifest = release["_write_artifact_manifest"](version, preparation)
+                    self.assertEqual(
+                        [f"{release['_sha256'](wheel.parent / name)}  {name}"
+                         for name in names],
+                        manifest.read_text(encoding="utf-8").splitlines())
+                    run = subprocess.run
+
+                    def local_run(command, **kwargs):
+                        if command[0] == "gh":
+                            return subprocess.CompletedProcess(command, 1, "", "")
+                        return run(command, **kwargs)
+
+                    write_notes = mock.Mock()
+                    with mock.patch.dict(scope, {
+                        "_require_tools": lambda: None,
+                        "_current_version": lambda: version,
+                        "_check_publish_state": lambda _version: False,
+                        "_release_notes": lambda _version: "fixture notes",
+                        "_write_release_notes": write_notes,
+                    }), mock.patch.object(subprocess, "run", side_effect=local_run):
+                        release["publish"]()
+                    uploaded = write_notes.call_args.kwargs["assets"]
+                    self.assertEqual(manifest, uploaded[0])
+                    self.assertEqual(
+                        [wheel.parent / name for name in names],
+                        [artifact.resolve() for artifact in uploaded[1:]])
+                    for name in names:
+                        artifact = wheel.parent / name
+                        original = artifact.read_bytes()
+                        artifact.write_bytes(b"tampered")
+                        with self.subTest(tampered=name):
+                            with self.assertRaisesRegex(release["ReleaseError"], "stale"):
+                                release["_check_preparation"](version)
+                            with self.assertRaisesRegex(release["ReleaseError"], "stale"):
+                                check_checkpoint()
+                            if artifact == wheel:
+                                with self.assertRaisesRegex(release["ReleaseError"], "stale"):
+                                    release["_check_candidate_acceptance"](version)
+                        artifact.write_bytes(original)
+                    for path, payload, check in (
+                        (preparation_path, preparation,
+                         lambda: release["_check_preparation"](version)),
+                        (acceptance_path, acceptance,
+                         lambda: release["_check_candidate_acceptance"](version)),
+                        (checkpoint_path, checkpoint, check_checkpoint),
+                    ):
+                        for field in ("commit", "tag_object", "wheel", "sdist", "installers"):
+                            if field not in payload:
+                                continue
+                            with self.subTest(receipt=path.name, field=field):
+                                stale = {**payload, field: "stale"}
+                                path.write_text(json.dumps(stale), encoding="utf-8")
+                                with self.assertRaisesRegex(
+                                        release["ReleaseError"], f"stale.*{field}"):
+                                    check()
+                        path.write_text(json.dumps(payload), encoding="utf-8")
+                    for name in names[1:]:
+                        artifact = wheel.parent / name
+                        original = artifact.read_bytes()
+                        artifact.unlink()
+                        with self.subTest(missing=name):
+                            with self.assertRaisesRegex(
+                                    release["ReleaseError"], "prepared .* is missing"):
+                                release["_check_preparation"](version)
+                        artifact.write_bytes(original)
+
     def test_preparation_preserves_artifacts_outside_mutable_dist(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         preserve = release["_preserve_release_artifacts"]
@@ -4440,7 +4578,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "tag": "v1.2.3",
                 "tag_object": "annotated-tag-object",
                 "commit": "candidate-commit",
-                "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
+                "wheel": wheel.resolve().as_posix(),
                 "wheel_sha256": release["_sha256"](wheel),
                 "platform": "test-platform",
                 "python_version": "3.12.0",
