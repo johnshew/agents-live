@@ -11,6 +11,16 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: safely restart started agents when activating a runtime version. (#491)
+  Activation refuses in-flight work, pauses and retires owned watchers, switches
+  the selected runtime, and restores started intent across registered repositories.
+  Failed activation restores the previous selection and convergence.
+- fix: preserve cron semantics with minimal Windows scheduler triggers. (#488)
+  Existing schedules use one exact or lowest-frequency covering trigger with
+  dispatch-time dueness checks. Status includes schedule translation diagnostics.
+- fix: retire watchers when their runtime version is no longer selected. (#490)
+  Watchers compare their running version directory with the active selection,
+  including transitions from a bake to a stable release.
 - fix: recover interrupted release preparation without bypassing validation. (#481)
   Preparation can resume after candidate commit failures, reusing only an exact
   valid receipt or rerunning all gates. Artifact replacement retains prior
@@ -19,6 +29,21 @@ history is retained in the source repository.
   Published versions no longer receive candidate preparation or republication
   instructions. Reports direct subsequent work to separately configured later
   bake cycles without claiming to verify PyPI or proxy availability.
+- fix: validate release receipts from linked worktrees. (#480)
+  Preparation, acceptance, and resumable checkpoints identify preserved
+  artifacts by canonical absolute paths, including Git storage outside the
+  checkout. Manifest and publication consumers retain exact file hashes, and
+  missing artifacts report their location instead of raising a path error.
+  Older relative-path receipts remain stale and require fresh evidence.
+- chore: isolate portable tests from native scheduler and watcher mutation.
+  Temporary test hosts restore runtime adapters and paths, and native scheduler
+  roundtrips require explicit opt-in.
+- chore: stabilize partial CI reruns and dashboard repository readiness.
+  Consumers reuse the producer's exact wheel artifact across rerun attempts,
+  and browser checks wait for the complete repository selector contents.
+- chore: qualify reusable source validation by exact inputs and environment.
+  The development validation runner records local evidence, release reports offer
+  structured JSON routing, and the import gate rejects duplicate definitions.
 - docs: simplify curl-based install commands.
   The README, packaged guidance, installer bootstrap, and generated release
   notes now use the conventional `curl -fsSL` form.
