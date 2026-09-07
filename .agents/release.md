@@ -159,6 +159,30 @@ bootstrap, acceptance, and publication steps use those copies. `dist/` may be
 rebuilt for diagnostics without changing the candidate identity. Inspect the
 receipt-bound artifacts and review the commit.
 
+### Preparation recovery
+
+If tag creation, artifact preservation, or receipt writing fails after the
+candidate commit, retain the candidate branch, tag, and Git-local artifacts.
+From the clean candidate checkout, run:
+
+```bash
+uv run --script tools/release.py --prepare --resume --yes
+```
+
+Resume does not bump the version again. It requires the candidate to remain
+one release commit ahead of current `origin/main`, rejects remote tags and
+local tags that are unannotated or point elsewhere, and checks the release
+file set. An exact valid preparation receipt is reused. Otherwise all release
+gates, including artifact build and packaged readiness, must pass again before
+a new receipt can be written. Interrupted copies do not replace the preserved
+artifact set. Successfully replaced copies remain in Git-local `retained-*`
+directories for inspection. Acceptance evidence still has to match the new
+preparation identity; recovery never authorizes publication by itself.
+
+Do not delete candidate evidence to silence a diagnostic or overwrite a
+published tag. If the candidate cannot be resumed, retain its evidence and
+prepare a different version from clean, synchronized `main`.
+
 ## Candidate acceptance
 
 The local release commit, annotated tag, and artifacts are not public yet.

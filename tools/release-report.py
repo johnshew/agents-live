@@ -112,9 +112,14 @@ def _promotion_state(bake: dict[str, Any], bake_sha: str) -> tuple[bool, str]:
 
 
 def _development_state(
-    *, bake_moved: bool, promotion_approved: bool,
+    *, is_released: bool = False, bake_moved: bool, promotion_approved: bool,
     promotion_open: bool,
 ) -> tuple[str, str]:
+    if is_released:
+        return (
+            "released",
+            "The configured release is complete. Direct subsequent development to the next cycle.",
+        )
     if bake_moved:
         return (
             "ready for candidate",
@@ -237,7 +242,37 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     promotion = _json(
         "gh", "pr", "list", "--state", "open", "--base", release["branch"],
         "--head", bake["branch"], "--limit", "10", "--json", pr_fields)
+    is_released = (
+        latest.get("tagName", "").removeprefix("v") == str(bake["version"])
+        and not latest.get("isDraft")
+        and not latest.get("isPrerelease")
+    )
+    next_cycle = "Configure the next bake branch and version in `.github/release-channels.toml`."
+    if is_released:
+        later_bakes = []
+        current_version = tuple(int(part) for part in str(bake["version"]).split("."))
+        for ref in _run(
+            "git", "for-each-ref", "--format=%(refname:short)",
+            "refs/remotes/origin/bake/",
+        ).splitlines():
+            try:
+                candidate = tomllib.loads(_run(
+                    "git", "show", f"{ref}:.github/release-channels.toml"))["bake"]
+                version = str(candidate["version"])
+                if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+                    continue
+                if ref == f"origin/{candidate['branch']}" and tuple(
+                    int(part) for part in version.split(".")
+                ) > current_version:
+                    later_bakes.append((candidate["branch"], version))
+            except (ReportError, tomllib.TOMLDecodeError, KeyError, TypeError):
+                continue
+        if later_bakes:
+            next_cycle = "Use the separately configured later bake cycle: " + ", ".join(
+                f"`{branch}` ({version})" for branch, version in sorted(later_bakes)
+            ) + ". Read its manifest and release report before choosing a target."
     development_state, development_state_detail = _development_state(
+        is_released=is_released,
         bake_moved=bake_moved,
         promotion_approved=promotion_approved,
         promotion_open=bool(promotion),
@@ -281,81 +316,107 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         f"is older than the current bake by {_commits(deployed_distance)}" if deployed_in_bake else
         "does not belong to the current bake"
     )
-    release_actions = []
-    if not bake_moved:
-        release_actions.append(promotion_state)
-    if not runtime_current:
-        release_actions.append(
-            "The version installed for testing is not the newest bake. "
-            "Fix outstanding bake defects, then install and test the current "
-            "bake before considering promotion.")
-    if bake_moved:
-        release_actions.append(
-            "Bake has moved into `main`. Prepare, install, and accept the official candidate.")
-    elif not promotion_approved:
-        release_actions.append(
-            "Do not open or merge the bake-to-main pull request until the "
-            "developer records approval for the current bake commit.")
-    elif not promotion:
-        release_actions.append(
-            "After the newest bake is accepted, open a pull request to move "
-            "bake into `main`.")
+    if is_released:
+        can_release = "**No, this release is complete.**"
+        release_actions = [
+            f"The {bake['version']} release is published on GitHub. " + next_cycle,
+            "This report does not independently verify PyPI availability; "
+            "an index or proxy delay is not a reason to republish this version."
+        ]
     else:
-        release_actions.append(
-            "The pull request to move bake into `main` must pass its checks and be merged.")
-    if decisions:
-        release_actions.append(
-            "We still need to decide how to handle "
-            f"{', '.join(_link(repository, 'issues', n) for n in decisions)}.")
+        can_release = "**No, not yet.**"
+        release_actions = []
+        if not bake_moved:
+            release_actions.append(promotion_state)
+        if not runtime_current:
+            release_actions.append(
+                "The version installed for testing is not the newest bake. "
+                "Fix outstanding bake defects, then install and test the current "
+                "bake before considering promotion.")
+        if bake_moved:
+            release_actions.append(
+                "Bake has moved into `main`. Prepare, install, and accept the official candidate.")
+        elif not promotion_approved:
+            release_actions.append(
+                "Do not open or merge the bake-to-main pull request until the "
+                "developer records approval for the current bake commit.")
+        elif not promotion:
+            release_actions.append(
+                "After the newest bake is accepted, open a pull request to move "
+                "bake into `main`.")
+        else:
+            release_actions.append(
+                "The pull request to move bake into `main` must pass its checks and be merged.")
+        if decisions:
+            release_actions.append(
+                "We still need to decide how to handle "
+                f"{', '.join(_link(repository, 'issues', n) for n in decisions)}.")
     recommendation_lines = [
         f"- {_link(repository, 'issues', number)}: "
         f"{recommendations[str(number)]}"
         for number in decisions
         if str(number) in recommendations
     ]
-    recommendation_lines.append(f"- Testing: {recommendations['testing']}")
+    if is_released:
+        recommendation_lines = [
+            "- Historical bake testing recommendations do not require another candidate for this release.",
+        ]
+    else:
+        recommendation_lines.append(f"- Testing: {recommendations['testing']}")
     bake_next = (
+        "Use the next release cycle."
+        if is_released else
         "Prepare the official candidate from `main`."
         if bake_moved else
         "Complete the recommendations below and test the newest bake."
         if decisions or not runtime_current else
         "Open a pull request to `main`."
     )
-    next_actions = []
-    if decisions:
-        next_actions.append("Resolve the remaining release decisions.")
-    if not runtime_current:
-        next_actions.append(
-            f"Install and test a version built from `{bake_sha[:8]}`.")
-    if not bake_moved:
-        next_actions.append(
-            "Keep fixing and redeploying bake until its newest commit satisfies "
-            "every recommendation and is accepted for promotion.")
-        next_actions.append(
-            "Make sure the changelog describes everything included in bake.")
-        if not promotion_approved:
+    if is_released:
+        next_actions = [
+            next_cycle,
+            "Direct subsequent development and pull requests to the new bake branch.",
+        ]
+    else:
+        next_actions = []
+        if decisions:
+            next_actions.append("Resolve the remaining release decisions.")
+        if not runtime_current:
             next_actions.append(
-                "Obtain developer approval for the exact bake commit and record "
-                "it in `.github/release-channels.toml`.")
-        if not promotion:
+                f"Install and test a version built from `{bake_sha[:8]}`.")
+        if not bake_moved:
             next_actions.append(
-                f"Only then, open one pull request from `{bake['branch']}` to "
-                f"`{release['branch']}`.")
-        next_actions.append(
-            "After the Ubuntu and Windows checks pass, merge it into `main`.")
-    next_actions.extend([
-        "Use the release tool to build the candidate, install it, and complete the final tests.",
-        f"Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
-    ])
+                "Keep fixing and redeploying bake until its newest commit satisfies "
+                "every recommendation and is accepted for promotion.")
+            next_actions.append(
+                "Make sure the changelog describes everything included in bake.")
+            if not promotion_approved:
+                next_actions.append(
+                    "Obtain developer approval for the exact bake commit and record "
+                    "it in `.github/release-channels.toml`.")
+            if not promotion:
+                next_actions.append(
+                    f"Only then, open one pull request from `{bake['branch']}` to "
+                    f"`{release['branch']}`.")
+            next_actions.append(
+                "After the Ubuntu and Windows checks pass, merge it into `main`.")
+        next_actions.extend([
+            "Use the release tool to build the candidate, install it, and complete the final tests.",
+            f"Publish `{bake['version']}` to GitHub Releases and PyPI, then regenerate this report.",
+        ])
     overall_recommendation = (
+        f"The {bake['version']} release is published. Direct subsequent development to the next cycle."
+        if is_released else
         f"Bake has moved into `main`. Prepare and accept the official {bake['version']} candidate."
         if bake_moved else recommendations["overall"]
     )
     bake_state = (
+        f"{bake['version']} is published."
+        if is_released else
         "All bake changes are in `main`."
         if bake_moved else "Work is still being tested. It contains changes not yet in `main`."
     )
-    active_bake_guidance = [] if bake_moved else [
+    active_bake_guidance = [] if (bake_moved or is_released) else [
         "",
         "## How to improve the current bake",
         "",
@@ -401,7 +462,7 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         "",
         "## Can we release this version now?",
         "",
-        "**No, not yet.**",
+        can_release,
         "",
         " ".join(release_actions) if release_actions else
         "All recorded decisions and bake testing are complete.",
