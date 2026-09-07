@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-09-06
+ms.date: 2026-09-07
 ms.topic: troubleshooting
 ---
 
@@ -22,6 +22,49 @@ never executed a second time.
 
 Use `agents-live doctor --repair --dry-run` to preview the one convergence diff
 and `agents-live doctor --repair` to apply it.
+
+## Run timing and usage
+
+Each invocation records one terminal event using the existing event schema.
+`duration_s` is monotonic elapsed time through dispatch and resource cleanup,
+including retry waits. `pre_duration_s`, `agent_duration_s`, and
+`post_duration_s` measure executed child phases, including version probes,
+interpretation, and transcript persistence; they exclude launch preparation
+and retry waits. A phase that never executes is null, not zero.
+
+`attempt` counts provider CLI invocations, excluding version probes. The
+`attempts` attribute retains each invocation's ordinal, provider, child
+duration, status, category when available, usage, and transcript reference.
+`model_called` means a provider invocation was attempted, not proof of remote
+inference. A failed version probe and an ordinary preprocessor skip both
+report false. Ordinary skip still ends the invocation without postprocessing.
+
+Provider usage survives timeouts, nonzero exits, invalid output, retries,
+postprocessor failures, and later resource failures when it was available.
+Run-level usage adds the same reported counter across attempts exactly once.
+If any attempt lacks a counter, its run total is null; available measurements
+remain in `attempts`. Do not interpret unknown cost as free execution.
+Providers without usage remain unknown. Malformed, negative, and nonfinite
+native numeric values are not measurements.
+
+Copilot session checkpoints and shutdown records are cumulative, not additive.
+Structured `tokenDetails.input` is retained as `input_tokens`, separately from
+`cache_read_input_tokens` and `cache_creation_input_tokens`; output stays
+`output_tokens`. The legacy text footer reports cache-inclusive input and
+`cached_tokens` as its subset. Do not add those subset counters to input.
+No token-price table or inferred invoice charge is used.
+
+Use public log queries rather than opening raw runtime files:
+
+```bash
+agents-live logs --slow 30
+agents-live logs --columns run_id,phase,status,duration_s,pre_duration_s,agent_duration_s,post_duration_s,attempt,model_called
+agents-live logs --columns run_id,usage,attempts
+```
+
+Older records without these measurements remain null. This accounting does
+not introduce nested spans, tracing exporters, aggregate usage summaries, or
+a model-bypass processor signal.
 
 ## Native Windows first run
 

@@ -8,8 +8,9 @@ import shutil
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from . import agent, obs, runtime, state
@@ -50,22 +51,95 @@ def dispatch(
     runner: ChildRunner | None = None,
     now: datetime | None = None,
 ) -> Outcome:
+    started = time.monotonic()
+    accounting = _Accounting(firing.agent_id)
+    result = _dispatch(firing, accounting, runner=runner, now=now)
+    if accounting.attempts:
+        result = replace(result, usage=_total_usage(accounting.attempts))
+        if not result.transcript:
+            result = replace(result, transcript=accounting.attempts[-1].get("transcript"))
+    model_called = bool(accounting.attempts)
+    transcript_state = (
+        "no_model_call" if not model_called
+        else "available" if result.transcript
+        else "disabled" if not accounting.transcript_enabled
+        else "missing"
+    )
+    obs.record(_event_path(Path(firing.root).resolve(), accounting.identifier), obs.create(
+        "firing" if result.status == "skipped" and not accounting.durations else "run",
+        result.status,
+        repository=firing.root, agent=accounting.identifier,
+        run_id=result.run_id, origin=firing.origin,
+        category=result.category, message=_recorded(result),
+        transcript=result.transcript, usage=result.usage,
+        attributes=(
+            *_firing_attributes(firing),
+            ("duration_s", time.monotonic() - started),
+            ("pre_duration_s", accounting.durations.get(Step.PRE)),
+            ("agent_duration_s", accounting.durations.get(Step.AGENT)),
+            ("post_duration_s", accounting.durations.get(Step.POST)),
+            ("attempt", len(accounting.attempts)),
+            ("attempts", accounting.attempts),
+            ("model_called", model_called),
+            ("transcript_state", transcript_state),
+        ),
+    ))
+    return result
+
+
+@dataclass
+class _Accounting:
+    identifier: str
+    transcript_enabled: bool = True
+    durations: dict[Step, float] = field(default_factory=dict)
+    attempts: list[dict] = field(default_factory=list)
+
+
+def _total_usage(attempts: list[dict]) -> tuple[tuple[str, str | None], ...]:
+    usages = [dict(attempt["usage"]) for attempt in attempts]
+    if len(usages) == 1:
+        return tuple(usages[0].items())
+    totals = []
+    for key in sorted({key for usage in usages for key in usage}):
+        values = []
+        for usage in usages:
+            value = usage.get(key)
+            if not isinstance(value, str):
+                break
+            multiplier = {"k": 1000, "m": 1000000}.get(value[-1:].lower(), 1)
+            try:
+                number = Decimal(value[:-1] if multiplier != 1 else value) * multiplier
+            except InvalidOperation:
+                break
+            if not number.is_finite() or number < 0:
+                break
+            values.append(number)
+        totals.append((key, str(sum(values)) if len(values) == len(usages) else None))
+    return tuple(totals)
+
+
+def _dispatch(
+    firing: Firing,
+    accounting: _Accounting,
+    *,
+    runner: ChildRunner | None,
+    now: datetime | None,
+) -> Outcome:
     root = Path(firing.root).resolve()
     run_id = uuid.uuid4().hex
-    events = _event_path(root, firing.agent_id)
     if firing.origin != "manual":
         try:
             if not state.is_started(root, firing.agent_id):
-                return _skip(events, firing, run_id, "not-started")
+                return _skip(run_id, "not-started")
         except state.StartedStateUnavailable as exc:
-            return _failure(events, firing, run_id, "state_unavailable", str(exc))
+            return _failure(run_id, "state_unavailable", str(exc))
 
     try:
         spec = agent.load(firing.agent_id, root=root)
     except agent.UnsupportedSchemaVersion as exc:
-        return _failure(events, firing, run_id, "runtime_outdated", str(exc))
+        return _failure(run_id, "runtime_outdated", str(exc))
     except agent.DefinitionError as exc:
-        return _failure(events, firing, run_id, "agent_invalid", str(exc))
+        return _failure(run_id, "agent_invalid", str(exc))
 
     # However the agent was named, record it under its canonical
     # identifier. `run --name <display name>` otherwise writes a second
@@ -73,48 +147,49 @@ def dispatch(
     # runs from the dashboard's history, cost, and health columns.
     if spec.identifier != firing.agent_id:
         firing = replace(firing, agent_id=spec.identifier)
-        events = _event_path(root, spec.identifier)
+    accounting.identifier = spec.identifier
 
     config = spec.execution
     if config is None:
         return _failure(
-            events, firing, run_id, "agent_invalid",
+            run_id, "agent_invalid",
             f"skill '{spec.name}' has no Agents Live execution metadata")
+    accounting.transcript_enabled = config.transcript
     if firing.origin == "clock":
         instant = now or datetime.now().astimezone()
         if not any(parse_schedule(item).matches(instant) for item in config.schedules):
-            return _skip(events, firing, run_id, "not-due")
+            return _skip(run_id, "not-due")
 
     lock = _RunLock(root, firing.agent_id)
     try:
         with handoff.gate():
             if not lock.acquire():
-                return _skip(events, firing, run_id, "already-running")
+                return _skip(run_id, "already-running")
     except hostruntime.LockBusy:
-        return _skip(events, firing, run_id, "runtime-activation")
+        return _skip(run_id, "runtime-activation")
     try:
         budget = claim_budget(
             _budget_path(root), now=(now.timestamp() if now is not None else None))
         if not budget.allowed:
-            return _skip(events, firing, run_id, "dispatch-budget")
+            return _skip(run_id, "dispatch-budget")
         selected_runner = runner or runtime.current().child_runner
         try:
-            events.parent.mkdir(parents=True, exist_ok=True)
-            return _pipeline(spec, firing, selected_runner, run_id, events)
+            _event_path(root, firing.agent_id).parent.mkdir(parents=True, exist_ok=True)
+            return _pipeline(spec, firing, selected_runner, run_id, accounting)
         except (agent.DefinitionError, ValueError) as exc:
             return _failure(
-                events, firing, run_id, "agent_invalid", str(exc))
+                run_id, "agent_invalid", str(exc))
         except OSError as exc:
             return _failure(
-                events, firing, run_id, "cli_crash", str(exc))
+                run_id, "cli_crash", str(exc))
         except RuntimeError as exc:
             return _failure(
-                events, firing, run_id, "resource_unavailable", str(exc))
+                run_id, "resource_unavailable", str(exc))
     finally:
         lock.release()
 
 
-def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Path) -> Outcome:
+def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting: _Accounting) -> Outcome:
     shape = agent.shape(spec)
     config = spec.execution
     if config is None:
@@ -136,7 +211,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
         )
         if overflow is not None:
             return _failure(
-                events, firing, run_id, "invocation_input_overflow", overflow)
+                run_id, "invocation_input_overflow", overflow)
     scratch = _scratch(spec, run_id)
     try:
         with _resource(
@@ -161,14 +236,14 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
 
             def finish(pipeline_result=None) -> Outcome:
                 return _finish(
-                    spec, results, firing, run_id, events,
+                    spec, results, run_id,
                     pipeline_result=pipeline_result)
 
             if shape.has_pre:
                 launch = agent.prepare(spec, Step.PRE, context(Step.PRE))
                 results[Step.PRE] = _run(
                     spec, Step.PRE, launch, runner, run_id=run_id,
-                    scratch=scratch)
+                    scratch=scratch, accounting=accounting)
                 if not results[Step.PRE].ok or results[Step.PRE].skip:
                     return finish(snapshot())
 
@@ -189,7 +264,8 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                     )
                     result = _run(
                         spec, Step.AGENT, launch, runner,
-                        run_id=run_id, attempt=attempt, scratch=scratch)
+                        run_id=run_id, attempt=attempt, scratch=scratch,
+                        accounting=accounting)
                     results[Step.AGENT] = result
                     if not result.retryable:
                         break
@@ -235,7 +311,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, events: Pa
                     _write_json(transcript, envelope)
                 results[Step.POST] = _run(
                     spec, Step.POST, launch, runner, run_id=run_id,
-                    scratch=scratch)
+                    scratch=scratch, accounting=accounting)
             return finish(published)
     finally:
         _discard_if_empty(scratch)
@@ -280,6 +356,29 @@ def _run(
     run_id: str,
     attempt: int = 1,
     scratch: Path | None = None,
+    accounting: _Accounting | None = None,
+):
+    started = time.monotonic() if accounting is not None else 0.0
+    try:
+        return _run_child(
+            spec, step, launch, runner, run_id=run_id, attempt=attempt,
+            scratch=scratch, accounting=accounting)
+    finally:
+        if accounting is not None:
+            accounting.durations[step] = (
+                accounting.durations.get(step, 0.0) + time.monotonic() - started)
+
+
+def _run_child(
+    spec,
+    step: Step,
+    launch,
+    runner: ChildRunner,
+    *,
+    run_id: str,
+    attempt: int,
+    scratch: Path | None,
+    accounting: _Accounting | None,
 ):
     environment = os.environ.copy()
     environment.update(launch.env)
@@ -306,14 +405,26 @@ def _run(
                     return agent.StepResult(
                         step, False, retryable=True, category="timeout",
                         message="provider version probe exhausted the agent timeout")
-    raw = runner.run_child(
-        launch.argv,
-        cwd=launch.cwd,
-        env=environment,
-        input_text=launch.input_text,
-        timeout=timeout,
-        use_pty=launch.use_pty,
-    )
+    attempt_record = None
+    if step is Step.AGENT and accounting is not None:
+        attempt_record = {
+            "attempt": attempt, "provider": launch.provider,
+            "status": "failed", "usage": (), "transcript": None,
+        }
+        accounting.attempts.append(attempt_record)
+    started = time.monotonic() if attempt_record is not None else 0.0
+    try:
+        raw = runner.run_child(
+            launch.argv,
+            cwd=launch.cwd,
+            env=environment,
+            input_text=launch.input_text,
+            timeout=timeout,
+            use_pty=launch.use_pty,
+        )
+    finally:
+        if attempt_record is not None:
+            attempt_record["duration_s"] = time.monotonic() - started
     interpreted = agent.interpret(
         spec,
         step,
@@ -321,6 +432,12 @@ def _run(
         RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out),
         _signals(spec, step, scratch),
     )
+    if attempt_record is not None:
+        attempt_record.update(
+            status="success" if interpreted.ok else "failed",
+            category=interpreted.category, usage=interpreted.usage,
+            transcript=interpreted.transcript,
+        )
     if (
         not interpreted.ok
         and interpreted.category in {
@@ -348,6 +465,8 @@ def _run(
         transcript = _write_transcript(
             spec, run_id, attempt, launch, raw, interpreted.transcript)
         interpreted = replace(interpreted, transcript=str(transcript))
+        if attempt_record is not None:
+            attempt_record["transcript"] = str(transcript)
     return interpreted
 
 
@@ -412,9 +531,7 @@ def _write_json(destination: Path, payload: object) -> None:
 def _finish(
     spec,
     results,
-    firing: Firing,
     run_id: str,
-    events: Path,
     *,
     pipeline_result: tuple[bool, object] | None = None,
 ) -> Outcome:
@@ -426,30 +543,6 @@ def _finish(
             structured=value if present else None,
             result_status="published" if present else "not_published",
         )
-    model_called = Step.AGENT in results
-    transcript_state = (
-        "no_model_call" if not model_called
-        else "available" if result.transcript
-        else "disabled" if spec.execution and not spec.execution.transcript
-        else "missing"
-    )
-    obs.record(events, obs.create(
-        "run",
-        result.status,
-        repository=firing.root,
-        agent=firing.agent_id,
-        run_id=run_id,
-        origin=firing.origin,
-        category=result.category,
-        message=_recorded(result),
-        transcript=result.transcript,
-        usage=result.usage,
-        attributes=(
-            *_firing_attributes(firing),
-            ("model_called", model_called),
-            ("transcript_state", transcript_state),
-        ),
-    ))
     return result
 
 
@@ -467,33 +560,17 @@ def _recorded(result: Outcome) -> str:
     return joined[:_RECORDED_MAX_CHARS] + "... (truncated)"
 
 
-def _skip(events: Path, firing: Firing, run_id: str, reason: str) -> Outcome:
-    result = Outcome(True, "skipped", message=reason, run_id=run_id)
-    obs.record(events, obs.create(
-        "firing", "skipped", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, message=reason,
-        attributes=_firing_attributes(firing)))
-    return result
+def _skip(run_id: str, reason: str) -> Outcome:
+    return Outcome(True, "skipped", message=reason, run_id=run_id)
 
 
 def _failure(
-    events: Path,
-    firing: Firing,
     run_id: str,
     category: str,
     message: str,
 ) -> Outcome:
-    result = Outcome(
+    return Outcome(
         False, "failed", category=category, message=message, run_id=run_id)
-    obs.record(events, obs.create(
-        "run", "failed", repository=firing.root, agent=firing.agent_id,
-        run_id=run_id, origin=firing.origin, category=category, message=message,
-        attributes=(
-            *_firing_attributes(firing),
-            ("model_called", False),
-            ("transcript_state", "no_model_call"),
-        )))
-    return result
 
 
 def _firing_attributes(firing: Firing) -> tuple[tuple[str, object], ...]:

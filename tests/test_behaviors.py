@@ -1668,6 +1668,88 @@ class TestStateSurvivesAConcurrentReader(TempRepository):
 
 
 class TestRunsRecordWhatTheySpent(TempRepository):
+    def test_native_invalid_usage_remains_unknown(self) -> None:
+        for provider in ("claude", "codex"):
+            for value in (None, True, -1, float("nan"), float("inf"), "invalid"):
+                with self.subTest(provider=provider, value=value):
+                    usage = {"input_tokens": 17, "output_tokens": value}
+                    payload = (
+                        {"result": "done", "usage": usage, "total_cost_usd": value}
+                        if provider == "claude" else
+                        {"type": "turn.completed", "usage": usage}
+                    )
+                    completion = providers.get(provider).parse(
+                        RawOutput(1, json.dumps(payload), "failed"))
+                    actual = dict(completion.usage)
+                    self.assertEqual("17", actual["input_tokens"])
+                    self.assertIsNone(actual.get("output_tokens"))
+                    self.assertIsNone(actual.get("list_cost_usd"))
+
+    def test_copilot_partial_and_malformed_checkpoints_keep_known_values(self) -> None:
+        for invalid in (None, True, -1, "NaN", "Infinity", "broken", {}):
+            with self.subTest(invalid=invalid):
+                events = [
+                    {"type": "session.usage_checkpoint", "data": {
+                        "totalNanoAiu": 1000000000,
+                        "tokenDetails": {"input": {"tokenCount": 17}},
+                    }},
+                    {"type": "session.shutdown", "data": {
+                        "totalNanoAiu": invalid,
+                        "tokenDetails": {"output": {"tokenCount": invalid}},
+                    }},
+                ]
+                completion = providers.get("copilot").parse(RawOutput(
+                    1, "\n".join(json.dumps(event) for event in events), "failed"))
+                actual = dict(completion.usage)
+                self.assertEqual("17", actual["input_tokens"])
+                self.assertEqual("0.01", actual["list_cost_usd"])
+                self.assertNotIn("output_tokens", actual)
+
+    def test_public_sql_filters_duration_from_event_attributes(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        log = directory / "timed.jsonl"
+        for run_id, attributes in (
+            ("timed", (("duration_s", 7.5), ("attempt", 2),
+                       ("model_called", True), ("transcript_state", "disabled"),
+                       ("attempts", [{"attempt": 1, "usage": [["list_cost_usd", "0.1"]]}]))),
+            ("unknown", ()),
+        ):
+            obs.record(log, obs.create(
+                "run", "success", repository=str(self.root), agent="timer",
+                run_id=run_id, origin="manual", attributes=attributes))
+        with qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, [str(log)])
+            rows = con.sql(
+                "SELECT run_id, duration_s FROM log WHERE duration_s > 5"
+            ).fetchall()
+            self.assertEqual([("timed", 7.5)], rows)
+            self.assertEqual((2, True, "disabled"), con.sql(
+                "SELECT attempt, model_called, transcript_state FROM log "
+                "WHERE run_id = 'timed'"
+            ).fetchone())
+            self.assertIsNone(con.sql(
+                "SELECT duration_s FROM log WHERE run_id = 'unknown'"
+            ).fetchone()[0])
+
+    def test_copilot_shutdown_preserves_disjoint_token_counters(self) -> None:
+        summary = {"totalNanoAiu": 22715200000, "tokenDetails": {
+            "input": {"tokenCount": 44564},
+            "cache_read": {"tokenCount": 40448},
+            "cache_write": {"tokenCount": 0},
+            "output": {"tokenCount": 7042},
+        }}
+        stream = "\n".join(json.dumps(event) for event in [
+            {"type": "assistant.message", "data": {"content": "done"}},
+            {"type": "session.usage_checkpoint", "data": summary},
+            {"type": "session.shutdown", "data": summary},
+        ])
+        usage = dict(providers.get("copilot").parse(RawOutput(0, stream, "")).usage)
+        self.assertEqual("0.227152", usage["list_cost_usd"])
+        self.assertEqual("44564", usage["input_tokens"])
+        self.assertEqual("40448", usage["cache_read_input_tokens"])
+        self.assertEqual("0", usage["cache_creation_input_tokens"])
+        self.assertEqual("7042", usage["output_tokens"])
+
     """The provider meters the work; nothing else can.
 
     Across 47,810 records on a live host, none carried usage, so both
