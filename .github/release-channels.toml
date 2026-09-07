@@ -10,25 +10,26 @@ name = "bake"
 branch = "bake/v6.9.0-local"
 version = "6.9.0"
 promotes_to = "release"
-deployed_version = "6.9.0.dev0+ge1c20231"
-deployed_commit = "e1c20231d667b26ca397f592c3c7e2dd48c8a493"
+deployed_version = "6.9.0.dev0+g999e197b"
+deployed_commit = "999e197b6c2bcc3e93ba37a4fb0ccfe93180a1df"
 validated_on = "2026-09-07"
 
 [bake.promotion]
 decision = "continue-bake"
 
 [bake.issues]
-delivered = [374, 424, 446, 447, 455, 461, 463, 468]
+delivered = [374, 424, 446, 447, 455, 461, 463, 468, 473]
 partial = []
 deferred = [105, 388, 434]
-promotion_decision = [473, 474]
+promotion_decision = [474, 477]
 
 [bake.recommendations]
-overall = "Deploy the Windows watcher launcher normalization and Claude minimum-version check, verify installed watcher health, and finish the remaining Claude isolation acceptance. Then obtain promotion approval for the exact tested bake commit before preparing the official candidate."
+overall = "Finish the remaining Claude isolation acceptance and resolve the intermittent Windows skill-refresh failure, or obtain explicit approval for each remaining limitation. The current runtime deployment and Windows generation convergence are verified. Then obtain promotion approval for the exact tested bake commit before preparing the official candidate."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
 "463" = "Completed in bake: a regression proves that earlier Run completions cannot satisfy a new action, and the installed commit-qualified artifact passed the full packaged normal, all-repositories, and development sequence."
-"473" = "All ten installed subscription tasks use the selected generation. Live watcher inspection found that the console launcher and its Python child received different fingerprints. Deploy the normalization fix and verify alive watcher status without restart churn before considering this complete."
+"473" = "Completed in bake: all ten installed subscription tasks use the selected generation, the started watcher reports alive, and an installed doctor repair pass preserved the same watcher process identities after launcher-child normalization."
 "474" = "Native subscription plan, write, schema, stdio MCP, project HTTP MCP, and authenticated pipeline checks passed; an installed workload completed normally and its schedule was restored. Dispatch and doctor now enforce the supported CLI minimum. Plugin metadata and hook activation have an executing positive control, but IDE discovery isolation still lacks conclusive live coverage. Managed-policy conflicts require administrator resolution, not bypasses. Finish the remaining acceptance boundary before closing the issue."
-testing = "The installed commit-qualified bake passed packaged dashboard readiness, a real subscription-backed workload, and all-repository doctor. A started watcher still reports degraded because of the launcher fingerprint defect being fixed. Exact-bake promotion approval, native provider conformance on the official candidate, and receipt-bound installed candidate acceptance remain required before publication."
+"477" = "Windows skill staging promotion failed twice with access denied after generation selection. Rollback preserved the previous payload; a later refresh and the supported deployment command succeeded with a receipt. The cause remains unproven, so retry success is recovery, not a fix. Establish the failure mode and add executing coverage, or obtain explicit release-risk acceptance."
+testing = "The installed commit-qualified bake passed packaged dashboard readiness, a real subscription-backed workload through the enforced version gate, all-repository doctor, and watcher convergence without process replacement during repair. Deployment now has a success receipt after skill-refresh recovery. Exact-bake promotion approval, native provider conformance on the official candidate, and receipt-bound installed candidate acceptance remain required before publication."
