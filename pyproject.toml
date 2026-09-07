@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [dependency-groups]
-dev = ["duckdb"]
+dev = ["duckdb", "ruff>=0.11,<1"]
 
 [project.scripts]
 agents-live = "agents_live.cli:main"

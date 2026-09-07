@@ -178,7 +178,7 @@ def _issue_rows(
     return rows, assigned
 
 
-def _render(config: dict[str, Any], generated_at: datetime) -> str:
+def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = False) -> str:
     repository_data = _json("gh", "repo", "view", "--json", "nameWithOwner,url")
     repository = repository_data["nameWithOwner"]
     release = config["release"]
@@ -516,14 +516,32 @@ def _render(config: dict[str, Any], generated_at: datetime) -> str:
         f"- Generator: [`tools/release-report.py`](../tools/release-report.py)",
         "",
     ])
+    if as_json:
+        return json.dumps({
+            "schema": 1,
+            "generated_at": generated_at.isoformat(),
+            "repository": repository,
+            "development_state": development_state,
+            "development_state_detail": development_state_detail,
+            "target_branch": release["branch"] if bake_moved else bake["branch"],
+            "active_bake": not bake_moved,
+            "release": {"branch": release["branch"], "commit": release_sha,
+                        "published_tag": latest["tagName"], "published_commit": tag_sha},
+            "bake": {"branch": bake["branch"], "commit": bake_sha,
+                     "version": bake["version"], "promotion_approved": promotion_approved},
+            "next_actions": next_actions,
+        }, indent=2) + "\n"
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--json", action="store_true", help="print structured routing to stdout")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     args = parser.parse_args(argv)
+    if args.json and args.check:
+        parser.error("--json and --check are mutually exclusive")
     with CONFIG.open("rb") as stream:
         config = tomllib.load(stream)
     if config.get("schema") != 1:
@@ -536,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
             print("release report has no generation timestamp", file=sys.stderr)
             return 1
         generated_at = datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
-    report = _render(config, generated_at)
+    report = _render(config, generated_at, as_json=args.json)
+    if args.json:
+        print(report, end="")
+        return 0
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
         if current != report:

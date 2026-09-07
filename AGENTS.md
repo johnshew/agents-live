@@ -62,6 +62,10 @@ The standard loop for any change that lands as commits:
   verify its ancestry before committing or pushing, and remove it when the
   task is complete.
 4. Edit, then run the smoke tests and the release audit (Quick commands above).
+  Use `tools/validate.py focused <unittest-selector>` during the edit loop and
+  `tools/validate.py pr` for source gates; see `.agents/testing.md` for evidence
+  reuse and artifact boundaries. Refresh origin at meaningful checkpoints and
+  follow `.agents/development.md` for rebase overlap review and write identity.
   Reuse passing evidence when the tested inputs and environment are unchanged;
   do not rerun gates merely at a handoff or before preparation runs them itself.
   See `.agents/testing.md` for artifact and installed-state boundaries.
