@@ -102,6 +102,27 @@ reports any package and skill payload version mismatch.
 
 ## Commit hygiene
 
+Refresh `origin` at meaningful checkpoints: before branching, after a long
+implementation or test phase, and before publication. Rebase unshared work
+onto the latest intended target, then inspect overlapping imports, call sites,
+and tests even when Git reports no conflict. Do not rebase a published branch
+without approval, and do not add synchronization merge commits. Fast-forward a
+clean primary checkout after verifying the merged commit is reachable from
+`origin/main`.
+
+Before GitHub writes, check the authenticated login and repository permission.
+With multiple accounts, use an owner credential scoped to the command process;
+never print tokens or switch the shared active account while other agents work.
+Preserve and restore any existing credential environment variable in `finally`.
+Use a full tested head SHA with guarded merges. Fetch and report a moved head
+instead of merging a different revision silently.
+
+Keep PowerShell validation scripts fail-fast: capture `$LASTEXITCODE` immediately
+after the native command and propagate it before formatting or another command
+can replace it. Prefer one check per invocation or the validation runner, which
+records and returns each failing command's status. Summarize outcomes and the
+next decision, not each successful tool invocation.
+
 Review the branch history before its first push:
 
 ```bash

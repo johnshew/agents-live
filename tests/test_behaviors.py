@@ -3857,6 +3857,103 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def _gate_text(self) -> str:
         return (REPOSITORY / "tools" / "release.py").read_text(encoding="utf-8")
 
+    def test_development_evidence_reuses_only_identical_success(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "validate.py"))
+        main = script["main"]
+        scope = main.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.py"
+            source.write_text("original", encoding="utf-8")
+            counter = root / "runs.txt"
+            command = [sys.executable, "-c",
+                       "from pathlib import Path; "
+                       f"path=Path({str(counter)!r}); "
+                       "path.write_text(path.read_text()+'run\\n' if path.exists() else 'run\\n')"]
+            environment = {"python": "test", "packages": ["one"]}
+            def git(*arguments):
+                return "source.py\0" if arguments[0] == "ls-files" else "commit"
+            with mock.patch.dict(scope, {
+                "ROOT": root, "_git": git,
+                "_environment": lambda: dict(environment),
+                "_commands": lambda *_: [command + ["--repo", str(scope["ROOT"])]],
+                "_receipt_directory": lambda: root / "receipts",
+            }):
+                self.assertEqual(0, main(["focused"]))
+                self.assertEqual(0, main(["focused", "--reuse"]))
+                other = root / "other-worktree"
+                other.mkdir()
+                (other / "source.py").write_text("original", encoding="utf-8")
+                with mock.patch.dict(scope, {"ROOT": other}):
+                    self.assertEqual(0, main(["focused", "--reuse"]))
+                self.assertEqual(1, len(counter.read_text().splitlines()))
+                source.write_text("changed", encoding="utf-8")
+                self.assertEqual(0, main(["focused", "--reuse"]))
+                environment["packages"] = ["two"]
+                self.assertEqual(0, main(["focused", "--reuse"]))
+                self.assertEqual(3, len(counter.read_text().splitlines()))
+                command[-1] += "; raise SystemExit(7)"
+                self.assertEqual(7, main(["focused", "--reuse"]))
+                self.assertEqual(7, main(["focused", "--reuse"]))
+                self.assertEqual(5, len(counter.read_text().splitlines()))
+                command[-1] = f"from pathlib import Path; Path({str(source)!r}).write_text('raced')"
+                self.assertEqual(2, main(["focused"]))
+                receipts = [json.loads(path.read_text())
+                            for path in (root / "receipts").glob("*.json")]
+                self.assertTrue(any(item["exit_code"] == 7 for item in receipts))
+                self.assertTrue(any(not item["source_unchanged"] for item in receipts))
+                self.assertTrue(all("duration_seconds" in item["results"][0]
+                                    for item in receipts))
+
+    def test_development_profiles_keep_artifact_acceptance_separate(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "validate.py"))
+        commands = script["_commands"]
+        with self.assertRaises(ValueError):
+            commands("focused", [])
+        focused = commands("focused", ["tests.test_smoke"])
+        self.assertIn("tests.test_smoke", focused[0])
+        source = commands("pr", [])
+        self.assertTrue(any("F811" in command for command in source))
+        self.assertTrue(any("tests/test_behaviors.py" in command for command in source))
+        self.assertFalse(any("--build-artifacts" in command for command in source))
+        self.assertEqual([["uv", "run", "--script", "tools/release.py", "--gates"]],
+                         commands("release", []))
+
+    def test_release_json_and_markdown_share_routing_decisions(self) -> None:
+        import tomllib
+
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
+        render = script["_render"]
+        config = tomllib.loads((REPOSITORY / ".github" / "release-channels.toml").read_text())
+        def github(*arguments):
+            if arguments[1] == "repo":
+                return {"nameWithOwner": "example/project", "url": "https://github.com/example/project"}
+            if arguments[1] == "release":
+                return {"name": "v0.0.0", "tagName": "v0.0.0",
+                        "publishedAt": "2026-01-01T00:00:00Z",
+                        "isDraft": False, "isPrerelease": False,
+                        "url": "https://github.com/example/project/releases/tag/v0.0.0"}
+            return []
+        for active in (False, True):
+            with self.subTest(active=active), mock.patch.dict(render.__globals__, {
+                "_json": github, "_run": lambda *_: "0",
+                "_sha": lambda *_: "d" * 40,
+                "_count": lambda *_: (0, int(active)),
+                "_issue_rows": lambda *_: ([], set()),
+                "_promotion_state": lambda *_: (False, "continue bake"),
+                "_has_runtime_changes": lambda *_: False,
+                "subprocess": mock.Mock(run=mock.Mock(return_value=mock.Mock(returncode=0))),
+            }):
+                moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+                markdown = render(config, moment)
+                routing = json.loads(render(config, moment, as_json=True))
+                self.assertEqual(active, routing["active_bake"])
+                channel = "bake" if active else "release"
+                self.assertEqual(config[channel]["branch"], routing["target_branch"])
+                self.assertIn(f'**`{routing["development_state"]}`**', markdown)
+                self.assertTrue(routing["next_actions"])
+                self.assertTrue(all(action in markdown for action in routing["next_actions"]))
+
     def _workflow_text(self, name: str) -> str:
         return (REPOSITORY / ".github" / "workflows" / name).read_text(
             encoding="utf-8")

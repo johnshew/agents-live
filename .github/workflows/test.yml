@@ -85,6 +85,7 @@ jobs:
         with:
           cache-dependency-glob: pyproject.toml
       - run: uv run --script tools/pre-release-audit.py
+      - run: uv run ruff check --select F811 src tools tests
 
   source:
     if: needs.changes.outputs.full == 'true'

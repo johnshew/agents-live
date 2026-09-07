@@ -59,6 +59,39 @@ tested for factual wording when an association cannot be inferred.
 
 ## Validate the current checkout
 
+Use the development runner for the edit loop:
+
+```bash
+uv run --script tools/validate.py focused tests.test_smoke
+uv run --script tools/validate.py pr
+uv run --script tools/validate.py pr --reuse
+uv run --script tools/validate.py release
+```
+
+`focused` requires explicit unittest selectors. `pr` runs redefined-import lint
+(`F811`), the export audit, all three source scripts, and framework smoke using
+the release tool's source gate list. `release` delegates the full existing
+non-provider gate sequence, including build and packaged dashboard readiness.
+It does not prepare, deploy, accept, or publish a candidate. Required CI still
+validates the exact wheel on both hosts; source evidence never replaces it.
+Use `--plan` to inspect a profile without running checks.
+
+Receipts live under the common Git directory, outside the exported tree. They
+record command arguments, exit codes, durations, commit and source digest,
+interpreter, installed package versions, platform, and a digest of environment
+variables. Release receipts also record wheel digests, but cannot be reused.
+Explicit `--reuse` applies only to successful source profiles with identical
+inputs and a complete receipt. Tracked and nonignored untracked files are
+hashed; edits during execution invalidate success. Changed environments or
+commands invalidate reuse. Use a fresh run when an external dependency or
+service changed in a way the local fingerprint cannot observe.
+
+After the first substantive edit, run the cheapest discriminating check before
+expanding the change. After a rebase, rerun checks for overlapping behavior and
+the import gate. Do not repeat unchanged passing gates merely for a handoff.
+Use `tests.host_safety.isolated_host()` for mutating lifecycle fixtures; the
+portable suite's native guard is not a sandbox inherited by arbitrary children.
+
 Run the portable suite and release gates:
 
 ```bash

@@ -16,6 +16,13 @@ git fetch origin --prune
 uv run --script tools/release-report.py
 ```
 
+For automation, `uv run --script tools/release-report.py --json` prints a
+versioned routing object without writing Markdown. It includes the recommended
+target branch, active bake flag, development state, full source commits,
+published tag, and ordered next actions from the same calculation as the human
+report. Treat it as point-in-time evidence, not authorization to promote or
+publish.
+
 The report is routing guidance for development as well as release review. It
 must agree with `AGENTS.md` about the active phase, branch targets, local bake
 deployment, and the conditions for moving work to `main`. When either source
