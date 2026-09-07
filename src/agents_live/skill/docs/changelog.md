@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: accept slow healthy dashboard responses during installed candidate validation.
+  Readiness requests use the remaining startup deadline instead of repeatedly
+  abandoning valid inventory responses after two seconds.
 - fix: replace stale Windows scheduled executables during generation convergence. (#473)
   Scheduled agents, maintenance, and watchers compare their effective action
   and working directory with the selected generation instead of retaining
