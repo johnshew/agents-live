@@ -374,7 +374,7 @@ def _release_notes(version: str) -> str:
         Linux and WSL:
 
         ```bash
-        curl --proto '=https' --tlsv1.2 -LsSf {download_root}/install.sh | sh
+        curl -fsSL {download_root}/install.sh | sh
         ```
 
         Windows PowerShell:

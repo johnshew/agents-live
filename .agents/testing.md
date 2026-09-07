@@ -347,7 +347,7 @@ If bare `agents-live` resolves to an editable or package-manager environment,
 run the verified bootstrap before testing consumer behavior:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
+curl -fsSL \
   https://github.com/johnshew/agents-live/releases/latest/download/install.sh | sh
 ```
 
