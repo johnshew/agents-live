@@ -290,6 +290,12 @@ def _action_fingerprint(argv: Sequence[str], root: str) -> str:
 
 
 def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
+    if (
+        len(argv) > 1
+        and ntpath.basename(argv[0]).casefold() in {"python.exe", "pythonw.exe"}
+        and ntpath.basename(argv[1]).casefold() == "agents-live.exe"
+    ):
+        argv = argv[1:]
     metadata = artifacts.from_argv(argv)
     if metadata is None or "watch-loop" not in argv:
         return None

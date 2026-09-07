@@ -110,12 +110,15 @@ uv run --with-editable . python -m unittest `
 Claude conformance requires Code 2.1.263 or later and verifies the required
 isolation flags before running. Its native-login checks leave the credential
 store unchanged and cover plan reads and denied writes, structured writes,
-explicit stdio MCP effects, and authenticated HTTP pipeline get/put with an
-unauthenticated rejection. Its separate request-capture fixture uses a
+explicit stdio and project HTTP MCP effects, and authenticated HTTP pipeline
+get/put with an unauthenticated rejection. Its separate request-capture fixture uses a
 disposable configuration directory and a loopback endpoint with a dummy key;
 no fixture prompts are sent to a provider. That fixture checks user/project
-instruction, skill, memory, hook, and undeclared MCP isolation, not native
-subscription authentication or organization-managed policy enforcement.
+instruction, skill, plugin metadata, memory, hook, and undeclared MCP isolation.
+A non-isolated control must load the instruction and plugin markers and run
+both the ordinary and plugin hooks. This does not prove native subscription authentication,
+IDE discovery suppression, or organization-managed
+policy enforcement; those remain separate acceptance boundaries.
 
 Do not treat the WSL/Linux pass as native Windows evidence. Record the native
 Windows CLI versions, candidate commit, and result in candidate acceptance. The

@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-09-05
+ms.date: 2026-09-07
 ms.topic: reference
 ---
 
@@ -112,9 +112,13 @@ Inherited `CLAUDE_CODE_SIMPLE` and `CLAUDE_CODE_SAFE_MODE` are disabled because
 they suppress subscription credentials or explicit MCP tools respectively.
 Managed settings remain authoritative: these controls do not override managed
 restrictions. Resolve conflicting policy with the administrator, not by
-dropping isolation flags. Native Windows validation uses Claude Code 2.1.263;
-unsupported CLI flags fail the run instead of falling back to an unisolated
-launch. Copilot uses a fresh run-scoped configuration home. Secure
+dropping isolation flags. Claude Code 2.1.263 or newer is required. Dispatch
+checks the native version before sending the model prompt, and `doctor`
+checks the same minimum. Older, unreadable, or failed version probes refuse
+execution with `cli_version_unsupported`; update Claude and rerun `doctor`.
+Unsupported CLI flags fail the run instead of falling back to an unisolated
+launch. Native Windows validation uses Claude Code 2.1.263.
+Copilot uses a fresh run-scoped configuration home. Secure
 credential-store login continues to work; on a host without a credential
 store, supply `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` because
 credentials stored below the normal Copilot configuration home are not read.

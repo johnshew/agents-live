@@ -1,7 +1,7 @@
 ---
 title: Why the provider contract is shaped this way
 description: The complete provider integration contract, the ownership boundary it preserves, and the migration from the 6.8 protocol
-ms.date: 2026-09-06
+ms.date: 2026-09-07
 ms.topic: concept
 ---
 
@@ -49,6 +49,13 @@ version lives behind a subcommand is described rather than special-cased. A
 provider may detect the native platform where that changes its CLI's
 capabilities or arguments; platform services and effects remain owned by the
 runtime host adapters.
+
+An integration that depends on a minimum native version declares
+`cli.minimum_version` as a three-integer tuple. Its probe must return a dotted
+three-part version, optionally followed by a parenthesized product name.
+Dispatch runs this bounded probe before sending any model prompt; doctor
+checks the same requirement. An old, failed, timed-out, or unrecognized probe
+refuses execution rather than assuming that isolation controls exist.
 
 **Capabilities.** `ProviderCapabilities` names the definition modes,
 models, efforts, and MCP transports the integration supports, and whether

@@ -30,6 +30,7 @@ class ClaudeProvider(ProviderBase):
         executable="claude",
         probe_argv=("--version",),
         install_commands=(("windows", "winget install Anthropic.ClaudeCode"),),
+        minimum_version=(2, 1, 263),
     )
     capabilities = ProviderCapabilities(
         modes=frozenset({"plan", "write", "pipeline"}),
