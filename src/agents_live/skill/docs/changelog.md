@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-06
+ms.date: 2026-09-07
 ms.topic: reference
 ---
 
@@ -15,11 +15,15 @@ history is retained in the source repository.
   Scheduled agents, maintenance, and watchers compare their effective action
   and working directory with the selected generation instead of retaining
   an old executable whenever the subscription key is unchanged.
+  Native Windows console launchers and their Python children share a
+  fingerprint, avoiding false watcher degradation and restart churn.
 - fix: preserve native Claude subscription authentication in isolated print mode.
   Explicit configuration, instruction, hook, memory, connector, and IDE
   discovery controls replace bare mode without extracting credentials or
   silently selecting API-key billing. Authentication failures receive a
   specific category, and explicit effort overrides inherited effort values.
+  Dispatch and doctor require Claude Code 2.1.263 or newer. Version probes
+  fail closed before prompt delivery and consume the agent timeout budget.
 - fix: wait for the newly requested dashboard readiness action. (#463)
   Aggregate checks exclude completion IDs from earlier scenarios before
   accepting Run success, preventing stale evidence from racing the next

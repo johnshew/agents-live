@@ -10,25 +10,25 @@ name = "bake"
 branch = "bake/v6.9.0-local"
 version = "6.9.0"
 promotes_to = "release"
-deployed_version = "6.9.0.dev0+g26831209"
-deployed_commit = "268312093e973f7b6f6dbb90e287f3d187f4c3e5"
-validated_on = "2026-09-06"
+deployed_version = "6.9.0.dev0+ge1c20231"
+deployed_commit = "e1c20231d667b26ca397f592c3c7e2dd48c8a493"
+validated_on = "2026-09-07"
 
 [bake.promotion]
 decision = "continue-bake"
 
 [bake.issues]
-delivered = [374, 424, 446, 447, 455, 461, 468]
+delivered = [374, 424, 446, 447, 455, 461, 463, 468]
 partial = []
 deferred = [105, 388, 434]
-promotion_decision = [463, 473, 474]
+promotion_decision = [473, 474]
 
 [bake.recommendations]
-overall = "Integrate and deploy the readiness, Windows generation convergence, and Claude subscription fixes. Complete installed workload and provider acceptance before promoting the exact validated bake commit."
+overall = "Deploy the Windows watcher launcher normalization and Claude minimum-version check, verify installed watcher health, and finish the remaining Claude isolation acceptance. Then obtain promotion approval for the exact tested bake commit before preparing the official candidate."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-"463" = "The gate accepted a prior scenario's Run completion. New-completion correlation now has a regression that fails without the guard; the full packaged normal, all-repositories, and development sequence passed. Integrate and validate the commit-qualified bake artifact."
-"473" = "Action fingerprints now detect stale Windows generation executables, changed arguments, and working directories. Verify installed task actions and watcher convergence after deployment."
-"474" = "Isolated non-bare Claude source launches passed native subscription plan, write, schema, and explicit stdio MCP checks. Complete packaged and installed workload acceptance, policy isolation coverage, and supported-version validation before closing the issue or restoring the schedule."
-testing = "The commit-qualified bake is installed and its packaged dashboard, restoration, model display, and real Copilot plan transcript-retention checks passed. Real pipeline retention passed on the preceding bake with unchanged retention code. User bake acceptance, native provider release conformance, and a newly prepared official candidate are still required before publication."
+"463" = "Completed in bake: a regression proves that earlier Run completions cannot satisfy a new action, and the installed commit-qualified artifact passed the full packaged normal, all-repositories, and development sequence."
+"473" = "All ten installed subscription tasks use the selected generation. Live watcher inspection found that the console launcher and its Python child received different fingerprints. Deploy the normalization fix and verify alive watcher status without restart churn before considering this complete."
+"474" = "Native subscription plan, write, schema, stdio MCP, project HTTP MCP, and authenticated pipeline checks passed; an installed workload completed normally and its schedule was restored. Dispatch and doctor now enforce the supported CLI minimum. Plugin metadata has an executing positive control, but plugin-hook activation and IDE discovery isolation still lack conclusive live coverage. Managed-policy conflicts require administrator resolution, not bypasses. Finish these acceptance boundaries before closing the issue."
+testing = "The installed commit-qualified bake passed packaged dashboard readiness, a real subscription-backed workload, and all-repository doctor. A started watcher still reports degraded because of the launcher fingerprint defect being fixed. Exact-bake promotion approval, native provider conformance on the official candidate, and receipt-bound installed candidate acceptance remain required before publication."
