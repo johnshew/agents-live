@@ -1447,6 +1447,26 @@ class TestWindowsDetachedProcess(unittest.TestCase):
                        desired.key, desired.fingerprint),
         ], found)
 
+    def test_python_launcher_child_retains_generation_fingerprint(self) -> None:
+        metadata = artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", "repo:C:/work/sample", "agent:sample"))
+        arguments = (
+            " --repo C:/work/sample internal watch-loop "
+            f"--metadata {metadata} sample")
+        command = "C:/tools/current/agents-live.exe" + arguments
+        with (
+            mock.patch.object(hostruntime, "process_command_lines", return_value=[
+                (41, command),
+                (42, "C:/tools/current/python.exe " + command),
+                (43, "C:/tools/old/python.exe C:/tools/old/agents-live.exe" + arguments),
+            ]),
+            mock.patch.object(hostruntime, "process_start_time", return_value=123.5),
+        ):
+            found = WindowsProcesses().owned("watcher")
+        self.assertEqual(3, len(found))
+        self.assertEqual(found[0].fingerprint, found[1].fingerprint)
+        self.assertNotEqual(found[0].fingerprint, found[2].fingerprint)
+
     def test_termination_uses_native_process_policy(self) -> None:
         reference = ProcessRef(
             42, 123.5, "agents-live.exe", "watcher", "key", "fingerprint")
