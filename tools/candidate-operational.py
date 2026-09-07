@@ -99,10 +99,10 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _api(port: int) -> dict | None:
+def _api(port: int, *, timeout_s: float = 2.0) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/agents", timeout=timeout_s) as response:
             value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else None
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
@@ -127,10 +127,15 @@ def _await_api(
                 observe()
             raise OperationalError(
                 f"dashboard exited {process.returncode} before readiness")
-        payload = _api(port)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        payload = _api(port, timeout_s=remaining)
         if payload and payload.get("agents"):
             return payload
-        time.sleep(0.5)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.5, remaining))
     if observe is not None:
         observe()
     raise OperationalError("dashboard did not serve agent rows")
@@ -529,7 +534,10 @@ def _await_dashboard_cost(
     deadline = time.monotonic() + ACTION_TIMEOUT_S
     last = None
     while time.monotonic() < deadline:
-        last = _api(port)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        last = _api(port, timeout_s=remaining)
         if last is not None:
             try:
                 _verify_dashboard_cost(
@@ -706,8 +714,10 @@ def _dashboard_actions(
             try:
                 page = browser.new_page()
                 page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+                page.get_by_label("Search agents or repositories").fill(display_name)
                 row = page.get_by_role("row").filter(
                     has=page.get_by_text(display_name, exact=True))
+                row.wait_for(state="visible", timeout=ACTION_TIMEOUT_S * 1000)
                 if row.count() != 1:
                     raise OperationalError(
                         f"dashboard rendered {row.count()} rows for "
@@ -721,10 +731,11 @@ def _dashboard_actions(
                     )
                 )
                 refresh_count = refresh_lines.count()
-                page.get_by_role("button", name="Run health check").click()
+                page.get_by_role("button", name="Run-health-check", exact=True).click()
                 _await_action(
                     cli, repo, "dashboard", "Health check", health_before)
-                page.get_by_text(re.compile(r"^healthy ")).first.wait_for(
+                page.locator(".dashboard-health-label").get_by_text(
+                    re.compile(r"^Host healthy ")).wait_for(
                     state="visible", timeout=ACTION_TIMEOUT_S * 1000)
                 refresh_lines.nth(refresh_count).wait_for(
                     state="visible", timeout=ACTION_TIMEOUT_S * 1000)
@@ -778,7 +789,7 @@ def _dashboard_actions(
                         state="visible", timeout=ACTION_TIMEOUT_S * 1000)
 
                 cost_window_started = datetime.now(timezone.utc).isoformat()
-                dashboard = _api(port)
+                dashboard = _api(port, timeout_s=READY_TIMEOUT_S)
                 if dashboard is None:
                     raise OperationalError(
                         "dashboard API was unavailable before the cost probe")
