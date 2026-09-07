@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ... import deploy, preflight
 from .. import identity
+from . import install_generation
 from ...runtime.hosts import system as hostruntime
 from ...runtime.hosts.processes import within
 
@@ -122,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Classified version {args.version} as {args.status}")
         elif args.command == "activate":
             selected = deploy.generation.load(args.version, root=root)
-            deploy.generation.activate(selected, root=root)
+            install_generation.activate_generation(selected, root=root)
             print(f"Activated version {selected.name}")
         elif args.command == "remove":
             deploy.generation.remove(
