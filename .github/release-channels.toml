@@ -10,26 +10,29 @@ name = "bake"
 branch = "bake/v6.9.0-local"
 version = "6.9.0"
 promotes_to = "release"
-deployed_version = "6.9.0.dev0+g999e197b"
-deployed_commit = "999e197b6c2bcc3e93ba37a4fb0ccfe93180a1df"
+deployed_version = "6.9.0.dev0+gd0e9b36c"
+deployed_commit = "d0e9b36c3b5c1c3e207538f5f7fdee09a2622ba1"
 validated_on = "2026-09-07"
 
 [bake.promotion]
-decision = "continue-bake"
+decision = "approved"
+commit = "d0e9b36c3b5c1c3e207538f5f7fdee09a2622ba1"
+decided_on = "2026-09-07"
 
 [bake.issues]
 delivered = [374, 424, 446, 447, 455, 461, 463, 468, 473]
-partial = []
-deferred = [105, 388, 434]
-promotion_decision = [474, 477]
+partial = [474]
+deferred = [105, 388, 434, 477, 478]
+promotion_decision = []
 
 [bake.recommendations]
-overall = "Finish the remaining Claude isolation acceptance and resolve the intermittent Windows skill-refresh failure, or obtain explicit approval for each remaining limitation. The current runtime deployment and Windows generation convergence are verified. Then obtain promotion approval for the exact tested bake commit before preparing the official candidate."
+overall = "The developer approved the tested 6.9 bake for promotion, accepting the documented Claude isolation edge cases and intermittent skill-refresh recovery. Move the approved bake into main through the promotion pull request, then prepare and validate the official candidate. Keep the 6.10 accounting and deterministic-bypass work separate."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
 "463" = "Completed in bake: a regression proves that earlier Run completions cannot satisfy a new action, and the installed commit-qualified artifact passed the full packaged normal, all-repositories, and development sequence."
 "473" = "Completed in bake: all ten installed subscription tasks use the selected generation, the started watcher reports alive, and an installed doctor repair pass preserved the same watcher process identities after launcher-child normalization."
-"474" = "Native subscription plan, write, schema, stdio MCP, project HTTP MCP, and authenticated pipeline checks passed; an installed workload completed normally and its schedule was restored. Dispatch and doctor now enforce the supported CLI minimum. Plugin metadata and hook activation have an executing positive control, but IDE discovery isolation still lacks conclusive live coverage. Managed-policy conflicts require administrator resolution, not bypasses. Finish the remaining acceptance boundary before closing the issue."
-"477" = "Windows skill staging promotion failed twice with access denied after generation selection. Rollback preserved the previous payload; a later refresh and the supported deployment command succeeded with a receipt. The cause remains unproven, so retry success is recovery, not a fix. Establish the failure mode and add executing coverage, or obtain explicit release-risk acceptance."
-testing = "The installed commit-qualified bake passed packaged dashboard readiness, a real subscription-backed workload through the enforced version gate, all-repository doctor, and watcher convergence without process replacement during repair. Deployment now has a success receipt after skill-refresh recovery. Exact-bake promotion approval, native provider conformance on the official candidate, and receipt-bound installed candidate acceptance remain required before publication."
+"474" = "Closed with developer-approved acceptance of the confirmed subscription and isolation fix. Native plan, write, schema, stdio and HTTP MCP, authenticated pipeline, version enforcement, and ambient instruction/plugin/hook controls passed. IDE discovery lacks a conclusive positive control and organization-managed policy enforcement remains untested; reopen on observed activation, policy violations, or regression. No managed-policy bypass or cross-platform installed-Claude guarantee is claimed."
+"477" = "Closed at developer direction as intermittent with no identified root cause. Rollback preserved the previous payload; subsequent refresh and supported deployment succeeded with receipts. Recovery is not a code fix. The developer accepted this release risk; reopen on recurrence."
+"478" = "The complete timing/accounting, log summaries, deterministic bypass, and downstream confirmed-delta sequence belongs to 6.10. Do not add it to the 6.9 candidate or replace its acceptance runtime with the 6.10 bake."
+testing = "The exact installed bake passed packaged dashboard readiness, a real subscription-backed workload through the enforced version gate, all-repository doctor, watcher convergence, and supported deployment with a success receipt. Candidate preflight passed after the authorized managed-dashboard shutdown. Native provider conformance on the official candidate and receipt-bound preparation and installed acceptance remain required before publication."
