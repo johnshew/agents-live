@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.1 - 2026-09-07
+
 - fix: safely restart started agents when activating a runtime version. (#491)
   Activation refuses in-flight work, pauses and retires owned watchers, switches
   the selected runtime, and restores started intent across registered repositories.
