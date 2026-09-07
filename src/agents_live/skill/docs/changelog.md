@@ -11,17 +11,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: validate release receipts from linked worktrees. (#480)
+  Preparation, acceptance, and resumable checkpoints identify preserved
+  artifacts by canonical absolute paths, including Git storage outside the
+  checkout. Manifest and publication consumers retain exact file hashes, and
+  missing artifacts report their location instead of raising a path error.
+  Older relative-path receipts remain stale and require fresh evidence.
 - docs: simplify curl-based install commands.
   The README, packaged guidance, installer bootstrap, and generated release
   notes now use the conventional `curl -fsSL` form.
 
 ## 6.9.0 - 2026-09-07
-
-- fix: accept slow healthy dashboard responses during installed candidate validation.
-  Readiness requests use the remaining startup deadline instead of repeatedly
-  abandoning valid inventory responses after two seconds.
-  Browser acceptance searches the virtualized inventory and uses the current
-  health controls; cost checks also honor their enclosing request deadlines.
 - fix: replace stale Windows scheduled executables during generation convergence. (#473)
   Scheduled agents, maintenance, and watchers compare their effective action
   and working directory with the selected generation instead of retaining
