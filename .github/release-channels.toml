@@ -10,12 +10,14 @@ name = "bake"
 branch = "bake/v6.9.1-local"
 version = "6.9.1"
 promotes_to = "release"
-deployed_version = "6.9.0.dev0+gd0e9b36c"
-deployed_commit = "d0e9b36c3b5c1c3e207538f5f7fdee09a2622ba1"
+deployed_version = "6.9.1.dev0+gec2cb954"
+deployed_commit = "ec2cb954634ae2a193dc53a4e5151cda10abdda9"
 validated_on = "2026-09-07"
 
 [bake.promotion]
-decision = "continue-bake"
+decision = "approved"
+commit = "ec2cb954634ae2a193dc53a4e5151cda10abdda9"
+decided_on = "2026-09-07"
 
 [bake.issues]
 delivered = [480, 481, 485, 488, 490, 491, 494, 495]
@@ -30,4 +32,4 @@ overall = "Integrate and validate the completed fixes for 6.9.1. The developer r
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
 "478" = "Keep accounting, usage summaries, and deterministic model bypass in the planned 6.10 feature release; they are not prerequisites for the requested 6.9.1 fixes."
 "489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
-testing = "Deployment fields retain the last tested bake baseline, not proof of 6.9.1 acceptance. Validate the integrated source and exact packaged artifact, then require installed candidate replacement, watcher restoration, dashboard operations, and provider cost evidence before publication. Verify public PyPI artifacts separately from managed-proxy propagation."
+testing = "The exact recorded 6.9.1 bake passed source gates, packaged dashboard readiness, and supported local deployment postchecks. After promotion, prepare and accept a fresh official candidate, including installed replacement, watcher restoration, dashboard operations, and provider cost evidence. Bake evidence is not official-candidate acceptance. Verify public PyPI artifacts separately from managed-proxy propagation."
