@@ -79,6 +79,9 @@ from agents_live.runtime.hosts import system as hostruntime, task_scheduler
 from agents_live.runtime.hosts import windows_watch as winwatch
 from agents_live.runtime.hosts import filesystem as watchsource
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tests.host_safety import allow_native_runtime, native_guard
+
 
 # The repository registry lives under the data home, not the state home, so
 # isolating only the latter leaves a test writing the developer's own registry.
@@ -99,6 +102,9 @@ _PREVIOUS_INSTALL_ROOT: str | None = None
 
 
 def setUpModule() -> None:
+    guard = native_guard()
+    guard.__enter__()
+    unittest.addModuleCleanup(guard.__exit__, None, None, None)
     global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
     _INSTALL_ROOT = tempfile.TemporaryDirectory()
@@ -7155,11 +7161,15 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         self.assertIn("irregular hour list", diag_irreg["fallback_reason"])
 
     @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
+    @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "native tests require explicit opt-in")
+    @allow_native_runtime()
     def test_installed_windows_task_scheduler_round_trip(self) -> None:
         """Installed Task Scheduler XML preserves Repetition in CalendarTrigger and matches signature (#488)."""
         if task_scheduler.probe() is not None:
             self.skipTest("Task Scheduler is not accessible on this host")
-        name = "test_roundtrip_488"
+        import uuid
+
+        name = f"test_roundtrip_{uuid.uuid4().hex}"
         path = f"{task_scheduler.TASK_FOLDER}\\{name}"
         document = task_scheduler.build_task_xml(
             command=r"C:\Windows\System32\cmd.exe",

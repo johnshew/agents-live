@@ -65,6 +65,9 @@ from agents_live.state import registry as repos
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(REPOSITORY))
+from tests.host_safety import isolated_host, native_guard
+
 _ISOLATED_HOMES = {
     "XDG_STATE_HOME": "state",
     "XDG_DATA_HOME": "data",
@@ -83,6 +86,9 @@ _PREVIOUS_CONFIG_HOME: str | None = None
 
 
 def setUpModule() -> None:
+    guard = native_guard()
+    guard.__enter__()
+    unittest.addModuleCleanup(guard.__exit__, None, None, None)
     global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT, _PREVIOUS_CONFIG_HOME
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
     _PREVIOUS_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME")
@@ -2575,10 +2581,7 @@ class TestActivationHandoff(TempRepository):
             deploy.layout.ENV_INSTALL_ROOT: str(self.install)})
         patch.start()
         self.addCleanup(patch.stop)
-        self.host = MemoryHost()
-        self.previous_host = runtime.current()
-        runtime.configure(self.host)
-        self.addCleanup(runtime.configure, self.previous_host)
+        _root, self.host = self.enterContext(isolated_host(self.root))
         patch = mock.patch.object(install_generation, "WATCHER_GRACE_SECONDS", 0)
         patch.start()
         self.addCleanup(patch.stop)
