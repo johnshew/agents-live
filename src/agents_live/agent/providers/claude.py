@@ -17,7 +17,7 @@ from ..values import (
     TranscriptSource,
     TranscriptTurn,
 )
-from .base import ProviderBase
+from .base import ProviderBase, usage_value
 
 PLAN_TOOLS = frozenset({"Read", "Glob", "Grep"})
 PROJECT_MCP_CONFIG = "AGENTS_LIVE_CLAUDE_PROJECT_MCP"
@@ -166,12 +166,11 @@ class ClaudeProvider(ProviderBase):
         text = payload.get("result")
         usage = payload.get("usage")
         usage_values = (
-            tuple(sorted((str(key), str(value)) for key, value in usage.items()))
+            tuple(sorted((str(key), usage_value(value)) for key, value in usage.items()))
             if isinstance(usage, dict) else ()
         )
-        total_cost = payload.get("total_cost_usd")
-        if isinstance(total_cost, (int, float)):
-            usage_values += (("list_cost_usd", str(total_cost)),)
+        if "total_cost_usd" in payload:
+            usage_values += (("list_cost_usd", usage_value(payload["total_cost_usd"])),)
         return Completion(
             text if isinstance(text, str) else raw.stdout.strip(),
             structured=payload.get("structured_output"),

@@ -21,7 +21,7 @@ from ..values import (
     TranscriptSource,
     TranscriptTurn,
 )
-from .base import ProviderBase
+from .base import ProviderBase, usage_value
 
 OUTPUT_SCHEMA = "AGENTS_LIVE_CODEX_OUTPUT_SCHEMA"
 
@@ -152,10 +152,10 @@ class CodexProvider(ProviderBase):
 
 def _events(
     stdout: str,
-) -> tuple[tuple[TranscriptTurn, ...], str | None, tuple[tuple[str, str], ...]]:
+) -> tuple[tuple[TranscriptTurn, ...], str | None, tuple[tuple[str, str | None], ...]]:
     turns: list[TranscriptTurn] = []
     thread_id = None
-    usage: dict[str, str] = {}
+    usage: dict[str, str | None] = {}
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
@@ -199,7 +199,7 @@ def _events(
             values = event.get("usage")
             if isinstance(values, dict):
                 usage.update({
-                    str(key): str(value) for key, value in values.items()
+                    str(key): usage_value(value) for key, value in values.items()
                     if not isinstance(value, (dict, list))
                 })
     return tuple(turns), thread_id, tuple(sorted(usage.items()))

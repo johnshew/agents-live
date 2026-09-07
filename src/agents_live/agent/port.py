@@ -277,6 +277,31 @@ def interpret(
     raw: RawOutput,
     signals: StepSignals = StepSignals(),
 ) -> StepResult:
+    from dataclasses import replace
+
+    completion = None
+    if step is Step.AGENT:
+        provider = get_provider(launch.provider or _config(spec).selector.provider)
+        try:
+            completion = provider.parse(raw)
+        except (ValueError, TypeError):
+            if not raw.timed_out and raw.returncode == 0:
+                raise
+    result = _interpret(spec, step, launch, raw, signals, completion)
+    if completion is not None:
+        result = replace(
+            result, usage=completion.usage, transcript=completion.transcript)
+    return result
+
+
+def _interpret(
+    spec: AgentSpec,
+    step: Step,
+    launch: Launch,
+    raw: RawOutput,
+    signals: StepSignals,
+    completion: Completion | None,
+) -> StepResult:
     if raw.timed_out:
         return StepResult(
             step, False, retryable=step is Step.AGENT,
@@ -310,8 +335,7 @@ def interpret(
             if skip and isinstance(note, str) and note:
                 message = note
         return StepResult(step, True, skip=skip, text=text, message=message)
-    provider = get_provider(launch.provider or _config(spec).selector.provider)
-    completion = provider.parse(raw)
+    assert completion is not None
     if not completion.text and completion.structured is None:
         return StepResult(
             step, False, retryable=True, category="empty_output",

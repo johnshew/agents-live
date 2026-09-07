@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: retain run timings and provider usage across retries and failures. (#502)
+  Existing log queries expose monotonic run, phase, and attempt durations.
+  Failed calls, rejected output, postprocessor failures, and cleanup failures
+  retain available usage. Complete retry counters are counted once; incomplete
+  totals remain unknown with per-attempt evidence preserved. Copilot cumulative
+  token checkpoints retain disjoint counters, and invalid native numbers stay
+  unknown. Version-probe rejection no longer reports a model invocation.
+
 ## 6.9.1 - 2026-09-07
 
 - fix: safely restart started agents when activating a runtime version. (#491)

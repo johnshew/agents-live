@@ -9,6 +9,7 @@ or server object is reachable from a provider.
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 
 from ..values import (
     Completion,
@@ -110,6 +111,16 @@ class ProviderBase:
             structured=structured,
             prompt=source.prompt,
         )
+
+
+def usage_value(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return str(value) if number.is_finite() and number >= 0 else None
 
 
 def mcp_transport(definition: object) -> str:

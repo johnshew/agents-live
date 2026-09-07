@@ -254,6 +254,7 @@ def _json_completion(stdout: str) -> Completion | None:
     completion_messages: list[str] = []
     task_summary = ""
     nano_aiu: Decimal | None = None
+    token_usage: dict[str, str] = {}
     recognized = False
     for line in stdout.splitlines():
         try:
@@ -287,7 +288,7 @@ def _json_completion(stdout: str) -> Completion | None:
             summary = data.get("summary")
             if isinstance(summary, str) and summary.strip():
                 task_summary = summary.strip()
-        elif event_type == "session.usage_checkpoint" and isinstance(data, dict):
+        elif event_type in {"session.usage_checkpoint", "session.shutdown"} and isinstance(data, dict):
             recognized = True
             value = data.get("totalNanoAiu")
             if not isinstance(value, bool) and isinstance(value, (int, float, str)):
@@ -298,12 +299,24 @@ def _json_completion(stdout: str) -> Completion | None:
                 else:
                     if candidate.is_finite() and candidate >= 0:
                         nano_aiu = candidate
+            details = data.get("tokenDetails")
+            if isinstance(details, dict):
+                for native, normalized in (
+                    ("input", "input_tokens"),
+                    ("cache_read", "cache_read_input_tokens"),
+                    ("cache_write", "cache_creation_input_tokens"),
+                    ("output", "output_tokens"),
+                ):
+                    item = details.get(native)
+                    count = item.get("tokenCount") if isinstance(item, dict) else None
+                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                        token_usage[normalized] = str(count)
     if not recognized:
         return None
-    usage: tuple[tuple[str, str | None], ...] = ()
+    usage: tuple[tuple[str, str | None], ...] = tuple(sorted(token_usage.items()))
     if nano_aiu is not None:
         credits = nano_aiu / _NANO_AIU_PER_CREDIT
-        usage = (
+        usage += (
             ("ai_credits", str(credits)),
             ("list_cost_usd", str(credits * Decimal("0.01"))),
         )

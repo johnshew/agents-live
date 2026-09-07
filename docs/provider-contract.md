@@ -95,6 +95,15 @@ category, and `transcript` maps raw output to a `ProviderTranscript` of
 turns and tool calls. Doctor and transcript rendering consume the
 normalized form, so neither branches on a provider name.
 
+`parse` retains available native telemetry even when a child times out or
+exits nonzero. The agent port keeps failure classification and output
+validation independent of that telemetry: parsing usage never makes a failed
+attempt successful. Partial or malformed output may have no usage. Numeric
+unknowns are absent or null, never fabricated zero, and cumulative native
+checkpoints must not be summed. Dispatch combines like counters across
+separate attempts only when each attempt reports that counter, retaining
+partial evidence separately on the terminal event.
+
 ## Providers stay pure
 
 **Decision.** A provider returns descriptions. Dispatch performs the

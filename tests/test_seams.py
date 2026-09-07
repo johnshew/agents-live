@@ -4268,6 +4268,157 @@ class TestTranscriptAcceptance(TempRepository):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_phase_accounting_survives_skips_and_late_failures(self) -> None:
+        original_resource = dispatch_module._resource
+        for scenario in ("success", "skip", "post-crash", "post-timeout", "cleanup"):
+            with self.subTest(scenario=scenario):
+                elapsed = 100.0
+                directory = self.skill(scenario, [
+                    'agents-live.selector: "copilot"',
+                    'agents-live.pre-processor: "pre.py"',
+                    'agents-live.post-processor: "post.py"',
+                ])
+                for filename in ("pre.py", "post.py"):
+                    (directory / filename).write_text("pass\n", encoding="utf-8")
+
+                @contextlib.contextmanager
+                def resource(*args, **kwargs):
+                    nonlocal elapsed
+                    with original_resource(*args, **kwargs) as value:
+                        yield value
+                    elapsed += 2.0
+                    if scenario == "cleanup":
+                        raise RuntimeError("cleanup failed")
+
+                class TimedRunner(RecordingRunner):
+                    def run_child(inner, *args, **kwargs):
+                        nonlocal elapsed
+                        elapsed += 3.0
+                        return super().run_child(*args, **kwargs)
+
+                stdout = "\n".join(json.dumps(event) for event in [
+                    {"type": "assistant.message", "data": {"content": "{}"}},
+                    {"type": "session.usage_checkpoint", "data": {"totalNanoAiu": 1000000000}},
+                ])
+                runner = TimedRunner([
+                    ChildResult(("pre",), 0, '{"skip":true}' if scenario == "skip" else "ready", ""),
+                    ChildResult(("copilot",), 0, stdout, ""),
+                    ChildResult(("post",), 1 if scenario == "post-crash" else 0,
+                                "done", "", scenario == "post-timeout"),
+                ])
+                with (
+                    mock.patch.object(dispatch_module, "_resource", resource),
+                    mock.patch.object(dispatch_module.time, "monotonic", side_effect=lambda: elapsed),
+                    mock.patch.object(processor_check, "diagnose", return_value=None),
+                ):
+                    result = dispatch(Firing(scenario, str(self.root), "manual"), runner=runner)
+                self.assertEqual(scenario in {"success", "skip"}, result.ok)
+                records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+                terminal = next(record for record in records if record["run_id"] == result.run_id)
+                skipped = scenario == "skip"
+                self.assertEqual(5.0 if skipped else 11.0, terminal["duration_s"])
+                self.assertEqual(3.0, terminal["pre_duration_s"])
+                self.assertEqual(None if skipped else 3.0, terminal["agent_duration_s"])
+                self.assertEqual(None if skipped else 3.0, terminal["post_duration_s"])
+                self.assertEqual(not skipped, terminal["model_called"])
+                self.assertEqual(0 if skipped else 1, terminal["attempt"])
+                self.assertEqual({} if skipped else {
+                    "ai_credits": "1", "list_cost_usd": "0.01",
+                }, dict(terminal["usage"]))
+                if scenario == "cleanup":
+                    self.assertEqual("resource_unavailable", result.category)
+                    self.assertTrue(result.transcript)
+
+    def test_retry_accounting_reaches_public_logs_once(self) -> None:
+        self.skill("retry-usage", ['agents-live.selector: "copilot"'])
+        elapsed = 100.0
+
+        class TimedRunner(RecordingRunner):
+            def run_child(inner, *args, **kwargs):
+                nonlocal elapsed
+                elapsed += 3.0
+                return super().run_child(*args, **kwargs)
+
+        def output(credits):
+            return "\n".join(json.dumps(event) for event in [
+                {"type": "assistant.message", "data": {"content": "done"}},
+                {"type": "session.usage_checkpoint", "data": {
+                    "totalNanoAiu": credits}},
+            ])
+
+        for second_usage, expected in ((2000000000, "0.03"), (None, None)):
+            with self.subTest(second_usage=second_usage):
+                runner = TimedRunner([
+                    ChildResult(("copilot",), 1, output(1000000000), "", True),
+                    ChildResult(("copilot",), 0, output(second_usage), ""),
+                ])
+                with mock.patch.object(
+                    dispatch_module.time, "monotonic", side_effect=lambda: elapsed,
+                ):
+                    result = dispatch(
+                        Firing("retry-usage", str(self.root), "manual"),
+                        runner=runner)
+                self.assertTrue(result.ok, result)
+                records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+                records = [record for record in records if record["run_id"] == result.run_id]
+                self.assertEqual(1, len(records))
+                terminal = records[0]
+                self.assertEqual(6.0, terminal["duration_s"])
+                self.assertEqual(6.0, terminal["agent_duration_s"])
+                self.assertIsNone(terminal["pre_duration_s"])
+                self.assertIsNone(terminal["post_duration_s"])
+                self.assertEqual(2, terminal["attempt"])
+                self.assertTrue(terminal["model_called"])
+                self.assertEqual(expected, dict(result.usage)["list_cost_usd"])
+                self.assertEqual(dict(result.usage), dict(terminal["usage"]))
+                attempts = terminal["attempts"]
+                self.assertEqual([3.0, 3.0], [item["duration_s"] for item in attempts])
+                self.assertEqual(["failed", "success"], [item["status"] for item in attempts])
+                self.assertEqual("0.01", dict(attempts[0]["usage"])["list_cost_usd"])
+
+    def test_non_model_paths_report_timing_without_model_calls(self) -> None:
+        self.skill("blocked-probe", ['agents-live.selector: "claude"'])
+        for name, origin, runner in (
+            ("blocked-probe", "manual", RecordingRunner([
+                ChildResult(("claude",), 0, "1.0.0", "")])),
+            ("missing", "manual", RecordingRunner([])),
+            ("blocked-probe", "boot", RecordingRunner([])),
+        ):
+            with self.subTest(name=name, origin=origin):
+                result = dispatch(Firing(name, str(self.root), origin), runner=runner)
+                records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+                terminal = next(record for record in records if record["run_id"] == result.run_id)
+                self.assertFalse(terminal["model_called"])
+                self.assertEqual("no_model_call", terminal["transcript_state"])
+                self.assertEqual(0, terminal["attempt"])
+                self.assertGreaterEqual(terminal["duration_s"], 0)
+
+    def test_failed_provider_output_keeps_reported_usage(self) -> None:
+        self.skill("failed-usage", [
+            'agents-live.selector: "copilot"',
+            'agents-live.output-schema: \'{"type": "object"}\'',
+        ])
+        spec = agent.load("failed-usage", root=self.root)
+        stdout = "\n".join(json.dumps(event) for event in [
+            {"type": "assistant.message", "data": {
+                "phase": "final_answer", "content": "not JSON"}},
+            {"type": "session.usage_checkpoint", "data": {
+                "totalNanoAiu": 1250000000}},
+        ])
+        for returncode, timed_out, category in (
+            (1, False, "cli_crash"),
+            (1, True, "timeout"),
+            (0, False, "output_parse_error"),
+        ):
+            with self.subTest(category=category):
+                result = agent.interpret(
+                    spec, agent.Step.AGENT, agent.Launch(("copilot",)),
+                    agent.RawOutput(returncode, stdout, "", timed_out))
+                self.assertFalse(result.ok)
+                self.assertEqual(category, result.category)
+                self.assertEqual("1.25", dict(result.usage)["ai_credits"])
+                self.assertEqual("0.0125", dict(result.usage)["list_cost_usd"])
+
     def test_model_run_records_when_transcripts_are_disabled(self) -> None:
         self.skill("no-transcript", [
             'agents-live.selector: "fake"',

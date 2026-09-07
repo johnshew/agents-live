@@ -242,9 +242,15 @@ def build_view(
         "ts", "agent_name", "phase", "status", "trigger", "log_schema",
         "has_transcript",
     }
+    accounting_types = {
+        "duration_s": "DOUBLE", "pre_duration_s": "DOUBLE",
+        "agent_duration_s": "DOUBLE", "post_duration_s": "DOUBLE",
+        "attempt": "INTEGER", "model_called": "BOOLEAN",
+        "transcript_state": "VARCHAR", "attempts": "VARCHAR",
+    }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:
-        if name in canonical:
+        if name in canonical or name in accounting_types:
             continue
         if name in NORMALIZED_COLUMN_TYPES:
             target_type = NORMALIZED_COLUMN_TYPES[name]
@@ -265,6 +271,17 @@ def build_view(
             f"COALESCE({', '.join(available)})")
 
     timestamp = source("ts", "timestamp")
+    for name, dtype in accounting_types.items():
+        attribute = (
+            "(SELECT json_extract_string(item.value, '$[1]') "
+            "FROM json_each(to_json(attributes)) AS item "
+            f"WHERE json_extract_string(item.value, '$[0]') = '{name}' LIMIT 1)"
+            if "attributes" in raw_names else "NULL"
+        )
+        projections.append(
+            f'COALESCE(TRY_CAST({source(name)} AS {dtype}), '
+            f'TRY_CAST({attribute} AS {dtype})) AS "{name}"'
+        )
     projections.extend((
         "TRY_CAST(regexp_replace("
         f"{timestamp}, ' UTCZ$', 'Z') AS TIMESTAMP WITH TIME ZONE) AS \"ts\"",
@@ -306,6 +323,7 @@ def build_view(
     # naming it raises a Binder Error. Project a typed NULL for each
     # standard column not already present so queries always bind.
     present = set(raw_names)
+    present.update(accounting_types)
     present.update(("_files", "has_transcript"))  # derived above
     STANDARD_COLUMNS = (
         "ts", "run_id", "agent_name", "phase", "status", "trigger", "level",
