@@ -493,30 +493,97 @@ def _require_tools() -> None:
         raise ReleaseError(f"missing required commands: {', '.join(missing)}")
 
 
-def _check_prepare_state(target: str, *, fetch: bool) -> None:
+def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> None:
     if _git("status", "--porcelain"):
         raise ReleaseError("working tree must be clean")
-    if _git("branch", "--show-current") != "main":
+    branch = _git("branch", "--show-current")
+    candidate_branch = _candidate_branch(target)
+    tag = f"v{target}"
+
+    if branch.startswith("release/v") and branch.endswith("-candidate"):
+        cand_ver = branch.removeprefix("release/v").removesuffix("-candidate")
+        cand_tag = f"v{cand_ver}"
+        if not resume or cand_ver != target:
+            raise ReleaseError(
+                f"currently on candidate branch {branch}. "
+                f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
+                f"To abandon this candidate and start over: git switch main; "
+                f"git branch -D {branch}; git tag -d {cand_tag} (if tagged)"
+            )
+
+    if resume:
+        if branch != candidate_branch:
+            local_branch = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{candidate_branch}"],
+                cwd=ROOT,
+            )
+            if local_branch.returncode != 0:
+                raise ReleaseError(
+                    f"candidate branch {candidate_branch} does not exist to resume; "
+                    "run --prepare without --resume to create a new candidate"
+                )
+            _run(["git", "switch", candidate_branch])
+            branch = candidate_branch
+        if fetch:
+            _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
+        head = _git("rev-parse", "HEAD")
+        origin = _git("rev-parse", "origin/main")
+        if _git("rev-list", "--count", "origin/main..HEAD") != "1":
+            raise ReleaseError(
+                f"candidate branch {candidate_branch} must be exactly one commit ahead of origin/main"
+            )
+        if _git("merge-base", "HEAD", "origin/main") != origin:
+            raise ReleaseError(
+                f"candidate branch {candidate_branch} must be based directly on origin/main"
+            )
+        expected_msg = f"chore(build): bump version to {tag}"
+        commit_msg = _git("log", "-1", "--format=%s")
+        if commit_msg != expected_msg:
+            raise ReleaseError(
+                f"candidate commit message must be '{expected_msg}', got '{commit_msg}'"
+            )
+        local_tag = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
+            cwd=ROOT,
+        )
+        if local_tag.returncode == 0:
+            tag_commit = _git("rev-parse", f"{tag}^{{commit}}")
+            if tag_commit != head:
+                raise ReleaseError(
+                    f"tag {tag} already exists but points to {tag_commit[:8]}, "
+                    f"not candidate commit {head[:8]}"
+                )
+        return
+
+    if branch != "main":
         raise ReleaseError("releases must run from main")
     if fetch:
         _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
     if _git("rev-parse", "HEAD") != _git("rev-parse", "origin/main"):
         raise ReleaseError("main must match origin/main before release")
-    branch = _candidate_branch(target)
+
     local_branch = subprocess.run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{candidate_branch}"],
         cwd=ROOT,
     )
     if local_branch.returncode == 0:
         raise ReleaseError(
-            f"candidate branch {branch} already exists; finish or delete it")
-    tag = f"v{target}"
+            f"candidate branch {candidate_branch} already exists. "
+            f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
+            f"To discard it and start over: git branch -D {candidate_branch} "
+            f"(and git tag -d {tag} if created)"
+        )
     local_tag = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
         cwd=ROOT,
     )
     if local_tag.returncode == 0:
-        raise ReleaseError(f"tag {tag} already exists")
+        raise ReleaseError(
+            f"tag {tag} already exists. "
+            f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
+            f"To discard it and start over: git tag -d {tag} "
+            f"(and git branch -D {candidate_branch} if created)"
+        )
 
 
 def _check_publish_state(version: str) -> bool:
@@ -568,8 +635,8 @@ def _candidate_wheel(version: str) -> Path:
     wheel = ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl"
     if not wheel.is_file():
         raise ReleaseError(
-            f"prepared wheel is missing: {wheel.relative_to(ROOT)}; "
-            "rerun --prepare"
+            f"prepared wheel is missing: {wheel.resolve()}; "
+            "rerun with --prepare --resume"
         )
     return wheel
 
@@ -586,7 +653,7 @@ def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
     sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
     if not sdist.is_file():
         raise ReleaseError(
-            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+            f"prepared source distribution is missing: {sdist.resolve()}")
     destination = _artifact_store_dir(version)
     if destination.exists():
         shutil.rmtree(destination)
@@ -654,15 +721,15 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     sdist = wheel.parent / f"agents_live-{version}.tar.gz"
     if not sdist.is_file():
         raise ReleaseError(
-            f"prepared source distribution is missing: {sdist.relative_to(ROOT)}")
+            f"prepared source distribution is missing: {sdist.resolve()}")
     installers = []
     for name in BOOTSTRAP_ASSETS:
         path = wheel.parent / name
         if not path.is_file():
             raise ReleaseError(
-                f"prepared bootstrap asset is missing: {path.relative_to(ROOT)}")
+                f"prepared bootstrap asset is missing: {path.resolve()}")
         installers.append({
-            "path": path.relative_to(ROOT).as_posix(),
+            "path": path.resolve().as_posix(),
             "sha256": _sha256(path),
         })
     return {
@@ -671,9 +738,9 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
         "base_commit": _git("rev-parse", "HEAD^"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
-        "sdist": sdist.relative_to(ROOT).as_posix(),
+        "sdist": sdist.resolve().as_posix(),
         "sdist_sha256": _sha256(sdist),
         "installers": installers,
     }
@@ -699,11 +766,19 @@ def _write_preparation(version: str, wheel: Path) -> Path:
 
 def _check_preparation(version: str) -> dict:
     receipt_path = _preparation_path(version)
+    candidate_branch = _candidate_branch(version)
+    tag = f"v{version}"
+    recovery_guidance = (
+        f"To resume preparation: uv run --script tools/release.py --prepare --resume --yes. "
+        f"To abandon this candidate and start over: git switch main; "
+        f"git branch -D {candidate_branch}; git tag -d {tag} (if tagged)."
+    )
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ReleaseError(
-            "prepared release has no gate receipt; rerun --prepare") from exc
+            f"prepared release {version} has no gate receipt. {recovery_guidance}"
+        ) from exc
     wheel = _candidate_wheel(version)
     expected = {
         "schema": PREPARATION_SCHEMA,
@@ -717,8 +792,8 @@ def _check_preparation(version: str) -> dict:
     ]
     if mismatched:
         raise ReleaseError(
-            "preparation receipt is stale for: " + ", ".join(mismatched)
-            + "; rerun --prepare")
+            f"preparation receipt is stale for: {', '.join(mismatched)}. {recovery_guidance}"
+        )
     return receipt
 
 
@@ -909,7 +984,7 @@ def _write_candidate_acceptance(
         "tag": f"v{version}",
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
         "repo": str(repo),
         **_evidence_identity(),
@@ -947,7 +1022,7 @@ def _check_candidate_acceptance(version: str) -> dict:
         "tag": f"v{version}",
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "commit": _git("rev-parse", "HEAD"),
-        "wheel": wheel.relative_to(ROOT).as_posix(),
+        "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
         **_evidence_identity(),
     }
@@ -1151,77 +1226,115 @@ def preview(bump: str) -> None:
     _print_plan(current, target, minimum_bump)
 
 
-def prepare(bump: str) -> None:
+def prepare(bump: str, *, resume: bool = False) -> None:
     _require_tools()
-    current = _current_version()
-    target = _next_version(current, bump)
-    minimum_bump = _check_bump(bump)
+    branch = _git("branch", "--show-current")
+    if resume and branch.startswith("release/v") and branch.endswith("-candidate"):
+        target = branch.removeprefix("release/v").removesuffix("-candidate")
+        current = target
+        minimum_bump = bump
+    else:
+        current = _current_version()
+        target = _next_version(current, bump)
+        minimum_bump = _check_bump(bump)
     _print_plan(current, target, minimum_bump)
-    _check_prepare_state(target, fetch=True)
-    _acceptance_path(target).unlink(missing_ok=True)
-    _preparation_path(target).unlink(missing_ok=True)
-    _checkpoint_path(target).unlink(missing_ok=True)
-    shutil.rmtree(_artifact_store_dir(target), ignore_errors=True)
-    original = {path: path.read_bytes() for path in RELEASE_FILES}
-    original_head = _git("rev-parse", "HEAD")
+    _check_prepare_state(target, fetch=True, resume=resume)
     candidate_branch = _candidate_branch(target)
-    release_head: str | None = None
-    committed = False
-    try:
-        _run(["git", "switch", "-c", candidate_branch])
-        _update_versions(current, target)
-        _check_release_diff()
-        validated = {path: path.read_bytes() for path in RELEASE_FILES}
-        for command in _gate_commands():
-            _run(command)
-        # The gates are long and the checkout is shared, so what was
-        # validated above is not necessarily what is about to be staged.
-        _check_release_diff()
-        release_paths = [str(path.relative_to(ROOT)) for path in RELEASE_FILES]
-        _run(["git", "add", *release_paths])
-        _check_release_index()
-        message = f"chore(build): bump version to v{target}"
-        _run(["git", "commit", "-m", message])
-        release_head = _git("rev-parse", "HEAD")
-        committed = True
-        _check_release_commit(validated)
-    except BaseException:
-        committed = _git("rev-parse", "HEAD") != original_head
-        if (
-            committed
-            and release_head is not None
-            and _git("rev-parse", "HEAD") == release_head
-            and _git("rev-parse", "HEAD^") == original_head
-        ):
-            subprocess.run(
-                ["git", "reset", "--soft", original_head],
-                cwd=ROOT,
-                check=False,
-            )
-            committed = False
-        if not committed:
-            subprocess.run(
-                ["git", "reset", "--quiet", "HEAD", "--",
-                 *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]],
-                cwd=ROOT,
-                check=False,
-            )
-            for path, content in original.items():
-                path.write_bytes(content)
-            if _git("branch", "--show-current") == candidate_branch:
-                subprocess.run(
-                    ["git", "switch", "main"], cwd=ROOT, check=False)
-                subprocess.run(
-                    ["git", "branch", "-D", candidate_branch],
-                    cwd=ROOT, check=False)
-            print("Restored release files after the failed preparation.", file=sys.stderr)
-        raise
-
     tag = f"v{target}"
-    _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
-    wheel = _preserve_release_artifacts(
-        target, ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl")
-    receipt = _write_preparation(target, wheel)
+
+    if not resume:
+        _acceptance_path(target).unlink(missing_ok=True)
+        _preparation_path(target).unlink(missing_ok=True)
+        _checkpoint_path(target).unlink(missing_ok=True)
+        shutil.rmtree(_artifact_store_dir(target), ignore_errors=True)
+        original = {path: path.read_bytes() for path in RELEASE_FILES}
+        original_head = _git("rev-parse", "HEAD")
+        release_head: str | None = None
+        committed = False
+        try:
+            _run(["git", "switch", "-c", candidate_branch])
+            _update_versions(current, target)
+            _check_release_diff()
+            validated = {path: path.read_bytes() for path in RELEASE_FILES}
+            for command in _gate_commands():
+                _run(command)
+            # The gates are long and the checkout is shared, so what was
+            # validated above is not necessarily what is about to be staged.
+            _check_release_diff()
+            release_paths = [str(path.relative_to(ROOT)) for path in RELEASE_FILES]
+            _run(["git", "add", *release_paths])
+            _check_release_index()
+            message = f"chore(build): bump version to v{target}"
+            _run(["git", "commit", "-m", message])
+            release_head = _git("rev-parse", "HEAD")
+            committed = True
+            _check_release_commit(validated)
+        except BaseException:
+            committed = _git("rev-parse", "HEAD") != original_head
+            if (
+                committed
+                and release_head is not None
+                and _git("rev-parse", "HEAD") == release_head
+                and _git("rev-parse", "HEAD^") == original_head
+            ):
+                subprocess.run(
+                    ["git", "reset", "--soft", original_head],
+                    cwd=ROOT,
+                    check=False,
+                )
+                committed = False
+            if not committed:
+                subprocess.run(
+                    ["git", "reset", "--quiet", "HEAD", "--",
+                     *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]],
+                    cwd=ROOT,
+                    check=False,
+                )
+                for path, content in original.items():
+                    path.write_bytes(content)
+                if _git("branch", "--show-current") == candidate_branch:
+                    subprocess.run(
+                        ["git", "switch", "main"], cwd=ROOT, check=False)
+                    subprocess.run(
+                        ["git", "branch", "-D", candidate_branch],
+                        cwd=ROOT, check=False)
+                print("Restored release files after the failed preparation.", file=sys.stderr)
+            raise
+    else:
+        validated = {path: path.read_bytes() for path in RELEASE_FILES}
+        _check_release_commit(validated)
+        wheel_file = ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl"
+        sdist_file = ROOT / "dist" / f"agents_live-{target}.tar.gz"
+        if not wheel_file.is_file() or not sdist_file.is_file():
+            _run(["uv", "build"])
+
+    release_head = _git("rev-parse", "HEAD")
+    try:
+        tag_exists = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
+            cwd=ROOT,
+        ).returncode == 0
+        if not tag_exists:
+            _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
+        else:
+            tag_commit = _git("rev-parse", f"{tag}^{{commit}}")
+            if tag_commit != release_head:
+                raise ReleaseError(
+                    f"tag {tag} already exists but points to {tag_commit[:8]}, "
+                    f"not candidate commit {release_head[:8]}"
+                )
+        wheel = _preserve_release_artifacts(
+            target, ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl")
+        receipt = _write_preparation(target, wheel)
+    except Exception as exc:
+        raise ReleaseError(
+            f"post-commit preparation failed for {tag} ({exc}). "
+            f"Candidate commit {release_head[:8]} on branch {candidate_branch} and any "
+            "preserved artifacts have been retained for recovery. "
+            f"To resume preparation: uv run --script tools/release.py --prepare --bump {bump} --resume --yes. "
+            f"To abandon this candidate and start over: git switch main; "
+            f"git branch -D {candidate_branch}; git tag -d {tag} (if tagged)."
+        ) from exc
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
     print(f"  preparation receipt: {receipt}")
     print(f"  agents-live upgrade --from {wheel} --candidate")
@@ -1572,7 +1685,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume candidate acceptance after a verified upgrade checkpoint",
+        help="Resume candidate preparation after a post-commit failure, or acceptance after a verified upgrade checkpoint",
     )
     parser.add_argument(
         "--gates",
@@ -1611,13 +1724,13 @@ def main(argv: list[str] | None = None) -> int:
             "candidate preflight and acceptance require --repo, --agent, "
             "and --cost-agent")
     if (args.repo is not None or args.agent is not None
-            or args.cost_agent is not None or args.resume) \
+            or args.cost_agent is not None) \
             and not (args.accept_candidate or args.candidate_preflight):
         parser.error(
-            "--repo, --agent, --cost-agent, and --resume apply only to "
+            "--repo, --agent, and --cost-agent apply only to "
             "candidate preflight or acceptance")
-    if args.resume and not args.accept_candidate:
-        parser.error("--resume applies only to --accept-candidate")
+    if args.resume and not (args.accept_candidate or args.prepare):
+        parser.error("--resume applies only to --accept-candidate and --prepare")
     if (args.publish or args.accept_candidate or args.candidate_preflight
             or args.gates or args.notes) \
             and args.bump != "patch":
@@ -1627,7 +1740,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:
-            prepare(args.bump)
+            prepare(args.bump, resume=args.resume)
         elif args.candidate_preflight:
             assert args.repo is not None
             assert args.agent is not None

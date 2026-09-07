@@ -4740,6 +4740,230 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     self.assertEqual(name.encode(), (store / name).read_bytes())
                 self.assertEqual(preserved, candidate_wheel("1.2.3"))
 
+    def test_post_commit_failure_retains_candidate_and_is_recoverable_with_resume(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = release["prepare"]
+        scope = prepare.__globals__
+        version = "1.2.4"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-b", "main"], check=True)
+            pkg = root / "src" / "agents_live"
+            skill = pkg / "skill"
+            skill.mkdir(parents=True)
+            dist = root / "dist"
+            dist.mkdir(parents=True)
+            changelog_path = root / "changelog.md"
+            (root / "pyproject.toml").write_text('[project]\nname = "agents-live"\nversion = "1.2.3"\n', encoding="utf-8")
+            (pkg / "__init__.py").write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+            (skill / "VERSION").write_text('1.2.3\n', encoding="utf-8")
+            changelog_path.write_text('## Unreleased\n- fix: sample\n', encoding="utf-8")
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "test.yml").write_text("workflow", encoding="utf-8")
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "add", ".",
+            ], check=True)
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "commit",
+                "-qm", "init",
+            ], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "fetch", "origin", "main"], check=True)
+
+            wheel = dist / f"agents_live-{version}-py3-none-any.whl"
+            sdist = dist / f"agents_live-{version}.tar.gz"
+            wheel.write_bytes(b"wheel bytes")
+            sdist.write_bytes(b"sdist bytes")
+            for name in release["BOOTSTRAP_ASSETS"]:
+                (dist / name).write_bytes(name.encode())
+
+            release_files = (
+                root / "pyproject.toml",
+                changelog_path,
+                pkg / "__init__.py",
+                skill / "VERSION",
+            )
+
+            def update_versions(_current_v, target_v):
+                (root / "pyproject.toml").write_text(f'[project]\nname = "agents-live"\nversion = "{target_v}"\n', encoding="utf-8")
+                (pkg / "__init__.py").write_text(f'__version__ = "{target_v}"\n', encoding="utf-8")
+                (skill / "VERSION").write_text(f'{target_v}\n', encoding="utf-8")
+                changelog_path.write_text(f'## {target_v}\n- fix: sample\n', encoding="utf-8")
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "PYPROJECT": root / "pyproject.toml",
+                "RELEASE_FILES": release_files,
+                "_require_tools": lambda: None,
+                "_check_bump": lambda _bump: "patch",
+                "_gate_commands": lambda: [],
+                "_update_versions": update_versions,
+                "_write_preparation": mock.Mock(side_effect=OSError("disk error")),
+            }):
+                with self.assertRaises(release["ReleaseError"]) as exc:
+                    prepare("patch")
+                self.assertIn("post-commit preparation failed", str(exc.exception))
+                self.assertIn("--prepare --bump patch --resume --yes", str(exc.exception))
+                self.assertIn("abandon this candidate", str(exc.exception))
+
+            candidate_branch = release["_candidate_branch"](version)
+            current_branch = subprocess.run(
+                ["git", "-C", str(root), "branch", "--show-current"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(candidate_branch, current_branch)
+            tag_commit = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", f"v{version}^{{commit}}"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            head_commit = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(head_commit, tag_commit)
+            self.assertFalse(release["_preparation_path"](version).is_file())
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "PYPROJECT": root / "pyproject.toml",
+                "RELEASE_FILES": release_files,
+                "_require_tools": lambda: None,
+                "_check_bump": lambda _bump: "patch",
+            }):
+                with self.assertRaises(release["ReleaseError"]) as exc:
+                    prepare("patch")
+                self.assertIn("currently on candidate branch", str(exc.exception))
+                self.assertIn("--resume", str(exc.exception))
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "PYPROJECT": root / "pyproject.toml",
+                "RELEASE_FILES": release_files,
+                "_require_tools": lambda: None,
+                "_check_bump": lambda _bump: "patch",
+            }):
+                prepare("patch", resume=True)
+                receipt = release["_check_preparation"](version)
+                self.assertTrue(receipt["prepared"])
+                self.assertEqual(version, receipt["version"])
+
+    def test_post_commit_failure_during_tag_creation_retains_commit_and_resumes(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = release["prepare"]
+        scope = prepare.__globals__
+        version = "1.2.4"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-b", "main"], check=True)
+            pkg = root / "src" / "agents_live"
+            skill = pkg / "skill"
+            skill.mkdir(parents=True)
+            dist = root / "dist"
+            dist.mkdir(parents=True)
+            changelog_path = root / "changelog.md"
+            (root / "pyproject.toml").write_text('[project]\nname = "agents-live"\nversion = "1.2.3"\n', encoding="utf-8")
+            (pkg / "__init__.py").write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+            (skill / "VERSION").write_text('1.2.3\n', encoding="utf-8")
+            changelog_path.write_text('## Unreleased\n- fix: sample\n', encoding="utf-8")
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "test.yml").write_text("workflow", encoding="utf-8")
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "add", ".",
+            ], check=True)
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "commit",
+                "-qm", "init",
+            ], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "fetch", "origin", "main"], check=True)
+
+            wheel = dist / f"agents_live-{version}-py3-none-any.whl"
+            sdist = dist / f"agents_live-{version}.tar.gz"
+            wheel.write_bytes(b"wheel bytes")
+            sdist.write_bytes(b"sdist bytes")
+            for name in release["BOOTSTRAP_ASSETS"]:
+                (dist / name).write_bytes(name.encode())
+
+            release_files = (
+                root / "pyproject.toml",
+                changelog_path,
+                pkg / "__init__.py",
+                skill / "VERSION",
+            )
+
+            def update_versions(_current_v, target_v):
+                (root / "pyproject.toml").write_text(f'[project]\nname = "agents-live"\nversion = "{target_v}"\n', encoding="utf-8")
+                (pkg / "__init__.py").write_text(f'__version__ = "{target_v}"\n', encoding="utf-8")
+                (skill / "VERSION").write_text(f'{target_v}\n', encoding="utf-8")
+                changelog_path.write_text(f'## {target_v}\n- fix: sample\n', encoding="utf-8")
+
+            original_run = release["_run"]
+
+            def fail_tag_run(cmd, **kwargs):
+                if cmd[:2] == ["git", "tag"]:
+                    raise subprocess.CalledProcessError(1, cmd, "tagging failed")
+                return original_run(cmd, **kwargs)
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "PYPROJECT": root / "pyproject.toml",
+                "RELEASE_FILES": release_files,
+                "_require_tools": lambda: None,
+                "_check_bump": lambda _bump: "patch",
+                "_gate_commands": lambda: [],
+                "_update_versions": update_versions,
+                "_run": fail_tag_run,
+            }):
+                with self.assertRaises(release["ReleaseError"]) as exc:
+                    prepare("patch")
+                self.assertIn("post-commit preparation failed", str(exc.exception))
+                self.assertIn("--prepare --bump patch --resume --yes", str(exc.exception))
+
+            candidate_branch = release["_candidate_branch"](version)
+            current_branch = subprocess.run(
+                ["git", "-C", str(root), "branch", "--show-current"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(candidate_branch, current_branch)
+            tag_check = subprocess.run(
+                ["git", "-C", str(root), "show-ref", "--verify", "--quiet", f"refs/tags/v{version}"],
+                check=False)
+            self.assertNotEqual(0, tag_check.returncode)
+
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "PYPROJECT": root / "pyproject.toml",
+                "RELEASE_FILES": release_files,
+                "_require_tools": lambda: None,
+                "_check_bump": lambda _bump: "patch",
+            }):
+                prepare("patch", resume=True)
+                receipt = release["_check_preparation"](version)
+                self.assertTrue(receipt["prepared"])
+                tag_commit = subprocess.run(
+                    ["git", "-C", str(root), "rev-parse", f"v{version}^{{commit}}"],
+                    capture_output=True, text=True, check=True).stdout.strip()
+                self.assertTrue(tag_commit)
+
+    def test_check_preparation_diagnoses_missing_receipt_with_recovery_options(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = release["_check_preparation"]
+        scope = check.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(scope, {
+                "_preparation_path": lambda _version: root / "missing.json",
+            }):
+                with self.assertRaises(release["ReleaseError"]) as exc:
+                    check("1.2.3")
+                self.assertIn("has no gate receipt", str(exc.exception))
+                self.assertIn("--prepare --resume --yes", str(exc.exception))
+                self.assertIn("abandon this candidate", str(exc.exception))
+
     def test_candidate_acceptance_receipt_binds_commit_and_wheel(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = release["_check_candidate_acceptance"]
@@ -4758,7 +4982,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "tag": "v1.2.3",
                 "tag_object": "annotated-tag-object",
                 "commit": "candidate-commit",
-                "wheel": "dist/agents_live-1.2.3-py3-none-any.whl",
+                "wheel": wheel.resolve().as_posix(),
                 "wheel_sha256": release["_sha256"](wheel),
                 "platform": "test-platform",
                 "python_version": "3.12.0",
@@ -5271,6 +5495,75 @@ class TestCrossModuleAgreements(unittest.TestCase):
             promotion_approved=True,
             promotion_open=False,
         )[0])
+        self.assertEqual("released", development_state(
+            is_released=True,
+            bake_moved=True,
+            promotion_approved=True,
+            promotion_open=False,
+        )[0])
+
+    def test_release_report_recognizes_published_version(self) -> None:
+        script = runpy.run_path(
+            str(REPOSITORY / "tools" / "release-report.py"))
+        render = script["_render"]
+        scope = render.__globals__
+
+        config = {
+            "release": {"name": "release", "branch": "main", "promotes_to": "GitHub Release and PyPI"},
+            "bake": {
+                "name": "bake",
+                "branch": "bake/v6.9.0-local",
+                "version": "6.9.0",
+                "deployed_version": "6.9.0.dev0+gd0e9b36c",
+                "deployed_commit": "d" * 40,
+                "validated_on": "2026-09-07",
+                "promotion": {"decision": "approved", "commit": "d" * 40, "decided_on": "2026-09-07"},
+                "issues": {"delivered": [], "partial": [], "deferred": [], "promotion_decision": []},
+                "recommendations": {"overall": "Original overall", "testing": "Testing done"},
+            },
+        }
+
+        def mock_json(*args):
+            cmd = args[0]
+            sub = args[1] if len(args) > 1 else ""
+            if (cmd, sub) == ("gh", "repo"):
+                return {"nameWithOwner": "johnshew/agents-live", "url": "https://github.com/johnshew/agents-live"}
+            if (cmd, sub) == ("gh", "release"):
+                return {
+                    "name": "agents-live v6.9.0",
+                    "tagName": "v6.9.0",
+                    "publishedAt": "2026-09-07T07:42:56Z",
+                    "isDraft": False,
+                    "isPrerelease": False,
+                    "url": "https://github.com/johnshew/agents-live/releases/tag/v6.9.0",
+                }
+            if (cmd, sub) == ("gh", "pr"):
+                return []
+            if (cmd, sub) == ("gh", "issue"):
+                return []
+            return {}
+
+        with mock.patch.dict(scope, {
+            "_run": lambda *args: "0",
+            "_json": mock_json,
+            "_sha": lambda _ref: "d" * 40,
+            "_count": lambda _left, _right: (0, 0),
+            "_promotion_state": lambda _bake, _sha: (True, "approved"),
+            "_has_runtime_changes": lambda _deployed, _ref: False,
+            "subprocess": mock.Mock(
+                run=mock.Mock(return_value=mock.Mock(returncode=0)),
+            ),
+        }):
+            report = render(config, datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc))
+
+        self.assertIn("**`released`**", report)
+        self.assertIn("**No, this release is complete.**", report)
+        self.assertIn("The 6.9.0 release is published. Direct subsequent development to the next cycle.", report)
+        self.assertIn("6.9.0 is published.", report)
+        self.assertIn("Configure the next release cycle.", report)
+        self.assertIn("Configure the next bake branch and version in `.github/release-channels.toml`.", report)
+        self.assertNotIn("Prepare and accept the official 6.9.0 candidate.", report)
+        self.assertNotIn("Publish `6.9.0` to GitHub Releases and PyPI", report)
 
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
