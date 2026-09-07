@@ -179,6 +179,18 @@ Tests that execute lifecycle convergence must configure the actual adapter with
 `runtime.current` function alone does not replace the adapter used internally
 by `runtime.converge` and can mutate the real host's trigger store.
 
+Use `tests.host_safety.isolated_host()` for lifecycle fixtures. It installs a
+`MemoryHost`, isolates repository, configuration, state, data, and installation
+roots, and restores the adapter and environment even after an exception. All
+portable suites enable `native_guard()`: an audit hook rejects native scheduler
+writes and watcher launches before subprocess execution. The hook protects the
+test interpreter, not arbitrary child interpreters; subprocess fixtures must
+also import and enable it or isolate their OS effects explicitly.
+
+Real scheduler tests require both `AGENTS_LIVE_TEST_NATIVE=1` and a narrowly
+scoped `allow_native_runtime()` context. They must use unique resource names
+and clean up in `finally`. Never enable this opt-in for ordinary portable runs.
+
 ## The gates
 
 `tools/release.py` declares the list once. Preparation runs it and records the

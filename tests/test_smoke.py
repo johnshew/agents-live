@@ -11,12 +11,13 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agents_live import agent, obs, paths, state
+from agents_live import agent, obs, paths, runtime, state
 from agents_live.cli import main as cli_main
 from agents_live.cli import lifecycle
 from agents_live.cli.commands import init
@@ -27,6 +28,15 @@ from agents_live.runtime import (
     parse_watch,
 )
 from agents_live.runtime.hosts.memory import MemoryHost
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tests.host_safety import allow_native_runtime, isolated_host, native_guard
+
+
+def setUpModule() -> None:
+    guard = native_guard()
+    guard.__enter__()
+    unittest.addModuleCleanup(guard.__exit__, None, None, None)
 
 
 class RecordingRunner:
@@ -41,26 +51,8 @@ class RecordingRunner:
 
 class SmokeRepository(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name).resolve()
+        self.root, self.host = self.enterContext(isolated_host())
         (self.root / "Agents").mkdir()
-        self.saved = {
-            name: os.environ.get(name)
-            for name in ("AGENTS_LIVE_REPO", "XDG_CONFIG_HOME", "XDG_STATE_HOME")
-        }
-        os.environ["AGENTS_LIVE_REPO"] = str(self.root)
-        os.environ["XDG_CONFIG_HOME"] = str(self.root / "config")
-        os.environ["XDG_STATE_HOME"] = str(self.root / "state")
-        paths.clear_cache()
-
-    def tearDown(self) -> None:
-        for name, value in self.saved.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-        paths.clear_cache()
-        self.temporary.cleanup()
 
     def write_flat_skill(self) -> Path:
         (self.root / ".agents-live.toml").write_text(
@@ -85,6 +77,63 @@ class SmokeRepository(unittest.TestCase):
 
 
 class TestSixRuntimeSmoke(SmokeRepository):
+    def test_guard_handles_both_schedulers_and_scoped_opt_in(self) -> None:
+        for executable, arguments in (
+            ("crontab", ["crontab", "-"]),
+            (None, '"schtasks.exe" /Create /TN never-created'),
+        ):
+            with self.subTest(executable=executable):
+                with self.assertRaisesRegex(RuntimeError, "blocked by test guard"):
+                    sys.audit("subprocess.Popen", executable, arguments, None, None)
+                with self.assertRaisesRegex(ValueError, "opt-in failure"):
+                    with allow_native_runtime():
+                        with allow_native_runtime():
+                            sys.audit("subprocess.Popen", executable, arguments, None, None)
+                        raise ValueError("opt-in failure")
+                with self.assertRaisesRegex(RuntimeError, "blocked by test guard"):
+                    sys.audit("subprocess.Popen", executable, arguments, None, None)
+        for executable, arguments in (
+            ("crontab", ["crontab", "-l"]),
+            (None, 'schtasks.exe /Query /FO CSV'),
+        ):
+            sys.audit("subprocess.Popen", executable, arguments, None, None)
+
+    def test_isolated_host_restores_adapter_after_failure(self) -> None:
+        previous = runtime.current()
+        environment = dict(os.environ)
+        with self.assertRaisesRegex(ValueError, "fixture failure"):
+            with isolated_host() as (root, host):
+                self.assertIs(host, runtime.current())
+                self.assertEqual(root, paths.resolve_root())
+                raise ValueError("fixture failure")
+        self.assertIs(previous, runtime.current())
+        self.assertEqual(environment, dict(os.environ))
+
+    def test_guard_blocks_native_watcher_launch(self) -> None:
+        from agents_live.runtime.hosts import system
+
+        with self.assertRaisesRegex(RuntimeError, "blocked by test guard"):
+            system.spawn_detached([
+                sys.executable, "-m", "agents_live.cli", "internal", "watch-loop", "never-created"])
+
+    def test_native_scheduler_guard_rejects_execution_in_a_subprocess(self) -> None:
+        code = """
+import subprocess
+from tests.host_safety import native_guard
+with native_guard():
+    try:
+        subprocess.run(['schtasks.exe', '/Delete', '/TN', 'never-created', '/F'])
+    except RuntimeError as exc:
+        assert 'blocked by test guard' in str(exc)
+    else:
+        raise AssertionError('scheduler mutation was allowed')
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_configured_flat_skill_runs_start_to_stop(self) -> None:
         prompt = self.write_flat_skill()
         spec = agent.load("verify-links", root=self.root)
