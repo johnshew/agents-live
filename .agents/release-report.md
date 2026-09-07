@@ -43,6 +43,14 @@ release channel only through one reviewable promotion pull request from bake to
 created by `tools/release.py` after bake moves into a clean, up-to-date `main`;
 it is not a third channel.
 
+When the configured bake version matches the latest stable GitHub release,
+the report marks that cycle `released`, suppresses obsolete candidate/testing
+instructions, and directs work to later bake branches whose own manifests
+configure a higher version. Read that branch's report before choosing a target;
+the old manifest does not route new work back into the completed cycle. If no
+later cycle is found, configure one. GitHub publication evidence does not prove
+PyPI or proxy availability, and an index delay must not trigger republication.
+
 The configured bake branch and report state decide routing, not the branch that
 happens to be checked out when an agent starts. Work explicitly requested on
 the active bake belongs to that bake. If an active bake exists but a request

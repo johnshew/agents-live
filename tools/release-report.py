@@ -247,6 +247,30 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         and not latest.get("isDraft")
         and not latest.get("isPrerelease")
     )
+    next_cycle = "Configure the next bake branch and version in `.github/release-channels.toml`."
+    if is_released:
+        later_bakes = []
+        current_version = tuple(int(part) for part in str(bake["version"]).split("."))
+        for ref in _run(
+            "git", "for-each-ref", "--format=%(refname:short)",
+            "refs/remotes/origin/bake/",
+        ).splitlines():
+            try:
+                candidate = tomllib.loads(_run(
+                    "git", "show", f"{ref}:.github/release-channels.toml"))["bake"]
+                version = str(candidate["version"])
+                if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+                    continue
+                if ref == f"origin/{candidate['branch']}" and tuple(
+                    int(part) for part in version.split(".")
+                ) > current_version:
+                    later_bakes.append((candidate["branch"], version))
+            except (ReportError, tomllib.TOMLDecodeError, KeyError, TypeError):
+                continue
+        if later_bakes:
+            next_cycle = "Use the separately configured later bake cycle: " + ", ".join(
+                f"`{branch}` ({version})" for branch, version in sorted(later_bakes)
+            ) + ". Read its manifest and release report before choosing a target."
     development_state, development_state_detail = _development_state(
         is_released=is_released,
         bake_moved=bake_moved,
@@ -295,8 +319,9 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     if is_released:
         can_release = "**No, this release is complete.**"
         release_actions = [
-            f"The {bake['version']} release is published. Configure the next bake cycle "
-            "in `.github/release-channels.toml` and direct subsequent development to it."
+            f"The {bake['version']} release is published on GitHub. " + next_cycle,
+            "This report does not independently verify PyPI availability; "
+            "an index or proxy delay is not a reason to republish this version."
         ]
     else:
         can_release = "**No, not yet.**"
@@ -332,9 +357,14 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         for number in decisions
         if str(number) in recommendations
     ]
-    recommendation_lines.append(f"- Testing: {recommendations['testing']}")
+    if is_released:
+        recommendation_lines = [
+            "- Historical bake testing recommendations do not require another candidate for this release.",
+        ]
+    else:
+        recommendation_lines.append(f"- Testing: {recommendations['testing']}")
     bake_next = (
-        "Configure the next release cycle."
+        "Use the next release cycle."
         if is_released else
         "Prepare the official candidate from `main`."
         if bake_moved else
@@ -344,7 +374,7 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     )
     if is_released:
         next_actions = [
-            "Configure the next bake branch and version in `.github/release-channels.toml`.",
+            next_cycle,
             "Direct subsequent development and pull requests to the new bake branch.",
         ]
     else:

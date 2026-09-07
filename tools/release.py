@@ -501,14 +501,13 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
     tag = f"v{target}"
 
     if branch.startswith("release/v") and branch.endswith("-candidate"):
-        cand_ver = branch.removeprefix("release/v").removesuffix("-candidate")
-        cand_tag = f"v{cand_ver}"
-        if not resume or cand_ver != target:
+        candidate_version = branch.removeprefix("release/v").removesuffix("-candidate")
+        if not resume or candidate_version != target:
             raise ReleaseError(
                 f"currently on candidate branch {branch}. "
                 f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
-                f"To abandon this candidate and start over: git switch main; "
-                f"git branch -D {branch}; git tag -d {cand_tag} (if tagged)"
+                "To abandon this candidate, retain its branch, tag, and Git-local "
+                "artifacts for inspection and prepare a different version from clean main."
             )
 
     if resume:
@@ -526,6 +525,10 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
             branch = candidate_branch
         if fetch:
             _run(["git", "fetch", "--quiet", "origin", "main", "--tags"])
+        if _git("ls-remote", "--tags", "origin", f"refs/tags/{tag}"):
+            raise ReleaseError(f"tag {tag} is already remote; do not resume or overwrite a published candidate")
+        if _current_version() != target:
+            raise ReleaseError(f"candidate branch version does not match {target}")
         head = _git("rev-parse", "HEAD")
         origin = _git("rev-parse", "origin/main")
         if _git("rev-list", "--count", "origin/main..HEAD") != "1":
@@ -547,6 +550,8 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
             cwd=ROOT,
         )
         if local_tag.returncode == 0:
+            if _git("cat-file", "-t", tag) != "tag":
+                raise ReleaseError(f"tag {tag} must be annotated")
             tag_commit = _git("rev-parse", f"{tag}^{{commit}}")
             if tag_commit != head:
                 raise ReleaseError(
@@ -570,8 +575,7 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
         raise ReleaseError(
             f"candidate branch {candidate_branch} already exists. "
             f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
-            f"To discard it and start over: git branch -D {candidate_branch} "
-            f"(and git tag -d {tag} if created)"
+            "Retain existing candidate evidence when preparing a different version."
         )
     local_tag = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
@@ -579,10 +583,8 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
     )
     if local_tag.returncode == 0:
         raise ReleaseError(
-            f"tag {tag} already exists. "
-            f"To resume post-commit preparation: uv run --script tools/release.py --prepare --resume --yes. "
-            f"To discard it and start over: git tag -d {tag} "
-            f"(and git branch -D {candidate_branch} if created)"
+            f"tag {tag} already exists; do not delete or overwrite it. "
+            "For a local candidate, switch to its candidate branch and use --prepare --resume --yes."
         )
 
 
@@ -651,22 +653,32 @@ def _artifact_store_dir(version: str) -> Path:
 
 def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
     sdist = ROOT / "dist" / f"agents_live-{version}.tar.gz"
-    if not sdist.is_file():
-        raise ReleaseError(
-            f"prepared source distribution is missing: {sdist.resolve()}")
-    destination = _artifact_store_dir(version)
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir(parents=True)
-    preserved_wheel = destination / wheel.name
-    shutil.copy2(wheel, preserved_wheel)
-    shutil.copy2(sdist, destination / sdist.name)
-    for name in BOOTSTRAP_ASSETS:
-        source = ROOT / "dist" / name
+    sources = [wheel, sdist, *(ROOT / "dist" / name for name in BOOTSTRAP_ASSETS)]
+    for source in sources:
         if not source.is_file():
-            raise ReleaseError(f"prepared bootstrap asset is missing: dist/{name}")
-        shutil.copy2(source, destination / name)
-    return preserved_wheel
+            raise ReleaseError(f"prepared artifact is missing: {source.resolve()}")
+    hashes = {source.name: _sha256(source) for source in sources}
+    destination = _artifact_store_dir(version)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"staging-{version}-", dir=destination.parent) as temporary:
+        staging = Path(temporary) / "artifacts"
+        staging.mkdir()
+        for source in sources:
+            shutil.copy2(source, staging / source.name)
+            if _sha256(staging / source.name) != hashes[source.name]:
+                raise ReleaseError(f"artifact changed while preserving: {source.name}")
+        previous = None
+        if destination.exists():
+            previous = Path(tempfile.mkdtemp(
+                prefix=f"retained-{version}-", dir=destination.parent)) / "artifacts"
+            os.replace(destination, previous)
+        try:
+            os.replace(staging, destination)
+        except BaseException:
+            if previous is not None:
+                os.replace(previous, destination)
+            raise
+    return destination / wheel.name
 
 
 def _sha256(path: Path) -> str:
@@ -766,12 +778,10 @@ def _write_preparation(version: str, wheel: Path) -> Path:
 
 def _check_preparation(version: str) -> dict:
     receipt_path = _preparation_path(version)
-    candidate_branch = _candidate_branch(version)
-    tag = f"v{version}"
     recovery_guidance = (
         f"To resume preparation: uv run --script tools/release.py --prepare --resume --yes. "
-        f"To abandon this candidate and start over: git switch main; "
-        f"git branch -D {candidate_branch}; git tag -d {tag} (if tagged)."
+        "To abandon this candidate, retain its branch, tag, and Git-local artifacts "
+        "for inspection and prepare a different version from clean main."
     )
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -1237,16 +1247,15 @@ def prepare(bump: str, *, resume: bool = False) -> None:
         current = _current_version()
         target = _next_version(current, bump)
         minimum_bump = _check_bump(bump)
-    _print_plan(current, target, minimum_bump)
+    if resume:
+        print(f"Resume preparation of v{target}; reuse a valid receipt or rerun all release gates.")
+    else:
+        _print_plan(current, target, minimum_bump)
     _check_prepare_state(target, fetch=True, resume=resume)
     candidate_branch = _candidate_branch(target)
     tag = f"v{target}"
 
     if not resume:
-        _acceptance_path(target).unlink(missing_ok=True)
-        _preparation_path(target).unlink(missing_ok=True)
-        _checkpoint_path(target).unlink(missing_ok=True)
-        shutil.rmtree(_artifact_store_dir(target), ignore_errors=True)
         original = {path: path.read_bytes() for path in RELEASE_FILES}
         original_head = _git("rev-parse", "HEAD")
         release_head: str | None = None
@@ -1303,13 +1312,22 @@ def prepare(bump: str, *, resume: bool = False) -> None:
     else:
         validated = {path: path.read_bytes() for path in RELEASE_FILES}
         _check_release_commit(validated)
-        wheel_file = ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl"
-        sdist_file = ROOT / "dist" / f"agents_live-{target}.tar.gz"
-        if not wheel_file.is_file() or not sdist_file.is_file():
-            _run(["uv", "build"])
+        try:
+            _check_preparation(target)
+        except (ReleaseError, OSError, subprocess.CalledProcessError):
+            pass
+        else:
+            print(f"Prepared {tag}; existing preparation receipt is valid: {_preparation_path(target)}")
+            return
 
     release_head = _git("rev-parse", "HEAD")
     try:
+        if resume:
+            for command in _gate_commands():
+                _run(command)
+            if _git("rev-parse", "HEAD") != release_head or _git("status", "--porcelain"):
+                raise ReleaseError("candidate changed while running preparation gates")
+            _check_release_commit(validated)
         tag_exists = subprocess.run(
             ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"],
             cwd=ROOT,
@@ -1317,6 +1335,8 @@ def prepare(bump: str, *, resume: bool = False) -> None:
         if not tag_exists:
             _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}"])
         else:
+            if _git("cat-file", "-t", tag) != "tag":
+                raise ReleaseError(f"tag {tag} must be annotated")
             tag_commit = _git("rev-parse", f"{tag}^{{commit}}")
             if tag_commit != release_head:
                 raise ReleaseError(
@@ -1326,14 +1346,14 @@ def prepare(bump: str, *, resume: bool = False) -> None:
         wheel = _preserve_release_artifacts(
             target, ROOT / "dist" / f"agents_live-{target}-py3-none-any.whl")
         receipt = _write_preparation(target, wheel)
-    except Exception as exc:
+    except BaseException as exc:
         raise ReleaseError(
             f"post-commit preparation failed for {tag} ({exc}). "
             f"Candidate commit {release_head[:8]} on branch {candidate_branch} and any "
             "preserved artifacts have been retained for recovery. "
             f"To resume preparation: uv run --script tools/release.py --prepare --bump {bump} --resume --yes. "
-            f"To abandon this candidate and start over: git switch main; "
-            f"git branch -D {candidate_branch}; git tag -d {tag} (if tagged)."
+            "To abandon this candidate, retain its branch, tag, and Git-local artifacts "
+            "for inspection and prepare a different version from clean main."
         ) from exc
     print(f"Prepared {tag}. Inspect dist/ and the commit, then run:")
     print(f"  preparation receipt: {receipt}")

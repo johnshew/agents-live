@@ -81,6 +81,12 @@ The standard loop for any change that lands as commits:
 
 ### Active bake routing
 
+When the report marks the configured version `released`, do not prepare or
+publish that version again. Use the separately configured later bake cycle
+identified by the report, reading its manifest and report before choosing a
+target. If no later cycle is configured, configure the next cycle first.
+GitHub publication does not by itself verify PyPI or package-proxy availability.
+
 Use the generated release report together with `.github/release-channels.toml`.
 When the configured `bake.branch` exists and contains work not yet in `main`,
 that branch is the integration target for the active bake cycle. Being asked

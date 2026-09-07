@@ -4748,6 +4748,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
             subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "true"], check=True)
             subprocess.run(["git", "-C", str(root), "checkout", "-b", "main"], check=True)
             pkg = root / "src" / "agents_live"
             skill = pkg / "skill"
@@ -4771,7 +4774,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "-c", "user.email=test@example.invalid", "commit",
                 "-qm", "init",
             ], check=True)
-            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)], check=True)
+            remote = Path(temporary) / "origin.git"
+            subprocess.run(["git", "clone", "--bare", "-q", str(root), str(remote)], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(remote)], check=True)
             subprocess.run(["git", "-C", str(root), "fetch", "origin", "main"], check=True)
 
             wheel = dist / f"agents_live-{version}-py3-none-any.whl"
@@ -4836,17 +4841,55 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertIn("currently on candidate branch", str(exc.exception))
                 self.assertIn("--resume", str(exc.exception))
 
+            gate = [sys.executable, "-c", "from pathlib import Path; Path('dist/gate-passed').touch()"]
             with mock.patch.dict(scope, {
                 "ROOT": root,
                 "PYPROJECT": root / "pyproject.toml",
                 "RELEASE_FILES": release_files,
                 "_require_tools": lambda: None,
                 "_check_bump": lambda _bump: "patch",
+                "_gate_commands": lambda: [gate],
             }):
+                preserved = release["_candidate_wheel"](version)
+                original_bytes = preserved.read_bytes()
+                with mock.patch.dict(scope, {
+                    "_gate_commands": lambda: [[sys.executable, "-c", "raise SystemExit(7)"]],
+                }):
+                    with self.assertRaisesRegex(release["ReleaseError"], "post-commit preparation failed"):
+                        prepare("patch", resume=True)
+                self.assertFalse(release["_preparation_path"](version).exists())
+                self.assertEqual(original_bytes, preserved.read_bytes())
+                copy = shutil.copy2
+
+                def interrupted_copy(source, destination):
+                    if Path(source).suffix == ".gz":
+                        raise OSError("interrupted artifact copy")
+                    return copy(source, destination)
+
+                with mock.patch.object(shutil, "copy2", side_effect=interrupted_copy):
+                    with self.assertRaisesRegex(release["ReleaseError"], "interrupted artifact copy"):
+                        prepare("patch", resume=True)
+                self.assertFalse(release["_preparation_path"](version).exists())
+                self.assertEqual(original_bytes, preserved.read_bytes())
+                self.assertEqual(head_commit, release["_git"]("rev-parse", "HEAD"))
+                self.assertEqual(tag_commit, release["_git"]("rev-parse", f"v{version}^{{commit}}"))
                 prepare("patch", resume=True)
                 receipt = release["_check_preparation"](version)
                 self.assertTrue(receipt["prepared"])
                 self.assertEqual(version, receipt["version"])
+                self.assertEqual([gate], receipt["gates"])
+                self.assertTrue((dist / "gate-passed").exists())
+                retained = list(preserved.parent.parent.glob(f"retained-{version}-*/artifacts/{preserved.name}"))
+                self.assertTrue(retained)
+                self.assertTrue(all(path.read_bytes() == original_bytes for path in retained))
+                (dist / "gate-passed").unlink()
+                prepare("patch", resume=True)
+                self.assertFalse((dist / "gate-passed").exists())
+                self.assertEqual(receipt, release["_check_preparation"](version))
+                subprocess.run(["git", "-C", str(root), "push", "origin", f"v{version}"], check=True)
+                with self.assertRaisesRegex(release["ReleaseError"], "already remote"):
+                    prepare("patch", resume=True)
+                self.assertEqual(receipt, release["_check_preparation"](version))
 
     def test_post_commit_failure_during_tag_creation_retains_commit_and_resumes(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -4856,6 +4899,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
             subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "true"], check=True)
             subprocess.run(["git", "-C", str(root), "checkout", "-b", "main"], check=True)
             pkg = root / "src" / "agents_live"
             skill = pkg / "skill"
@@ -4879,7 +4925,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "-c", "user.email=test@example.invalid", "commit",
                 "-qm", "init",
             ], check=True)
-            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(root)], check=True)
+            remote = Path(temporary) / "origin.git"
+            subprocess.run(["git", "clone", "--bare", "-q", str(root), str(remote)], check=True)
+            subprocess.run(["git", "-C", str(root), "remote", "add", "origin", str(remote)], check=True)
             subprocess.run(["git", "-C", str(root), "fetch", "origin", "main"], check=True)
 
             wheel = dist / f"agents_live-{version}-py3-none-any.whl"
@@ -4940,7 +4988,21 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "RELEASE_FILES": release_files,
                 "_require_tools": lambda: None,
                 "_check_bump": lambda _bump: "patch",
+                "_gate_commands": lambda: [[sys.executable, "-c", "print('recovery gate')"]],
             }):
+                subprocess.run(["git", "-C", str(root), "tag", f"v{version}"], check=True)
+                with self.assertRaisesRegex(release["ReleaseError"], "must be annotated"):
+                    prepare("patch", resume=True)
+                self.assertEqual("commit", release["_git"]("cat-file", "-t", f"v{version}"))
+                subprocess.run(["git", "-C", str(root), "tag", "-d", f"v{version}"], check=True)
+                subprocess.run([
+                    "git", "-C", str(root), "tag", "-a", f"v{version}", "HEAD^", "-m", "wrong candidate",
+                ], check=True)
+                wrong_tag = release["_git"]("rev-parse", f"refs/tags/v{version}")
+                with self.assertRaisesRegex(release["ReleaseError"], "not candidate commit"):
+                    prepare("patch", resume=True)
+                self.assertEqual(wrong_tag, release["_git"]("rev-parse", f"refs/tags/v{version}"))
+                subprocess.run(["git", "-C", str(root), "tag", "-d", f"v{version}"], check=True)
                 prepare("patch", resume=True)
                 receipt = release["_check_preparation"](version)
                 self.assertTrue(receipt["prepared"])
@@ -5519,7 +5581,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "validated_on": "2026-09-07",
                 "promotion": {"decision": "approved", "commit": "d" * 40, "decided_on": "2026-09-07"},
                 "issues": {"delivered": [], "partial": [], "deferred": [], "promotion_decision": []},
-                "recommendations": {"overall": "Original overall", "testing": "Testing done"},
+                "recommendations": {"overall": "Original overall", "testing": "Prepare and accept 6.9.0 before publication"},
             },
         }
 
@@ -5543,8 +5605,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 return []
             return {}
 
+        def mock_run(*args):
+            if args[:2] == ("git", "for-each-ref"):
+                return "origin/bake/v6.10.0-local"
+            if args[:2] == ("git", "show"):
+                return '[bake]\nbranch = "bake/v6.10.0-local"\nversion = "6.10.0"\n'
+            return "0"
+
         with mock.patch.dict(scope, {
-            "_run": lambda *args: "0",
+            "_run": mock_run,
             "_json": mock_json,
             "_sha": lambda _ref: "d" * 40,
             "_count": lambda _left, _right: (0, 0),
@@ -5560,10 +5629,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("**No, this release is complete.**", report)
         self.assertIn("The 6.9.0 release is published. Direct subsequent development to the next cycle.", report)
         self.assertIn("6.9.0 is published.", report)
-        self.assertIn("Configure the next release cycle.", report)
-        self.assertIn("Configure the next bake branch and version in `.github/release-channels.toml`.", report)
+        self.assertIn("Use the next release cycle.", report)
+        self.assertIn("`bake/v6.10.0-local` (6.10.0)", report)
         self.assertNotIn("Prepare and accept the official 6.9.0 candidate.", report)
         self.assertNotIn("Publish `6.9.0` to GitHub Releases and PyPI", report)
+        self.assertNotIn("Prepare and accept 6.9.0 before publication", report)
+        self.assertIn("does not independently verify PyPI", report)
 
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
