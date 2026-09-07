@@ -2,14 +2,24 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from ... import deploy
+from ... import deploy, paths, runtime
+from ...runtime import handoff
 from ...runtime.hosts import system as hostruntime
+from ...runtime.hosts.processes import pid_exists
 from ...runtime.spawn import find_uv
+from ...state import registry as repos
+from .. import lifecycle
+
+WATCHER_GRACE_SECONDS = 5.0
 
 
 def _run(command: list[str], *, step: str, capture: bool = False) -> str:
@@ -119,13 +129,126 @@ def activate_generation(
     *,
     root: Path | None = None,
 ) -> None:
-    """Select a generation and converge the host through that version."""
-    deploy.generation.activate(generation, root=root)
-    selected = executable(generation)
+    """Quiesce started intent, select a version, and restart through it."""
+    install_root = root or deploy.layout.installation_root()
+    previous = None
+    disturbed = False
+    try:
+        with handoff.operation():
+            try:
+                with handoff.gate(), contextlib.ExitStack() as stopping:
+                    installed = deploy.generation.load(generation.name, root=install_root)
+                    if installed != generation:
+                        raise deploy.generation.GenerationError(
+                            "version changed after validation")
+                    pointer, status, detail = deploy.pointer.status(
+                        deploy.layout.current_path(install_root))
+                    if status not in (deploy.pointer.ACTIVE, deploy.pointer.MISSING):
+                        raise deploy.generation.GenerationError(detail)
+                    if pointer is not None:
+                        previous = deploy.generation.load(pointer.generation, root=install_root)
+                    _require_idle(install_root)
+                    registered = repos.load()["repos"]
+                    if registered:
+                        collected = lifecycle.collect(persist=False)
+                        if collected.unavailable_repositories or collected.broken_definitions:
+                            raise deploy.generation.GenerationError(
+                                "cannot snapshot all registered agents; repair unavailable "
+                                "repositories or broken definitions before activation")
+                        lifecycle.collect()
+                        disturbed = True
+                        stopping.enter_context(handoff.pause_watchers())
+                        _stop_runtime(install_root)
+                    _require_idle(install_root, watchers=True)
+                    disturbed = True
+                    deploy.generation.activate(generation, root=install_root)
+                _maintain(generation)
+            except Exception as exc:
+                if disturbed:
+                    try:
+                        with handoff.gate(), handoff.pause_watchers():
+                            current, _, _ = deploy.pointer.status(
+                                deploy.layout.current_path(install_root))
+                            if registered and current is not None and (
+                                    previous is None or current.generation != previous.name):
+                                _require_idle(install_root)
+                                _stop_runtime(install_root)
+                            if previous is None:
+                                deploy.generation.clear_activation(root=install_root)
+                            else:
+                                deploy.generation.activate(previous, root=install_root)
+                        if previous is not None:
+                            _maintain(previous)
+                        elif registered:
+                            result = lifecycle.converge()
+                            if result.failed:
+                                raise deploy.generation.GenerationError(
+                                    "could not restore the previous runtime triggers")
+                    except Exception as recovery:
+                        raise deploy.generation.GenerationError(
+                            f"activation failed: {exc}; restoration failed: {recovery}; "
+                            "started intent is preserved; run versions activate again "
+                            "after resolving the failure") from exc
+                raise deploy.generation.GenerationError(str(exc)) from exc
+    except hostruntime.LockBusy as exc:
+        raise deploy.generation.GenerationError(
+            "runtime activation or convergence is in progress; retry shortly") from exc
+
+
+def _maintain(generation: deploy.generation.Generation) -> None:
     _run(
-        [str(selected), "internal", "maintain"],
+        [str(executable(generation)), "internal", "maintain"],
         step=f"converging generation {generation.name}",
     )
+
+
+def _stop_runtime(root: Path) -> None:
+    host = runtime.current()
+    for trigger in host.trigger_store.list():
+        host.trigger_store.remove(trigger.key)
+    _require_idle(root)
+    deadline = time.monotonic() + WATCHER_GRACE_SECONDS
+    while host.supervisor.owned(role="watcher") and time.monotonic() < deadline:
+        time.sleep(0.1)
+    for process in host.supervisor.owned(role="watcher"):
+        host.supervisor.terminate(process)
+        if host.supervisor.alive(process):
+            raise deploy.generation.GenerationError(
+                f"watcher {process.pid} did not stop; activation refused")
+    if host.supervisor.owned(role="watcher"):
+        raise deploy.generation.GenerationError(
+            "watchers are still running; activation refused")
+    _require_idle(root, watchers=True)
+
+
+def _require_idle(root: Path, *, watchers: bool = False) -> None:
+    for lock in (paths.state_home() / "repos").glob("*/locks/*.lock"):
+        try:
+            document = json.loads(lock.read_text(encoding="ascii"))
+            pid = int(document["pid"])
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise deploy.generation.GenerationError(
+                f"cannot verify running work from {lock}; activation refused") from exc
+        if pid > 0 and pid_exists(pid):
+            raise deploy.generation.GenerationError(
+                f"agent work is running (process {pid}); wait for it to finish "
+                "and retry activation")
+    processes = hostruntime.process_command_lines()
+    if not any(pid == os.getpid() for pid, _command in processes):
+        raise deploy.generation.GenerationError(
+            "cannot verify host process inventory; activation refused")
+    for pid, command in processes:
+        if pid == os.getpid():
+            continue
+        argv = hostruntime.split_command_line(command)
+        if not any(deploy.layout.generation_of(argument, root) for argument in argv[:2]):
+            continue
+        if "run" in argv or "maintain" in argv or (watchers and "watch-loop" in argv):
+            raise deploy.generation.GenerationError(
+                f"runtime process {pid} is still running; wait for it to finish "
+                "and retry activation")
 
 
 def executable(generation: deploy.generation.Generation) -> Path:

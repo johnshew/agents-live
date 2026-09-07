@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import shlex
 import subprocess
 import tempfile
@@ -126,7 +125,7 @@ class LocalProcesses:
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
             return
-        os.kill(ref.pid, signal.SIGTERM)
+        system.terminate(ref.pid)
 
     def owned(self, role: str | None = None) -> list[ProcessRef]:
         proc = Path("/proc")

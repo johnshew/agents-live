@@ -174,6 +174,11 @@ pointing at a temporary directory leaves the developer's crontab holding
 entries for a path that no longer exists, so the dashboard readiness gate
 seeds started state through the artifact instead of calling `start`.
 
+Tests that execute lifecycle convergence must configure the actual adapter with
+`runtime.configure(MemoryHost())` and restore it afterward. Patching the exported
+`runtime.current` function alone does not replace the adapter used internally
+by `runtime.converge` and can mutate the real host's trigger store.
+
 ## The gates
 
 `tools/release.py` declares the list once. Preparation runs it and records the

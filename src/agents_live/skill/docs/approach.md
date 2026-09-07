@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-08-28
+ms.date: 2026-09-07
 ms.topic: concept-article
 ---
 
@@ -25,8 +25,14 @@ adapter with a staged, verified Windows-side liveness task.
 
 One `converge(desired)` operation renders the complete subscription set,
 compares it with structured owned artifacts and watcher process markers, and
-repairs drift. There is no held plan and no second mutation path. `health()` is
-the read-side operation.
+repairs drift. `health()` is the read-side operation. Version activation
+temporarily withdraws triggers and stops watchers before selecting a runtime;
+the selected runtime then uses normal convergence to restore started intent.
+An interprocess launch gate coordinates activation, lifecycle convergence, and
+dispatch lock acquisition without serializing running agents. Activation refuses
+active or unverifiable run locks, preserves started state, and attempts rollback
+when the selected runtime cannot converge. Idle watchers receive a cooperative
+stop signal before bounded host termination is used.
 
 Automatic maintenance is the sole writer of the host-local health record.
 `doctor --quick` treats a record as healthy only when it is both fresh and

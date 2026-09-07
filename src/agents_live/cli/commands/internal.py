@@ -17,6 +17,7 @@ from ... import __version__, agent, deploy, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...obs import retention
+from ...runtime import handoff
 from ...runtime.hosts import filesystem as watchsource
 from ...runtime.grammars import parse_watch
 from ...runtime.watchloop import run as run_watchloop
@@ -249,6 +250,9 @@ def _watch(
     watcher_id = args.name
 
     def should_continue() -> bool:
+        if handoff.paused():
+            retirement["reason"] = "activation"
+            return False
         if not _runtime_is_current():
             retirement["reason"] = "replacement"
             return False

@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-09-06
+ms.date: 2026-09-07
 ms.topic: reference
 ---
 
@@ -34,6 +34,21 @@ or `versions classify <version> released`. Classification changes no
 generation files and selects no runtime. Development versions are shown as
 bake releases. `versions activate <version>` explicitly selects a runtime;
 successful selections appear as `generation.activate` administrative events.
+
+Activation through `versions activate`, `install-release --activate`, or
+`upgrade` preserves started intent across registered repositories. It refuses
+while agent work is running: wait for that work to finish, then retry. It does
+not interrupt in-flight agent work. Unreadable run state or unavailable
+repositories also block activation.
+
+Once idle, activation withdraws triggers, gives watchers five seconds to exit,
+terminates remaining owned watchers, and verifies they stopped before changing
+the selected version. New dispatches and convergence are gated during that
+window. Maintenance under the selected version reinstalls schedules and
+restarts watchers from the unchanged started intent. A failure attempts to
+restore the previous selection and its automation; a failed restoration is
+reported explicitly. Activation does not promise to release files held by
+unrelated applications or by the activating CLI itself.
 
 ### `run`
 
