@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: record successful processor early finishes without discarding completed work.
+  The existing skip control still omits the model and later processors, but
+  successful preprocessor work now completes as success rather than skipped.
+  Logs expose the early-finish reason and a full work record beyond the bounded
+  terminal summary, retaining output and diagnostics alongside the control
+  message. Failures still override skip; pre-execution gates remain skipped.
 - fix: retain run timings and provider usage across retries and failures. (#502)
   Existing log queries expose monotonic run, phase, and attempt durations.
   Failed calls, rejected output, postprocessor failures, and cleanup failures

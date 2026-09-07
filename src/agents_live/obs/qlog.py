@@ -247,6 +247,7 @@ def build_view(
         "agent_duration_s": "DOUBLE", "post_duration_s": "DOUBLE",
         "attempt": "INTEGER", "model_called": "BOOLEAN",
         "transcript_state": "VARCHAR", "attempts": "VARCHAR",
+        "completion_reason": "VARCHAR", "processor_record": "VARCHAR",
     }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:

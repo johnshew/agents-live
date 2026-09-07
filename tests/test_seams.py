@@ -3542,7 +3542,98 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertEqual({}, json.loads(environment["AGENTS_LIVE_OPTIONS"]))
         self.assertEqual("", environment["AGENTS_LIVE_INSTRUCTIONS"])
 
-    def test_control_file_skips_the_run_and_version_1_uses_stdout(self) -> None:
+    def test_early_finish_records_completed_processor_work(self) -> None:
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode):
+                name = f"early-finish-{returncode}"
+                directory = self.skill(name, [
+                    'agents-live.selector: "fake"',
+                    'agents-live.pre-processor: "prepare.py"',
+                    'agents-live.post-processor: "post.py"',
+                ], version="2")
+                (directory / "prepare.py").write_text(
+                    "import json, os, pathlib, sys\n"
+                    "pathlib.Path(os.environ['AGENTS_LIVE_OUTPUT']).write_text('updated 3 records')\n"
+                    "pathlib.Path(os.environ['AGENTS_LIVE_LOG']).write_text(\n"
+                    "    json.dumps({'message': 'validated 3 records', 'run_id': os.environ['AGENTS_LIVE_RUN_ID']}) + '\\n')\n"
+                    "pathlib.Path(os.environ['AGENTS_LIVE_CONTROL']).write_text(\n"
+                    "    json.dumps({'skip': True, 'message': 'completed deterministically'}))\n"
+                    "print('checked all inputs')\n"
+                    "print('kept unchanged records', file=sys.stderr)\n"
+                    f"raise SystemExit({returncode})\n",
+                    encoding="utf-8",
+                )
+                (directory / "post.py").write_text(
+                    "raise RuntimeError('postprocessor must not run')\n", encoding="utf-8")
+                child = LocalChildRunner()
+                runner = mock.Mock(run_child=mock.Mock(wraps=child.run_child))
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=runner)
+                self.assertEqual(1, runner.run_child.call_count)
+                records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+                terminal = next(record for record in records if record["run_id"] == result.run_id)
+                self.assertEqual("done", terminal["phase"])
+                self.assertEqual("ok" if returncode == 0 else "error", terminal["status"])
+                self.assertEqual("success" if returncode == 0 else "failed", result.status)
+                self.assertFalse(terminal["model_called"])
+                self.assertEqual(0, terminal["attempt"])
+                self.assertIsNone(terminal["agent_duration_s"])
+                self.assertIsNone(terminal["post_duration_s"])
+                self.assertGreaterEqual(terminal["pre_duration_s"], 0)
+                if returncode == 0:
+                    for detail in ("updated 3 records", "checked all inputs",
+                                   "kept unchanged records", "completed deterministically"):
+                        self.assertIn(detail, terminal["message"])
+                    self.assertEqual("preprocessor_skip", terminal["completion_reason"])
+                else:
+                    self.assertEqual("pre_processor_crash", result.category)
+                    self.assertNotEqual("preprocessor_skip", terminal.get("completion_reason"))
+                scratch = paths.repo_state_dir(self.root) / "runs" / name / result.run_id
+                files = agent.step_files(scratch, agent.Step.PRE)
+                self.assertEqual("updated 3 records", files.output.read_text(encoding="utf-8"))
+                self.assertIn("validated 3 records", files.log.read_text(encoding="utf-8"))
+
+    def test_early_finish_keeps_full_work_record_beyond_terminal_summary(self) -> None:
+        directory = self.skill("full-early-finish", [
+            'agents-live.selector: "fake"',
+            'agents-live.pre-processor: "prepare.py"',
+        ], version="2")
+        (directory / "prepare.py").write_text(
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['AGENTS_LIVE_CONTROL']).write_text(\n"
+            "    json.dumps({'skip': True, 'message': 'finished all work'}))\n"
+            "print('processed record\\n' * 500 + 'FINAL_RECORD')\n"
+            "print('all records validated', file=sys.stderr)\n",
+            encoding="utf-8",
+        )
+        result = dispatch(Firing("full-early-finish", str(self.root), "manual"))
+        self.assertEqual("success", result.status)
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        terminal = next(record for record in records if record["run_id"] == result.run_id)
+        self.assertIn("truncated", terminal["message"])
+        completed = subprocess.run([
+            sys.executable, "-m", "agents_live.cli", "--repo", str(self.root),
+            "logs", "--columns", "run_id,status,completion_reason,processor_record", "--format", "jsonl",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        public_record = json.loads(completed.stdout.strip())
+        self.assertEqual("preprocessor_skip", public_record["completion_reason"])
+        self.assertEqual("ok", public_record["status"])
+        recorded = subprocess.run([
+            sys.executable, "-m", "agents_live.cli", "--repo", str(self.root),
+            "logs", "--log", public_record["processor_record"],
+            "--columns", "run_id,phase,status,message", "--format", "jsonl",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        full_record = json.loads(recorded.stdout.strip())
+        self.assertEqual(result.run_id, full_record["run_id"])
+        self.assertEqual("pre-processor", full_record["phase"])
+        self.assertEqual("ok", full_record["status"])
+        self.assertIn("FINAL_RECORD", full_record["message"])
+        self.assertIn("all records validated", full_record["message"])
+        self.assertIn("finished all work", full_record["message"])
+        self.assertEqual(500, full_record["message"].count("processed record"))
+
+    def test_control_file_finishes_successfully_without_later_steps(self) -> None:
         directory = self.skill("skipper", [
             'agents-live.selector: "none"',
             'agents-live.pre-processor: "scripts/prepare.py"',
@@ -3564,7 +3655,7 @@ class TestProcessorContractVersion2(TempRepository):
         result = dispatch(Firing("skipper", str(self.root), "manual"))
 
         self.assertTrue(result.ok, result)
-        self.assertEqual("skipped", result.status)
+        self.assertEqual("success", result.status)
         self.assertEqual("nothing to do", result.message)
         records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
         terminal = [record for record in records if record["phase"] == "done"][-1]
@@ -3613,7 +3704,7 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertEqual("success", result.status)
         self.assertEqual('ran:{"skip": true}', result.text)
 
-    def test_version_1_still_skips_on_a_stdout_object(self) -> None:
+    def test_version_1_finishes_successfully_on_a_skip_stdout_object(self) -> None:
         directory = self.skill("legacy-skipper", [
             'agents-live.selector: "none"',
             'agents-live.pre-processor: "scripts/prepare.py"',
@@ -3630,7 +3721,7 @@ class TestProcessorContractVersion2(TempRepository):
         result = dispatch(Firing("legacy-skipper", str(self.root), "manual"))
 
         self.assertTrue(result.ok, result)
-        self.assertEqual("skipped", result.status)
+        self.assertEqual("success", result.status)
 
     def test_an_oversized_result_may_travel_by_file(self) -> None:
         directory = self.skill("by-file", [
@@ -4270,8 +4361,10 @@ class TestTranscriptAcceptance(TempRepository):
 class TestAgentPipeline(TempRepository):
     def test_phase_accounting_survives_skips_and_late_failures(self) -> None:
         original_resource = dispatch_module._resource
-        for scenario in ("success", "skip", "post-crash", "post-timeout", "cleanup"):
+        for scenario in ("success", "skip", "skip-timeout", "skip-cleanup",
+                         "post-crash", "post-timeout", "cleanup"):
             with self.subTest(scenario=scenario):
+                early_finish = scenario.startswith("skip")
                 elapsed = 100.0
                 directory = self.skill(scenario, [
                     'agents-live.selector: "copilot"',
@@ -4287,7 +4380,7 @@ class TestAgentPipeline(TempRepository):
                     with original_resource(*args, **kwargs) as value:
                         yield value
                     elapsed += 2.0
-                    if scenario == "cleanup":
+                    if scenario in {"cleanup", "skip-cleanup"}:
                         raise RuntimeError("cleanup failed")
 
                 class TimedRunner(RecordingRunner):
@@ -4301,7 +4394,8 @@ class TestAgentPipeline(TempRepository):
                     {"type": "session.usage_checkpoint", "data": {"totalNanoAiu": 1000000000}},
                 ])
                 runner = TimedRunner([
-                    ChildResult(("pre",), 0, '{"skip":true}' if scenario == "skip" else "ready", ""),
+                    ChildResult(("pre",), 0, '{"skip":true}' if early_finish else "ready",
+                                "", scenario == "skip-timeout"),
                     ChildResult(("copilot",), 0, stdout, ""),
                     ChildResult(("post",), 1 if scenario == "post-crash" else 0,
                                 "done", "", scenario == "post-timeout"),
@@ -4315,16 +4409,24 @@ class TestAgentPipeline(TempRepository):
                 self.assertEqual(scenario in {"success", "skip"}, result.ok)
                 records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
                 terminal = next(record for record in records if record["run_id"] == result.run_id)
-                skipped = scenario == "skip"
-                self.assertEqual(5.0 if skipped else 11.0, terminal["duration_s"])
+                self.assertEqual("success" if result.ok else "failed", result.status)
+                self.assertEqual("ok" if result.ok else "error", terminal["status"])
+                self.assertEqual("preprocessor_skip" if scenario == "skip" else None,
+                                 terminal["completion_reason"])
+                self.assertEqual(5.0 if early_finish else 11.0, terminal["duration_s"])
                 self.assertEqual(3.0, terminal["pre_duration_s"])
-                self.assertEqual(None if skipped else 3.0, terminal["agent_duration_s"])
-                self.assertEqual(None if skipped else 3.0, terminal["post_duration_s"])
-                self.assertEqual(not skipped, terminal["model_called"])
-                self.assertEqual(0 if skipped else 1, terminal["attempt"])
-                self.assertEqual({} if skipped else {
+                self.assertEqual(None if early_finish else 3.0, terminal["agent_duration_s"])
+                self.assertEqual(None if early_finish else 3.0, terminal["post_duration_s"])
+                self.assertEqual(not early_finish, terminal["model_called"])
+                self.assertEqual(0 if early_finish else 1, terminal["attempt"])
+                self.assertEqual({} if early_finish else {
                     "ai_credits": "1", "list_cost_usd": "0.01",
                 }, dict(terminal["usage"]))
+                if scenario == "skip-timeout":
+                    self.assertEqual("timeout", result.category)
+                if scenario == "skip-cleanup":
+                    self.assertEqual("resource_unavailable", result.category)
+                    self.assertTrue(Path(terminal["processor_record"]).is_file())
                 if scenario == "cleanup":
                     self.assertEqual("resource_unavailable", result.category)
                     self.assertTrue(result.transcript)
