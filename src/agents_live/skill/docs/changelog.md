@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: validate release receipts from linked worktrees. (#480)
+  Preparation, acceptance, and resumable checkpoints identify preserved
+  artifacts by canonical absolute paths, including Git storage outside the
+  checkout. Manifest and publication consumers retain exact file hashes, and
+  missing artifacts report their location instead of raising a path error.
+  Older relative-path receipts remain stale and require fresh evidence.
 - fix: replace stale Windows scheduled executables during generation convergence. (#473)
   Scheduled agents, maintenance, and watchers compare their effective action
   and working directory with the selected generation instead of retaining
