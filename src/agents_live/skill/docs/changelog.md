@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.0 - 2026-09-07
+
 - fix: accept slow healthy dashboard responses during installed candidate validation.
   Readiness requests use the remaining startup deadline instead of repeatedly
   abandoning valid inventory responses after two seconds.
