@@ -1112,6 +1112,42 @@ class TestFailuresAreVisible(TempRepository):
                     obs.query.resolve_since(value)[:16],
                     qlog._resolve_ts(value)[:16])
 
+    def test_log_queries_preserve_usage_across_different_json_shapes(self) -> None:
+        directory = self.root / "mixed-usage"
+        directory.mkdir()
+        values = [[], {"ai_credits": "0.25", "list_cost_usd": "0.01"}, None]
+        for index, usage in enumerate(values):
+            (directory / f"run-{index}.jsonl").write_text(json.dumps({
+                "ts": "2026-09-11T00:00:00Z", "agent_name": "probe",
+                "log_schema": 5, "run_id": str(index), "usage": usage,
+                "attributes": [["level", None], ["duration_s", 1.25]],
+            }) + "\n", encoding="utf-8")
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, [str(directory / "*.jsonl")])
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id").fetchall()
+        self.assertEqual(values, [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * len(values), [row[1] for row in rows])
+        archive = directory / "archive"
+        archive.mkdir()
+        with qlog.duckdb.connect(":memory:") as connection:
+            for log in directory.glob("*.jsonl"):
+                parquet = archive / f"{log.stem}.parquet"
+                connection.sql(
+                    f"COPY (SELECT * FROM read_json_auto('{log}')) "
+                    f"TO '{parquet}' (FORMAT PARQUET)")
+            qlog.build_view(
+                connection, [str(directory / "*.jsonl")], archives=archive)
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id, _archive"
+            ).fetchall()
+        self.assertEqual([value for value in values for _ in range(2)], [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * (2 * len(values)), [row[1] for row in rows])
+
     def test_schema_check_names_where_a_handler_record_is_invalid(self) -> None:
         """A count alone cannot tell a handler author what to fix."""
         directory = paths.repo_state_dir(self.root) / "logs"
@@ -6573,8 +6609,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             positive = json.loads(completed.stdout)
             self.assertEqual([
-                '["ai_credits","25"]',
-                '["list_cost_usd","0.25"]',
+                ["ai_credits", "25"],
+                ["list_cost_usd", "0.25"],
             ], positive["records"][0]["usage"])
             positive["records"][0]["usage"].insert(0, "{malformed")
             with mock.patch.dict(scope, {

@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: query historical logs with mixed accounting shapes without conversion errors.
+  Normalize usage, attributes, and attempts before combining current JSONL and
+  retained Parquet records. JSON output preserves structured usage values, and
+  phase timing extraction handles attributes containing nulls.
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or
