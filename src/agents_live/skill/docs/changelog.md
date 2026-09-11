@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.2 - 2026-09-11
+
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or
