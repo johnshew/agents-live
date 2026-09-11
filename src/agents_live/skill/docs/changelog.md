@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-07
+ms.date: 2026-09-11
 ms.topic: reference
 ---
 
@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
+  Version probes decode stdout and stderr independently of the system locale,
+  tolerating malformed diagnostic bytes without losing captured output or
+  raising reader-thread exceptions. Failed exits and invalid required versions
+  still report unhealthy providers.
 - fix: record successful processor early finishes without discarding completed work.
   The existing skip control still omits the model and later processors, but
   successful preprocessor work now completes as success rather than skipped.

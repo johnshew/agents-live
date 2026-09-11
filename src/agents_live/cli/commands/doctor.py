@@ -226,7 +226,9 @@ def _probe_check(
     argv = [executable, *cli.probe_argv]
     printable = " ".join(argv)
     try:
-        probe = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        probe = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {
             "check": f"provider CLI {name}",

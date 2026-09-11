@@ -6371,6 +6371,45 @@ class TestProviderContract(TempRepository):
         self.assertTrue(checks[0]["ok"], checks[0])
         self.assertIn("-m json.tool --help", checks[0]["detail"])
 
+    def test_doctor_handles_non_ascii_probe_output_without_reader_errors(
+            self) -> None:
+        provider = self._plugin_provider()
+        cases = (
+            (b"1.2.3 (\xc4\x81)\n", b"\x81", 0, (1, 0, 0), True),
+            (b"\x81", b"", 0, None, True),
+            (b"\x81", b"", 0, (1, 0, 0), False),
+            (b"1.2.3\n", b"\x81", 3, None, False),
+        )
+        for stdout, stderr, returncode, minimum, healthy in cases:
+            with self.subTest(
+                    stdout=stdout, stderr=stderr, returncode=returncode,
+                    minimum=minimum):
+                provider.cli = agent.ProviderCli(
+                    executable=sys.executable,
+                    probe_argv=("-c", (
+                        "import os, sys; "
+                        f"os.write(1, {stdout!r}); "
+                        f"os.write(2, {stderr!r}); "
+                        f"sys.exit({returncode})"
+                    )),
+                    minimum_version=minimum,
+                )
+                reader_errors = []
+                with (
+                    mock.patch.object(
+                        subprocess.locale, "getencoding", return_value="cp1252"),
+                    mock.patch.object(
+                        threading, "excepthook", side_effect=reader_errors.append),
+                ):
+                    checks = doctor._provider_cli_checks({"contract-demo"})
+
+                self.assertEqual([], reader_errors)
+                self.assertEqual(healthy, checks[0]["ok"], checks[0])
+                if returncode:
+                    self.assertIn("exited 3", checks[0]["detail"])
+                elif not healthy:
+                    self.assertIn("requires version", checks[0]["detail"])
+
     def test_a_cli_that_fails_its_own_probe_is_reported_unhealthy(self) -> None:
         """A pinned executable is a file, not a working CLI."""
         provider = self._plugin_provider()
