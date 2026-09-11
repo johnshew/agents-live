@@ -10,12 +10,14 @@ name = "bake"
 branch = "bake/v6.9.2-local"
 version = "6.9.2"
 promotes_to = "release"
-deployed_version = "6.9.1.dev0+gec2cb954"
-deployed_commit = "ec2cb954634ae2a193dc53a4e5151cda10abdda9"
-validated_on = "2026-09-07"
+deployed_version = "6.9.2.dev0+gd3704345"
+deployed_commit = "d3704345fe0a465839d51c95be457996e7a1b4b3"
+validated_on = "2026-09-11"
 
 [bake.promotion]
-decision = "continue-bake"
+decision = "approved"
+commit = "d3704345fe0a465839d51c95be457996e7a1b4b3"
+decided_on = "2026-09-11"
 
 [bake.issues]
 delivered = [502]
@@ -31,4 +33,4 @@ overall = "Validate and release the completed 6.9.2 patch fixes: Windows doctor 
 "478" = "Keep numeric usage queries and summaries in 6.10. Existing timing, usage retention, and successful processor early-finish corrections are delivered for 6.9.2; no separate model-bypass signal is planned."
 "486" = "The developer approved proceeding with the patch release after both exact-version managed-proxy checks remained unavailable on 2026-09-11. Keep consumer-resolution verification open and use the verified official GitHub release bootstrap. Do not change package sources, weaken TLS, or republish immutable versions."
 "489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
-testing = "The completed fixes passed source gates and Windows/Linux PR checks. Validate the exact 6.9.2 bake, then prepare and accept a fresh official candidate, including installed replacement, watcher restoration, dashboard operations, and provider cost evidence. Bake evidence is not official-candidate acceptance. Verify public PyPI artifacts separately from managed-proxy propagation."
+testing = "The exact recorded 6.9.2 bake passed packaged dashboard readiness and supported local deployment postchecks, including installed identity and watcher restoration. The completed fixes also passed source gates and Windows/Linux PR checks. The developer requested promotion and the patch release. Prepare and accept a fresh official candidate, including installed replacement, watcher restoration, dashboard operations, and provider cost evidence. Bake evidence is not official-candidate acceptance. Verify public PyPI artifacts separately from managed-proxy propagation."
