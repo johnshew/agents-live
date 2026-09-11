@@ -7,29 +7,28 @@ promotes_to = "GitHub Release and PyPI"
 
 [bake]
 name = "bake"
-branch = "bake/v6.9.1-local"
-version = "6.9.1"
+branch = "bake/v6.9.2-local"
+version = "6.9.2"
 promotes_to = "release"
 deployed_version = "6.9.1.dev0+gec2cb954"
 deployed_commit = "ec2cb954634ae2a193dc53a4e5151cda10abdda9"
 validated_on = "2026-09-07"
 
 [bake.promotion]
-decision = "approved"
-commit = "ec2cb954634ae2a193dc53a4e5151cda10abdda9"
-decided_on = "2026-09-07"
+decision = "continue-bake"
 
 [bake.issues]
-delivered = [480, 481, 485, 488, 490, 491, 494, 495]
+delivered = [502]
 partial = []
-deferred = [105, 388, 434, 478, 489]
+deferred = [105, 388, 434, 478, 486, 489]
 promotion_decision = []
 
 [bake.recommendations]
-overall = "Integrate and validate the completed fixes for 6.9.1. The developer requested a patch release; planned accounting and deterministic model-bypass features remain in 6.10. Preserve the published 6.9.0 release and require exact-candidate acceptance before publishing 6.9.1."
+overall = "Validate and release the completed 6.9.2 patch fixes: Windows doctor probe decoding, run timing and usage retention, and successful processor early-finish recording. The developer requested publication after reviewing the remaining open issues. Preserve the published 6.9.1 release and require exact-candidate acceptance before publishing 6.9.2."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
-"478" = "Keep accounting, usage summaries, and deterministic model bypass in the planned 6.10 feature release; they are not prerequisites for the requested 6.9.1 fixes."
+"478" = "Keep numeric usage queries and summaries in 6.10. Existing timing, usage retention, and successful processor early-finish corrections are delivered for 6.9.2; no separate model-bypass signal is planned."
+"486" = "The developer approved proceeding with the patch release after both exact-version managed-proxy checks remained unavailable on 2026-09-11. Keep consumer-resolution verification open and use the verified official GitHub release bootstrap. Do not change package sources, weaken TLS, or republish immutable versions."
 "489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
-testing = "The exact recorded 6.9.1 bake passed source gates, packaged dashboard readiness, and supported local deployment postchecks. After promotion, prepare and accept a fresh official candidate, including installed replacement, watcher restoration, dashboard operations, and provider cost evidence. Bake evidence is not official-candidate acceptance. Verify public PyPI artifacts separately from managed-proxy propagation."
+testing = "The completed fixes passed source gates and Windows/Linux PR checks. Validate the exact 6.9.2 bake, then prepare and accept a fresh official candidate, including installed replacement, watcher restoration, dashboard operations, and provider cost evidence. Bake evidence is not official-candidate acceptance. Verify public PyPI artifacts separately from managed-proxy propagation."
