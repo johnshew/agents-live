@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: identify numbered release candidates instead of displaying an unknown channel.
+  Version and structured runtime output report `candidate` for RC packages;
+  installed-version listings distinguish local release candidates and retain
+  explicit rejected status.
 - fix: preserve remaining same-day Windows calendar repetitions. (#509)
   Registration retains an active period's original anchor without shifting
   cron phase, interval, bounded windows, or catch-up policy. Calendar periods

@@ -2985,28 +2985,31 @@ class TestInstallationGenerations(unittest.TestCase):
 
     def test_generation_listing_names_candidate_and_rejected_status(self) -> None:
         from agents_live.cli.commands import generations
-        self._activate_generation("6.9.0")
-        built = deploy.generation.load("6.9.0")
         from dataclasses import replace
-        candidate = replace(built, provenance=deploy.generation.Provenance(
-            "local-artifact", "candidate.whl", "a" * 64),
-            validated="2026-09-06T12:30:00+02:00")
-        with mock.patch.object(deploy.generation, "load", return_value=candidate):
-            deploy.generation.classify("6.9.0", "rejected")
-            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    generations.main(["list"])
-                row = json.loads(output.getvalue())["versions"][0]
-            self.assertEqual("release-candidate", row["channel"])
-            self.assertEqual("local-artifact", row["source"])
-            self.assertEqual("rejected", row["status"])
-            self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
-            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    generations.main(["list"])
-            self.assertIn("local release candidate (rejected)", output.getvalue())
+        for version, channel in (("6.9.0", "release-candidate"), ("6.9.2rc3", "candidate")):
+            self._activate_generation(version)
+            built = deploy.generation.load(version)
+            candidate = replace(built, provenance=deploy.generation.Provenance(
+                "local-artifact", "candidate.whl", "a" * 64),
+                validated="2026-09-06T12:30:00+02:00")
+            with self.subTest(version=version), \
+                    mock.patch.object(deploy.generation, "load", return_value=candidate), \
+                    mock.patch.object(deploy.layout, "installed_generations", return_value=[version]):
+                deploy.generation.classify(version, "rejected")
+                with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        generations.main(["list"])
+                    row = json.loads(output.getvalue())["versions"][0]
+                self.assertEqual(channel, row["channel"])
+                self.assertEqual("local-artifact", row["source"])
+                self.assertEqual("rejected", row["status"])
+                self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
+                with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        generations.main(["list"])
+                self.assertIn("local release candidate (rejected)", output.getvalue())
 
     def test_public_versions_command_replaces_generations(self) -> None:
         self._activate_generation("6.9.0.dev0+g123abcd")

@@ -76,9 +76,11 @@ def _list(root: Path) -> int:
                 zone = "".join(word[0].upper() for word in zone.split())
             date = f"{moment.strftime('%b')} {moment.day}, {moment.year} "
             date += f"{moment.hour % 12 or 12}:{moment.minute:02d} {moment.strftime('%p')} {zone}"
-            label = {"bake": "bake release", "release-candidate": "release candidate"}.get(
+            label = {"bake": "bake release", "candidate": "release candidate",
+                     "release-candidate": "release candidate"}.get(
                 row["channel"], row["channel"])
-            if row["source"] == "local-artifact" and row["channel"] == "release-candidate":
+            if row["source"] == "local-artifact" and row["channel"] in {
+                    "candidate", "release-candidate"}:
                 label = "local " + label
             if row["status"] == "rejected":
                 label += " (rejected)"
