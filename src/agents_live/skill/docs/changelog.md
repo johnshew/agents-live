@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-11
+ms.date: 2026-09-13
 ms.topic: reference
 ---
 
@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: block legacy release commands when a cycle adopts numbered release candidates.
+  Release reports distinguish the stable target, next RC, and historical rejected
+  attempts without relabeling package bytes or claiming unavailable evidence.
+  Preparation remains blocked until the numbered-RC tooling is implemented and
+  validated; RC testing cannot replace acceptance of the final stable artifacts.
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or
