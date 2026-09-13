@@ -309,7 +309,10 @@ class TestDefinitionLoader(TempRepository):
     def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
         self.assertEqual("release", identity.channel("6.6.0"))
         self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
-        self.assertEqual("unknown", identity.channel("6.6.0rc1"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc1"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc12"))
+        for invalid in ("6.6.0rc", "6.6.0rc1junk", "6.6.0beta1"):
+            self.assertEqual("unknown", identity.channel(invalid))
         self.assertEqual(
             "agents-live 6.6.0 (channel: release)",
             identity.label("6.6.0"),
@@ -1410,6 +1413,16 @@ class TestRuntimeCore(unittest.TestCase):
             "(channel: bake, commit: abc1234)",
             output.getvalue().strip(),
         )
+
+    def test_version_command_identifies_a_numbered_candidate(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        output = io.StringIO()
+        with mock.patch.object(module, "__version__", "6.9.2rc3"), \
+                contextlib.redirect_stdout(output):
+            result = module.main(["--version"])
+        self.assertEqual(0, result)
+        self.assertEqual("agents-live 6.9.2rc3 (channel: candidate)",
+                         output.getvalue().strip())
 
     def test_windows_uninstall_queues_owned_tree_removal(self) -> None:
         stdout = io.StringIO()
