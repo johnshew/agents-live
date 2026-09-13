@@ -20,7 +20,8 @@ The active `6.9.2` cycle adopts numbered RCs under
 [#511](https://github.com/johnshew/agents-live/issues/511). The migration record
 reserves `6.9.2rc1` for a legacy rejected attempt actually packaged as `6.9.2`;
 its original evidence is unavailable in this checkout. It is not a recovered
-RC package. The next new package is `6.9.2rc2`.
+RC package. `6.9.2rc2` is now installed for local evaluation; the manifest
+reserves `6.9.2rc3` for the next new candidate, not automatic deployment.
 
 **Final stable preparation remains blocked on #511.** For authorized local
 RC evaluation, use `tools/local-deploy.py --repo <live-repository> --rc <version>`

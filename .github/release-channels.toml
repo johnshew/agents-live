@@ -10,9 +10,9 @@ name = "bake"
 branch = "bake/v6.9.2-rc"
 version = "6.9.2"
 promotes_to = "release"
-deployed_version = "6.9.2.dev0+gd3704345"
-deployed_commit = "d3704345fe0a465839d51c95be457996e7a1b4b3"
-validated_on = "2026-09-11"
+deployed_version = "6.9.2rc2"
+deployed_commit = "5d47911db93e9ab3f455a68dcc4363f602e4739b"
+validated_on = "2026-09-13"
 
 [bake.promotion]
 decision = "continue-bake"
@@ -21,7 +21,7 @@ decision = "continue-bake"
 model = "numbered-rc"
 implementation = "local-rc-deploy"
 issue = 511
-next = "6.9.2rc2"
+next = "6.9.2rc3"
 supersedes = ["bake/v6.9.2-local", "bake/v6.9.3-local"]
 decided_on = "2026-09-13"
 
@@ -33,16 +33,26 @@ evidence = "unavailable"
 source = "https://github.com/johnshew/agents-live/pull/510"
 reason = "Installed acceptance found mixed-schema historical log query failures. The original candidate artifacts and receipts are not available in this checkout. This is a historical designation, not a recovered or rebuilt rc1 package."
 
+[bake.candidate_cycle.history."6.9.2rc2"]
+status = "local-testing"
+kind = "numbered-rc"
+artifact_version = "6.9.2rc2"
+evidence = "Windows packaged readiness, installed health and unchanged agent state, dashboard restoration, and stable rollback/reselection passed. Not full operational or stable-release acceptance."
+source = "https://github.com/johnshew/agents-live/pull/514"
+commit = "5d47911db93e9ab3f455a68dcc4363f602e4739b"
+wheel_sha256 = "f875ef3ee820e8c72018fed7af94f7e35650a77e806e5c71fcc6892cbf50115d"
+publication = "local-only"
+
 [bake.issues]
-delivered = [502]
-partial = []
+delivered = [502, 509]
+partial = [508, 511]
 deferred = [105, 388, 434, 478, 486, 489]
-promotion_decision = [508, 509, 511]
+promotion_decision = [508, 511]
 
 [bake.recommendations]
-overall = "Release 6.9.2 through numbered release candidates. Reserve rc1 for the legacy rejected attempt without changing its original 6.9.2 artifact identity or claiming unavailable evidence. Local rc2 evaluation uses local-deploy.py --rc without a GitHub release. Complete #511 before final stable preparation, finish #510 and #509, and correct #508's display defect with an explicit decision on its remaining editing scope. Preserve published 6.9.1 and require independent acceptance of the final stable bytes. Do not prepare or publish with the old stable-numbered candidate workflow."
-"508" = "Fix configured model and effort display separately from last-run telemetry. Obtain explicit developer approval before deferring provider-aware editing and context controls; that deferral has not been approved."
-"509" = "Fix compact Windows scheduling and prove actual same-day scheduled firing, calendar phase, stable convergence, and no duplicate midnight runs. Registration and doctor output alone are not acceptance."
+overall = "6.9.2rc2 is installed locally beside 6.9.1 without a GitHub release. Historical log, Windows scheduling, configured-model display, and dashboard shutdown fixes reached bake in #514. Continue local RC evaluation, complete #511 before final stable preparation, and obtain an explicit decision on #508's remaining editing scope. RC3 is the next unused candidate number, not an instruction to replace the selected RC2. Preserve published 6.9.1 and independently accept final stable bytes. Do not use the old stable-numbered candidate workflow."
+"508" = "Configured model and effort display is fixed in #514. Obtain explicit developer approval before deferring provider-aware editing and context controls; that stable-release deferral has not been approved."
+"509" = "Fixed in #514. A real temporary Windows hourly task fired one second after its expected same-day boundary, without immediate catch-up or definition change. Boundary and phase regression suites pass; cleanup succeeded."
 "511" = "Local RC wheel preparation and side-by-side selection are available. Complete rejection and rollback validation, exact-artifact acceptance, final stable retry identities, and stable-only publication guards. Keep final stable preparation and promotion blocked until this workflow is implemented and validated."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
@@ -50,4 +60,4 @@ overall = "Release 6.9.2 through numbered release candidates. Reserve rc1 for th
 "478" = "Keep numeric usage queries and summaries in 6.10. Existing timing, usage retention, and successful processor early-finish corrections belong in this patch; no separate model-bypass signal is planned."
 "486" = "The developer approved proceeding with the patch release after both exact-version managed-proxy checks remained unavailable on 2026-09-11. Keep consumer-resolution verification open and use the verified official GitHub release bootstrap. Do not change package sources, weaken TLS, or republish immutable versions."
 "489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
-testing = "The last recorded bake deployment is historical evidence, not acceptance of an RC or this machine's installed version. After the RC workflow and fixes pass required Windows/Linux checks, prepare 6.9.2rc2 and validate side-by-side installation, deliberate selection, rollback, replacement, watcher restoration, dashboard operations and clean shutdown, and real provider cost evidence. Confirm life repository ownership before exercising automation. Rejected RCs advance to rc3 without changing the stable target. Build and independently accept final 6.9.2 only after RC acceptance and exact-commit approval. Verify GitHub and public PyPI publication separately from managed-proxy propagation."
+testing = "RC2's exact wheel passed Windows packaged readiness including desktop/mobile layouts and clean shutdown. Local deployment preserved 23 stopped definitions and restored the dashboard; doctor passed and rollback to retained 6.9.1 followed by RC2 reselection succeeded. Source CI passed on Windows and Linux; this is not Linux acceptance of the separately stamped RC2 wheel. No live provider run or started-watcher restoration was exercised. RC channel labels still show unknown despite stored candidate status; complete that identity work in #511. Full operational and final stable acceptance remain required."

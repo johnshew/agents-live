@@ -150,7 +150,9 @@ shared history. The manifest reserves `6.9.2rc1` for the legacy rejected
 candidate, whose actual package version was `6.9.2`. Original artifacts and
 receipts are unavailable here. This records the documented rejection, not a
 recovered or rebuilt RC package, and carries no reusable acceptance claim.
-The next newly built candidate is `6.9.2rc2`.
+The first newly built candidate, `6.9.2rc2`, is installed for local evaluation.
+Its exact commit and wheel hash are recorded in the manifest. `6.9.2rc3` is
+the next unused candidate number; RC2 has not been marked release-accepted.
 
 The migration record, policy, reporting, legacy-command safety guard, and
 local numbered RC deployment are implemented. Use `local-deploy.py --rc` for
