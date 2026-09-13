@@ -5699,7 +5699,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
         scope = script["_prepare_artifact"].__globals__
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             wheel = root / "agents_live-6.9.2rc2-py3-none-any.whl"
             wheel.write_bytes(b"immutable candidate")
             digest = script["RELEASE"]["_sha256"](wheel)
