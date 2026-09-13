@@ -19,7 +19,7 @@ decision = "continue-bake"
 
 [bake.candidate_cycle]
 model = "numbered-rc"
-implementation = "pending"
+implementation = "local-rc-deploy"
 issue = 511
 next = "6.9.2rc2"
 supersedes = ["bake/v6.9.2-local", "bake/v6.9.3-local"]
@@ -40,10 +40,10 @@ deferred = [105, 388, 434, 478, 486, 489]
 promotion_decision = [508, 509, 511]
 
 [bake.recommendations]
-overall = "Release 6.9.2 through numbered release candidates. Reserve rc1 for the legacy rejected attempt without changing its original 6.9.2 artifact identity or claiming unavailable evidence. Implement and validate #511 before preparing rc2, finish #510 and #509, and correct #508's display defect with an explicit decision on its remaining editing scope. Preserve published 6.9.1 and require independent acceptance of the final stable bytes. Do not prepare or publish with the old stable-numbered candidate workflow."
+overall = "Release 6.9.2 through numbered release candidates. Reserve rc1 for the legacy rejected attempt without changing its original 6.9.2 artifact identity or claiming unavailable evidence. Local rc2 evaluation uses local-deploy.py --rc without a GitHub release. Complete #511 before final stable preparation, finish #510 and #509, and correct #508's display defect with an explicit decision on its remaining editing scope. Preserve published 6.9.1 and require independent acceptance of the final stable bytes. Do not prepare or publish with the old stable-numbered candidate workflow."
 "508" = "Fix configured model and effort display separately from last-run telemetry. Obtain explicit developer approval before deferring provider-aware editing and context controls; that deferral has not been approved."
 "509" = "Fix compact Windows scheduling and prove actual same-day scheduled firing, calendar phase, stable convergence, and no duplicate midnight runs. Registration and doctor output alone are not acceptance."
-"511" = "Implement numbered RC preparation, side-by-side staging and selection, rejection and rollback, exact-artifact acceptance, final stable retry identities, and stable-only publication guards. Keep candidate preparation and promotion blocked until this workflow is implemented and validated."
+"511" = "Local RC wheel preparation and side-by-side selection are available. Complete rejection and rollback validation, exact-artifact acceptance, final stable retry identities, and stable-only publication guards. Keep final stable preparation and promotion blocked until this workflow is implemented and validated."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."

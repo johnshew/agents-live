@@ -259,6 +259,29 @@ Prepared releases still require the complete preparation gates and
 `tools/release.py --accept-candidate`; their release receipts and resumable
 acceptance checkpoints remain authoritative.
 
+### Local numbered RCs
+
+From the clean synchronized bake, local-only RC evaluation uses:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
+```
+
+The command accepts only the manifest's next unused RC, builds an archived copy
+with that exact package version, and installs through `upgrade --from`. Existing
+versions remain installed side by side; `current` selects the RC. No GitHub tag,
+release, or PyPI upload is created. Use `versions list` to inspect retained
+versions and `versions activate <version>` to deliberately select a previous version.
+
+Per-RC source identity, wheel, preparation evidence, and deployment receipt live
+under the common Git directory's `agents-live-local-deploy/candidates/<version>`.
+A retry uses the same wheel even after readiness fails. Changed source must use
+the next RC; changed retained bytes fail closed. An interrupted lock or wheel
+without its identity receipt requires inspection, not deletion or rebuilding
+under the same version. Local deployment is not provider-backed acceptance or
+approval of final stable bytes. Stable preparation and publication remain
+blocked on #511.
+
 ## Validate a published bake
 
 A published bake is a GitHub prerelease used to move already-validated bytes
