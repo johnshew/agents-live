@@ -21,7 +21,7 @@ decision = "continue-bake"
 model = "numbered-rc"
 implementation = "local-rc-deploy"
 issue = 511
-next = "6.9.2rc3"
+next = "6.9.2rc4"
 supersedes = ["bake/v6.9.2-local", "bake/v6.9.3-local"]
 decided_on = "2026-09-13"
 
@@ -43,21 +43,32 @@ commit = "5d47911db93e9ab3f455a68dcc4363f602e4739b"
 wheel_sha256 = "f875ef3ee820e8c72018fed7af94f7e35650a77e806e5c71fcc6892cbf50115d"
 publication = "local-only"
 
+[bake.candidate_cycle.history."6.9.2rc3"]
+status = "readiness-failed"
+kind = "numbered-rc"
+artifact_version = "6.9.2rc3"
+evidence = "Exact wheel failed Windows packaged readiness twice at the 1280x720 refresh focus-restoration assertion. Retry reused identical bytes. Not installed; RC2 remains selected. Track investigation in #516."
+source = "https://github.com/johnshew/agents-live/pull/515"
+commit = "6f3b53c0275e36bf0724e850509b942afb4891d5"
+wheel_sha256 = "a833cc64b9b92933fddd388671620f35d54eb7a728fbe9436d85363d68b38cd0"
+publication = "local-only"
+
 [bake.issues]
 delivered = [502, 509]
 partial = [508, 511]
 deferred = [105, 388, 434, 478, 486, 489]
-promotion_decision = [508, 511]
+promotion_decision = [508, 511, 516]
 
 [bake.recommendations]
-overall = "6.9.2rc2 is installed locally beside 6.9.1 without a GitHub release. Historical log, Windows scheduling, configured-model display, and dashboard shutdown fixes reached bake in #514. Continue local RC evaluation, complete #511 before final stable preparation, and obtain an explicit decision on #508's remaining editing scope. RC3 is the next unused candidate number, not an instruction to replace the selected RC2. Preserve published 6.9.1 and independently accept final stable bytes. Do not use the old stable-numbered candidate workflow."
+overall = "6.9.2rc2 remains installed locally beside 6.9.1 without a GitHub release. The RC channel-label fix reached bake in #515, but RC3 failed exact-wheel packaged readiness twice before installation; resolve #516 before deployment. RC4 is the next unused candidate number. Complete #511 before final stable preparation and obtain an explicit decision on #508's remaining editing scope. Preserve published 6.9.1 and independently accept final stable bytes. Do not use the old stable-numbered candidate workflow."
 "508" = "Configured model and effort display is fixed in #514. Obtain explicit developer approval before deferring provider-aware editing and context controls; that stable-release deferral has not been approved."
 "509" = "Fixed in #514. A real temporary Windows hourly task fired one second after its expected same-day boundary, without immediate catch-up or definition change. Boundary and phase regression suites pass; cleanup succeeded."
 "511" = "Local RC wheel preparation and side-by-side selection are available. Complete rejection and rollback validation, exact-artifact acceptance, final stable retry identities, and stable-only publication guards. Keep final stable preparation and promotion blocked until this workflow is implemented and validated."
+"516" = "Investigate the repeatable local RC3 dashboard refresh focus failure without weakening the gate. Preserve RC3 bytes and use the next numbered RC for any source correction. RC2 remains active."
 "105" = "Defer span correlation and sensitivity metadata to a dedicated schema release; current run IDs and bounded log and timeline queries remain the operational workaround."
 "388" = "Defer the remaining registration and initialization clean break to the planned major-version boundary; the additive 6.x groundwork is already delivered."
 "434" = "Defer removal of the 5.x compatibility surface to 7.0 as explicitly scoped by the issue."
 "478" = "Keep numeric usage queries and summaries in 6.10. Existing timing, usage retention, and successful processor early-finish corrections belong in this patch; no separate model-bypass signal is planned."
 "486" = "The developer approved proceeding with the patch release after both exact-version managed-proxy checks remained unavailable on 2026-09-11. Keep consumer-resolution verification open and use the verified official GitHub release bootstrap. Do not change package sources, weaken TLS, or republish immutable versions."
 "489" = "Keep the internal generation-to-version terminology cleanup separate; the public version commands remain available and this refactor is not required for the patch fixes."
-testing = "RC2's exact wheel passed Windows packaged readiness including desktop/mobile layouts and clean shutdown. Local deployment preserved 23 stopped definitions and restored the dashboard; doctor passed and rollback to retained 6.9.1 followed by RC2 reselection succeeded. Source CI passed on Windows and Linux; this is not Linux acceptance of the separately stamped RC2 wheel. No live provider run or started-watcher restoration was exercised. RC channel labels still show unknown despite stored candidate status; complete that identity work in #511. Full operational and final stable acceptance remain required."
+testing = "RC2's exact wheel passed Windows packaged readiness including desktop/mobile layouts and clean shutdown. Local deployment preserved 23 stopped definitions and restored the dashboard; doctor passed and rollback to retained 6.9.1 followed by RC2 reselection succeeded. Source CI passed on Windows and Linux; this is not Linux acceptance of the separately stamped RC2 wheel. No live provider run or started-watcher restoration was exercised. #515 fixes RC channel labels with red-before-green regression coverage and passing Windows/Linux CI. Its RC3 wheel failed local packaged focus readiness twice (#516), so the installed RC2 still shows unknown. Full operational and final stable acceptance remain required."

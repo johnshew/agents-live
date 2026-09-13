@@ -151,8 +151,10 @@ candidate, whose actual package version was `6.9.2`. Original artifacts and
 receipts are unavailable here. This records the documented rejection, not a
 recovered or rebuilt RC package, and carries no reusable acceptance claim.
 The first newly built candidate, `6.9.2rc2`, is installed for local evaluation.
-Its exact commit and wheel hash are recorded in the manifest. `6.9.2rc3` is
-the next unused candidate number; RC2 has not been marked release-accepted.
+Its exact commit and wheel hash are recorded in the manifest. `6.9.2rc3`
+contains the channel-label fix but failed packaged readiness before installation
+(#516). Its exact bytes are retained; `6.9.2rc4` is the next unused candidate
+number. RC2 remains selected and has not been marked release-accepted.
 
 The migration record, policy, reporting, legacy-command safety guard, and
 local numbered RC deployment are implemented. Use `local-deploy.py --rc` for

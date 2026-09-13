@@ -83,9 +83,10 @@ The standard loop for any change that lands as commits:
 
 The active cycle uses numbered release candidates under
 [#511](https://github.com/johnshew/agents-live/issues/511). The stable target is
-`6.9.2`, the integration branch is `bake/v6.9.2-rc`, and the next newly built
-package was `6.9.2rc2`, now deployed locally; `6.9.2rc3` is the next unused
-candidate number. This explicitly supersedes the former 6.9.2 and 6.9.3
+`6.9.2`, the integration branch is `bake/v6.9.2-rc`, and `6.9.2rc2` remains
+deployed locally. `6.9.2rc3` was built but failed packaged readiness before
+installation (#516); `6.9.2rc4` is the next unused candidate number.
+This explicitly supersedes the former 6.9.2 and 6.9.3
 bake routing without rewriting either branch's history.
 
 The manifest records `6.9.2rc1` as the legacy rejected attempt whose actual
