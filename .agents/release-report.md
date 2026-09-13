@@ -43,10 +43,12 @@ historical candidate decisions. The first record is a legacy rejection:
 logical `6.9.2rc1`, actual package version `6.9.2`, original evidence unavailable.
 Do not infer a rebuilt RC or successful acceptance from this designation.
 
-The report must remain `blocked` while this revision lacks numbered RC tooling,
+The report must remain `blocked` while this revision lacks final stable tooling,
 even if older ancestry says bake already moved to main or an approval remains.
-Its next action is to implement and validate #511, not prepare a stable-numbered
-candidate. Markdown and JSON must show the same target, next RC, historical
+Its next action is to complete and validate #511, not prepare a stable-numbered
+candidate. Local evaluation through `local-deploy.py --rc` is available without
+a GitHub release and is not final stable acceptance.
+Markdown and JSON must show the same target, next RC, historical
 evidence qualification, and blocker. Changing a manifest status does not enable
 unsupported release commands.
 

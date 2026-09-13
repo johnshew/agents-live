@@ -446,19 +446,20 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     if rc_blocked and not is_released:
         development_state = "blocked"
         development_state_detail = (
-            "The numbered RC policy is adopted, but preparation is blocked until "
-            "the RC tooling in #511 is implemented and validated.")
+            "Local numbered RC deployment is available; final stable preparation "
+            "and acceptance remain blocked on #511.")
         promotion_approved = False
         release_actions = [development_state_detail]
         overall_recommendation = recommendations["overall"]
-        bake_state = "RC migration recorded; release preparation is blocked."
-        bake_next = "Implement and validate #511, then finish the release fixes."
+        bake_state = "Local RC testing is available; stable release preparation is blocked."
+        bake_next = "Finish #511 and the release fixes; local RC evaluation may continue."
         next_actions = [
-            "Implement and validate #511 before using any candidate preparation, "
-            "acceptance, or publication command; the legacy workflow is blocked.",
+            "Complete and validate #511 before final stable preparation, "
+            "acceptance, or publication; the legacy workflow remains blocked.",
             "Finish the remaining fixes and release-scope decisions in the configured bake.",
-            f"Prepare and independently test `{candidate_cycle['next']}` only after "
-            "the numbered RC tooling and required Windows/Linux checks pass.",
+            "For authorized local evaluation, use `tools/local-deploy.py --repo "
+            f"<live-repository> --rc {candidate_cycle['next']}` from the synchronized "
+            "bake. This retains side-by-side versions without a GitHub release.",
             "Retain rejected RCs and advance the RC number, not the stable target.",
             "Obtain exact-commit approval, build the final stable version, and "
             "independently accept its exact bytes before tagging or publishing.",
@@ -467,8 +468,9 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         candidate_lines = [
             "", "## Numbered release candidates", "",
             f"Stable target: `{bake['version']}`. Next package: `{candidate_cycle['next']}`.",
-            "RC tooling is not implemented in this revision. Changing manifest "
-            "status cannot enable the legacy stable-numbered candidate commands.",
+            "Local RC deployment retains exact wheel bytes and per-candidate evidence. "
+            "It is not final stable acceptance. Changing manifest status cannot "
+            "enable the legacy stable-numbered candidate commands.",
             "", "| Candidate record | Status | Original package version | Evidence |",
             "|---|---|---|---|",
         ]

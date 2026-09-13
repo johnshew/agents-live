@@ -22,8 +22,12 @@ reserves `6.9.2rc1` for a legacy rejected attempt actually packaged as `6.9.2`;
 its original evidence is unavailable in this checkout. It is not a recovered
 RC package. The next new package is `6.9.2rc2`.
 
-**Preparation is blocked until the numbered RC tooling is implemented and
-validated.** The commands below document the existing legacy mechanism, not
+**Final stable preparation remains blocked on #511.** For authorized local
+RC evaluation, use `tools/local-deploy.py --repo <live-repository> --rc <version>`
+from the clean synchronized bake. The version must be the configured next RC.
+This builds and selects a side-by-side installation without creating a tag or
+GitHub release. See [testing.md](testing.md) for evidence and retry rules.
+The release commands below document the existing legacy mechanism, not
 an authorized workaround. The tool refuses its legacy preview, prepare,
 acceptance, and publish paths for a numbered-RC cycle. Do not run an older
 checkout to bypass this guard.

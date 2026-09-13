@@ -11,11 +11,17 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: support local numbered RC deployment without publishing a release.
+  Candidate wheels and source identities are retained per version across failed
+  readiness retries. Local deployment selects the RC beside existing versions
+  and verifies repository state and dashboard restoration. Reusing a number
+  with changed source or wheel bytes is refused; final stable acceptance and
+  publication remain separate, blocked gates.
 - fix: block legacy release commands when a cycle adopts numbered release candidates.
   Release reports distinguish the stable target, next RC, and historical rejected
   attempts without relabeling package bytes or claiming unavailable evidence.
-  Preparation remains blocked until the numbered-RC tooling is implemented and
-  validated; RC testing cannot replace acceptance of the final stable artifacts.
+  Final stable preparation remains blocked until its tooling is implemented and
+  validated; local RC testing cannot replace acceptance of the final stable artifacts.
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or

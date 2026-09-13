@@ -142,7 +142,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
-    receipt = _state_directory() / "preparation.json"
+    receipt = _preparation_directory(version) / "preparation.json"
     try:
         payload = json.loads(receipt.read_text(encoding="utf-8"))
         wheel = Path(payload["wheel"])
@@ -169,10 +169,96 @@ def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
     return wheel.resolve(), digest
 
 
+def _preparation_directory(version: str) -> Path:
+    root = _state_directory()
+    return root / "candidates" / version if "rc" in version else root
+
+
+def _requested_rc(version: str, target: str) -> str:
+    if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", version) is None:
+        raise LocalDeployError(f"RC must be a numbered candidate of {target}")
+    cycle = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"].get(
+        "candidate_cycle", {})
+    if cycle.get("model") != "numbered-rc" or cycle.get("next") != version \
+            or version in cycle.get("history", {}):
+        raise LocalDeployError(
+            f"{version} is not the configured next, unused RC")
+    return version
+
+
 def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
+    if "rc" not in version:
+        return _build_artifact(commit, version)
+    directory = _preparation_directory(version)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / "prepare.lock"
+    try:
+        descriptor = lock.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise LocalDeployError(
+            f"RC preparation is locked; inspect the retained state at {lock}") from exc
+    try:
+        descriptor.close()
+        identity = directory / "identity.json"
+        expected = {"commit": commit, "version": version}
+        if identity.exists():
+            if json.loads(identity.read_text(encoding="utf-8")) != expected:
+                raise LocalDeployError(
+                    f"{version} already belongs to different source; use the next RC")
+        else:
+            _atomic_json(identity, expected)
+        return _build_artifact(commit, version)
+    finally:
+        lock.unlink()
+
+
+def _build_artifact(commit: str, version: str) -> tuple[Path, str]:
     reusable = _prepared_artifact(commit, version)
     if reusable is not None:
         return reusable
+    directory = _preparation_directory(version)
+    retained = directory / "artifact.json"
+    if "rc" in version and retained.exists():
+        payload = json.loads(retained.read_text(encoding="utf-8"))
+        artifact = Path(payload["wheel"])
+        digest = payload["wheel_sha256"]
+        if payload.get("commit") != commit or payload.get("version") != version \
+                or not artifact.is_file() or RELEASE["_sha256"](artifact) != digest:
+            raise LocalDeployError("retained RC artifact identity changed")
+    else:
+        artifact, digest = _build_new_artifact(commit, version)
+        if "rc" in version:
+            _atomic_json(retained, {
+                "commit": commit, "version": version,
+                "wheel": str(artifact), "wheel_sha256": digest,
+            })
+    _run([
+        "uv", "run", "--script", "tools/dashboard-readiness.py",
+        "--wheel", str(artifact.resolve()),
+    ])
+    _require_unchanged_checkout(commit)
+    _atomic_json(directory / "preparation.json", {
+        "schema": LOCAL_PREPARATION_SCHEMA,
+        "prepared": True,
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+        "commit": commit,
+        "version": version,
+        "wheel": str(artifact.resolve()),
+        "wheel_sha256": digest,
+        "platform": sys.platform,
+        "os_name": os.name,
+        "architecture": platform.machine(),
+        "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
+    })
+    return artifact.resolve(), digest
+
+
+def _build_new_artifact(commit: str, version: str) -> tuple[Path, str]:
+    candidate = _preparation_directory(version) / f"agents_live-{version}-py3-none-any.whl"
+    if "rc" in version and candidate.exists():
+        raise LocalDeployError(
+            "RC wheel exists without its identity receipt; inspect retained evidence")
     with tempfile.TemporaryDirectory(prefix="agents-live-local-deploy-") as temp:
         temporary = Path(temp)
         archive = temporary / "source.zip"
@@ -191,30 +277,13 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         artifact = (
             _state_directory() / "artifacts" /
             f"{commit}-{digest}" / wheel.name)
+        if "rc" in version:
+            artifact = candidate
         artifact.parent.mkdir(parents=True, exist_ok=True)
         if not artifact.is_file():
             shutil.copy2(wheel, artifact)
     if RELEASE["_sha256"](artifact) != digest:
         raise LocalDeployError("immutable deployment artifact digest changed")
-    _run([
-        "uv", "run", "--script", "tools/dashboard-readiness.py",
-        "--wheel", str(artifact.resolve()),
-    ])
-    _require_unchanged_checkout(commit)
-    _atomic_json(_state_directory() / "preparation.json", {
-        "schema": LOCAL_PREPARATION_SCHEMA,
-        "prepared": True,
-        "prepared_at": datetime.now(timezone.utc).isoformat(),
-        "commit": commit,
-        "version": version,
-        "wheel": str(artifact.resolve()),
-        "wheel_sha256": digest,
-        "platform": sys.platform,
-        "os_name": os.name,
-        "architecture": platform.machine(),
-        "gates": [list(command) for command in LOCAL_GATES],
-        "python": sys.version,
-    })
     return artifact.resolve(), digest
 
 
@@ -240,7 +309,9 @@ def _stamp_bake_version(source: Path, current: str, target: str) -> None:
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
-    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:\.|\+|$)", value)
+    match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)(?:rc[1-9]\d*|\.dev\d+)?(?:\+[a-z0-9.]+)?",
+        value)
     if match is None:
         raise LocalDeployError(f"invalid package version: {value!r}")
     return tuple(int(part) for part in match.groups())
@@ -503,7 +574,7 @@ def _write_receipt(
     watchers: tuple[tuple[str, str], ...],
     dashboards: tuple[Dashboard, ...],
 ) -> Path:
-    destination = _state_directory() / "receipt.json"
+    destination = _preparation_directory(version) / "receipt.json"
     _atomic_json(destination, {
         "schema": LOCAL_DEPLOYMENT_SCHEMA,
         "deployed": True,
@@ -524,10 +595,12 @@ def _write_receipt(
     return destination
 
 
-def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
+def deploy(
+    repo: Path, *, allow_downgrade: bool = False, rc: str | None = None,
+) -> Path:
     commit = _synchronize()
     _branch, target = _bake_configuration()
-    version = f"{target}.dev0+g{commit[:8]}"
+    version = _requested_rc(rc, target) if rc else f"{target}.dev0+g{commit[:8]}"
     previous_version = RELEASE["_installed_version"]()
     if _version_tuple(version) < _version_tuple(previous_version) \
             and not allow_downgrade:
@@ -586,8 +659,11 @@ def main() -> int:
     parser.add_argument(
         "--allow-downgrade", action="store_true",
         help="Allow a local package version below the installed version")
+    parser.add_argument(
+        "--rc", metavar="VERSION",
+        help="Build and select the configured next RC locally, without publication")
     args = parser.parse_args()
-    deploy(args.repo, allow_downgrade=args.allow_downgrade)
+    deploy(args.repo, allow_downgrade=args.allow_downgrade, rc=args.rc)
     return 0
 
 

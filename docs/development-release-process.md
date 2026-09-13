@@ -152,9 +152,12 @@ receipts are unavailable here. This records the documented rejection, not a
 recovered or rebuilt RC package, and carries no reusable acceptance claim.
 The next newly built candidate is `6.9.2rc2`.
 
-Only this migration record, policy, reporting, and the legacy-command safety
-guard are implemented. Numbered RC preparation and final stable recovery remain
-work in [#511](https://github.com/johnshew/agents-live/issues/511). The report
+The migration record, policy, reporting, legacy-command safety guard, and
+local numbered RC deployment are implemented. Use `local-deploy.py --rc` for
+authorized side-by-side evaluation without a GitHub release. Candidate source
+and wheel identity are retained per RC, including failed-readiness retries.
+Final stable preparation and recovery remain work in
+[#511](https://github.com/johnshew/agents-live/issues/511). The report
 must say `blocked`, and release commands must refuse legacy candidate creation,
 acceptance, or publication until that workflow is implemented and validated.
 Do not remove the guard or use old checkout instructions to bypass it.

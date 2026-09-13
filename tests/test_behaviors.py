@@ -5670,6 +5670,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
             )
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("--repo", completed.stdout)
+        self.assertIn("--rc", completed.stdout)
+
+    def test_local_deploy_accepts_rc_release_lines(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        self.assertEqual((6, 9, 2), script["_version_tuple"]("6.9.2rc2"))
+        for invalid in ("6.9.2rc", "6.9.2garbage", "6.9.2rc2junk"):
+            with self.subTest(version=invalid), self.assertRaises(
+                    script["LocalDeployError"]):
+                script["_version_tuple"](invalid)
 
     def test_local_deploy_rejects_an_implicit_version_downgrade(self) -> None:
         script = runpy.run_path(
@@ -5685,6 +5694,73 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.assertRaisesRegex(
                     script["LocalDeployError"], "pass --allow-downgrade"):
                 deploy(Path("C:/repo"))
+
+    def test_local_deploy_rc_retains_bytes_across_failed_readiness(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["_prepare_artifact"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            wheel = root / "agents_live-6.9.2rc2-py3-none-any.whl"
+            wheel.write_bytes(b"immutable candidate")
+            digest = script["RELEASE"]["_sha256"](wheel)
+            build = mock.Mock(return_value=(wheel, digest))
+            ready = mock.Mock(side_effect=script["LocalDeployError"]("readiness failed"))
+            with mock.patch.dict(scope, {
+                "_state_directory": lambda: root,
+                "_build_new_artifact": build,
+                "_run": ready,
+                "_require_unchanged_checkout": mock.Mock(),
+            }):
+                with self.assertRaisesRegex(script["LocalDeployError"], "readiness failed"):
+                    script["_prepare_artifact"]("first-commit", "6.9.2rc2")
+                state = root / "candidates" / "6.9.2rc2"
+                self.assertFalse((state / "preparation.json").exists())
+                self.assertFalse((state / "prepare.lock").exists())
+                ready.side_effect = None
+                self.assertEqual((wheel, digest), script["_prepare_artifact"](
+                    "first-commit", "6.9.2rc2"))
+                self.assertEqual((wheel, digest), script["_prepare_artifact"](
+                    "first-commit", "6.9.2rc2"))
+                build.assert_called_once()
+                self.assertEqual(2, ready.call_count)
+                self.assertEqual("first-commit", json.loads(
+                    (state / "preparation.json").read_text())["commit"])
+                with self.assertRaisesRegex(script["LocalDeployError"], "different source"):
+                    script["_prepare_artifact"]("changed-commit", "6.9.2rc2")
+                wheel.write_bytes(b"modified candidate")
+                with self.assertRaisesRegex(script["LocalDeployError"], "identity changed"):
+                    script["_prepare_artifact"]("first-commit", "6.9.2rc2")
+                build.assert_called_once()
+
+    def test_local_deploy_rc_cli_rejects_unreserved_candidates(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["main"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            channels = root / "channels.toml"
+            channels.write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'next = "6.9.2rc2"\n'
+                '[bake.candidate_cycle.history."6.9.2rc1"]\nstatus = "rejected"\n',
+                encoding="utf-8")
+            prepare = mock.Mock(side_effect=script["LocalDeployError"]("reached preparation"))
+            with mock.patch.dict(scope, {
+                "CHANNELS": channels,
+                "_synchronize": lambda: "commit",
+                "_bake_configuration": lambda: ("bake/v6.9.2-rc", "6.9.2"),
+                "_prepare_artifact": prepare,
+            }), mock.patch.dict(scope["RELEASE"], {"_installed_version": lambda: "6.9.1"}):
+                for version in ("6.9.2rc1", "6.9.2rc3", "6.9.3rc2", "../rc2"):
+                    with self.subTest(version=version), mock.patch.object(
+                            sys, "argv", ["local-deploy.py", "--repo", str(root), "--rc", version]):
+                        with self.assertRaises(script["LocalDeployError"]):
+                            script["main"]()
+                prepare.assert_not_called()
+                with mock.patch.object(sys, "argv", [
+                    "local-deploy.py", "--repo", str(root), "--rc", "6.9.2rc2",
+                ]), self.assertRaisesRegex(script["LocalDeployError"], "reached preparation"):
+                    script["main"]()
+                prepare.assert_called_once_with("commit", "6.9.2rc2")
 
     def test_release_report_includes_standalone_promotion_decisions(self) -> None:
         script = runpy.run_path(

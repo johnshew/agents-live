@@ -92,9 +92,11 @@ package version was `6.9.2`. Its original artifacts and receipts are unavailable
 here; do not rename bytes, invent hashes, or claim an rc1 package was recovered.
 Preserve that original evidence if it becomes available.
 
-The policy migration is implemented, but numbered RC preparation and final
-stable acceptance are not. Release preparation, acceptance, and publication
-are blocked by the tool until #511 is implemented and validated. Do not remove
+Local numbered RC deployment is available through
+`tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
+It preserves side-by-side versions and does not create a tag or GitHub release.
+Final stable preparation, acceptance, and publication remain blocked by the
+release tool until #511 is completed and validated. Do not remove
 the guard or use an older checkout to bypass it. See
 [development-release-process.md](docs/development-release-process.md) for the
 adopted lifecycle, including side-by-side versions and independent stable tests.
