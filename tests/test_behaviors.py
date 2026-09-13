@@ -1019,6 +1019,43 @@ class TestFailuresAreVisible(TempRepository):
             from agents_live.cli.scripts import dashboard
         return dashboard
 
+    def test_dashboard_late_interrupt_does_not_interrupt_stopped_cleanup(self) -> None:
+        import signal
+
+        dashboard = self._dashboard()
+        original = signal.getsignal(signal.SIGINT)
+        delivered = []
+        try:
+            for started in (False, True):
+                signal.signal(signal.SIGINT, lambda *_args: delivered.append("interrupt"))
+                with mock.patch.object(sys, "argv", ["dashboard.py"]), \
+                        mock.patch.object(dashboard, "build_page"), \
+                        mock.patch.object(dashboard.app, "is_started", started), \
+                        mock.patch.object(dashboard.ui, "run"):
+                    dashboard.main()
+                signal.raise_signal(signal.SIGINT)
+                self.assertEqual(["interrupt"] if started else [], delivered)
+        finally:
+            signal.signal(signal.SIGINT, original)
+
+    def test_dashboard_reloads_configured_effort_without_stale_model_override(self) -> None:
+        dashboard = self._dashboard()
+        definition = self.skill("sample", ['agents-live.selector: "copilot/gpt-5:high"']) / "SKILL.md"
+        for effort in ("high", "low"):
+            definition.write_text(definition.read_text().replace(":high", f":{effort}"))
+            views = dashboard.agent_view.repository_agents(self.root)
+            self.assertEqual(1, len(views))
+            self.assertEqual(effort, views[0].effort)
+            agents = [dashboard._agent_view_dict(views[0])]
+            with mock.patch.object(dashboard, "_scan", return_value=({}, {})), \
+                    mock.patch.dict(dashboard.STATE, {"models": {views[0].identifier: "old-model"}}):
+                for reports in (None, {views[0].identifier: "old-model"}, {}):
+                    row = dashboard._agent_rows_for(self.root, agents, reports)[0]
+                    self.assertEqual(f"gpt-5:{effort}", row["model"])
+                    self.assertEqual("stopped", row["state"])
+                    self.assertIn(f"effort: {effort}", row["model_tip"])
+                    self.assertEqual(None if reports == {} else "old-model", row["reported_model"])
+
     def test_the_header_counts_a_failure_written_under_an_identifier(self) -> None:
         """Records key on the identifier and the row shows the display
         name. Matching only display names filed every failed run under
