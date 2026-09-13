@@ -200,7 +200,10 @@ def build_view(
         per_file_cols = con.sql(f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
         projection_parts: list[str] = []
         for name, dtype, *_ in per_file_cols:
-            if dtype == "JSON":
+            if name in {"usage", "attributes", "attempts"}:
+                projection_parts.append(
+                    f'CAST(to_json("{name}") AS VARCHAR) AS "{name}"')
+            elif dtype == "JSON":
                 projection_parts.append(f'CAST("{name}" AS VARCHAR) AS "{name}"')
             else:
                 projection_parts.append(f'"{name}"')
@@ -220,11 +223,20 @@ def build_view(
         if directory.is_dir()
         for item in directory.glob("*.parquet")
     })
-    if unified_files:
-        paths_csv = ", ".join(f"'{p}'" for p in unified_files)
+    for parquet in unified_files:
+        read_expr = f"read_parquet('{parquet}')"
+        replacements = [
+            f'CAST(to_json("{name}") AS VARCHAR) AS "{name}"'
+            for name, dtype, *_ in con.sql(
+                f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
+            if name in {"usage", "attributes", "attempts"} and dtype != "VARCHAR"
+        ]
+        projection = "*"
+        if replacements:
+            projection += f" REPLACE ({', '.join(replacements)})"
         selects.append(
-            f"SELECT *, TRUE AS _jsonl, TRUE AS _archive "
-            f"FROM read_parquet([{paths_csv}], union_by_name=true)"
+            f"SELECT {projection}, TRUE AS _jsonl, TRUE AS _archive "
+            f"FROM {read_expr}"
         )
     if not selects:
         raise SystemExit(f"no log files matched: {patterns}")
@@ -275,7 +287,7 @@ def build_view(
     for name, dtype in accounting_types.items():
         attribute = (
             "(SELECT json_extract_string(item.value, '$[1]') "
-            "FROM json_each(to_json(attributes)) AS item "
+            "FROM json_each(TRY_CAST(attributes AS JSON)) AS item "
             f"WHERE json_extract_string(item.value, '$[0]') = '{name}' LIMIT 1)"
             if "attributes" in raw_names else "NULL"
         )
@@ -598,7 +610,13 @@ def main() -> int:
             import json
             cols = rel.columns
             for row in rel.fetchall():
-                print(json.dumps(dict(zip(cols, row, strict=True)), default=str))
+                record = dict(zip(cols, row, strict=True))
+                if isinstance(record.get("usage"), str):
+                    try:
+                        record["usage"] = json.loads(record["usage"])
+                    except json.JSONDecodeError:
+                        pass
+                print(json.dumps(record, default=str))
         elif args.format == "csv":
             print(",".join(rel.columns))
             for row in rel.fetchall():

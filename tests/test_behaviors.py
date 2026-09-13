@@ -1019,6 +1019,43 @@ class TestFailuresAreVisible(TempRepository):
             from agents_live.cli.scripts import dashboard
         return dashboard
 
+    def test_dashboard_late_interrupt_does_not_interrupt_stopped_cleanup(self) -> None:
+        import signal
+
+        dashboard = self._dashboard()
+        original = signal.getsignal(signal.SIGINT)
+        delivered = []
+        try:
+            for started in (False, True):
+                signal.signal(signal.SIGINT, lambda *_args: delivered.append("interrupt"))
+                with mock.patch.object(sys, "argv", ["dashboard.py"]), \
+                        mock.patch.object(dashboard, "build_page"), \
+                        mock.patch.object(dashboard.app, "is_started", started), \
+                        mock.patch.object(dashboard.ui, "run"):
+                    dashboard.main()
+                signal.raise_signal(signal.SIGINT)
+                self.assertEqual(["interrupt"] if started else [], delivered)
+        finally:
+            signal.signal(signal.SIGINT, original)
+
+    def test_dashboard_reloads_configured_effort_without_stale_model_override(self) -> None:
+        dashboard = self._dashboard()
+        definition = self.skill("sample", ['agents-live.selector: "copilot/gpt-5:high"']) / "SKILL.md"
+        for effort in ("high", "low"):
+            definition.write_text(definition.read_text().replace(":high", f":{effort}"))
+            views = dashboard.agent_view.repository_agents(self.root)
+            self.assertEqual(1, len(views))
+            self.assertEqual(effort, views[0].effort)
+            agents = [dashboard._agent_view_dict(views[0])]
+            with mock.patch.object(dashboard, "_scan", return_value=({}, {})), \
+                    mock.patch.dict(dashboard.STATE, {"models": {views[0].identifier: "old-model"}}):
+                for reports in (None, {views[0].identifier: "old-model"}, {}):
+                    row = dashboard._agent_rows_for(self.root, agents, reports)[0]
+                    self.assertEqual(f"gpt-5:{effort}", row["model"])
+                    self.assertEqual("stopped", row["state"])
+                    self.assertIn(f"effort: {effort}", row["model_tip"])
+                    self.assertEqual(None if reports == {} else "old-model", row["reported_model"])
+
     def test_the_header_counts_a_failure_written_under_an_identifier(self) -> None:
         """Records key on the identifier and the row shows the display
         name. Matching only display names filed every failed run under
@@ -1111,6 +1148,42 @@ class TestFailuresAreVisible(TempRepository):
                 self.assertEqual(
                     obs.query.resolve_since(value)[:16],
                     qlog._resolve_ts(value)[:16])
+
+    def test_log_queries_preserve_usage_across_different_json_shapes(self) -> None:
+        directory = self.root / "mixed-usage"
+        directory.mkdir()
+        values = [[], {"ai_credits": "0.25", "list_cost_usd": "0.01"}, None]
+        for index, usage in enumerate(values):
+            (directory / f"run-{index}.jsonl").write_text(json.dumps({
+                "ts": "2026-09-11T00:00:00Z", "agent_name": "probe",
+                "log_schema": 5, "run_id": str(index), "usage": usage,
+                "attributes": [["level", None], ["duration_s", 1.25]],
+            }) + "\n", encoding="utf-8")
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, [str(directory / "*.jsonl")])
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id").fetchall()
+        self.assertEqual(values, [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * len(values), [row[1] for row in rows])
+        archive = directory / "archive"
+        archive.mkdir()
+        with qlog.duckdb.connect(":memory:") as connection:
+            for log in directory.glob("*.jsonl"):
+                parquet = archive / f"{log.stem}.parquet"
+                connection.sql(
+                    f"COPY (SELECT * FROM read_json_auto('{log}')) "
+                    f"TO '{parquet}' (FORMAT PARQUET)")
+            qlog.build_view(
+                connection, [str(directory / "*.jsonl")], archives=archive)
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id, _archive"
+            ).fetchall()
+        self.assertEqual([value for value in values for _ in range(2)], [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * (2 * len(values)), [row[1] for row in rows])
 
     def test_schema_check_names_where_a_handler_record_is_invalid(self) -> None:
         """A count alone cannot tell a handler author what to fix."""
@@ -6703,8 +6776,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             positive = json.loads(completed.stdout)
             self.assertEqual([
-                '["ai_credits","25"]',
-                '["list_cost_usd","0.25"]',
+                ["ai_credits", "25"],
+                ["list_cost_usd", "0.25"],
             ], positive["records"][0]["usage"])
             positive["records"][0]["usage"].insert(0, "{malformed")
             with mock.patch.dict(scope, {
