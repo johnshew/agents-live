@@ -14,6 +14,34 @@ reached bake, what remains deferred or needs a promotion decision, whether the
 deployed artifact matches the channel tip, and the next promotion target. It is
 gitignored and summarizes evidence without replacing any gate below.
 
+## Numbered RC migration
+
+The active `6.9.2` cycle adopts numbered RCs under
+[#511](https://github.com/johnshew/agents-live/issues/511). The migration record
+reserves `6.9.2rc1` for a legacy rejected attempt actually packaged as `6.9.2`;
+its original evidence is unavailable in this checkout. It is not a recovered
+RC package. The next new package is `6.9.2rc2`.
+
+**Preparation is blocked until the numbered RC tooling is implemented and
+validated.** The commands below document the existing legacy mechanism, not
+an authorized workaround. The tool refuses its legacy preview, prepare,
+acceptance, and publish paths for a numbered-RC cycle. Do not run an older
+checkout to bypass this guard.
+
+The adopted policy keeps a stable target while advancing RC numbers on
+rejection. Keep immutable artifacts and receipts for every attempt. An
+accepted RC permits preparation of final stable bytes, not their publication.
+Final stable artifacts must pass independent required acceptance. Create the
+stable tag only afterward and publish exactly those accepted bytes, without
+rebuilding them. A failed final build needs a distinct retained attempt identity
+and safe installed-version recovery, not another stable patch number.
+
+Stage RCs beside the existing stable installation and select one deliberately
+for testing. Verify rollback and watcher restoration without duplicate native
+automation. Optional GitHub RC releases must be prereleases and never latest;
+normal upgrades and the PyPI publishing workflow remain stable-only, including
+manual workflow dispatch. Existing immutable tags and evidence are not rewritten.
+
 ## Changelog readiness
 
 Invoke `/changelog-maintenance` before previewing a release. It compares every

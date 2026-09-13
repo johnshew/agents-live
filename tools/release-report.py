@@ -188,6 +188,8 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     repository = repository_data["nameWithOwner"]
     release = config["release"]
     bake = config["bake"]
+    candidate_cycle = bake.get("candidate_cycle", {})
+    rc_blocked = candidate_cycle.get("model") == "numbered-rc"
     recommendations = bake["recommendations"]
     release_ref = f"origin/{release['branch']}"
     bake_ref = f"origin/{bake['branch']}"
@@ -440,6 +442,49 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         "```",
     ]
 
+    candidate_lines = []
+    if rc_blocked and not is_released:
+        development_state = "blocked"
+        development_state_detail = (
+            "The numbered RC policy is adopted, but preparation is blocked until "
+            "the RC tooling in #511 is implemented and validated.")
+        promotion_approved = False
+        release_actions = [development_state_detail]
+        overall_recommendation = recommendations["overall"]
+        bake_state = "RC migration recorded; release preparation is blocked."
+        bake_next = "Implement and validate #511, then finish the release fixes."
+        next_actions = [
+            "Implement and validate #511 before using any candidate preparation, "
+            "acceptance, or publication command; the legacy workflow is blocked.",
+            "Finish the remaining fixes and release-scope decisions in the configured bake.",
+            f"Prepare and independently test `{candidate_cycle['next']}` only after "
+            "the numbered RC tooling and required Windows/Linux checks pass.",
+            "Retain rejected RCs and advance the RC number, not the stable target.",
+            "Obtain exact-commit approval, build the final stable version, and "
+            "independently accept its exact bytes before tagging or publishing.",
+            "Verify GitHub and PyPI publication independently.",
+        ]
+        candidate_lines = [
+            "", "## Numbered release candidates", "",
+            f"Stable target: `{bake['version']}`. Next package: `{candidate_cycle['next']}`.",
+            "RC tooling is not implemented in this revision. Changing manifest "
+            "status cannot enable the legacy stable-numbered candidate commands.",
+            "", "| Candidate record | Status | Original package version | Evidence |",
+            "|---|---|---|---|",
+        ]
+        for version, attempt in candidate_cycle.get("history", {}).items():
+            candidate_lines.append(
+                f"| `{version}` | {attempt['status']} ({attempt['kind']}) | "
+                f"`{attempt['artifact_version']}` | {attempt['evidence']} |")
+        candidate_lines.extend([
+            "", "Legacy candidate records do not rename package bytes or establish "
+            "acceptance of an RC package. Preserve original artifacts and receipts "
+            "when available; unavailable evidence remains explicitly unverified.",
+            "Multiple full-version installations may coexist. Select the tested "
+            "runtime deliberately and restore the prior selection after rejection "
+            "without duplicating live schedulers or watchers.",
+        ])
+
     lines = [
         "---",
         "title: Release Channel Report",
@@ -472,6 +517,7 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         f"**{overall_recommendation}**",
         "",
         *recommendation_lines,
+        *candidate_lines,
         "",
         "## Where each channel stands",
         "",
@@ -584,12 +630,14 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
             "repository": repository,
             "development_state": development_state,
             "development_state_detail": development_state_detail,
-            "target_branch": release["branch"] if bake_moved else bake["branch"],
-            "active_bake": not bake_moved,
+            "target_branch": bake["branch"] if rc_blocked and not is_released else
+            release["branch"] if bake_moved else bake["branch"],
+            "active_bake": not bake_moved or (rc_blocked and not is_released),
             "release": {"branch": release["branch"], "commit": release_sha,
                         "published_tag": latest["tagName"], "published_commit": tag_sha},
             "bake": {"branch": bake["branch"], "commit": bake_sha,
                      "version": bake["version"], "promotion_approved": promotion_approved},
+            "candidate_cycle": candidate_cycle,
             "next_actions": next_actions,
         }, indent=2) + "\n"
     return "\n".join(lines)

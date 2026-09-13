@@ -81,6 +81,24 @@ The standard loop for any change that lands as commits:
 
 ### Active bake routing
 
+The active cycle uses numbered release candidates under
+[#511](https://github.com/johnshew/agents-live/issues/511). The stable target is
+`6.9.2`, the integration branch is `bake/v6.9.2-rc`, and the next newly built
+package is `6.9.2rc2`. This explicitly supersedes the former 6.9.2 and 6.9.3
+bake routing without rewriting either branch's history.
+
+The manifest records `6.9.2rc1` as the legacy rejected attempt whose actual
+package version was `6.9.2`. Its original artifacts and receipts are unavailable
+here; do not rename bytes, invent hashes, or claim an rc1 package was recovered.
+Preserve that original evidence if it becomes available.
+
+The policy migration is implemented, but numbered RC preparation and final
+stable acceptance are not. Release preparation, acceptance, and publication
+are blocked by the tool until #511 is implemented and validated. Do not remove
+the guard or use an older checkout to bypass it. See
+[development-release-process.md](docs/development-release-process.md) for the
+adopted lifecycle, including side-by-side versions and independent stable tests.
+
 When the report marks the configured version `released`, do not prepare or
 publish that version again. Use the separately configured later bake cycle
 identified by the report, reading its manifest and report before choosing a

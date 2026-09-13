@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -1757,6 +1758,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--bump applies only to --dry-run and --prepare")
     try:
+        if args.dry_run or args.prepare or args.accept_candidate or args.publish:
+            manifest = ROOT / ".github" / "release-channels.toml"
+            if manifest.is_file():
+                with manifest.open("rb") as stream:
+                    cycle = tomllib.load(stream).get("bake", {}).get("candidate_cycle", {})
+                if cycle.get("model") == "numbered-rc":
+                    raise ReleaseError(
+                        "the numbered RC workflow is not implemented in this tool; "
+                        "complete and validate #511 before candidate preparation, "
+                        "acceptance, or publication. Do not use the legacy "
+                        "stable-numbered candidate workflow or remove its guard.")
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:

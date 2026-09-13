@@ -4007,6 +4007,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
         render = script["_render"]
         config = tomllib.loads((REPOSITORY / ".github" / "release-channels.toml").read_text())
+        config["bake"].pop("candidate_cycle", None)
         def github(*arguments):
             if arguments[1] == "repo":
                 return {"nameWithOwner": "example/project", "url": "https://github.com/example/project"}
@@ -5855,6 +5856,59 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertNotIn("Publish `6.9.0` to GitHub Releases and PyPI", report)
         self.assertNotIn("Prepare and accept 6.9.0 before publication", report)
         self.assertIn("does not independently verify PyPI", report)
+
+    def test_release_report_blocks_a_migrated_rc_cycle_even_after_promotion(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
+        render = script["_render"]
+        cycle = {
+            "model": "numbered-rc", "implementation": "pending", "next": "6.9.2rc2",
+            "history": {"6.9.2rc1": {
+                "status": "rejected", "kind": "legacy-candidate",
+                "artifact_version": "6.9.2", "evidence": "unavailable",
+            }},
+        }
+        config = {
+            "release": {"branch": "main"},
+            "bake": {
+                "branch": "bake/v6.9.2-rc", "version": "6.9.2",
+                "candidate_cycle": cycle, "deployed_commit": "d" * 40,
+                "deployed_version": "6.9.2.dev0+gdddddddd", "validated_on": "2026-09-11",
+                "promotion": {"decision": "approved", "commit": "d" * 40,
+                              "decided_on": "2026-09-13"},
+                "issues": {}, "recommendations": {
+                    "overall": "Implement RC tooling before preparation.",
+                    "testing": "Accept the exact final stable bytes independently.",
+                },
+            },
+        }
+
+        def response(*arguments):
+            if arguments[:3] == ("gh", "repo", "view"):
+                return {"nameWithOwner": "owner/repository", "url": "https://example.invalid"}
+            if arguments[:3] == ("gh", "release", "view"):
+                return {"tagName": "v6.9.1", "publishedAt": "2026-09-07T20:02:47Z",
+                        "isDraft": False, "isPrerelease": False, "url": "https://example.invalid"}
+            return []
+
+        with mock.patch.dict(render.__globals__, {
+            "_json": response, "_run": lambda *_args: "0",
+            "_sha": lambda _ref: "d" * 40, "_count": lambda *_args: (0, 0),
+            "subprocess": mock.Mock(run=mock.Mock(return_value=mock.Mock(returncode=0))),
+        }):
+            report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
+            result = json.loads(render(
+                config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
+
+        self.assertIn("**`blocked`**", report)
+        self.assertIn("`6.9.2rc1` | rejected (legacy-candidate) | `6.9.2` | unavailable", report)
+        self.assertIn("Next package: `6.9.2rc2`", report)
+        self.assertNotIn("Prepare and accept the official 6.9.2 candidate", report)
+        self.assertEqual("blocked", result["development_state"])
+        self.assertEqual("bake/v6.9.2-rc", result["target_branch"])
+        self.assertTrue(result["active_bake"])
+        self.assertFalse(result["bake"]["promotion_approved"])
+        self.assertEqual(cycle, result["candidate_cycle"])
+        self.assertIn("#511", result["next_actions"][0])
 
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(

@@ -29,6 +29,20 @@ the defect.
 
 ## Test boundaries
 
+For the numbered-RC cycle tracked in
+[#511](https://github.com/johnshew/agents-live/issues/511), policy adoption is
+not evidence that RC preparation is implemented. Keep preparation blocked until
+the new workflow passes its checks. Test RC rejection followed by the next RC,
+side-by-side stable/RC installation, deliberate selection and rollback, and
+restoration of watchers without duplicate automation. Resume may reuse only
+unchanged bytes and matching evidence. Historical legacy rejection records with
+unavailable artifacts are not executing evidence.
+
+RC acceptance never satisfies the final stable wheel's artifact or installed
+gates. Final stable failures must preserve an attempt-specific record and allow
+safe recovery without overwriting sealed installations or consuming the next
+stable version. Publication must upload exactly the accepted stable bytes.
+
 Keep these execution modes distinct. A passing editable-source command does
 not prove that the built wheel or installed PyPI tool works.
 
