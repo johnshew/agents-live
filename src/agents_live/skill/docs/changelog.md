@@ -11,6 +11,18 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve remaining same-day Windows calendar repetitions. (#509)
+  Registration retains an active period's original anchor without shifting
+  cron phase, interval, bounded windows, or catch-up policy. Calendar periods
+  with no remaining occurrence advance normally.
+- fix: display configured dashboard model and effort independently of stale telemetry.
+  Single and aggregate rows show next-run settings; tooltips distinguish the
+  last reported model and provider defaults. Late interrupts after server
+  shutdown no longer interrupt UI finalizers.
+- fix: query mixed accounting shapes across current and archived logs.
+  Usage, attributes, and attempts are normalized before JSONL and Parquet file
+  union so historical list-shaped records coexist with newer object-shaped
+  accounting without losing available measurements.
 - fix: support local numbered RC deployment without publishing a release.
   Candidate wheels and source identities are retained per version across failed
   readiness retries. Local deployment selects the RC beside existing versions
