@@ -1183,6 +1183,35 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_numbered_rc_cycle_blocks_legacy_candidate_commands(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "tools" / "release.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / ".github").mkdir()
+            script = root / "tools" / "release.py"
+            shutil.copy2(source, script)
+            (root / ".github" / "release-channels.toml").write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'implementation = "pending"\nnext = "6.9.2rc2"\n',
+                encoding="utf-8")
+            for arguments in (
+                ["--dry-run"], ["--prepare", "--yes"],
+                ["--prepare", "--resume", "--yes"], ["--publish", "--yes"],
+                ["--accept-candidate", "--yes", "--repo", str(root),
+                 "--agent", "safe", "--cost-agent", "provider"],
+            ):
+                with self.subTest(arguments=arguments):
+                    completed = subprocess.run(
+                        [sys.executable, str(script), *arguments],
+                        cwd=root, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", check=False)
+                    self.assertEqual(1, completed.returncode)
+                    self.assertIn("numbered RC workflow", completed.stderr)
+                    self.assertIn("#511", completed.stderr)
+                    self.assertEqual("", completed.stdout)
+                    self.assertFalse((root / ".git").exists())
+
     def test_installed_version_accepts_channel_identity(self) -> None:
         root = Path(__file__).resolve().parents[1]
         release = runpy.run_path(str(root / "tools" / "release.py"))

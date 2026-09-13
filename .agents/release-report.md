@@ -31,6 +31,30 @@ same change.
 
 ## Channel model
 
+### Active RC migration
+
+The developer adopted the numbered-RC model for the `6.9.2` target on
+2026-09-13. `bake/v6.9.2-rc` supersedes the earlier 6.9.2 and 6.9.3 bake
+branches. Read this branch's manifest and report; a report from the old
+`main` checkout does not describe the migrated cycle.
+
+`bake.candidate_cycle` records the model, next RC, superseded branches, and
+historical candidate decisions. The first record is a legacy rejection:
+logical `6.9.2rc1`, actual package version `6.9.2`, original evidence unavailable.
+Do not infer a rebuilt RC or successful acceptance from this designation.
+
+The report must remain `blocked` while this revision lacks numbered RC tooling,
+even if older ancestry says bake already moved to main or an approval remains.
+Its next action is to implement and validate #511, not prepare a stable-numbered
+candidate. Markdown and JSON must show the same target, next RC, historical
+evidence qualification, and blocker. Changing a manifest status does not enable
+unsupported release commands.
+
+After RC acceptance, final stable preparation and installed acceptance are
+separate states. Preserve failed attempts, advance RC numbers for source fixes,
+and require independent acceptance of final stable bytes before a stable tag
+or publication. See [development-release-process.md](../docs/development-release-process.md).
+
 | Channel | Branch | Version | Moves to |
 |---|---|---|---|
 | `bake` | `bake/v<version>-local` | Development version ending in `.dev`, with its commit ID | Local deployment, optional GitHub prerelease, then `release` by pull request to `main` |
