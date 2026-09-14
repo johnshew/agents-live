@@ -92,6 +92,10 @@ class TestWindowsBootstrap(unittest.TestCase):
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            environment = {
+                key: value for key, value in os.environ.items()
+                if key.upper() != "PSMODULEPATH"
+            }
             source = root / "UvFixture.cs"
             source.write_text('''
 using System;
@@ -124,7 +128,7 @@ public class UvFixture {
                 [compiler, "-NoProfile", "-Command",
                  "Add-Type -Path $env:FIXTURE_SOURCE -OutputAssembly "
                  "$env:FIXTURE_EXE -OutputType ConsoleApplication"],
-                env={**os.environ, "FIXTURE_SOURCE": str(source),
+                env={**environment, "FIXTURE_SOURCE": str(source),
                      "FIXTURE_EXE": str(fixture)},
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(0, compiled.returncode, compiled.stderr)
@@ -174,7 +178,7 @@ exit $LASTEXITCODE
                     result = subprocess.run(
                         [shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
                          "-File", str(script)],
-                        env={**os.environ, "USERPROFILE": str(home),
+                        env={**environment, "USERPROFILE": str(home),
                              "AGENTS_LIVE_INSTALL_ROOT": str(home / "install"),
                              "AGENTS_LIVE_RELEASE_API": "",
                              "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": "",
