@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-09-04
+ms.date: 2026-09-14
 ms.topic: concept
 ---
 
@@ -20,21 +20,17 @@ off-box log shipment stay postponed until a consumer needs them; a future
 sidecar can translate the local schema instead.
 ([#105](https://github.com/johnshew/agents-live/issues/105))
 
-The same stream should also answer whether the agents are working, not
-just what they did. An agent that fails every run stays invisible today:
-status keeps showing a fresh error time, and the health beacon reports
-only infrastructure state. Escalating that from existing log data comes
-before any richer export.
-([#123](https://github.com/johnshew/agents-live/issues/123))
+Health escalation and retention are delivered foundations. The remaining
+observability direction is the local schema work above, not the closed health
+work in [#123](https://github.com/johnshew/agents-live/issues/123).
 
 ## Observability a processor can contribute to
 
-A processor has three channels and all three are lossy: an exit code, stderr
-that surfaces only on failure, and stdout that 6.0 now records but bounds. 5.x
-let a handler write structured entries directly into the log; 6.0 withdrew that
-without replacing it, so the capability regressed.
+A processor now has separate output, log, and control channels. Build on that
+delivered contract for correlation and sensitivity metadata; the old 6.0
+channel gap is not a pending replacement project.
 
-The replacement should not be a Python API. Processors are `.py`, `.js`, `.ts`,
+The extension should not be a Python API. Processors are `.py`, `.js`, `.ts`,
 `.ps1`, or `.sh`, so a Python surface serves one of five and couples user code
 to module paths, which is exactly what broke when 6.0 moved them. The
 contract should be an environment handle naming an append-only JSONL file,
@@ -72,7 +68,8 @@ cannot drift as the package grows, and runs on hosts where the defect it
 guards cannot be reproduced. An assertion about a literal in one file is
 the anti-pattern: it breaks on unrelated edits and proves nothing. A test
 is not finished until the fix has been removed and the test watched to
-fail.
+fail. The historical policy issue is closed; the current requirements live in
+[testing-methodology.md](testing-methodology.md).
 
 The corollary, learned the hard way: a Windows-only test that flakes is
 worse than no test, because an untrustworthy signal invites ignoring the
@@ -86,9 +83,8 @@ suite could not see, because it verified structure where behaviour was
 what mattered: convergence removing artifacts it could not account for, a
 diagnostic command that failed at import, and a migrator that refused most
 real 5.x definitions. Structural invariants are necessary and cheap; they
-are not sufficient. What #184 still has to settle is which behaviours are
-owed an executing test, now that there is no large mock population to
-argue about.
+are not sufficient. This remains an engineering requirement for each change,
+not unfinished scope in the closed #184.
 
 ## Platform coverage
 
@@ -120,10 +116,10 @@ and what was really wrong was that the maintenance sweep tried to adopt
 an ephemeral fixture. Fixtures now belong to the run that creates them,
 named once as `headless.is_ephemeral` and honoured everywhere.
 
-Installation and first-run readiness on native Windows is the remaining
-gap before the platform is releasable from an installed artifact
-([#243](https://github.com/johnshew/agents-live/issues/243),
-[#244](https://github.com/johnshew/agents-live/issues/244)).
+Platform-enablement issues #243 and #244 are closed. Current Windows bootstrap
+and installed recovery acceptance belong to the active release cycle
+([#517](https://github.com/johnshew/agents-live/issues/517),
+[#522](https://github.com/johnshew/agents-live/issues/522)).
 
 ## Installation and deployment reliability
 
@@ -134,22 +130,16 @@ directory link, and ownership-aware health checks. Public bootstrap installs
 authenticated release bytes into that model on Windows and POSIX without a
 custom launcher or package-index fallback for Agents Live.
 
-The model landed in 6.7, and the 6.7 bake exposed the next problem: the model
-is simple, but the machinery around it is not. Release verification and
-generation construction were each implemented three times, once in
-`install.ps1`, once in the Python heredoc inside `install.sh`, and once in the
-package. A single defect in asset URL handling had to be fixed in all three.
-Removing that duplication, and retiring the uv ownership channel whose
-in-place rewrite semantics justify most of the surviving upgrade machinery, is
-what completes this cluster rather than extending it.
+The shared construction path and uv ownership retirement have landed. Remaining
+work is numbered candidate identity, installed acceptance, stable finalization,
+and recoverable publication without reusing failed artifact identities.
 
 The direction is that the bootstrap does transport and nothing else: verify
 bytes, stage a throwaway environment, and let the package build the real
 generation through the one code path every other install uses.
 
-This cluster is tracked by [#334](https://github.com/johnshew/agents-live/issues/334),
-building on the bootstrap delivered in
-[#395](https://github.com/johnshew/agents-live/issues/395).
+Current work is tracked by [#511](https://github.com/johnshew/agents-live/issues/511).
+The earlier #334 and #395 are delivered foundations.
 [compatibility-boundaries.md](compatibility-boundaries.md) records what the
 uv retirement does and does not break.
 
@@ -177,11 +167,11 @@ The next P1/P2 cluster is runtime health. A watch that silently drops events,
 reports a running agent after the process has died, or leaves the local logs and
 transcripts unbounded is operationally worse than a failing but visible run.
 
-This theme includes [#393](https://github.com/johnshew/agents-live/issues/393),
-[#259](https://github.com/johnshew/agents-live/issues/259), and the local
-observability work in [#105](https://github.com/johnshew/agents-live/issues/105),
-with the same principle: make failures explainable before expanding the runtime
-surface.
+The watch-health and retention work in #393 and #259 is closed. Continue with
+local observability in [#105](https://github.com/johnshew/agents-live/issues/105),
+and investigate the processor-control lifetime report in
+[#519](https://github.com/johnshew/agents-live/issues/519). Make failures
+explainable before expanding the runtime surface.
 
 ## Repository and execution policy
 
@@ -190,9 +180,23 @@ Registration, init, discovery, ownership opt-in, and the trust boundary for
 provider-controlled hooks do not belong to one command or one directory, and
 keeping them separate is the delivery strategy.
 
-This cluster currently spans the staged repository-registration work in
-[#388](https://github.com/johnshew/agents-live/issues/388), the explicit opt-in
-for the cross-machine ownership backend in [#365](https://github.com/johnshew/agents-live/issues/365), the unattended-run trust decision in [#375](https://github.com/johnshew/agents-live/issues/375), and the provider execution safety work in [#374](https://github.com/johnshew/agents-live/issues/374) and [#376](https://github.com/johnshew/agents-live/issues/376).
+The ownership and execution-safety work in #365, #374, #375, and #376 is closed.
+Remaining direction is the registration/init split in
+[#388](https://github.com/johnshew/agents-live/issues/388), retirement of 5.x
+compatibility in [#434](https://github.com/johnshew/agents-live/issues/434), and
+the internal versus persisted identity boundary in
+[#489](https://github.com/johnshew/agents-live/issues/489).
+
+## Dashboard and usage
+
+Separate configured model/effort display from editing and context controls;
+the release disposition stays in [#508](https://github.com/johnshew/agents-live/issues/508)
+while [#525](https://github.com/johnshew/agents-live/issues/525) owns the remaining
+controls, proposed for 6.10. Numeric usage
+summaries should explain recorded work without adding an execution bypass
+([#478](https://github.com/johnshew/agents-live/issues/478)). Managed package-proxy
+availability remains independent external verification
+([#486](https://github.com/johnshew/agents-live/issues/486)).
 
 ## Maintaining this file
 

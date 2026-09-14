@@ -293,6 +293,10 @@ readiness:
 uv run --script tools/local-deploy.py --repo <live-repository> --rc <retained-rc> --recover-provider-readiness
 ```
 
+The manifest must record the retained numbered RC with `status = "prepared"`
+and its matching `artifact_version`. Recovery selects that recorded identity,
+not the next unused RC. Normal preparation cannot reuse a historical identity.
+
 Recovery does not rebuild or restamp the candidate. It requires the original
 preparation receipt, wheel hash, source ancestry, platform, interpreter, and
 gate list. Package and installer inputs must be unchanged; later deployment

@@ -83,16 +83,20 @@ The standard loop for any change that lands as commits:
 
 The active cycle uses numbered release candidates under
 [#511](https://github.com/johnshew/agents-live/issues/511). The stable target is
-`6.9.2`, the integration branch is `bake/v6.9.2-rc`, and `6.9.2rc2` remains
-deployed locally. `6.9.2rc3` was built but failed packaged readiness before
-installation (#516); `6.9.2rc4` is the next unused candidate number.
+`6.9.2` and the integration branch is `bake/v6.9.2-rc`. The manifest retains
+the last validated RC2 deployment observation, not a universal installed state.
+RC3 failed packaged readiness (#516); RC4 passed that gate on its preparing
+environment but still needs installed recovery verification (#522).
+`6.9.2rc5` is the next unused candidate number. Recover retained RC4 only with
+its original preparation evidence and `--recover-provider-readiness`.
 This explicitly supersedes the former 6.9.2 and 6.9.3
 bake routing without rewriting either branch's history.
 
 The manifest records `6.9.2rc1` as the legacy rejected attempt whose actual
-package version was `6.9.2`. Its original artifacts and receipts are unavailable
-here; do not rename bytes, invent hashes, or claim an rc1 package was recovered.
-Preserve that original evidence if it becomes available.
+package version was `6.9.2`. Its original artifacts and preparation/checkpoint
+records were recovered in the preparing checkout; hashes are recorded in the
+manifest. This is not an rc1 package or full acceptance. Preserve the original
+tag conflict and private receipts for the explicit #511 finalization migration.
 
 Local numbered RC deployment is available through
 `tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
