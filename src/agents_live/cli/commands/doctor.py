@@ -98,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
                     })
             checks.append(_ownership_check(root, name))
         selected_roots = None if args.all_repos else tuple(checked_roots)
+        collected = None
         try:
             collected = lifecycle.collect(
                 selected_roots=selected_roots, persist=False)
@@ -127,10 +128,19 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 })
         if hostruntime.id() == hostruntime.WINDOWS:
-            checks.extend(_provider_cli_checks(
-                _configured_provider_names({
-                    "repos": dict(repository_items),
-                })))
+            configured, required = _configured_provider_names({
+                "repos": dict(repository_items),
+            }, {(item.scope, item.target) for item in collected.subscriptions}
+                if collected is not None else set())
+            for check in _provider_cli_checks(configured):
+                name = str(check["check"]).removeprefix("provider CLI ")
+                if name not in required:
+                    ready = "ready" if check["ok"] else "not ready"
+                    check = {
+                        **check, "ok": True,
+                        "detail": f"on-demand launch {ready}; {check['detail']}",
+                    }
+                checks.append(check)
         health_payload = _health_payload(paths.health_beacon_path())
         if health_payload is not None:
             checks.extend(_agent_failure_checks(health_payload))
@@ -151,23 +161,29 @@ def main(argv: list[str] | None = None) -> int:
     return _finish(checks)
 
 
-def _configured_provider_names(registry: dict) -> set[str]:
-    """Which providers this host is actually expected to launch.
-
-    Derived from the definitions themselves and filtered by whether the
-    provider names a native executable, so a new provider is probed
-    without doctor learning its name.
-    """
+def _configured_provider_names(
+    registry: dict, desired: set[tuple[str, str]],
+) -> tuple[set[str], set[str]]:
+    """Return locally eligible providers and those required by started agents."""
     names: set[str] = set()
+    required: set[str] = set()
     for value in registry.get("repos", {}).values():
         root = state.resolve_root(value) if os.path.isdir(value) else None
         if root is None:
             continue
         try:
             discovery = agent.discover(root)
-        except (OSError, ValueError, agent.DefinitionError):
+            started = state.load(root).agents
+            owners = {} if ownership.local_only(root) else ownership.resolve_owners(
+                ((spec.identifier, spec.name) for spec in discovery.specs),
+                ownership.load_owners(root=root))
+        except (OSError, ValueError, agent.DefinitionError,
+                state.StartedStateUnavailable, ownership.OwnershipUnavailableError):
             continue
         for spec in discovery.specs:
+            owner = owners.get(spec.identifier)
+            if owner is not None and not ownership.owns(owner):
+                continue
             config = spec.execution
             if config is None:
                 continue
@@ -177,7 +193,11 @@ def _configured_provider_names(registry: dict) -> set[str]:
                 continue
             if provider.cli.executable:
                 names.add(provider.name)
-    return names
+                if spec.identifier in started or (
+                    f"repo:{root}", f"agent:{spec.identifier}"
+                ) in desired:
+                    required.add(provider.name)
+    return names, required
 
 
 def _provider_cli_checks(names: set[str]) -> list[dict[str, object]]:

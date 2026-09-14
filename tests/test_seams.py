@@ -1088,6 +1088,7 @@ class TestDoctor(unittest.TestCase):
 
     def test_unknown_metadata_reports_both_possible_remedies(self) -> None:
         collected = mock.Mock(
+            subscriptions=(),
             unavailable_repositories=(), broken_definitions=(),
             unknown_metadata=((Path("Agents/sample/SKILL.md"),
                                ("agents-live.schedul",)),),
