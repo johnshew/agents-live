@@ -6307,6 +6307,165 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "git", "pull", "--ff-only", "origin", "bake/v6.7.0-local",
         ], commands[0])
 
+    def test_provider_recovery_requires_candidate_confirmed_optional_failure(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        decide = script["_recovery_health"]
+        baseline = {"ok": False, "checks": [
+            {"check": name, "ok": True, "detail": "healthy"}
+            for name in ("installation", "host runtime", "repository registry", "ownership test")
+        ] + [{"check": "provider CLI example", "ok": False, "detail": "CLI absent"}]}
+        candidate = json.loads(json.dumps(baseline))
+        candidate["ok"] = True
+        candidate["checks"][-1].update(
+            ok=True, detail="on-demand launch not ready; CLI absent")
+        self.assertEqual(("provider CLI example",), decide(baseline, candidate))
+        for change in ("runtime", "missing", "candidate", "required", "duplicate", "malformed"):
+            with self.subTest(change=change):
+                old = json.loads(json.dumps(baseline))
+                new = json.loads(json.dumps(candidate))
+                if change == "runtime":
+                    old["checks"][1]["ok"] = False
+                elif change == "missing":
+                    new["checks"].pop(3)
+                elif change == "candidate":
+                    new["ok"] = False
+                elif change == "required":
+                    new["checks"][-1]["detail"] = "launchable executable"
+                elif change == "duplicate":
+                    new["checks"].append(new["checks"][0])
+                else:
+                    old["checks"][0]["ok"] = "true"
+                with self.assertRaises(script["LocalDeployError"]):
+                    decide(old, new)
+
+    def test_candidate_recovery_probe_executes_exact_wheel_without_activation(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        probe = script["_candidate_json"]
+        with tempfile.TemporaryDirectory() as temporary:
+            wheel = Path(temporary) / "agents_live-1.2.3rc4-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("agents_live/__init__.py", '__version__ = "1.2.3rc4"\n')
+                archive.writestr("agents_live/cli/__init__.py", "")
+                archive.writestr("agents_live/cli/__main__.py",
+                    'import json,sys\nprint(json.dumps({"argv":sys.argv[1:]}))\n')
+            with mock.patch.dict(probe.__globals__, {
+                "_installed_cli": lambda: Path(sys.executable).parent / "agents-live",
+            }):
+                self.assertEqual({"argv": ["--json", "doctor", "--all-repos"]},
+                                 probe(wheel, "1.2.3rc4", "doctor"))
+                with self.assertRaises(script["LocalDeployError"]):
+                    probe(wheel, "1.2.3rc5", "doctor")
+
+    def test_provider_recovery_preserves_receipts_refusals_and_rollback(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy_candidate = script["deploy"]
+        scope = deploy_candidate.__globals__
+        for scenario in ("success", "changed-source", "missing-readiness", "unhealthy", "postcheck"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                wheel = root / "agents_live-1.2.3rc4-py3-none-any.whl"
+                wheel.write_bytes(b"retained wheel")
+                digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+                (root / "preparation.json").write_text(
+                    json.dumps({"commit": "a" * 40}), encoding="utf-8")
+                status = {"agents": [{"repository": str(root), "identifier": "sample",
+                                      "state": "started", "loadable": True}]}
+                old = {"ok": False, "checks": [
+                    {"check": name, "ok": True, "detail": "healthy"}
+                    for name in ("installation", "host runtime", "repository registry")
+                ] + [{"check": "provider CLI example", "ok": False, "detail": "absent"}]}
+                new = json.loads(json.dumps(old))
+                new["ok"] = True
+                new["checks"][-1].update(ok=True, detail="on-demand launch not ready; absent")
+                if scenario == "unhealthy":
+                    old["checks"][1]["ok"] = False
+                selected = ["1.2.2"]
+                operations = []
+                payload_file = root / "payload"
+                payload_file.write_bytes(b"previous payload")
+                dashboard = script["Dashboard"](8231, 100, str(root), ())
+                dashboard_versions = {8231: "1.2.2"}
+
+                def installed(*arguments):
+                    if arguments == ("--json", "doctor", "--all-repos"):
+                        return subprocess.CompletedProcess(arguments, 1, json.dumps(old), "")
+                    if arguments == ("--repo", str(root), "upgrade", "--skills-only"):
+                        self.assertEqual("1.2.2", selected[0])
+                        payload_file.write_bytes(b"previous payload")
+                        operations.append("refresh")
+                        return subprocess.CompletedProcess(arguments, 0, "", "")
+                    self.assertEqual(("versions", "activate", "1.2.2"), arguments)
+                    self.assertEqual({}, dashboard_versions)
+                    operations.append("rollback")
+                    selected[0] = "1.2.2"
+                    return subprocess.CompletedProcess(arguments, 0, "", "")
+
+                def upgrade_candidate(*_arguments):
+                    operations.append("upgrade")
+                    selected[0] = "1.2.3rc4"
+                    payload_file.write_bytes(b"candidate payload")
+
+                def stop_dashboard(item):
+                    operations.append("stop " + dashboard_versions.pop(item.port))
+
+                def restart_dashboards(items):
+                    for item in items:
+                        dashboard_versions.setdefault(item.port, selected[0])
+                    operations.append("dashboards")
+
+                def postcheck(*_arguments):
+                    operations.append("postcheck")
+                    if scenario == "postcheck":
+                        raise script["LocalDeployError"]("postcheck failed")
+
+                with mock.patch.dict(scope, {
+                    "_synchronize": lambda: "b" * 40,
+                    "_bake_configuration": lambda: ("bake/v1.2.3-rc", "1.2.3"),
+                    "_requested_rc": lambda version, _target: version,
+                    "_preparation_directory": lambda _version: root,
+                    "_git": lambda *args: "a" * 40 if args[0] == "merge-base" else (
+                        "src/changed.py" if scenario == "changed-source" else ""),
+                    "_prepared_artifact": lambda *_args: None if scenario == "missing-readiness" else (wheel, digest),
+                    "_require_unchanged_checkout": lambda _commit: None,
+                    "_installed_run": installed,
+                    "_candidate_json": lambda _wheel, _version, command: new if command == "doctor" else status,
+                    "_installed_cli": lambda: root / "current" / "Scripts" / "agents-live.exe",
+                    "watchers_on_host": lambda **_kwargs: [],
+                    "_running_dashboards": lambda: (dashboard,),
+                    "_port_answers": lambda port: port in dashboard_versions,
+                    "_stop_dashboard": stop_dashboard,
+                    "_restart_dashboards": restart_dashboards,
+                    "_upgrade": upgrade_candidate,
+                    "_postcheck": postcheck,
+                }), mock.patch.dict(scope["RELEASE"], {
+                    "_installed_version": lambda: selected[0],
+                    "_installed_all_json": lambda _command: status,
+                    "_started_watchers": lambda _payload: (),
+                }):
+                    if scenario == "success":
+                        receipt = deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
+                        payload = json.loads(receipt.read_text(encoding="utf-8"))
+                        self.assertTrue(payload["deployed"])
+                        self.assertEqual("a" * 40, payload["commit"])
+                        self.assertEqual("b" * 40, payload["recovery"]["tool_commit"])
+                        self.assertEqual(digest, payload["wheel_sha256"])
+                        self.assertEqual("1.2.3rc4", selected[0])
+                        self.assertEqual({8231: "1.2.3rc4"}, dashboard_versions)
+                    else:
+                        with self.assertRaises(script["LocalDeployError"]):
+                            deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
+                        self.assertFalse((root / "receipt.json").exists())
+                        self.assertEqual("1.2.2", selected[0])
+                        self.assertEqual(b"previous payload", payload_file.read_bytes())
+                        self.assertEqual({8231: "1.2.2"}, dashboard_versions)
+                        if scenario == "postcheck":
+                            self.assertIn("rollback", operations)
+                            self.assertIn("stop 1.2.3rc4", operations)
+                            self.assertIn("refresh", operations)
+                            self.assertEqual("dashboards", operations[-1])
+                        else:
+                            self.assertEqual([], operations)
+
     def test_local_deploy_stamps_only_the_archived_bake_source(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
