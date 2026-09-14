@@ -1369,7 +1369,7 @@ def _write_preparation(version: str, wheel: Path) -> Path:
         "gates": _gate_commands(),
     }
     if ACTIVE_ATTEMPT is not None:
-        payload["checkout"] = str(ROOT.resolve())
+        payload["checkout"] = str(ROOT)
         _write_once(destination, payload)
         return destination
     temporary = destination.with_suffix(".tmp")
@@ -1401,7 +1401,7 @@ def _check_preparation(version: str) -> dict:
         "gates": _gate_commands(),
     }
     if ACTIVE_ATTEMPT is not None:
-        expected["checkout"] = str(ROOT.resolve())
+        expected["checkout"] = str(ROOT)
     mismatched = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]

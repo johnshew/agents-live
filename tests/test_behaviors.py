@@ -4364,7 +4364,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         scope = script["prepare_attempt"].__globals__
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            alias = Path(temporary) / "path-alias"
+            alias.mkdir()
+            root = alias / ".."
             project = root / "pyproject.toml"
             package = root / "package.py"
             version_file = root / "VERSION"
