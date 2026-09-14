@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-09-07
+ms.date: 2026-09-14
 ms.topic: reference
 ---
 
@@ -34,6 +34,16 @@ or `versions classify <version> released`. Classification changes no
 generation files and selects no runtime. Development versions are shown as
 bake releases. `versions activate <version>` explicitly selects a runtime;
 successful selections appear as `generation.activate` administrative events.
+
+Numbered RC packages retain their full version, such as `1.2.3rc2`, beside stable
+versions. Deliberately restore a retained version with `versions activate` when
+rejecting a candidate, then verify all-repository health and watcher restoration.
+Different final build attempts can share the stable package version but must not
+overwrite a sealed installed version containing different bytes. Use `versions
+remove <inactive-version>` only after restoration and its ownership/liveness
+checks pass, then install the next exact wheel. Release preparation evidence is
+retained separately from the runtime version store. Ordinary upgrades continue
+to resolve stable releases, not RCs.
 
 Activation through `versions activate`, `install-release --activate`, or
 `upgrade` preserves started intent across registered repositories. It refuses

@@ -26,15 +26,95 @@ unchanged Windows gate on its preparing environment but is not installed-accepte
 The manifest records RC4 as prepared and reserves RC5 for new bytes. Explicit
 RC4 recovery requires its retained wheel and readiness receipt (#522).
 
-**Final stable preparation remains blocked on #511.** For authorized local
-RC evaluation, use `tools/local-deploy.py --repo <live-repository> --rc <version>`
-from the clean synchronized bake. The version must be the configured next RC.
-This builds and selects a side-by-side installation without creating a tag or
-GitHub release. See [testing.md](testing.md) for evidence and retry rules.
-The release commands below document the existing legacy mechanism, not
-an authorized workaround. The tool refuses its legacy preview, prepare,
-acceptance, and publish paths for a numbered-RC cycle. Do not run an older
-checkout to bypass this guard.
+The numbered lifecycle is implemented by `tools/release.py`. Existing
+`local-deploy.py --rc` receipts support historical local evaluation and recovery,
+not full operational acceptance. Never rebuild those consumed identities or
+import their limited readiness evidence as full acceptance. The current release
+still requires the issue dispositions, exact RC acceptance, promotion approval,
+and independent stable acceptance described by the generated report.
+
+### Numbered attempt commands
+
+Run preflight with the live repository and safe agent arguments before allocating
+an attempt. From clean, synchronized bake, prepare the configured next RC:
+
+```bash
+uv run --script tools/release.py --prepare-rc <configured-next-rc> --yes
+```
+
+Allocation consumes an identity across manifest history, local evidence and refs,
+and origin refs. It creates a dedicated `release/v<attempt>-candidate` worktree
+and retains evidence under the common Git directory's
+`agents-live-release/cycle-<target>/<attempt>/`. Preparation commits release
+metadata, preserves `Unreleased` for RCs, builds once, and runs the source and
+packaged gates. No tag is created. Run subsequent commands from the printed
+retained worktree, using its script, not a different checkout's version.
+
+```bash
+agents-live upgrade --from <retained-wheel> --candidate
+uv run --script tools/release.py --accept-candidate --attempt <rc> \
+  --repo <live-repository> --agent <safe-agent-identifier> \
+  --cost-agent <safe-provider-agent-identifier> --yes
+```
+
+After exact RC acceptance, obtain developer approval naming its original bake
+source commit, record the promotion decision, and merge bake to main through
+the reviewed promotion PR. Only the promotion fields may differ from the
+accepted source. From clean synchronized main:
+
+```bash
+uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
+```
+
+The final attempt has package version `<target>` but a separate identity such
+as `<target>-final-1`. Its preparation stamps the accumulated stable changelog,
+builds new stable bytes, and reruns the required gates. Bootstrap and independently
+accept those bytes using the same command above with the final attempt identifier.
+RC acceptance can never substitute for this receipt. After explicit approval:
+
+```bash
+uv run --script tools/release.py --finalize --attempt <final-attempt> --yes
+uv run --script tools/release.py --publish --attempt <final-attempt> --yes
+```
+
+Finalization creates the annotated stable tag and an immutable record binding it
+to final preparation and acceptance. Publication pushes the exact commit and tag
+atomically, uploads retained bytes and a privacy-safe evidence digest, and refuses
+replacement of existing draft assets. Both automatic and manual PyPI workflow
+paths require a canonical stable tag and matching public evidence. Publication
+never rebuilds accepted assets. Verify GitHub and PyPI availability independently.
+
+### Retry and rejection
+
+Use `--prepare-attempt <attempt> --yes` in its retained worktree to retry unchanged
+preparation. Completed builds are reused byte-for-byte; changed or unreceipted
+bytes are refused. An interruption before the commit/build record is complete
+may require a new identity after preserving the failed attempt for inspection.
+Use `--accept-candidate --attempt <attempt> --resume` with all live arguments
+and `--yes` only when a matching upgrade checkpoint exists. Cycle mutation and
+allocation locks refuse concurrent operations; after a crash, verify no operation
+is active before removing only the stale lock directory. Never delete receipts.
+
+To reject, deliberately restore a retained version through `versions activate`,
+verify all-repository doctor, agent state, and representative watchers, then run
+`--reject-attempt <attempt> --reason <reason> --yes`. The tool verifies the retained
+state baseline when acceptance has started and records rejection without deleting
+artifacts. Advance the configured RC for source fixes. A failed final attempt
+does not consume a stable patch: after restoration, remove only the inactive
+failed installed version through `versions remove`, then allocate a new final
+attempt. The installed wheel digest must match; sealed versions are never
+overwritten. Runtime removal does not remove the Git-local evidence store.
+
+The existing rejected local stable tag needs explicit migration before finalization:
+`--migrate-legacy-tag v<target> --yes`. This verifies the original receipt and
+artifacts, preserves the exact annotated object under an archive ref, and removes
+only the matching unpublished local canonical ref. It refuses remote tags and
+conflicting identities. It does not install or publish anything.
+
+`--cycle-status` reports local attempt evidence without exposing receipt paths.
+Legacy preview/prepare and implicit acceptance/publication remain blocked in
+numbered cycles; the later legacy examples apply only to non-numbered cycles.
+Do not use an older checkout to bypass the guard.
 
 The adopted policy keeps a stable target while advancing RC numbers on
 rejection. Keep immutable artifacts and receipts for every attempt. An
@@ -132,14 +212,11 @@ CLI to be installed. `tools/release.py` runs these gates during `--prepare`;
 
 `uv build` resolves its build backend from PyPI, so on a network that
 intercepts TLS it fails with `HandshakeFailure` while every other gate
-passes. That is a local condition, not a release defect: the published
-artifacts are built by `.github/workflows/publish.yml` on a GitHub
-runner, which reaches PyPI normally. `uv build --offline` succeeds from
-the local cache and is enough to confirm the package still builds, but
-`release.py` deliberately offers no offline mode, because a release
-cannot be cut from a host that cannot reach the index it publishes to.
-Either run the release from a host with direct access, or dispatch the
-publish workflow against the tag.
+passes. That is a local condition, not permission to replace accepted bytes.
+Use an environment that reaches the approved package source for preparation.
+An offline diagnostic build is not a preparation receipt. The publish workflow
+downloads and verifies the accepted release assets rather than rebuilding them;
+manual dispatch cannot bypass missing finalization or artifact evidence.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`

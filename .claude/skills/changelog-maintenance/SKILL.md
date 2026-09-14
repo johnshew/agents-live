@@ -22,13 +22,14 @@ changelog, to `docs/backlog.md`, or to an issue, and delete it.
 ## The release contract (read first)
 
 The current numbered-RC policy migration is tracked in
-[#511](https://github.com/johnshew/agents-live/issues/511). Candidate preparation
-is blocked until the new tooling is implemented and validated. Under that
-policy, keep entries under `Unreleased` during RC iterations and stamp the
+[#511](https://github.com/johnshew/agents-live/issues/511). Use explicit
+`release.py --prepare-rc` and `--prepare-final --from-rc` operations with retained
+attempt identities; legacy implicit preparation remains blocked. Keep entries
+under `Unreleased` during RC iterations and stamp the
 stable section during final stable preparation. Summarize the complete change
 since the previous stable release, not just changes since the preceding RC.
 RC acceptance does not authorize stable publication. The legacy mechanical
-contract below is not permission to bypass the migration guard.
+contract below is not permission to bypass independent final acceptance.
 
 `tools/release.py` consumes the changelog mechanically:
 

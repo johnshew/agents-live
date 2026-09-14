@@ -19,7 +19,7 @@ decision = "continue-bake"
 
 [bake.candidate_cycle]
 model = "numbered-rc"
-implementation = "local-rc-deploy"
+implementation = "numbered-rc-v1"
 issue = 511
 next = "6.9.2rc5"
 supersedes = ["bake/v6.9.2-local", "bake/v6.9.3-local"]
@@ -74,10 +74,10 @@ deferred = [105, 388, 434, 478, 486, 489]
 promotion_decision = [508, 511, 516, 519, 522]
 
 [bake.recommendations]
-overall = "Keep promotion blocked. RC4 is already prepared, not accepted; RC5 is the next unused identity. Verify retained RC4 recovery on the environment holding its exact bytes and readiness receipt (#522), investigate #519, disposition the historical RC3 focus failure (#516), and obtain the #508 scope decision. Complete #511 finalization and acceptance before stable preparation. Deployment fields retain the last recorded validated RC2 observation, not a universal claim about current installations."
+overall = "Keep promotion blocked. RC4 is already prepared, not accepted; RC5 is the next unused identity. Verify retained RC4 recovery on the environment holding its exact bytes and readiness receipt (#522), investigate #519, disposition the historical RC3 focus failure (#516), and obtain the #508 scope decision. Validate the #511 workflow and accept the exact next RC before promotion; independently accept final stable bytes before finalization. Deployment fields retain the last recorded validated RC2 observation, not a universal claim about current installations."
 "508" = "Configured model and effort display is fixed in #514 with reload coverage in #524. Remaining provider-aware editing and context controls are split to #525, proposed for 6.10. Obtain explicit developer approval before deferring that scope from this stable release; the deferral has not been approved."
 "509" = "Fixed in #514. A real temporary Windows hourly task fired one second after its expected same-day boundary, without immediate catch-up or definition change. Boundary and phase regression suites pass; cleanup succeeded."
-"511" = "Local RC wheel preparation and side-by-side selection are available. Complete rejection and rollback validation, exact-artifact acceptance, final stable retry identities, and stable-only publication guards. Keep final stable preparation and promotion blocked until this workflow is implemented and validated."
+"511" = "Numbered RC and independent final-attempt tooling is available with retained evidence, rejection, deferred stable tagging, and stable-only publication. Validate the implementation through required platform CI and exercise the exact next RC through live operational acceptance before promotion. Historical local-deploy receipts are not full acceptance; final stable bytes require their own gates and explicit approval."
 "516" = "RC4 passed the unchanged Windows focus-readiness gate according to its preparing environment. RC3 remains a rejected historical attempt with no established root cause. Keep the gate and require explicit disposition before promotion; do not relabel RC3 as passing."
 "517" = "Windows bootstrap fixes merged in #520 and passed Windows/Linux CI. Delivered to RC, not yet released; close through promotion after required acceptance."
 "518" = "Locally eligible started-provider health checks merged in #520. Delivered to RC, not yet released. The old installed-runtime recovery requirement remains tracked separately in #522."

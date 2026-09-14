@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -48,7 +49,7 @@ BOOTSTRAP_VERSION_MARKERS = {
     "install.ps1": "$embeddedVersion = ''",
     "install.sh": 'embedded_version=""',
 }
-VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+)"$', re.MULTILINE)
+VERSION_RE = re.compile(r'^version = "(\d+\.\d+\.\d+(?:rc[1-9]\d*)?)"$', re.MULTILINE)
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 COMPARE_URL = "https://github.com/johnshew/agents-live/compare/{base}...{tag}"
 SUMMARY_END_RE = re.compile(r"[.!?](?: \(#\d+(?:, #\d+)*\))?$")
@@ -62,6 +63,7 @@ TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore
 ACCEPTANCE_SCHEMA = 2
 PREPARATION_SCHEMA = 2
 CHECKPOINT_SCHEMA = 1
+ACTIVE_ATTEMPT: dict | None = None
 
 
 class ReleaseError(RuntimeError):
@@ -417,10 +419,24 @@ def _write_release_notes(
                     "--title", f"agents-live {tag}",
                 ])
             if assets:
-                _run([
-                    "gh", "release", "upload", tag,
-                    *(str(path) for path in assets), "--clobber",
-                ])
+                if ACTIVE_ATTEMPT is not None:
+                    metadata = json.loads(_run([
+                        "gh", "release", "view", tag, "--json", "assets",
+                    ], capture=True))
+                    existing_assets = {item["name"]: item for item in metadata["assets"]}
+                    if set(existing_assets) - {path.name for path in assets}:
+                        raise ReleaseError("draft contains unexpected release assets")
+                    for path in assets:
+                        if path.name in existing_assets:
+                            if existing_assets[path.name].get("digest") != f"sha256:{_sha256(path)}":
+                                raise ReleaseError("draft asset differs from accepted bytes; never replace assets")
+                        else:
+                            _run(["gh", "release", "upload", tag, str(path)])
+                else:
+                    _run([
+                        "gh", "release", "upload", tag,
+                        *(str(path) for path in assets), "--clobber",
+                    ])
             _run(["gh", "release", "edit", tag, "--draft=false"])
         else:
             _run(["gh", "release", "edit", tag, "--notes-file", notes_file.name])
@@ -589,8 +605,64 @@ def _check_prepare_state(target: str, *, fetch: bool, resume: bool = False) -> N
         )
 
 
+def _stable_tag_version(tag: str) -> str:
+    if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag) is None:
+        raise ReleaseError("publication requires a canonical stable vX.Y.Z tag")
+    return tag[1:]
+
+
+def verify_publication(tag: str) -> None:
+    version = _stable_tag_version(tag)
+    if _current_version() != version:
+        raise ReleaseError("publication tag does not match the checked-out package")
+    payload = json.loads(_run([
+        "gh", "release", "view", tag, "--json", "tagName,isDraft,isPrerelease",
+    ], capture=True))
+    if (payload.get("tagName") != tag or payload.get("isDraft") is not False
+            or payload.get("isPrerelease") is not False):
+        raise ReleaseError("publication requires an existing non-draft stable release")
+    if _git("rev-parse", f"{tag}^{{commit}}") != _git("rev-parse", "HEAD"):
+        raise ReleaseError("publication checkout does not match the stable tag")
+
+
+def verify_publication_assets(tag: str) -> None:
+    verify_publication(tag)
+    version = _stable_tag_version(tag)
+    directory = ROOT / "dist"
+    record = json.loads((directory / "release-evidence.json").read_text(encoding="utf-8"))
+    expected = {"schema": 1, "version": version, "tag": tag,
+                "commit": _git("rev-parse", "HEAD"),
+                "tag_object": _git("rev-parse", f"refs/tags/{tag}"), "accepted": True}
+    if any(record.get(key) != value for key, value in expected.items()) \
+            or re.fullmatch(re.escape(version) + r"-final-[1-9]\d*", str(record.get("attempt", ""))) is None:
+        raise ReleaseError("published evidence is not finalized stable acceptance")
+    expected_names = {f"agents_live-{version}-py3-none-any.whl",
+                      f"agents_live-{version}.tar.gz", *BOOTSTRAP_ASSETS}
+    if set(record.get("artifacts", {})) != expected_names:
+        raise ReleaseError("published evidence has an unexpected artifact set")
+    for name, digest in record["artifacts"].items():
+        if _sha256(directory / name) != digest:
+            raise ReleaseError("downloaded release bytes differ from finalized acceptance")
+    if {path.name for path in directory.glob("*.whl")} != {f"agents_live-{version}-py3-none-any.whl"} \
+            or {path.name for path in directory.glob("*.tar.gz")} != {f"agents_live-{version}.tar.gz"}:
+        raise ReleaseError("publication directory contains unrelated package artifacts")
+
+
 def _check_publish_state(version: str) -> bool:
     """Validate a prepared release and return whether it still needs pushing."""
+    _stable_tag_version(f"v{version}")
+    if ACTIVE_ATTEMPT is not None:
+        _check_finalization(version)
+        _run(["git", "fetch", "--quiet", "origin", "main"])
+        head = _git("rev-parse", "HEAD")
+        origin = _git("rev-parse", "origin/main")
+        if origin not in {head, ACTIVE_ATTEMPT["source_commit"]}:
+            raise ReleaseError("main changed since final preparation; accept a new RC")
+        remote = _git("ls-remote", "--tags", "origin", f"refs/tags/v{version}")
+        tag_object = _git("rev-parse", f"refs/tags/v{version}")
+        if remote and remote.split()[0] != tag_object:
+            raise ReleaseError("remote stable tag conflicts with finalized identity")
+        return head != origin or not remote
     if _git("status", "--porcelain"):
         raise ReleaseError("working tree must be clean")
     branch = _git("branch", "--show-current")
@@ -645,6 +717,8 @@ def _candidate_wheel(version: str) -> Path:
 
 
 def _artifact_store_dir(version: str) -> Path:
+    if ACTIVE_ATTEMPT is not None:
+        return _attempt_path() / "artifacts"
     value = _git(
         "rev-parse", "--git-path",
         f"agents-live-release/artifacts-{version}")
@@ -660,6 +734,12 @@ def _preserve_release_artifacts(version: str, wheel: Path) -> Path:
             raise ReleaseError(f"prepared artifact is missing: {source.resolve()}")
     hashes = {source.name: _sha256(source) for source in sources}
     destination = _artifact_store_dir(version)
+    if ACTIVE_ATTEMPT is not None and destination.exists():
+        if any(not (destination / name).is_file()
+               or _sha256(destination / name) != digest
+               for name, digest in hashes.items()):
+            raise ReleaseError("attempt artifacts are immutable; allocate a new attempt")
+        return destination / wheel.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"staging-{version}-", dir=destination.parent) as temporary:
         staging = Path(temporary) / "artifacts"
@@ -711,6 +791,8 @@ def _checkpoint_path(version: str) -> Path:
 
 
 def _artifact_manifest_path(version: str) -> Path:
+    if ACTIVE_ATTEMPT is not None:
+        return _attempt_path() / f"SHA256SUMS-{version}"
     value = _git(
         "rev-parse", "--git-path",
         f"agents-live-release/SHA256SUMS-{version}")
@@ -719,6 +801,10 @@ def _artifact_manifest_path(version: str) -> Path:
 
 
 def _release_state_path(kind: str, version: str) -> Path:
+    if ACTIVE_ATTEMPT is not None:
+        if ACTIVE_ATTEMPT["version"] != version:
+            raise ReleaseError("receipt version does not match the selected attempt")
+        return _attempt_path() / f"{kind}.json"
     value = _git(
         "rev-parse", "--git-path",
         f"agents-live-release/{kind}-{version}.json")
@@ -727,7 +813,518 @@ def _release_state_path(kind: str, version: str) -> Path:
 
 
 def _candidate_branch(version: str) -> str:
+    if ACTIVE_ATTEMPT is not None:
+        return ACTIVE_ATTEMPT["branch"]
     return f"release/v{version}-candidate"
+
+
+def _attempt_path() -> Path:
+    if ACTIVE_ATTEMPT is None:
+        raise ReleaseError("no release attempt selected")
+    return _cycle_directory(ACTIVE_ATTEMPT["target"]) / ACTIVE_ATTEMPT["id"]
+
+
+def _cycle_directory(target: str) -> Path:
+    _stable_tag_version(f"v{target}")
+    common = Path(_git("rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = ROOT / common
+    return common.resolve() / "agents-live-release" / f"cycle-{target}"
+
+
+def _write_once(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") != encoded:
+            raise ReleaseError(f"immutable release evidence already exists: {path.name}")
+        return
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(encoded.encode("utf-8"))
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _receipt_tag_object(version: str) -> str | None:
+    return None if ACTIVE_ATTEMPT is not None else _git(
+        "rev-parse", f"refs/tags/v{version}")
+
+
+def _check_installed_attempt(version: str, wheel: Path) -> None:
+    installed = _install_root() / "versions" / version / "generation.json"
+    try:
+        record = json.loads(installed.read_text(encoding="utf-8"))
+        digest = record["provenance"]["sha256"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ReleaseError("installed attempt has no verifiable artifact provenance") from exc
+    if digest != _sha256(wheel):
+        raise ReleaseError(
+            "same-version installation contains different bytes; restore another "
+            "version and remove the inactive failed version through versions remove "
+            "before bootstrapping this attempt; never overwrite a sealed installation")
+
+
+def _check_finalization(version: str) -> dict:
+    if ACTIVE_ATTEMPT is None or ACTIVE_ATTEMPT["kind"] != "final":
+        raise ReleaseError("stable finalization requires a final attempt")
+    _stable_tag_version(f"v{version}")
+    _check_attempt_checkout()
+    _check_preparation(version)
+    _check_candidate_acceptance(version)
+    try:
+        record = json.loads((_attempt_path() / "finalization.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("final stable attempt has not been finalized") from exc
+    expected = {
+        "attempt": ACTIVE_ATTEMPT["id"], "version": version,
+        "commit": _git("rev-parse", "HEAD"), "tag": f"v{version}",
+        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "preparation_sha256": _sha256(_preparation_path(version)),
+        "acceptance_sha256": _sha256(_acceptance_path(version)), "approved": True,
+    }
+    if any(record.get(key) != value for key, value in expected.items()) \
+            or _git("cat-file", "-t", f"v{version}") != "tag" \
+            or _git("rev-parse", f"v{version}^{{commit}}") != expected["commit"]:
+        raise ReleaseError("finalization or stable tag identity changed")
+    return record
+
+
+def finalize_attempt() -> None:
+    if ACTIVE_ATTEMPT is None or ACTIVE_ATTEMPT["kind"] != "final":
+        raise ReleaseError("only an independently accepted final build can be finalized")
+    version = ACTIVE_ATTEMPT["version"]
+    _check_attempt_checkout()
+    _check_preparation(version)
+    _check_candidate_acceptance(version)
+    destination = _attempt_path() / "finalization.json"
+    if destination.exists():
+        _check_finalization(version)
+        print("Finalization already matches the accepted bytes")
+        return
+    tag = f"v{version}"
+    if _git("ls-remote", "--tags", "origin", f"refs/tags/{tag}"):
+        raise ReleaseError("stable tag is already remote; do not replace it")
+    head = _git("rev-parse", "HEAD")
+    local = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"], cwd=ROOT)
+    if local.returncode == 0:
+        if _git("cat-file", "-t", tag) != "tag" or _git("rev-parse", f"{tag}^{{commit}}") != head:
+            raise ReleaseError("stable tag conflicts with retained evidence; explicitly migrate the legacy tag")
+    else:
+        _run(["git", "tag", "-a", tag, "-m", f"agents-live {tag}; accepted {ACTIVE_ATTEMPT['id']}"])
+    _write_once(destination, {
+        "schema": 1, "attempt": ACTIVE_ATTEMPT["id"], "version": version,
+        "commit": head, "tag": tag, "tag_object": _git("rev-parse", f"refs/tags/{tag}"),
+        "preparation_sha256": _sha256(_preparation_path(version)),
+        "acceptance_sha256": _sha256(_acceptance_path(version)), "approved": True,
+        "finalized_at": datetime.now(timezone.utc).isoformat(),
+    })
+    print(f"Finalized {tag} locally; no publication performed")
+
+
+def reject_attempt(reason: str) -> None:
+    if ACTIVE_ATTEMPT is None or not reason.strip():
+        raise ReleaseError("rejection requires an attempt and reason")
+    directory = _attempt_path()
+    if (directory / "finalization.json").exists():
+        raise ReleaseError("finalized attempts require inspection; rejection cannot retire their stable tag")
+    version = ACTIVE_ATTEMPT["version"]
+    if _installed_version() == version:
+        raise ReleaseError(
+            "restore a retained version with versions activate, verify doctor and "
+            "watcher state, then reject this inactive attempt")
+    if not _installed_all_json("doctor").get("ok"):
+        raise ReleaseError("restored installation must be healthy before rejection")
+    checkpoint = _checkpoint_path(version)
+    if (directory / "baseline.json").exists():
+        checkpoint = directory / "baseline.json"
+    elif _acceptance_path(version).exists():
+        raise ReleaseError("accepted attempt has no retained restoration baseline; inspect missing evidence")
+    if checkpoint.exists():
+        baseline = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if _status_contract(_installed_all_json("status")) != tuple(
+                tuple(row) for row in baseline["contract"]):
+            raise ReleaseError("restoration changed the recorded agent state")
+        representative = _installed_json(Path(baseline["repo"]), "status")
+        if _started_watchers(representative) != tuple(tuple(row) for row in baseline["watchers"]):
+            raise ReleaseError("restoration changed the recorded watcher state")
+    _write_once(directory / "rejected.json", {
+        "schema": 1, "attempt": ACTIVE_ATTEMPT["id"], "reason": reason.strip(),
+        "restored_version": _installed_version(),
+        "rejected_at": datetime.now(timezone.utc).isoformat(),
+    })
+    print("Rejected attempt retained. Remove only its inactive installed version "
+          "through versions remove before a different same-version final attempt.")
+
+
+def migrate_legacy_tag(tag: str) -> None:
+    version = _stable_tag_version(tag)
+    bake = _cycle_configuration()
+    legacy = next((item for item in bake["candidate_cycle"].get("history", {}).values()
+                   if item.get("kind") == "legacy-candidate"
+                   and item.get("status") == "rejected"
+                   and item.get("artifact_version") == version), None)
+    if legacy is None:
+        raise ReleaseError("manifest has no rejected legacy candidate for this tag")
+    if _git("ls-remote", "--tags", "origin", f"refs/tags/{tag}"):
+        raise ReleaseError("remote immutable tags cannot be migrated")
+    directory = _cycle_directory(version)
+    receipt_path = directory.parent / f"preparation-{version}.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if receipt["commit"] != legacy.get("commit") \
+            or receipt["wheel_sha256"] != legacy.get("wheel_sha256") \
+            or receipt["sdist_sha256"] != legacy.get("sdist_sha256"):
+        raise ReleaseError("legacy preparation does not match recorded rejected evidence")
+    for filename, digest in [(receipt[key], receipt[f"{key}_sha256"]) for key in ("wheel", "sdist")] \
+            + [(item["path"], item["sha256"]) for item in receipt["installers"]]:
+        if _sha256(Path(filename)) != digest:
+            raise ReleaseError("legacy artifact hash changed")
+    original = receipt["tag_object"]
+    if _git("cat-file", "-t", original) != "tag" \
+            or _git("rev-parse", f"{original}^{{commit}}") != receipt["commit"]:
+        raise ReleaseError("legacy annotated tag identity changed")
+    archive = f"refs/tags/archive/legacy-{tag}-{original[:12]}"
+    migration = directory / "legacy-tag-migration.json"
+    record = {"schema": 1, "tag": tag, "tag_object": original,
+              "archive_ref": archive, "preparation_sha256": _sha256(receipt_path)}
+    _write_once(migration, record)
+    existing = _git("for-each-ref", "--format=%(objectname)", archive)
+    if existing and existing != original:
+        raise ReleaseError("legacy archive ref conflicts")
+    if not existing:
+        _run(["git", "update-ref", archive, original, "0" * 40])
+    current = _git("for-each-ref", "--format=%(objectname)", f"refs/tags/{tag}")
+    if current:
+        if current != original:
+            raise ReleaseError("stable tag no longer points to the legacy candidate")
+        _run(["git", "update-ref", "-d", f"refs/tags/{tag}", original])
+    print(f"Preserved original annotated tag object at {archive}; artifacts and receipts unchanged")
+
+
+def _attempt_identity() -> dict:
+    if ACTIVE_ATTEMPT is None:
+        return {}
+    return {"attempt": ACTIVE_ATTEMPT["id"],
+            "source_commit": ACTIVE_ATTEMPT["source_commit"]}
+
+
+def _check_final_source(accepted_source: str, final_source: str) -> None:
+    manifest = ".github/release-channels.toml"
+    if _git("merge-base", accepted_source, final_source) != accepted_source:
+        raise ReleaseError("accepted RC source has not reached main")
+    changed = set(_git("diff", "--name-only", accepted_source, final_source).splitlines())
+    if changed - {manifest}:
+        raise ReleaseError("final source differs from accepted RC code; accept a new RC")
+    original = tomllib.loads(_git("show", f"{accepted_source}:{manifest}"))
+    promoted = tomllib.loads(_git("show", f"{final_source}:{manifest}"))
+    original["bake"].pop("promotion", None)
+    approval = promoted["bake"].pop("promotion", {})
+    if original != promoted:
+        raise ReleaseError("release policy changed since accepted RC; accept a new RC")
+    if approval.get("decision") != "approved" or approval.get("commit") != accepted_source:
+        raise ReleaseError("final preparation requires promotion approval for the accepted RC source")
+    try:
+        datetime.strptime(approval["decided_on"], "%Y-%m-%d")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReleaseError("promotion approval requires a valid decision date") from exc
+
+
+def _check_accepted_rc(record: dict) -> None:
+    if record["kind"] != "final":
+        return
+    accepted = _load_attempt(record["accepted_rc"])
+    if accepted["kind"] != "rc" or accepted["target"] != record["target"]:
+        raise ReleaseError("final attempt refers to an incompatible RC")
+    _retained_preparation(accepted, accepted=True)
+    path = _cycle_directory(record["target"]) / accepted["id"] / "acceptance.json"
+    if _sha256(path) != record["rc_acceptance_sha256"]:
+        raise ReleaseError("accepted RC decision changed since final allocation")
+    _check_final_source(accepted["source_commit"], record["source_commit"])
+
+
+def _cycle_configuration() -> dict:
+    with (ROOT / ".github" / "release-channels.toml").open("rb") as stream:
+        bake = tomllib.load(stream)["bake"]
+    if bake.get("candidate_cycle", {}).get("model") != "numbered-rc":
+        raise ReleaseError("attempt commands require a numbered RC cycle")
+    _stable_tag_version(f"v{bake['version']}")
+    return bake
+
+
+def cycle_status() -> list[dict]:
+    target = _cycle_configuration()["version"]
+    directory = _cycle_directory(target)
+    rows = []
+    for path in sorted(directory.glob("*/attempt.json")):
+        identifier = path.parent.name
+        row = {"attempt": identifier, "state": "reserved"}
+        try:
+            if (path.parent / "rejected.json").exists():
+                rejection = json.loads((path.parent / "rejected.json").read_text(encoding="utf-8"))
+                if rejection.get("schema") != 1 or rejection.get("attempt") != identifier \
+                        or not rejection.get("reason") or not rejection.get("restored_version"):
+                    raise ReleaseError("rejection record is malformed")
+                row["state"] = "rejected"
+            else:
+                record = _load_attempt(identifier)
+                row.update(version=record["version"], source_commit=record["source_commit"])
+                if (path.parent / "preparation.json").exists():
+                    preparation = _retained_preparation(record)
+                    row.update(state="prepared", commit=preparation["commit"],
+                               wheel_sha256=preparation["wheel_sha256"])
+                if (path.parent / "acceptance.json").exists():
+                    _retained_preparation(record, accepted=True)
+                    _check_accepted_rc(record)
+                    row["state"] = "accepted"
+                if (path.parent / "finalization.json").exists():
+                    final = json.loads((path.parent / "finalization.json").read_text(encoding="utf-8"))
+                    if row["state"] != "accepted" or record["kind"] != "final" \
+                            or final.get("schema") != 1 or final.get("approved") is not True \
+                            or final.get("attempt") != identifier or final.get("version") != record["version"] \
+                            or final.get("tag") != f"v{record['version']}" \
+                            or final.get("commit") != row["commit"] \
+                            or final.get("preparation_sha256") != _sha256(path.parent / "preparation.json") \
+                            or final.get("acceptance_sha256") != _sha256(path.parent / "acceptance.json") \
+                            or _git("rev-parse", f"refs/tags/v{record['version']}") != final.get("tag_object") \
+                            or _git("cat-file", "-t", final["tag_object"]) != "tag" \
+                            or _git("rev-parse", f"{final['tag_object']}^{{commit}}") != row["commit"]:
+                        raise ReleaseError("finalization evidence is stale")
+                    row["state"] = "finalized"
+        except (OSError, ValueError, KeyError, TypeError, ReleaseError, subprocess.CalledProcessError):
+            row["state"] = "invalid-evidence"
+        rows.append(row)
+    return rows
+
+
+def _load_attempt(identifier: str) -> dict:
+    match = re.fullmatch(
+        r"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(rc[1-9]\d*|-final-[1-9]\d*)",
+        identifier)
+    if match is None:
+        raise ReleaseError("invalid release attempt identity")
+    target = match.group(1)
+    directory = _cycle_directory(target) / identifier
+    try:
+        record = json.loads((directory / "attempt.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseError("attempt reservation is missing or incomplete") from exc
+    kind = "rc" if match.group(2).startswith("rc") else "final"
+    if not isinstance(record, dict):
+        raise ReleaseError("attempt reservation must be an object")
+    expected = {"schema": 1, "id": identifier, "target": target,
+                "kind": kind, "version": identifier if kind == "rc" else target,
+                "branch": f"release/v{identifier}-candidate"}
+    if any(record.get(key) != value for key, value in expected.items()):
+        raise ReleaseError("attempt reservation identity is inconsistent")
+    if re.fullmatch(r"[0-9a-f]{40}", str(record.get("source_commit", ""))) is None:
+        raise ReleaseError("attempt source commit is invalid")
+    if (directory / "rejected.json").exists():
+        raise ReleaseError("attempt is rejected; retain its evidence and use a new identity")
+    return record
+
+
+def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
+    directory = _cycle_directory(record["target"]) / record["id"]
+    try:
+        commit = json.loads((directory / "commit.json").read_text(encoding="utf-8"))["commit"]
+        preparation = json.loads((directory / "preparation.json").read_text(encoding="utf-8"))
+        checkout = preparation["checkout"]
+        if not isinstance(checkout, str) or not Path(checkout).is_absolute():
+            raise ReleaseError("retained preparation checkout is invalid")
+        gate_commands = [[checkout if argument == str(ROOT) else argument for argument in command]
+                         for command in _gate_commands()]
+        expected = {"schema": PREPARATION_SCHEMA, "prepared": True,
+                    "attempt": record["id"], "version": record["version"],
+                    "source_commit": record["source_commit"], "commit": commit,
+                    "base_commit": record["source_commit"], "tag_object": None,
+                    "tag": f"v{record['version']}", "gates": gate_commands,
+                    **_evidence_identity()}
+        if any(preparation.get(key) != value for key, value in expected.items()):
+            raise ReleaseError("retained preparation identity is stale")
+        artifacts = [(preparation[key], preparation[f"{key}_sha256"])
+                     for key in ("wheel", "sdist")]
+        artifacts.extend((asset["path"], asset["sha256"])
+                         for asset in preparation["installers"])
+        names = {f"agents_live-{record['version']}-py3-none-any.whl",
+                 f"agents_live-{record['version']}.tar.gz", *BOOTSTRAP_ASSETS}
+        if len(artifacts) != 4 or {Path(filename).name for filename, _digest in artifacts} != names:
+            raise ReleaseError("retained preparation has an incomplete artifact set")
+        for filename, digest in artifacts:
+            path = Path(filename)
+            if path.parent.resolve() != (directory / "artifacts").resolve() \
+                    or _sha256(path) != digest:
+                raise ReleaseError("retained artifact location or hash changed")
+        if accepted:
+            receipt = json.loads((directory / "acceptance.json").read_text(encoding="utf-8"))
+            identity = {key: preparation[key] for key in (
+                "attempt", "source_commit", "version", "commit", "tag_object",
+                "wheel", "wheel_sha256", "platform", "python_version", "workflow_sha256")}
+            identity.update(schema=ACCEPTANCE_SCHEMA, accepted=True, operational=True,
+                            preparation_sha256=_sha256(directory / "preparation.json"))
+            if any(receipt.get(key) != value for key, value in identity.items()) \
+                    or not receipt.get("started_watchers") \
+                    or not receipt.get("operational_agent") or not receipt.get("cost_agent"):
+                raise ReleaseError("retained operational acceptance is missing or stale")
+        return preparation
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ReleaseError("retained attempt evidence is incomplete") from exc
+
+
+def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
+    _require_tools()
+    bake = _cycle_configuration()
+    target = bake["version"]
+    branch = bake["branch"] if rc else "main"
+    if _git("status", "--porcelain") or _git("branch", "--show-current") != branch:
+        raise ReleaseError(f"prepare from a clean synchronized {branch} checkout")
+    _run(["git", "fetch", "--quiet", "origin", branch])
+    source = _git("rev-parse", "HEAD")
+    if source != _git("rev-parse", f"origin/{branch}"):
+        raise ReleaseError("preparation source must match origin")
+    accepted_record = None
+    if rc:
+        if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", rc) is None:
+            raise ReleaseError("RC must belong to the configured stable target")
+        cycle = bake["candidate_cycle"]
+        if cycle.get("next") != rc or rc in cycle.get("history", {}):
+            raise ReleaseError("RC must be the configured next unused identity")
+    else:
+        if not from_rc:
+            raise ReleaseError("final preparation requires --from-rc")
+        accepted_record = _load_attempt(from_rc)
+        if accepted_record["kind"] != "rc" or accepted_record["target"] != target:
+            raise ReleaseError("final preparation requires an RC of the current target")
+        _retained_preparation(accepted_record, accepted=True)
+        accepted_source = accepted_record["source_commit"]
+        _check_final_source(accepted_source, source)
+    directory = _cycle_directory(target)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / "allocation.lock"
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise ReleaseError("another allocation is active; inspect the retained lock") from exc
+    try:
+        remote = _git("ls-remote", "--heads", "--tags", "origin")
+        remote += "\n" + _git("for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags")
+        consumed = set(bake["candidate_cycle"].get("history", {}))
+        consumed.update(path.name for path in directory.iterdir())
+        common = Path(_git("rev-parse", "--git-common-dir"))
+        if not common.is_absolute():
+            common = ROOT / common
+        old_candidates = common / "agents-live-local-deploy" / "candidates"
+        if old_candidates.is_dir():
+            consumed.update(path.name for path in old_candidates.iterdir())
+        consumed.update(re.findall(re.escape(target) + r"(?:rc[1-9]\d*|-final-[1-9]\d*)", remote))
+        if rc:
+            if rc in consumed or any(
+                    item.startswith(target + "rc") and int(item.split("rc")[-1]) >= int(rc.split("rc")[-1])
+                    for item in consumed if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", item)):
+                raise ReleaseError("RC identity is consumed; advance the manifest to a new RC")
+            identifier = rc
+        else:
+            numbers = [int(item.rsplit("-", 1)[1]) for item in consumed
+                       if re.fullmatch(re.escape(target) + r"-final-[1-9]\d*", item)]
+            identifier = f"{target}-final-{max(numbers, default=0) + 1}"
+        attempt_dir = directory / identifier
+        attempt_dir.mkdir()
+        record = {"schema": 1, "id": identifier, "target": target,
+                  "version": rc or target, "kind": "rc" if rc else "final",
+                  "branch": f"release/v{identifier}-candidate", "source_commit": source,
+                  "accepted_rc": from_rc,
+                  "reserved_at": datetime.now(timezone.utc).isoformat()}
+        if accepted_record:
+            record["rc_acceptance_sha256"] = _sha256(
+                directory / accepted_record["id"] / "acceptance.json")
+        _write_once(attempt_dir / "attempt.json", record)
+    finally:
+        lock.rmdir()
+    checkout = directory / "worktrees" / identifier
+    checkout.parent.mkdir(parents=True, exist_ok=True)
+    _run(["git", "worktree", "add", "-b", record["branch"], str(checkout), source])
+    print(f"Reserved {identifier}; retained worktree: {checkout}", flush=True)
+    _run(["uv", "run", "--directory", str(checkout), "--script",
+          str(checkout / "tools" / "release.py"), "--prepare-attempt", identifier, "--yes"])
+
+
+def _check_attempt_checkout() -> None:
+    if ACTIVE_ATTEMPT is None:
+        raise ReleaseError("select an attempt explicitly")
+    record = ACTIVE_ATTEMPT
+    _check_accepted_rc(record)
+    commit = json.loads((_attempt_path() / "commit.json").read_text(encoding="utf-8"))["commit"]
+    if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != commit \
+            or _git("branch", "--show-current") != record["branch"]:
+        raise ReleaseError("attempt requires its clean, exact retained checkout")
+    if _git("rev-parse", "HEAD^") != record["source_commit"]:
+        raise ReleaseError("attempt source ancestry changed")
+    allowed = {path.relative_to(ROOT).as_posix() for path in RELEASE_FILES}
+    if set(_git("diff", "--name-only", "HEAD^", "HEAD").splitlines()) - allowed:
+        raise ReleaseError("attempt commit contains non-release changes")
+    if _current_version() != record["version"]:
+        raise ReleaseError("attempt package version changed")
+
+
+def prepare_attempt() -> None:
+    if ACTIVE_ATTEMPT is None:
+        raise ReleaseError("select an attempt explicitly")
+    record = ACTIVE_ATTEMPT
+    directory = _attempt_path()
+    version = record["version"]
+    commit_path = directory / "commit.json"
+    if not commit_path.exists():
+        _check_accepted_rc(record)
+        if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != record["source_commit"] \
+                or _git("branch", "--show-current") != record["branch"]:
+            raise ReleaseError("uncommitted attempt changed; retain it for inspection")
+        current = _current_version()
+        if record["kind"] == "final":
+            _update_versions(current, version)
+        else:
+            _run(["uv", "version", version, "--no-sync"])
+            _replace_once(VERSION_FILES[0], f'__version__ = "{current}"', f'__version__ = "{version}"')
+            _replace_once(VERSION_FILES[1], f"{current}\n", f"{version}\n")
+        validated = {path: path.read_bytes() for path in RELEASE_FILES}
+        _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
+        _run(["git", "commit", "-m", f"chore(build): prepare {record['id']}"])
+        for path, content in validated.items():
+            if _git("rev-parse", f"HEAD:{path.relative_to(ROOT).as_posix()}") != _blob_id(path, content):
+                raise ReleaseError("release metadata changed during commit")
+        _write_once(commit_path, {"commit": _git("rev-parse", "HEAD")})
+    _check_attempt_checkout()
+    if _preparation_path(version).exists():
+        _check_preparation(version)
+        print(f"Reused exact preparation for {record['id']}")
+        return
+    build_record = directory / "build.json"
+    for command in _gate_commands():
+        if "--build-artifacts" in command:
+            if build_record.exists():
+                retained = json.loads(build_record.read_text(encoding="utf-8"))
+                if retained != _release_identity(version, _candidate_wheel(version)):
+                    raise ReleaseError("retained build identity changed; never rebuild this attempt")
+                (ROOT / "dist").mkdir(exist_ok=True)
+                for path in _artifact_store_dir(version).iterdir():
+                    shutil.copy2(path, ROOT / "dist" / path.name)
+                continue
+            if _artifact_store_dir(version).exists() or any((ROOT / "dist").glob("*.whl")):
+                raise ReleaseError("unreceipted build bytes exist; retain them and allocate a new attempt")
+            _run(command)
+            wheel = _preserve_release_artifacts(version, ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl")
+            _write_once(build_record, _release_identity(version, wheel))
+        else:
+            _run(command)
+        _check_attempt_checkout()
+    wheel = _candidate_wheel(version)
+    if json.loads(build_record.read_text(encoding="utf-8")) != _release_identity(version, wheel):
+        raise ReleaseError("attempt artifacts changed during readiness")
+    _write_preparation(version, wheel)
+    print(f"Prepared {record['id']} without a tag. Bootstrap exact wheel: {wheel}")
+    print(f"Run --accept-candidate --attempt {record['id']} with the required live-agent arguments.")
 
 
 def _release_identity(version: str, wheel: Path) -> dict[str, object]:
@@ -748,7 +1345,8 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     return {
         "version": version,
         "tag": f"v{version}",
-        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "tag_object": _receipt_tag_object(version),
+        **_attempt_identity(),
         "commit": _git("rev-parse", "HEAD"),
         "base_commit": _git("rev-parse", "HEAD^"),
         "wheel": wheel.resolve().as_posix(),
@@ -770,6 +1368,10 @@ def _write_preparation(version: str, wheel: Path) -> Path:
         **_evidence_identity(),
         "gates": _gate_commands(),
     }
+    if ACTIVE_ATTEMPT is not None:
+        payload["checkout"] = str(ROOT)
+        _write_once(destination, payload)
+        return destination
     temporary = destination.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -798,6 +1400,8 @@ def _check_preparation(version: str) -> dict:
         **_evidence_identity(),
         "gates": _gate_commands(),
     }
+    if ACTIVE_ATTEMPT is not None:
+        expected["checkout"] = str(ROOT)
     mismatched = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
@@ -993,7 +1597,8 @@ def _write_candidate_acceptance(
         "accepted_at": datetime.now(timezone.utc).isoformat(),
         "version": version,
         "tag": f"v{version}",
-        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "tag_object": _receipt_tag_object(version),
+        **_attempt_identity(),
         "commit": _git("rev-parse", "HEAD"),
         "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
@@ -1008,6 +1613,10 @@ def _write_candidate_acceptance(
             for root, watcher in watchers
         ],
     }
+    if ACTIVE_ATTEMPT is not None:
+        payload["preparation_sha256"] = _sha256(_preparation_path(version))
+        _write_once(destination, payload)
+        return destination
     temporary = destination.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1031,12 +1640,17 @@ def _check_candidate_acceptance(version: str) -> dict:
         "accepted": True,
         "version": version,
         "tag": f"v{version}",
-        "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
+        "tag_object": _receipt_tag_object(version),
+        **_attempt_identity(),
         "commit": _git("rev-parse", "HEAD"),
         "wheel": wheel.resolve().as_posix(),
         "wheel_sha256": _sha256(wheel),
         **_evidence_identity(),
     }
+    if ACTIVE_ATTEMPT is not None:
+        expected["preparation_sha256"] = _sha256(_preparation_path(version))
+        if not isinstance(receipt.get("started_watchers"), list) or not receipt["started_watchers"]:
+            raise ReleaseError("attempt acceptance requires a recorded started watcher")
     mismatched = [key for key, value in expected.items()
                   if receipt.get(key) != value]
     if receipt.get("operational") is not True \
@@ -1504,6 +2118,12 @@ def _finish_operational_acceptance(
     if _started_watchers(final_representative) != watchers:
         raise ReleaseError(
             "candidate operational pass changed the representative watchers")
+    if ACTIVE_ATTEMPT is not None:
+        _check_attempt_checkout()
+        _check_preparation(version)
+        _check_installed_attempt(version, wheel)
+        if _installed_version() != version:
+            raise ReleaseError("installed version changed during operational acceptance")
     return _write_candidate_acceptance(
         version, root, wheel, operation_id=operation_id, watchers=watchers,
         operational_agent=operational_agent, cost_agent=cost_agent)
@@ -1515,8 +2135,16 @@ def accept_candidate(
     """Exercise the installed tagged candidate before any public push."""
     _require_tools()
     version = _current_version()
-    _acceptance_path(version).unlink(missing_ok=True)
-    _check_publish_state(version)
+    if ACTIVE_ATTEMPT is not None:
+        _check_attempt_checkout()
+        if _acceptance_path(version).exists():
+            _check_preparation(version)
+            _check_candidate_acceptance(version)
+            print("Exact attempt already accepted; reject it explicitly to invalidate the decision")
+            return
+    else:
+        _acceptance_path(version).unlink(missing_ok=True)
+        _check_publish_state(version)
     _check_preparation(version)
     wheel = _candidate_wheel(version)
     root = repo.expanduser().resolve()
@@ -1527,6 +2155,8 @@ def accept_candidate(
         raise ReleaseError(
             f"installed tool is {installed}, but prepared candidate is {version}; "
             f"bootstrap it first with `agents-live upgrade --from {wheel} --candidate`")
+    if ACTIVE_ATTEMPT is not None:
+        _check_installed_attempt(version, wheel)
 
     _run_operational_acceptance(root, agent_id, cost_agent, preflight=True)
 
@@ -1576,6 +2206,12 @@ def accept_candidate(
             "candidate acceptance requires at least one started watcher in "
             f"{root}")
     before_contract = _status_contract(before_status)
+
+    if ACTIVE_ATTEMPT is not None:
+        _write_once(_attempt_path() / "baseline.json", {
+            "schema": 1, **_attempt_identity(), "repo": str(root),
+            "contract": before_contract, "watchers": watchers,
+        })
 
     completed = _installed_run(
         ["--repo", str(root), "upgrade", "--from", str(wheel), "--candidate"])
@@ -1637,6 +2273,8 @@ def publish() -> None:
         resume_draft = True
     preparation = _check_preparation(version)
     _check_candidate_acceptance(version)
+    if ACTIVE_ATTEMPT is not None:
+        preparation = {**preparation, "tag_object": _check_finalization(version)["tag_object"]}
     notes = _release_notes(version)
     manifest = _write_artifact_manifest(version, preparation)
     accepted_artifacts = (
@@ -1644,6 +2282,19 @@ def publish() -> None:
         Path(str(preparation["sdist"])),
         *(Path(str(asset["path"])) for asset in preparation["installers"]),
     )
+    evidence_assets = ()
+    if ACTIVE_ATTEMPT is not None:
+        evidence = _attempt_path() / "release-evidence.json"
+        _write_once(evidence, {
+            "schema": 1, "version": version, "tag": tag, "accepted": True,
+            "attempt": ACTIVE_ATTEMPT["id"], "commit": preparation["commit"],
+            "tag_object": preparation["tag_object"],
+            "artifacts": {path.name: _sha256(path) for path in accepted_artifacts},
+            "preparation_sha256": _sha256(_preparation_path(version)),
+            "acceptance_sha256": _sha256(_acceptance_path(version)),
+            "finalization_sha256": _sha256(_attempt_path() / "finalization.json"),
+        })
+        evidence_assets = (evidence,)
     if needs_push:
         _run([
             "git", "push", "--atomic", "origin",
@@ -1651,14 +2302,28 @@ def publish() -> None:
             f"{preparation['tag_object']}:refs/tags/{tag}",
         ])
     _write_release_notes(
-        tag, notes, create=True, assets=(manifest, *accepted_artifacts),
+        tag, notes, create=True, assets=(manifest, *accepted_artifacts, *evidence_assets),
         resume_draft=resume_draft)
     print(f"Published GitHub release {tag}; the PyPI workflow is now running.")
     print(f"Record the local release decision: agents-live versions classify {version} released")
 
 
 def main(argv: list[str] | None = None) -> int:
+    global ACTIVE_ATTEMPT
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare-rc", metavar="VERSION")
+    parser.add_argument("--prepare-final", action="store_true")
+    parser.add_argument("--from-rc", metavar="ATTEMPT")
+    parser.add_argument("--prepare-attempt", metavar="ATTEMPT")
+    parser.add_argument("--attempt", metavar="ATTEMPT")
+    parser.add_argument("--finalize", action="store_true")
+    parser.add_argument("--reject-attempt", metavar="ATTEMPT")
+    parser.add_argument("--reason")
+    parser.add_argument("--migrate-legacy-tag", metavar="TAG")
+    parser.add_argument("--verify-publication-assets", metavar="TAG")
+    parser.add_argument("--cycle-status", action="store_true")
+    parser.add_argument("--verify-publication", metavar="TAG",
+                        help="Verify stable-only workflow publication prerequisites")
     parser.add_argument(
         "--bump",
         choices=("patch", "minor", "major"),
@@ -1731,12 +2396,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     selected = sum((args.dry_run, args.prepare, args.publish,
                     args.accept_candidate, args.candidate_preflight,
-                    args.gates, args.build_artifacts, args.notes is not None))
+                    args.gates, args.build_artifacts, args.notes is not None,
+                    args.verify_publication is not None, args.prepare_rc is not None,
+                    args.prepare_final, args.prepare_attempt is not None,
+                    args.finalize, args.reject_attempt is not None,
+                    args.migrate_legacy_tag is not None,
+                    args.verify_publication_assets is not None, args.cycle_status))
     if selected != 1:
-        parser.error(
-            "choose exactly one of --dry-run, --prepare, "
-            "--candidate-preflight, --accept-candidate, --publish, --gates, "
-            "--build-artifacts, or --notes")
+        parser.error("choose exactly one release operation; see --help")
+    cycle_write = (args.prepare_rc or args.prepare_final or args.prepare_attempt
+                   or args.finalize or args.reject_attempt or args.migrate_legacy_tag)
+    if cycle_write and not args.yes:
+        parser.error("release attempt changes require --yes")
+    if args.from_rc and not args.prepare_final or args.prepare_final and not args.from_rc:
+        parser.error("--prepare-final requires --from-rc; --from-rc applies only to final preparation")
+    if args.attempt and not (args.accept_candidate or args.finalize or args.publish):
+        parser.error("--attempt applies only to acceptance, finalization, or publication")
+    if args.finalize and not args.attempt:
+        parser.error("--finalize requires --attempt")
+    if bool(args.reason) != bool(args.reject_attempt):
+        parser.error("--reject-attempt requires --reason")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
     if (args.accept_candidate or args.candidate_preflight) and (
@@ -1757,18 +2436,54 @@ def main(argv: list[str] | None = None) -> int:
             and args.bump != "patch":
         parser.error(
             "--bump applies only to --dry-run and --prepare")
+    mutation_lock = None
     try:
+        identifier = args.attempt or args.prepare_attempt or args.reject_attempt
+        ACTIVE_ATTEMPT = _load_attempt(identifier) if identifier else None
+        if ACTIVE_ATTEMPT is not None:
+            lock = _cycle_directory(ACTIVE_ATTEMPT["target"]) / "mutation.lock"
+            try:
+                lock.mkdir()
+            except FileExistsError as exc:
+                raise ReleaseError("another cycle operation is active; inspect the retained mutation lock") from exc
+            mutation_lock = lock
+            ACTIVE_ATTEMPT = _load_attempt(identifier)
+        if args.cycle_status:
+            with contextlib.redirect_stdout(sys.stderr):
+                status = cycle_status()
+            print(json.dumps(status, indent=2))
+            return 0
+        if args.verify_publication:
+            verify_publication(args.verify_publication)
+            return 0
+        if args.verify_publication_assets:
+            verify_publication_assets(args.verify_publication_assets)
+            return 0
+        if args.prepare_rc or args.prepare_final:
+            prepare_cycle(rc=args.prepare_rc, from_rc=args.from_rc)
+            return 0
+        if args.prepare_attempt:
+            prepare_attempt()
+            return 0
+        if args.finalize:
+            finalize_attempt()
+            return 0
+        if args.reject_attempt:
+            reject_attempt(args.reason)
+            return 0
+        if args.migrate_legacy_tag:
+            migrate_legacy_tag(args.migrate_legacy_tag)
+            return 0
         if args.dry_run or args.prepare or args.accept_candidate or args.publish:
             manifest = ROOT / ".github" / "release-channels.toml"
             if manifest.is_file():
                 with manifest.open("rb") as stream:
                     cycle = tomllib.load(stream).get("bake", {}).get("candidate_cycle", {})
-                if cycle.get("model") == "numbered-rc":
+                if cycle.get("model") == "numbered-rc" and ACTIVE_ATTEMPT is None:
                     raise ReleaseError(
-                        "the numbered RC workflow is not implemented in this tool; "
-                        "complete and validate #511 before candidate preparation, "
-                        "acceptance, or publication. Do not use the legacy "
-                        "stable-numbered candidate workflow or remove its guard.")
+                        "the numbered RC workflow requires --prepare-rc or --prepare-final, "
+                        "and --attempt for acceptance or publication. The legacy "
+                        "stable-numbered candidate workflow remains blocked under #511.")
         if args.dry_run:
             preview(args.bump)
         elif args.prepare:
@@ -1795,9 +2510,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("release interrupted", file=sys.stderr)
         return 130
-    except (OSError, ReleaseError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, ReleaseError, subprocess.CalledProcessError) as exc:
         print(f"release error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if mutation_lock is not None:
+            mutation_lock.rmdir()
+        ACTIVE_ATTEMPT = None
     return 0
 
 

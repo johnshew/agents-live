@@ -30,9 +30,12 @@ the defect.
 ## Test boundaries
 
 For the numbered-RC cycle tracked in
-[#511](https://github.com/johnshew/agents-live/issues/511), policy adoption is
-not evidence that RC preparation is implemented. Keep preparation blocked until
-the new workflow passes its checks. Test RC rejection followed by the next RC,
+[#511](https://github.com/johnshew/agents-live/issues/511), use the explicit
+`release.py` attempt workflow in [release.md](release.md). Source regression
+tests exercise real temporary commits, artifacts, rejection, approval-only
+promotion, independent final acceptance records, and deferred annotated tags.
+Their synthetic builder and operational receipts do not prove live acceptance.
+Test RC rejection followed by the next RC,
 side-by-side stable/RC installation, deliberate selection and rollback, and
 restoration of watchers without duplicate automation. Resume may reuse only
 unchanged bytes and matching evidence. Historical legacy rejection records with
@@ -42,6 +45,14 @@ RC acceptance never satisfies the final stable wheel's artifact or installed
 gates. Final stable failures must preserve an attempt-specific record and allow
 safe recovery without overwriting sealed installations or consuming the next
 stable version. Publication must upload exactly the accepted stable bytes.
+
+Preparation and acceptance receipts bind attempt, source and metadata commits,
+gate commands, environment, artifact hashes, and each other. `--cycle-status`
+rechecks retained bytes and decisions; malformed or changed evidence is invalid,
+not accepted. Full installed acceptance retains a state baseline for rejection
+even after its resumable checkpoint is retired. Restoring through `versions activate`
+and removing only an inactive failed version through `versions remove` are
+separate live operations; temporary Git lifecycle tests never perform them.
 
 Keep these execution modes distinct. A passing editable-source command does
 not prove that the built wheel or installed PyPI tool works.
