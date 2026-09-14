@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: finish fresh Windows bootstrap without a shell restart. (#517)
+  Newly installed uv is resolved as an executable command. Empty legacy tool
+  inventories no longer abort Windows PowerShell 5.1 after activation, while
+  failed inventory and cleanup commands still report their exit codes.
+- fix: scope Windows provider health failures to locally started agents. (#518)
+  Other-host assignments do not require local provider CLIs. Stopped local
+  agents report on-demand launch readiness without failing runtime health;
+  unavailable ownership remains a hard failure.
 - fix: identify numbered release candidates instead of displaying an unknown channel.
   Version and structured runtime output report `candidate` for RC packages;
   installed-version listings distinguish local release candidates and retain
