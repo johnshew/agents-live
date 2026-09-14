@@ -6773,6 +6773,28 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual("provider default", dashboard._agent_model({**row, "model": None}))
         self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}))
 
+    def test_dashboard_rows_reload_configured_model_and_effort(self) -> None:
+        dashboard = self._dashboard_module()
+        directory = self.skill(
+            "current-model", ['agents-live.selector: "fake/new-model:high"'])
+        definition = directory / "SKILL.md"
+        original = definition.read_text(encoding="utf-8")
+        repos._add(str(self.root))
+        dashboard.STATE["all_repos"]["repo"] = "All"
+        for effort in ("high", "low"):
+            with self.subTest(effort=effort):
+                definition.write_text(
+                    original.replace(":high", f":{effort}"), encoding="utf-8")
+                spec = agent.load("current-model", root=self.root)
+                dashboard.STATE["models"] = {spec.identifier: "old-model"}
+                single = dashboard.agent_rows()
+                aggregate = dashboard.operational_snapshot()["rows"]
+                for rows in (single, aggregate):
+                    selected = next(
+                        row for row in rows if row["identifier"] == spec.identifier)
+                    self.assertEqual(f"new-model:{effort}", selected["model"])
+                    self.assertEqual(effort, selected["effort"])
+
     def test_dashboard_attention_includes_degraded_host_health(self) -> None:
         dashboard = self._dashboard_module()
         snapshot = {
