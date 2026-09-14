@@ -85,6 +85,112 @@ _PREVIOUS_INSTALL_ROOT: str | None = None
 _PREVIOUS_CONFIG_HOME: str | None = None
 
 
+@unittest.skipUnless(os.name == "nt", "Windows bootstrap")
+class TestWindowsBootstrap(unittest.TestCase):
+    def test_fresh_uv_and_empty_inventory_complete_in_supported_shells(self):
+        compiler = shutil.which("powershell")
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {
+                key: value for key, value in os.environ.items()
+                if key.upper() != "PSMODULEPATH"
+            }
+            source = root / "UvFixture.cs"
+            source.write_text('''
+using System;
+using System.IO;
+using System.Reflection;
+public class UvFixture {
+    public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "--version") {
+            Console.WriteLine("agents-live 6.9.2rc4");
+            return 0;
+        }
+        if (args.Length > 1 && args[1] == "list") {
+            Console.Error.WriteLine("No tools installed");
+            return 0;
+        }
+        if (args.Length > 1 && args[1] == "run") {
+            int index = Array.IndexOf(args, "--install-root");
+            string directory = Path.Combine(args[index + 1], "current", "Scripts");
+            Directory.CreateDirectory(directory);
+            File.Copy(Assembly.GetExecutingAssembly().Location,
+                      Path.Combine(directory, "agents-live.exe"), true);
+            return 0;
+        }
+        return 42;
+    }
+}
+''', encoding="utf-8")
+            fixture = root / "uv-fixture.exe"
+            compiled = subprocess.run(
+                [compiler, "-NoProfile", "-Command",
+                 "Add-Type -Path $env:FIXTURE_SOURCE -OutputAssembly "
+                 "$env:FIXTURE_EXE -OutputType ConsoleApplication"],
+                env={**environment, "FIXTURE_SOURCE": str(source),
+                     "FIXTURE_EXE": str(fixture)},
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, compiled.returncode, compiled.stderr)
+            script = root / "bootstrap-test.ps1"
+            script.write_text('''
+$ErrorActionPreference = 'Stop'
+function Get-Command {
+    param([string]$Name, $ErrorAction)
+    if ($Name -eq 'uv') { return $null }
+    Microsoft.PowerShell.Core\\Get-Command -Name $Name -ErrorAction $ErrorAction
+}
+function Invoke-RestMethod {
+    param($Uri, $Headers, [switch]$UseBasicParsing)
+    @{
+        tag_name = 'v6.9.2rc4'; draft = $false; prerelease = $true
+        assets = @(@{
+            name = 'agents_live-6.9.2rc4-py3-none-any.whl'
+            state = 'uploaded'; size = 1
+            digest = 'sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881'
+            browser_download_url = 'https://github.com/johnshew/agents-live/releases/download/v6.9.2rc4/agents_live-6.9.2rc4-py3-none-any.whl'
+        })
+    }
+}
+function Invoke-WebRequest {
+    param($Uri, $OutFile, [switch]$UseBasicParsing)
+    if ($Uri -eq 'https://astral.sh/uv/install.ps1') {
+        Set-Content -LiteralPath $OutFile -Value @'
+$bin = Join-Path $env:USERPROFILE '.local\\bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Copy-Item -LiteralPath $env:FIXTURE_EXE -Destination (Join-Path $bin 'uv.exe')
+'@
+    } else {
+        [IO.File]::WriteAllText($OutFile, 'x')
+    }
+}
+& $env:BOOTSTRAP_SCRIPT -Version '6.9.2rc4'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+agents-live --version
+exit $LASTEXITCODE
+''', encoding="utf-8")
+            shells = [compiler]
+            if shell := shutil.which("pwsh"):
+                shells.append(shell)
+            for index, shell in enumerate(shells):
+                with self.subTest(shell=Path(shell).name):
+                    home = root / str(index)
+                    result = subprocess.run(
+                        [shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                         "-File", str(script)],
+                        env={**environment, "USERPROFILE": str(home),
+                             "AGENTS_LIVE_INSTALL_ROOT": str(home / "install"),
+                             "AGENTS_LIVE_RELEASE_API": "",
+                             "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": "",
+                             "FIXTURE_EXE": str(fixture),
+                             "BOOTSTRAP_SCRIPT": str(REPOSITORY / "install.ps1")},
+                        capture_output=True, text=True, timeout=60)
+                    self.assertEqual(0, result.returncode,
+                                     result.stdout + result.stderr)
+                    self.assertIn("Agents Live is ready:", result.stdout)
+                    self.assertEqual(2, result.stdout.count("agents-live 6.9.2rc4"))
+
+
 def setUpModule() -> None:
     guard = native_guard()
     guard.__enter__()
@@ -289,6 +395,118 @@ class TestOwnershipEnforcement(TempRepository):
         with mock.patch.object(ownership, "_require_backend") as backend:
             self.assertEqual({}, ownership.load_owners(root=self.root))
         backend.assert_not_called()
+
+    def test_doctor_provider_health_follows_local_started_eligibility(self):
+        self.skill("provider-agent", [
+            'agents-live.selector: "claude"',
+            'agents-live.schedule: "0 9 * * *"',
+        ])
+        spec = agent.load("provider-agent", root=self.root)
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        previous = runtime.current()
+        runtime.configure(MemoryHost())
+        self.addCleanup(runtime.configure, previous)
+        for owner in (ownership.current_owner_id(), "*", None,
+                      "otherhost/windows/" + "a" * 32):
+            for started in (False, True):
+                with self.subTest(local=owner is None or ownership.owns(owner),
+                                  wildcard=owner == "*", started=started):
+                    state.replace(self.root, {spec.identifier} if started else set())
+                    owners = {} if owner is None else {spec.name: owner}
+                    output = io.StringIO()
+                    with (
+                        mock.patch.object(repos, "load", return_value={
+                            "repos": {"test": str(self.root)}}),
+                        mock.patch.object(ownership, "load_owners", return_value=owners),
+                        mock.patch.object(ownership, "validate_registry"),
+                        mock.patch.object(hostruntime, "id", return_value="windows"),
+                        mock.patch.object(hostruntime, "pin_executable", side_effect=
+                                          hostruntime.ExecutableNotFound("CLI absent")),
+                        mock.patch.object(doctor, "_git_index_check", return_value=None),
+                        mock.patch.object(doctor, "_health_payload", return_value=None),
+                        mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        code = doctor.main([])
+                    eligible = owner is None or ownership.owns(owner)
+                    self.assertEqual(int(started and eligible), code, output.getvalue())
+                    if eligible and not started:
+                        self.assertIn("on-demand", output.getvalue())
+                        self.assertIn("CLI absent", output.getvalue())
+                    elif not eligible:
+                        self.assertNotIn("provider CLI claude", output.getvalue())
+
+    def test_doctor_keeps_unavailable_ownership_a_hard_failure(self):
+        self.skill("provider-agent", ['agents-live.selector: "claude"'])
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        state.replace(self.root, set())
+        previous = runtime.current()
+        runtime.configure(MemoryHost())
+        self.addCleanup(runtime.configure, previous)
+        output = io.StringIO()
+        unavailable = ownership.OwnershipUnavailableError("registry unavailable")
+        with (
+            mock.patch.object(repos, "load", return_value={
+                "repos": {"test": str(self.root)}}),
+            mock.patch.object(ownership, "load_owners", side_effect=unavailable),
+            mock.patch.object(ownership, "validate_registry", side_effect=unavailable),
+            mock.patch.object(hostruntime, "id", return_value="windows"),
+            mock.patch.object(hostruntime, "pin_executable", side_effect=
+                              hostruntime.ExecutableNotFound("CLI absent")) as probe,
+            mock.patch.object(doctor, "_git_index_check", return_value=None),
+            mock.patch.object(doctor, "_health_payload", return_value=None),
+            mock.patch.object(doctor.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(output),
+        ):
+            code = doctor.main([])
+        self.assertEqual(1, code, output.getvalue())
+        self.assertIn("registry unavailable", output.getvalue())
+        probe.assert_not_called()
+
+    def test_doctor_requires_local_duplicate_and_adopted_agent_providers(self):
+        self.skill("provider-agent", [
+            'agents-live.selector: "claude"',
+            'agents-live.schedule: "0 9 * * *"',
+        ])
+        spec = agent.load("provider-agent", root=self.root)
+        previous = runtime.current()
+        host = MemoryHost()
+        runtime.configure(host)
+        self.addCleanup(runtime.configure, previous)
+        subscription = Subscription.create(
+            scope=f"repo:{self.root}", target=f"agent:{spec.identifier}",
+            kind="schedule", trigger="0 9 * * *")
+        host.trigger_store.install(host.render(subscription))
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                if duplicate:
+                    self.skill("provider-agent", ['agents-live.selector: "claude"'],
+                               root=self.root / "extra")
+                    (self.root / ".agents-live.toml").write_text(
+                        'agent_directories = ["Agents", "extra/Agents"]\n',
+                        encoding="utf-8")
+                    state.replace(self.root, {spec.identifier})
+                else:
+                    self.assertFalse(state.load(self.root).initialized)
+                output = io.StringIO()
+                with (
+                    mock.patch.object(repos, "load", return_value={
+                        "repos": {"test": str(self.root)}}),
+                    mock.patch.object(hostruntime, "id", return_value="windows"),
+                    mock.patch.object(hostruntime, "pin_executable", side_effect=
+                                      hostruntime.ExecutableNotFound("CLI absent")),
+                    mock.patch.object(doctor, "_git_index_check", return_value=None),
+                    mock.patch.object(doctor, "_health_payload", return_value=None),
+                    mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                    contextlib.redirect_stdout(output),
+                ):
+                    code = doctor.main([])
+                self.assertEqual(1, code, output.getvalue())
+                self.assertIn("ERROR: provider CLI claude:", output.getvalue())
+                if not duplicate:
+                    self.assertFalse(state.load(self.root).initialized)
 
 
 class TestCrontabTriggerStore(TempRepository):
