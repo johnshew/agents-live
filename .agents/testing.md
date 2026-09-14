@@ -282,6 +282,37 @@ under the same version. Local deployment is not provider-backed acceptance or
 approval of final stable bytes. Stable preparation and publication remain
 blocked on #511.
 
+### Recover obsolete provider diagnostics
+
+When an installed version fails doctor solely because a stopped local agent's
+provider CLI is unavailable, a retained RC may already correct that diagnostic.
+Use the explicit recovery path only after its wheel has passed packaged
+readiness:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <retained-rc> --recover-provider-readiness
+```
+
+Recovery does not rebuild or restamp the candidate. It requires the original
+preparation receipt, wheel hash, source ancestry, platform, interpreter, and
+gate list. Package and installer inputs must be unchanged; later deployment
+tool and test corrections can consume the older candidate without pretending
+they were included in its package.
+
+Before any replacement, the retained wheel runs read-only doctor and status
+commands with the installed interpreter and plugin dependencies. The candidate
+must explicitly classify each old failed provider check as on-demand readiness,
+pass every health check, and report the same agent state. Unknown, malformed,
+missing, or unrelated failed checks refuse recovery. The installed runtime's
+ownership and host-health checks must already pass. Tool execution approval is
+still required where the environment restricts candidate execution.
+
+The regular upgrade, post-install health, exact-version, direct-wheel identity,
+state, and dashboard checks remain mandatory. A post-upgrade failure attempts
+rollback to the prior retained version. Diagnostic comparisons and the tooling
+commit are recorded alongside the original candidate identity. This recovery
+does not authorize stable publication or replace installed acceptance.
+
 ## Validate a published bake
 
 A published bake is a GitHub prerelease used to move already-validated bytes
