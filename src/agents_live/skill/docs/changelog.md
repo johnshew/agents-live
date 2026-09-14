@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-13
+ms.date: 2026-09-14
 ms.topic: reference
 ---
 
@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: separate numbered RC acceptance from final stable release attempts. (#511)
+  Immutable attempt records retain builds, rejection decisions, and source-bound
+  acceptance across retries. Final stable bytes require independent acceptance
+  before explicit tagging and exact-asset publication. Reports distinguish local
+  attempt states from public availability; manual PyPI dispatch rejects RC tags.
+  Legacy unpublished tag migration preserves the original annotated object and
+  artifacts. Same-version retries require supported restoration and inactive
+  version removal, never replacement of sealed installed bytes.
 - fix: finish fresh Windows bootstrap without a shell restart. (#517)
   Newly installed uv is resolved as an executable command. Empty legacy tool
   inventories no longer abort Windows PowerShell 5.1 after activation, while
@@ -40,12 +48,12 @@ history is retained in the source repository.
   readiness retries. Local deployment selects the RC beside existing versions
   and verifies repository state and dashboard restoration. Reusing a number
   with changed source or wheel bytes is refused; final stable acceptance and
-  publication remain separate, blocked gates.
+  publication remain separate gates.
 - fix: block legacy release commands when a cycle adopts numbered release candidates.
   Release reports distinguish the stable target, next RC, and historical rejected
   attempts without relabeling package bytes or claiming unavailable evidence.
-  Final stable preparation remains blocked until its tooling is implemented and
-  validated; local RC testing cannot replace acceptance of the final stable artifacts.
+  Explicit attempt commands enforce the numbered lifecycle; local RC testing
+  cannot replace acceptance of the final stable artifacts.
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or
