@@ -6362,7 +6362,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = deploy_candidate.__globals__
         for scenario in ("success", "changed-source", "missing-readiness", "unhealthy", "postcheck"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve()
                 wheel = root / "agents_live-1.2.3rc4-py3-none-any.whl"
                 wheel.write_bytes(b"retained wheel")
                 digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
