@@ -40,8 +40,11 @@ branches. Read this branch's manifest and report; a report from the old
 
 `bake.candidate_cycle` records the model, next RC, superseded branches, and
 historical candidate decisions. The first record is a legacy rejection:
-logical `6.9.2rc1`, actual package version `6.9.2`, original evidence unavailable.
-Do not infer a rebuilt RC or successful acceptance from this designation.
+logical `6.9.2rc1`, actual package version `6.9.2`. Original preparation evidence
+has been recovered in the preparing checkout, not converted to a numbered RC
+or full acceptance. RC4 is already prepared; RC5 is next for new bytes.
+Report candidate preparation separately from installed acceptance and qualify
+deployment observations by environment rather than assuming one global selection.
 
 The report must remain `blocked` while this revision lacks final stable tooling,
 even if older ancestry says bake already moved to main or an approval remains.

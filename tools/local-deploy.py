@@ -174,11 +174,19 @@ def _preparation_directory(version: str) -> Path:
     return root / "candidates" / version if "rc" in version else root
 
 
-def _requested_rc(version: str, target: str) -> str:
+def _requested_rc(version: str, target: str, *, recovery: bool = False) -> str:
     if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", version) is None:
         raise LocalDeployError(f"RC must be a numbered candidate of {target}")
     cycle = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"].get(
         "candidate_cycle", {})
+    if recovery:
+        record = cycle.get("history", {}).get(version, {})
+        if (cycle.get("model") != "numbered-rc"
+                or record.get("status") != "prepared"
+                or record.get("kind") != "numbered-rc"
+                or record.get("artifact_version") != version):
+            raise LocalDeployError(f"{version} is not a recorded prepared RC")
+        return version
     if cycle.get("model") != "numbered-rc" or cycle.get("next") != version \
             or version in cycle.get("history", {}):
         raise LocalDeployError(
@@ -662,7 +670,9 @@ def deploy(
     tool_commit = _synchronize()
     commit = tool_commit
     _branch, target = _bake_configuration()
-    version = _requested_rc(rc, target) if rc else f"{target}.dev0+g{commit[:8]}"
+    version = _requested_rc(
+        rc, target, recovery=recover_provider_readiness,
+    ) if rc else f"{target}.dev0+g{commit[:8]}"
     if recover_provider_readiness and rc is None:
         raise LocalDeployError("provider recovery requires a retained numbered RC")
     previous_version = RELEASE["_installed_version"]()

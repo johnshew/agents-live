@@ -433,12 +433,16 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         "branch and remove it when the task is complete.",
         f"- Verify that work descends from `{bake['branch']}` before committing "
         "or pushing.",
+        "- For authorized local evaluation, deploy the synchronized bake commit:"
+        if candidate_cycle.get("model") == "numbered-rc" else
         "- After each change reaches bake, deploy its exact synchronized commit:",
         f"  Run this from a clean checkout of `{bake['branch']}`.",
         "",
         "```bash",
         f"git pull --ff-only origin {bake['branch']}",
-        "uv run --script tools/local-deploy.py --repo <live-repository>",
+          "uv run --script tools/local-deploy.py --repo <live-repository>"
+          + (f" --rc {candidate_cycle['next']}"
+              if candidate_cycle.get("model") == "numbered-rc" else ""),
         "```",
     ]
 
@@ -461,6 +465,9 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
             f"<live-repository> --rc {candidate_cycle['next']}` from the synchronized "
             "bake. This retains side-by-side versions without a GitHub release.",
             "Retain rejected RCs and advance the RC number, not the stable target.",
+            "Recover a recorded prepared RC only with its original wheel and "
+            "readiness receipt using `--recover-provider-readiness`; never "
+            "rebuild it under a consumed identity. Installed verification remains separate.",
             "Obtain exact-commit approval, build the final stable version, and "
             "independently accept its exact bytes before tagging or publishing.",
             "Verify GitHub and PyPI publication independently.",
@@ -539,7 +546,7 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         "`main`, `tools/release.py` builds it, runs the final tests, and publishes it.",
         *active_bake_guidance,
         "",
-        "## Version installed for testing",
+        "## Last recorded tested deployment",
         "",
         "| Version | Commit | Tested | Compared with current bake |",
         "|---|---|---|---|",

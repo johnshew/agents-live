@@ -6268,6 +6268,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
             report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
             result = json.loads(render(
                 config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
+            with mock.patch.dict(render.__globals__, {
+                "_count": lambda *_args: (1, 1),
+            }):
+                active_report = render(
+                    config, datetime(2026, 9, 13, tzinfo=timezone.utc))
 
         self.assertIn("**`blocked`**", report)
         self.assertIn("`6.9.2rc1` | rejected (legacy-candidate) | `6.9.2` | unavailable", report)
@@ -6279,6 +6284,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertFalse(result["bake"]["promotion_approved"])
         self.assertEqual(cycle, result["candidate_cycle"])
         self.assertIn("#511", result["next_actions"][0])
+        self.assertIn(
+            "uv run --script tools/local-deploy.py --repo <live-repository>"
+            " --rc 6.9.2rc2\n", active_report)
+        self.assertNotIn("--repo <live-repository>\n", active_report)
+        self.assertIn("## Last recorded tested deployment", active_report)
 
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
@@ -6306,6 +6316,41 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertEqual([
             "git", "pull", "--ff-only", "origin", "bake/v6.7.0-local",
         ], commands[0])
+
+    def test_recorded_rc_is_recoverable_but_cannot_be_prepared_again(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        select_rc = script["_requested_rc"]
+        with tempfile.TemporaryDirectory() as temporary:
+            channels = Path(temporary) / "channels.toml"
+            channels.write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'next = "1.2.3rc5"\n'
+                '[bake.candidate_cycle.history."1.2.3rc4"]\n'
+                'status = "prepared"\nkind = "numbered-rc"\n'
+                'artifact_version = "1.2.3rc4"\n', encoding="utf-8")
+            with mock.patch.dict(select_rc.__globals__, {"CHANNELS": channels}):
+                self.assertEqual("1.2.3rc4", select_rc(
+                    "1.2.3rc4", "1.2.3", recovery=True))
+                self.assertEqual("1.2.3rc5", select_rc("1.2.3rc5", "1.2.3"))
+                for version, recovery in (("1.2.3rc4", False),
+                                          ("1.2.3rc5", True),
+                                          ("1.2.3rc3", True)):
+                    with self.subTest(version=version, recovery=recovery):
+                        with self.assertRaises(script["LocalDeployError"]):
+                            select_rc(version, "1.2.3", recovery=recovery)
+                original = channels.read_text(encoding="utf-8")
+                for before, after in (
+                    ('status = "prepared"', 'status = "rejected"'),
+                    ('kind = "numbered-rc"', 'kind = "legacy-candidate"'),
+                    ('artifact_version = "1.2.3rc4"',
+                     'artifact_version = "1.2.3"'),
+                    ('model = "numbered-rc"', 'model = "legacy"'),
+                ):
+                    with self.subTest(replacement=after):
+                        channels.write_text(original.replace(before, after),
+                                            encoding="utf-8")
+                        with self.assertRaises(script["LocalDeployError"]):
+                            select_rc("1.2.3rc4", "1.2.3", recovery=True)
 
     def test_provider_recovery_requires_candidate_confirmed_optional_failure(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
@@ -6421,7 +6466,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with mock.patch.dict(scope, {
                     "_synchronize": lambda: "b" * 40,
                     "_bake_configuration": lambda: ("bake/v1.2.3-rc", "1.2.3"),
-                    "_requested_rc": lambda version, _target: version,
+                    "_requested_rc": lambda version, _target, **_options: version,
                     "_preparation_directory": lambda _version: root,
                     "_git": lambda *args: "a" * 40 if args[0] == "merge-base" else (
                         "src/changed.py" if scenario == "changed-source" else ""),

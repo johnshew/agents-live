@@ -147,14 +147,15 @@ GitHub and PyPI verification.
 The developer selected this model for the current `6.9.2` cycle on 2026-09-13.
 `bake/v6.9.2-rc` replaces the earlier 6.9.2 and 6.9.3 routing without rewriting
 shared history. The manifest reserves `6.9.2rc1` for the legacy rejected
-candidate, whose actual package version was `6.9.2`. Original artifacts and
-receipts are unavailable here. This records the documented rejection, not a
-recovered or rebuilt RC package, and carries no reusable acceptance claim.
-The first newly built candidate, `6.9.2rc2`, is installed for local evaluation.
-Its exact commit and wheel hash are recorded in the manifest. `6.9.2rc3`
-contains the channel-label fix but failed packaged readiness before installation
-(#516). Its exact bytes are retained; `6.9.2rc4` is the next unused candidate
-number. RC2 remains selected and has not been marked release-accepted.
+candidate, whose actual package version was `6.9.2`. Original preparation
+artifacts and the upgrade-complete checkpoint were recovered in the preparing
+checkout. Preserve those bytes and the original local tag conflict; they are
+not a numbered RC package or reusable full acceptance.
+RC2 has historical local evaluation evidence. RC3 failed packaged readiness
+(#516), while RC4 passed the unchanged Windows gate on its preparing environment.
+RC4 is prepared but still needs guarded installed recovery verification (#522).
+RC5 is the next unused identity. Different environments can select different
+retained versions; the manifest's deployment observation is not a global fact.
 
 The migration record, policy, reporting, legacy-command safety guard, and
 local numbered RC deployment are implemented. Use `local-deploy.py --rc` for
