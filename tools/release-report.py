@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
+import runpy
 import subprocess
 import sys
 import tomllib
@@ -183,6 +185,14 @@ def _issue_rows(
     return rows, assigned
 
 
+def _local_attempts(bake: dict) -> list[dict]:
+    release_tool = runpy.run_path(str(ROOT / "tools" / "release.py"))
+    scope = release_tool["cycle_status"].__globals__
+    scope["_cycle_configuration"] = lambda: bake
+    with contextlib.redirect_stdout(sys.stderr):
+        return release_tool["cycle_status"]()
+
+
 def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = False) -> str:
     repository_data = _json("gh", "repo", "view", "--json", "nameWithOwner,url")
     repository = repository_data["nameWithOwner"]
@@ -190,6 +200,10 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
     bake = config["bake"]
     candidate_cycle = bake.get("candidate_cycle", {})
     rc_blocked = candidate_cycle.get("model") == "numbered-rc"
+    attempts = []
+    lifecycle_available = candidate_cycle.get("implementation") == "numbered-rc-v1"
+    if lifecycle_available:
+        attempts = _local_attempts(bake)
     recommendations = bake["recommendations"]
     release_ref = f"origin/{release['branch']}"
     bake_ref = f"origin/{bake['branch']}"
@@ -452,7 +466,8 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
         development_state_detail = (
             "Local numbered RC deployment is available; final stable preparation "
             "and acceptance remain blocked on #511.")
-        promotion_approved = False
+        if not lifecycle_available:
+            promotion_approved = False
         release_actions = [development_state_detail]
         overall_recommendation = recommendations["overall"]
         bake_state = "Local RC testing is available; stable release preparation is blocked."
@@ -493,6 +508,51 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
             "runtime deliberately and restore the prior selection after rejection "
             "without duplicating live schedulers or watchers.",
         ])
+        if lifecycle_available:
+            development_state_detail = (
+                "Numbered RC and final-attempt tooling is available. Release remains "
+                "blocked until required operational acceptance and release decisions are recorded.")
+            release_actions = [development_state_detail]
+            bake_state = "Numbered lifecycle tooling is available; operational decisions remain separate."
+            bake_next = "Accept the next RC, resolve scope decisions, and independently accept final stable bytes."
+            next_actions = [
+                "Resolve the remaining release issues and obtain explicit scope decisions.",
+                f"Prepare a new RC with `tools/release.py --prepare-rc {candidate_cycle['next']} --yes` "
+                "from synchronized bake; existing local-deploy receipts are not full operational acceptance.",
+                "Accept the exact RC using `--accept-candidate --attempt <rc>` with the required live-agent arguments.",
+                "Obtain exact-source promotion approval and merge bake to main; prepare final bytes with "
+                "`--prepare-final --from-rc <accepted-rc> --yes` from synchronized main.",
+                "Independently accept the final attempt, explicitly migrate any rejected local legacy tag, "
+                "then run `--finalize --attempt <final-attempt> --yes`.",
+                "Publish finalized bytes with `--publish --attempt <final-attempt> --yes`; verify GitHub and PyPI independently.",
+            ]
+            valid = [item for item in attempts if item["state"] not in {"rejected", "invalid-evidence"}]
+            if valid:
+                current = max(valid, key=lambda item: (
+                    "-final-" in item["attempt"], int(re.split(r"rc|-final-", item["attempt"])[-1])))
+                identifier, state = current["attempt"], current["state"]
+                if "-final-" in identifier:
+                    operation = {"reserved": "--prepare-attempt", "prepared": "--accept-candidate --attempt",
+                                 "accepted": "--finalize --attempt", "finalized": "--publish --attempt"}[state]
+                    next_actions = [
+                        f"Continue `{identifier}` with `{operation} {identifier} --yes`; "
+                        "acceptance also requires the live repository and agent arguments.",
+                        "Resolve all release decisions before finalization or publication; verify GitHub and PyPI independently.",
+                    ]
+                elif state == "accepted":
+                    next_actions = next_actions[3:]
+                else:
+                    next_actions[1] = (
+                        f"Resume `{identifier}` with `--prepare-attempt {identifier} --yes` "
+                        "or accept its exact prepared bytes; do not rebuild under a consumed identity.")
+            candidate_lines.extend([
+                "", "### Local attempt evidence", "",
+                "These are local records, not a claim about another environment or public availability.",
+                "", "| Attempt | Verified local state |", "|---|---|",
+                *(f"| `{item['attempt']}` | {item['state']} |" for item in attempts),
+            ])
+            if not attempts:
+                candidate_lines.append("| - | No numbered lifecycle attempt records in this checkout |")
 
     lines = [
         "---",
@@ -639,14 +699,17 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
             "repository": repository,
             "development_state": development_state,
             "development_state_detail": development_state_detail,
-            "target_branch": bake["branch"] if rc_blocked and not is_released else
+            "target_branch": bake["branch"] if rc_blocked and not lifecycle_available and not is_released else
             release["branch"] if bake_moved else bake["branch"],
-            "active_bake": not bake_moved or (rc_blocked and not is_released),
+            "active_bake": not bake_moved or (rc_blocked and not lifecycle_available and not is_released),
             "release": {"branch": release["branch"], "commit": release_sha,
                         "published_tag": latest["tagName"], "published_commit": tag_sha},
             "bake": {"branch": bake["branch"], "commit": bake_sha,
                      "version": bake["version"], "promotion_approved": promotion_approved},
             "candidate_cycle": candidate_cycle,
+            "attempts": attempts,
+            "publication": {"github": {"target_published": is_released, "latest_stable_tag": latest["tagName"]},
+                            "pypi": {"status": "not-verified"}},
             "next_actions": next_actions,
         }, indent=2) + "\n"
     return "\n".join(lines)

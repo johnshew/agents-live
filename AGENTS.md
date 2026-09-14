@@ -101,9 +101,13 @@ tag conflict and private receipts for the explicit #511 finalization migration.
 Local numbered RC deployment is available through
 `tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
 It preserves side-by-side versions and does not create a tag or GitHub release.
-Final stable preparation, acceptance, and publication remain blocked by the
-release tool until #511 is completed and validated. Do not remove
-the guard or use an older checkout to bypass it. See
+Full lifecycle preparation uses `tools/release.py --prepare-rc` from synchronized
+bake. Accept that exact attempt, record approval for its source, then promote
+to main and use `--prepare-final --from-rc`. Final stable bytes require their own
+acceptance before explicit `--finalize` and `--publish`, each with `--attempt`.
+Run attempt commands from the retained worktree printed during allocation.
+Legacy implicit commands remain blocked; do not use an older checkout to bypass
+the guard. Historical local-deploy receipts do not replace full acceptance. See
 [development-release-process.md](docs/development-release-process.md) for the
 adopted lifecycle, including side-by-side versions and independent stable tests.
 

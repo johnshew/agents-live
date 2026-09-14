@@ -1,7 +1,7 @@
 ---
 title: Development and Release Process
 description: State machine for moving Agents Live changes through bake, candidate acceptance, and public release
-ms.date: 2026-09-13
+ms.date: 2026-09-14
 ms.topic: concept
 ---
 
@@ -32,14 +32,13 @@ stateDiagram-v2
     [*] --> Released
     Released --> Baking: configure bake branch
     Baking --> Baking: fix, merge, deploy, validate
-    Baking --> PromotionApproved: developer approves exact bake commit
+    Baking --> Candidate: prepare numbered RC from synchronized bake
+    Candidate --> Baking: RC rejected; retain evidence and advance RC number
+    Candidate --> PromotionApproved: exact RC accepted and developer approves source
     PromotionApproved --> Baking: bake commit changes or approval withdrawn
     PromotionApproved --> PromotionProposed: open bake-to-main PR
     PromotionProposed --> Baking: PR closed or bake changes
-    PromotionProposed --> ReadyForCandidate: checks pass and PR merges to main
-    ReadyForCandidate --> Candidate: prepare numbered RC
-    Candidate --> Baking: RC rejected; retain evidence and advance RC number
-    Candidate --> StablePreparation: exact RC accepted
+    PromotionProposed --> StablePreparation: checks pass and PR merges to main
     StablePreparation --> StableAcceptance: build final stable bytes
     StableAcceptance --> Baking: source fix needed; retain attempt and advance RC
     StableAcceptance --> Released: final bytes accepted, approved, tagged, and published
@@ -53,8 +52,7 @@ stateDiagram-v2
 | `baking` | Configured bake branch plus `decision = "continue-bake"` | Direct administrative commits or focused PRs to bake | Developer approves an exact tested commit |
 | `promotion approved` | `decision = "approved"`, full bake commit, and decision date | No new code without invalidating approval | Open the bake-to-`main` PR |
 | `promotion proposed` | Open bake-to-`main` PR for the approved commit | Promotion PR only | Merge after required checks pass |
-| `ready for candidate` | Bake commit is in synchronized `main` | Release preparation from `main` | Prepare the candidate |
-| `candidate` | Numbered RC identity, preparation receipt, tag, and immutable artifacts | RC acceptance only | Prepare final stable bytes or reject back to bake |
+| `candidate` | Numbered RC identity, preparation receipt, and immutable artifacts; no stable tag | RC acceptance only | Approve and promote the source or reject back to bake |
 | `stable preparation` | Accepted RC and approved source commit | Release-metadata changes only | Build final stable artifacts |
 | `stable acceptance` | Attempt-specific stable preparation and artifact hashes | Independent final artifact and installed gates | Tag and publish accepted bytes, or retain a rejected attempt |
 | `released` | Stable tag, GitHub release, and verified PyPI publication | Close the cycle | Start later work in a new bake |
@@ -157,15 +155,23 @@ RC4 is prepared but still needs guarded installed recovery verification (#522).
 RC5 is the next unused identity. Different environments can select different
 retained versions; the manifest's deployment observation is not a global fact.
 
-The migration record, policy, reporting, legacy-command safety guard, and
-local numbered RC deployment are implemented. Use `local-deploy.py --rc` for
-authorized side-by-side evaluation without a GitHub release. Candidate source
-and wheel identity are retained per RC, including failed-readiness retries.
-Final stable preparation and recovery remain work in
-[#511](https://github.com/johnshew/agents-live/issues/511). The report
-must say `blocked`, and release commands must refuse legacy candidate creation,
-acceptance, or publication until that workflow is implemented and validated.
-Do not remove the guard or use old checkout instructions to bypass it.
+The explicit numbered lifecycle under
+[#511](https://github.com/johnshew/agents-live/issues/511) uses
+`release.py --prepare-rc` from bake, receipt-bound `--accept-candidate --attempt`,
+then source approval and promotion. Only the promotion fields in the channel
+manifest may change between the accepted RC source and final source on main.
+`--prepare-final --from-rc` allocates a distinct `<target>-final-N` identity and
+stamps stable release metadata. Independent stable acceptance precedes
+`--finalize --attempt` and `--publish --attempt`. No tag exists before finalization.
+See [.agents/release.md](../.agents/release.md) for the commands and retry rules.
+
+Artifacts and private receipts live under the common Git directory, never the
+exported tree. `--cycle-status` and the report validate local attempt evidence;
+they do not claim another environment's operational results. Rejection retains
+bytes and decisions, and legacy stable-tag migration is an explicit verified
+operation that refuses remote tags. The old implicit release commands remain
+blocked. The current release still needs real operational acceptance and scope
+decisions; tooling availability is not release approval.
 
 ## Keeping guidance aligned
 

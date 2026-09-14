@@ -46,14 +46,16 @@ or full acceptance. RC4 is already prepared; RC5 is next for new bytes.
 Report candidate preparation separately from installed acceptance and qualify
 deployment observations by environment rather than assuming one global selection.
 
-The report must remain `blocked` while this revision lacks final stable tooling,
-even if older ancestry says bake already moved to main or an approval remains.
-Its next action is to complete and validate #511, not prepare a stable-numbered
-candidate. Local evaluation through `local-deploy.py --rc` is available without
-a GitHub release and is not final stable acceptance.
+`implementation = "numbered-rc-v1"` identifies the explicit attempt workflow.
+The report reads its local evidence as reserved, prepared, accepted, finalized,
+rejected, or invalid-evidence, and recommends the next operation for the latest
+valid attempt. Tool availability is not candidate acceptance or release approval.
+Historical manifests without that implementation remain blocked on tooling.
+Local evaluation through `local-deploy.py --rc` is not full operational acceptance.
 Markdown and JSON must show the same target, next RC, historical
-evidence qualification, and blocker. Changing a manifest status does not enable
-unsupported release commands.
+evidence qualification, and blocker. Local attempt records are not evidence of
+another environment's selection. JSON reports GitHub publication and unverified
+PyPI availability separately; changing a manifest status does not create evidence.
 
 After RC acceptance, final stable preparation and installed acceptance are
 separate states. Preserve failed attempts, advance RC numbers for source fixes,
@@ -119,7 +121,7 @@ branch from current `origin/main`, update `.github/release-channels.toml`, and
 route focused fixes there. The report must then describe the rejected candidate
 in the bake recommendation while the last successfully tested deployment stays
 in the deployment fields. After the corrected bake moves to `main`, prepare a
-new candidate and replace the stale local candidate evidence.
+new final attempt and retain all prior candidate evidence.
 
 A bake may be published as a GitHub prerelease when another machine must test
 the exact validated bytes. This does not move the bake to the release channel:
