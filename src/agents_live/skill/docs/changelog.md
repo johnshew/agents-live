@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-14
+ms.date: 2026-09-15
 ms.topic: reference
 ---
 
@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve due clock launches during maintenance contention. (#528)
+  Scheduled firings wait up to 60 seconds for activation exclusion, retain
+  their original due minute, and recheck started state and definitions before
+  acquiring the per-agent run lock. Deadline exhaustion is a visible failure,
+  not a healthy skip. Real interprocess and native Windows clock regressions
+  verify one processor execution after concurrent maintenance releases.
 - fix: separate numbered RC acceptance from final stable release attempts. (#511)
   Immutable attempt records retain builds, rejection decisions, and source-bound
   acceptance across retries. Final stable bytes require independent acceptance
