@@ -66,7 +66,7 @@ from agents_live.state import registry as repos
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(REPOSITORY))
-from tests.host_safety import isolated_host, native_guard
+from tests.host_safety import allow_native_runtime, isolated_host, native_guard
 
 _ISOLATED_HOMES = {
     "XDG_STATE_HOME": "state",
@@ -3143,6 +3143,215 @@ class TestActivationHandoff(TempRepository):
             with self.assertRaises(lifecycle.CollectionUnavailable):
                 lifecycle.converge()
         self.assert_restored(self.old.name)
+
+
+class TestClockActivationHandoff(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(isolated_host(self.root))
+        bundle = self.skill("clock-work", [
+            'agents-live.selector: "none"',
+            'agents-live.schedule: "0 9 * * *"',
+            'agents-live.post-processor: "record.py"',
+        ])
+        (bundle / "record.py").write_text(
+            "print('done')\n", encoding="utf-8")
+        self.identifier = agent.load("clock-work", root=self.root).identifier
+        state.replace(self.root, {self.identifier})
+        self.runner = mock.Mock()
+        self.runner.run_child.return_value = ChildResult(("processor",), 0, "done", "")
+        self.instant = datetime(2026, 9, 15, 9, 0, 59).astimezone()
+
+    @contextlib.contextmanager
+    def held_gate(self):
+        from agents_live.runtime import handoff
+
+        holder = subprocess.Popen(
+            [sys.executable, "-c", (
+                "from unittest.mock import patch\n"
+                "from agents_live.cli import lifecycle\n"
+                "from agents_live import runtime\n"
+                "from agents_live.runtime.hosts.memory import MemoryHost\n"
+                "runtime.configure(MemoryHost())\n"
+                "collect = lifecycle.collect\n"
+                "def paused_collect(**kwargs):\n"
+                " print('locked', flush=True)\n"
+                " input()\n"
+                " return collect(**kwargs)\n"
+                "with patch.object(lifecycle, 'collect', side_effect=paused_collect):\n"
+                " lifecycle.converge()\n"
+            )], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual("locked", holder.stdout.readline().strip())
+            with self.assertRaises(hostruntime.LockBusy), handoff.gate():
+                pass
+            yield holder
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+            holder.communicate()
+
+    def fire(self, *, now=None):
+        return dispatch(
+            Firing(self.identifier, str(self.root), "clock"),
+            runner=self.runner, now=now,
+        )
+
+    def test_clock_waits_for_interprocess_activation_gate(self) -> None:
+        with self.held_gate() as holder:
+            release = threading.Timer(0.3, lambda: holder.communicate("release\n"))
+            release.start()
+            try:
+                outcome = self.fire(now=self.instant)
+            finally:
+                release.join(10)
+        self.assertEqual("success", outcome.status, outcome)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_original_due_minute_survives_wait(self) -> None:
+        with self.held_gate() as holder:
+            with mock.patch("agents_live.dispatch.datetime") as clock:
+                clock.now.return_value = self.instant
+
+                def release():
+                    clock.now.return_value = self.instant + timedelta(seconds=2)
+                    holder.communicate("release\n")
+
+                timer = threading.Timer(0.3, release)
+                timer.start()
+                try:
+                    outcome = self.fire()
+                finally:
+                    timer.join(10)
+        self.assertEqual("success", outcome.status, outcome)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_stopped_during_wait_does_not_execute(self) -> None:
+        with self.held_gate() as holder:
+            def stop_and_release():
+                state.replace(self.root, set())
+                holder.communicate("release\n")
+
+            timer = threading.Timer(0.3, stop_and_release)
+            timer.start()
+            try:
+                outcome = self.fire(now=self.instant)
+            finally:
+                timer.join(10)
+        self.assertEqual("not-started", outcome.message)
+        self.runner.run_child.assert_not_called()
+
+    def test_competing_clock_launch_keeps_single_flight(self) -> None:
+        entered = threading.Event()
+        finish = threading.Event()
+        outcomes = []
+
+        def process(*args, **kwargs):
+            entered.set()
+            if not finish.wait(10):
+                raise RuntimeError("test processor release timed out")
+            return ChildResult(("processor",), 0, "done", "")
+
+        self.runner.run_child.side_effect = process
+        with self.held_gate() as holder:
+            first = threading.Thread(target=lambda: outcomes.append(self.fire(now=self.instant)))
+            first.start()
+            holder.communicate("release\n")
+            try:
+                self.assertTrue(entered.wait(10))
+                second = self.fire(now=self.instant)
+                self.assertEqual("already-running", second.message)
+            finally:
+                finish.set()
+                first.join(10)
+        self.assertEqual(1, len(outcomes))
+        self.assertEqual("success", outcomes[0].status)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_deadline_exhaustion_is_a_failure_not_a_skip(self) -> None:
+        with self.held_gate(), mock.patch(
+                "agents_live.dispatch._CLOCK_ACTIVATION_WAIT_SECONDS", 0.1):
+            outcome = self.fire(now=self.instant)
+        self.assertFalse(outcome.ok)
+        self.assertEqual("failed", outcome.status)
+        self.assertEqual("runtime_activation_timeout", outcome.category)
+        self.runner.run_child.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Task Scheduler")
+    @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "explicit native opt-in")
+    @allow_native_runtime()
+    def test_native_clock_survives_maintenance_exactly_once(self) -> None:
+        import socket
+        import uuid
+        from agents_live.runtime.hosts import task_scheduler
+
+        now = datetime.now().astimezone()
+        due = (now + timedelta(minutes=2)).replace(second=0, microsecond=0)
+        schedule = f"{due.minute} {due.hour} * * *"
+        definition = self.root / "Agents" / "clock-work" / "SKILL.md"
+        definition.write_text(definition.read_text().replace("0 9 * * *", schedule), encoding="utf-8")
+        marker = self.root / "executions.txt"
+        (definition.parent / "record.py").write_text(
+            "from pathlib import Path\n"
+            f"with Path({str(marker)!r}).open('a', encoding='utf-8') as output:\n"
+            " output.write('executed\\n')\n", encoding="utf-8")
+        name = f"test_clock_maintenance_{uuid.uuid4().hex}"
+        task_path = f"{task_scheduler.TASK_FOLDER}\\{name}"
+        environment = {key: os.environ[key] for key in (
+            *_ISOLATED_HOMES, deploy.layout.ENV_INSTALL_ROOT, "AGENTS_LIVE_REPO")}
+        with socket.socket() as listener, self.held_gate() as holder:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            listener.settimeout((due - now).total_seconds() + 40)
+            program = self.root / "native-clock.py"
+            program.write_text(
+                "import json, os, socket\n"
+                f"os.environ.update({environment!r})\n"
+                "from agents_live.dispatch import Firing, dispatch\n"
+                "from agents_live.runtime import handoff\n"
+                "from agents_live.runtime.hosts import system\n"
+                "from agents_live.runtime.hosts.processes import LocalChildRunner\n"
+                f"with socket.create_connection({listener.getsockname()!r}) as connection:\n"
+                " try:\n"
+                "  with handoff.gate():\n"
+                "   connection.sendall(b'not-contended\\n')\n"
+                " except system.LockBusy:\n"
+                "  connection.sendall(b'contended\\n')\n"
+                f" outcome = dispatch(Firing({self.identifier!r}, {str(self.root)!r}, 'clock'), runner=LocalChildRunner())\n"
+                " connection.sendall((json.dumps({'status': outcome.status, 'message': outcome.message, 'run_id': outcome.run_id}) + '\\n').encode())\n",
+                encoding="utf-8")
+            document = task_scheduler.build_task_xml(
+                command=sys.executable,
+                arguments=subprocess.list2cmdline([str(program)]),
+                working_dir=str(self.root), schedules=[schedule],
+                description="Isolated clock/maintenance regression",
+                uri=task_path, user_id=task_scheduler.current_user_id(), now=now)
+            xml_file = self.root / "task.xml"
+            xml_file.write_text(document, encoding="utf-16")
+            try:
+                code, _output, error = task_scheduler._run([
+                    "/Create", "/TN", task_path, "/XML", str(xml_file), "/F"])
+                self.assertEqual(0, code, error)
+                connection, _address = listener.accept()
+                with connection:
+                    connection.settimeout(45)
+                    with connection.makefile("r", encoding="utf-8") as messages:
+                        self.assertEqual("contended", messages.readline().strip())
+                        timer = threading.Timer(0.3, lambda: holder.communicate("release\n"))
+                        timer.start()
+                        try:
+                            outcome = json.loads(messages.readline())
+                        finally:
+                            timer.join(10)
+                self.assertEqual("success", outcome["status"], outcome)
+                self.assertEqual(["executed"], marker.read_text().splitlines())
+                print(f"Native clock survived maintenance: due={due.isoformat()} run_id={outcome['run_id']} executions=1")
+            finally:
+                code, _output, error = task_scheduler._run([
+                    "/Delete", "/TN", task_path, "/F"])
+                self.assertEqual(0, code, error)
 
 
 class TestInstallationGenerations(unittest.TestCase):
