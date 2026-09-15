@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-09-07
+ms.date: 2026-09-15
 ms.topic: concept-article
 ---
 
@@ -33,6 +33,13 @@ dispatch lock acquisition without serializing running agents. Activation refuses
 active or unverifiable run locks, preserves started state, and attempts rollback
 when the selected runtime cannot converge. Idle watchers receive a cooperative
 stop signal before bounded host termination is used.
+
+Clock firings wait up to 60 seconds for the launch gate instead of dropping due
+work during maintenance. They retain their arrival time for schedule matching,
+then reload started state and the definition under the gate before claiming the
+per-agent run lock. A wait that expires records a failed run with category
+`runtime_activation_timeout`; it is not a successful or skipped firing. Manual
+and watcher launches retain their immediate activation-exclusion behavior.
 
 Automatic maintenance is the sole writer of the host-local health record.
 `doctor --quick` treats a record as healthy only when it is both fresh and

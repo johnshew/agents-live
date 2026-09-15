@@ -31,6 +31,37 @@ same change.
 
 ## Channel model
 
+### Active RC migration
+
+The developer adopted the numbered-RC model for the `6.9.2` target on
+2026-09-13. `bake/v6.9.2-rc` supersedes the earlier 6.9.2 and 6.9.3 bake
+branches. Read this branch's manifest and report; a report from the old
+`main` checkout does not describe the migrated cycle.
+
+`bake.candidate_cycle` records the model, next RC, superseded branches, and
+historical candidate decisions. The first record is a legacy rejection:
+logical `6.9.2rc1`, actual package version `6.9.2`. Original preparation evidence
+has been recovered in the preparing checkout, not converted to a numbered RC
+or full acceptance. RC4 is already prepared; RC5 is next for new bytes.
+Report candidate preparation separately from installed acceptance and qualify
+deployment observations by environment rather than assuming one global selection.
+
+`implementation = "numbered-rc-v1"` identifies the explicit attempt workflow.
+The report reads its local evidence as reserved, prepared, accepted, finalized,
+rejected, or invalid-evidence, and recommends the next operation for the latest
+valid attempt. Tool availability is not candidate acceptance or release approval.
+Historical manifests without that implementation remain blocked on tooling.
+Local evaluation through `local-deploy.py --rc` is not full operational acceptance.
+Markdown and JSON must show the same target, next RC, historical
+evidence qualification, and blocker. Local attempt records are not evidence of
+another environment's selection. JSON reports GitHub publication and unverified
+PyPI availability separately; changing a manifest status does not create evidence.
+
+After RC acceptance, final stable preparation and installed acceptance are
+separate states. Preserve failed attempts, advance RC numbers for source fixes,
+and require independent acceptance of final stable bytes before a stable tag
+or publication. See [development-release-process.md](../docs/development-release-process.md).
+
 | Channel | Branch | Version | Moves to |
 |---|---|---|---|
 | `bake` | `bake/v<version>-local` | Development version ending in `.dev`, with its commit ID | Local deployment, optional GitHub prerelease, then `release` by pull request to `main` |
@@ -90,7 +121,7 @@ branch from current `origin/main`, update `.github/release-channels.toml`, and
 route focused fixes there. The report must then describe the rejected candidate
 in the bake recommendation while the last successfully tested deployment stays
 in the deployment fields. After the corrected bake moves to `main`, prepare a
-new candidate and replace the stale local candidate evidence.
+new final attempt and retain all prior candidate evidence.
 
 A bake may be published as a GitHub prerelease when another machine must test
 the exact validated bytes. This does not move the bake to the release channel:

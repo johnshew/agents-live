@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-11
+ms.date: 2026-09-15
 ms.topic: reference
 ---
 
@@ -11,6 +11,55 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: preserve due clock launches during maintenance contention. (#528)
+  Scheduled firings wait up to 60 seconds for activation exclusion, retain
+  their original due minute, and recheck started state and definitions before
+  acquiring the per-agent run lock. Deadline exhaustion is a visible failure,
+  not a healthy skip. Real interprocess and native Windows clock regressions
+  verify one processor execution after concurrent maintenance releases.
+- fix: separate numbered RC acceptance from final stable release attempts. (#511)
+  Immutable attempt records retain builds, rejection decisions, and source-bound
+  acceptance across retries. Final stable bytes require independent acceptance
+  before explicit tagging and exact-asset publication. Reports distinguish local
+  attempt states from public availability; manual PyPI dispatch rejects RC tags.
+  Legacy unpublished tag migration preserves the original annotated object and
+  artifacts. Same-version retries require supported restoration and inactive
+  version removal, never replacement of sealed installed bytes.
+- fix: finish fresh Windows bootstrap without a shell restart. (#517)
+  Newly installed uv is resolved as an executable command. Empty legacy tool
+  inventories no longer abort Windows PowerShell 5.1 after activation, while
+  failed inventory and cleanup commands still report their exit codes.
+- fix: scope Windows provider health failures to locally started agents. (#518)
+  Other-host assignments do not require local provider CLIs. Stopped local
+  agents report on-demand launch readiness without failing runtime health;
+  unavailable ownership remains a hard failure.
+- fix: identify numbered release candidates instead of displaying an unknown channel.
+  Version and structured runtime output report `candidate` for RC packages;
+  installed-version listings distinguish local release candidates and retain
+  explicit rejected status.
+- fix: preserve remaining same-day Windows calendar repetitions. (#509)
+  Registration retains an active period's original anchor without shifting
+  cron phase, interval, bounded windows, or catch-up policy. Calendar periods
+  with no remaining occurrence advance normally.
+- fix: display configured dashboard model and effort independently of stale telemetry.
+  Single and aggregate rows show next-run settings; tooltips distinguish the
+  last reported model and provider defaults. Late interrupts after server
+  shutdown no longer interrupt UI finalizers.
+- fix: query mixed accounting shapes across current and archived logs.
+  Usage, attributes, and attempts are normalized before JSONL and Parquet file
+  union so historical list-shaped records coexist with newer object-shaped
+  accounting without losing available measurements.
+- fix: support local numbered RC deployment without publishing a release.
+  Candidate wheels and source identities are retained per version across failed
+  readiness retries. Local deployment selects the RC beside existing versions
+  and verifies repository state and dashboard restoration. Reusing a number
+  with changed source or wheel bytes is refused; final stable acceptance and
+  publication remain separate gates.
+- fix: block legacy release commands when a cycle adopts numbered release candidates.
+  Release reports distinguish the stable target, next RC, and historical rejected
+  attempts without relabeling package bytes or claiming unavailable evidence.
+  Explicit attempt commands enforce the numbered lifecycle; local RC testing
+  cannot replace acceptance of the final stable artifacts.
 - fix: prevent Windows doctor crashes when provider probes emit non-ASCII output.
   Version probes decode stdout and stderr independently of the system locale,
   tolerating malformed diagnostic bytes without losing captured output or

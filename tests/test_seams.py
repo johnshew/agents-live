@@ -309,7 +309,10 @@ class TestDefinitionLoader(TempRepository):
     def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
         self.assertEqual("release", identity.channel("6.6.0"))
         self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
-        self.assertEqual("unknown", identity.channel("6.6.0rc1"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc1"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc12"))
+        for invalid in ("6.6.0rc", "6.6.0rc1junk", "6.6.0beta1"):
+            self.assertEqual("unknown", identity.channel(invalid))
         self.assertEqual(
             "agents-live 6.6.0 (channel: release)",
             identity.label("6.6.0"),
@@ -1085,6 +1088,7 @@ class TestDoctor(unittest.TestCase):
 
     def test_unknown_metadata_reports_both_possible_remedies(self) -> None:
         collected = mock.Mock(
+            subscriptions=(),
             unavailable_repositories=(), broken_definitions=(),
             unknown_metadata=((Path("Agents/sample/SKILL.md"),
                                ("agents-live.schedul",)),),
@@ -1183,6 +1187,35 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_numbered_rc_cycle_blocks_legacy_candidate_commands(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "tools" / "release.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / ".github").mkdir()
+            script = root / "tools" / "release.py"
+            shutil.copy2(source, script)
+            (root / ".github" / "release-channels.toml").write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'implementation = "pending"\nnext = "6.9.2rc2"\n',
+                encoding="utf-8")
+            for arguments in (
+                ["--dry-run"], ["--prepare", "--yes"],
+                ["--prepare", "--resume", "--yes"], ["--publish", "--yes"],
+                ["--accept-candidate", "--yes", "--repo", str(root),
+                 "--agent", "safe", "--cost-agent", "provider"],
+            ):
+                with self.subTest(arguments=arguments):
+                    completed = subprocess.run(
+                        [sys.executable, str(script), *arguments],
+                        cwd=root, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", check=False)
+                    self.assertEqual(1, completed.returncode)
+                    self.assertIn("numbered RC workflow", completed.stderr)
+                    self.assertIn("#511", completed.stderr)
+                    self.assertEqual("", completed.stdout)
+                    self.assertFalse((root / ".git").exists())
+
     def test_installed_version_accepts_channel_identity(self) -> None:
         root = Path(__file__).resolve().parents[1]
         release = runpy.run_path(str(root / "tools" / "release.py"))
@@ -1381,6 +1414,16 @@ class TestRuntimeCore(unittest.TestCase):
             "(channel: bake, commit: abc1234)",
             output.getvalue().strip(),
         )
+
+    def test_version_command_identifies_a_numbered_candidate(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        output = io.StringIO()
+        with mock.patch.object(module, "__version__", "6.9.2rc3"), \
+                contextlib.redirect_stdout(output):
+            result = module.main(["--version"])
+        self.assertEqual(0, result)
+        self.assertEqual("agents-live 6.9.2rc3 (channel: candidate)",
+                         output.getvalue().strip())
 
     def test_windows_uninstall_queues_owned_tree_removal(self) -> None:
         stdout = io.StringIO()
@@ -6719,17 +6762,38 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertIn("Attention in all registered repositories", attention)
         self.assertIn("1 failing agents", attention)
 
-    def test_dashboard_model_shows_reported_configured_and_default_values(self) -> None:
+    def test_dashboard_model_shows_configured_effort_and_default_values(self) -> None:
         dashboard = self._dashboard_module()
         row = {"runtime": "copilot", "identifier": "sample-123", "name": "sample",
                "model": "configured-model"}
-        for reports, expected in (({}, "configured-model"),
-                                  ({"sample": "legacy-model"}, "legacy-model"),
-                                  ({"sample-123": "reported-model"}, "reported-model")):
-            with self.subTest(reports=reports):
-                self.assertEqual(expected, dashboard._agent_model(row, reports))
-        self.assertEqual("default", dashboard._agent_model({**row, "model": None}, {}))
-        self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}, {}))
+        for effort in ("high", "low"):
+            self.assertEqual(f"configured-model:{effort}", dashboard._agent_model(
+                {**row, "effort": effort}))
+        self.assertEqual("configured-model", dashboard._agent_model(row))
+        self.assertEqual("provider default", dashboard._agent_model({**row, "model": None}))
+        self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}))
+
+    def test_dashboard_rows_reload_configured_model_and_effort(self) -> None:
+        dashboard = self._dashboard_module()
+        directory = self.skill(
+            "current-model", ['agents-live.selector: "fake/new-model:high"'])
+        definition = directory / "SKILL.md"
+        original = definition.read_text(encoding="utf-8")
+        repos._add(str(self.root))
+        dashboard.STATE["all_repos"]["repo"] = "All"
+        for effort in ("high", "low"):
+            with self.subTest(effort=effort):
+                definition.write_text(
+                    original.replace(":high", f":{effort}"), encoding="utf-8")
+                spec = agent.load("current-model", root=self.root)
+                dashboard.STATE["models"] = {spec.identifier: "old-model"}
+                single = dashboard.agent_rows()
+                aggregate = dashboard.operational_snapshot()["rows"]
+                for rows in (single, aggregate):
+                    selected = next(
+                        row for row in rows if row["identifier"] == spec.identifier)
+                    self.assertEqual(f"new-model:{effort}", selected["model"])
+                    self.assertEqual(effort, selected["effort"])
 
     def test_dashboard_attention_includes_degraded_host_health(self) -> None:
         dashboard = self._dashboard_module()
@@ -7239,6 +7303,38 @@ class TestDashboardRepositorySurface(TempRepository):
 
 
 class TestWindowsTaskScheduling(unittest.TestCase):
+    def test_repeating_calendar_keeps_today_when_future_slots_remain(self) -> None:
+        from xml.etree import ElementTree as ET
+
+        cases = (
+            ("37 * * * *", "2026-09-14T09:10:00", "2026-09-14T00:37:00"),
+            ("17 */2 * * *", "2026-09-14T09:10:00", "2026-09-14T00:17:00"),
+            ("0 */5 * * *", "2026-09-14T09:10:00", "2026-09-14T00:00:00"),
+            ("0 */5 * * *", "2026-09-14T20:00:01", "2026-09-15T00:00:00"),
+            ("37 * * * *", "2026-09-14T09:37:00", "2026-09-14T00:37:00"),
+            ("37 * * * *", "2026-09-14T23:37:01", "2026-09-15T00:37:00"),
+            ("0 9-17 * * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
+            ("0 9-17 * * *", "2026-09-14T17:01:00", "2026-09-15T09:00:00"),
+            ("*/10 9-17 * * MON-FRI", "2026-09-14T10:10:01", "2026-09-14T09:00:00"),
+            ("*/10 9-17 * * MON-FRI", "2026-09-13T10:10:01", "2026-09-14T09:00:00"),
+            ("0 9-17 14 * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
+        )
+        for expression, timestamp, boundary in cases:
+            for offset in ("-07:00", "-08:00"):
+                with self.subTest(expression=expression, timestamp=timestamp, offset=offset):
+                    document = task_scheduler.build_task_xml(
+                        command="fixture.exe", arguments="", working_dir=".",
+                        schedules=[expression], description="fixture", uri="fixture",
+                        user_id="user", now=datetime.fromisoformat(timestamp + offset))
+                    root = ET.fromstring(document)
+                    namespace = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+                    triggers = root.findall("t:Triggers/*", namespace)
+                    self.assertEqual(1, len(triggers))
+                    self.assertEqual(boundary + offset, triggers[0].findtext(
+                        "t:StartBoundary", namespaces=namespace))
+                    self.assertEqual("true", root.findtext(
+                        "t:Settings/t:StartWhenAvailable", namespaces=namespace))
+
     def test_daily_boundary_preserves_local_utc_offset(self) -> None:
         local_now = datetime(
             2026, 8, 23, 16, 0,
@@ -7451,6 +7547,64 @@ class TestWindowsTaskScheduling(unittest.TestCase):
         self.assertEqual(10, diag_irreg["estimated_native_firings"])
         self.assertEqual(3, diag_irreg["estimated_due_firings"])
         self.assertIn("irregular hour list", diag_irreg["fallback_reason"])
+
+    @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
+    @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "native tests require explicit opt-in")
+    @allow_native_runtime()
+    def test_new_hourly_task_fires_today_without_registration_catchup(self) -> None:
+        import time
+        import uuid
+
+        if task_scheduler.probe() is not None:
+            self.skipTest("Task Scheduler is not accessible on this host")
+        now = datetime.now().astimezone()
+        due = (now + timedelta(minutes=2)).replace(second=0, microsecond=0)
+        if due.date() != now.date() or now.hour == 0:
+            self.skipTest("requires a passed daily anchor and a remaining same-day occurrence")
+        name = f"test_same_day_{uuid.uuid4().hex}"
+        path = f"{task_scheduler.TASK_FOLDER}\\{name}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            marker = root / "fired.txt"
+            program = (
+                "from datetime import datetime; from pathlib import Path; "
+                f"Path({str(marker)!r}).write_text(datetime.now().astimezone().isoformat())")
+            schedule = f"{due.minute} * * * *"
+            document = task_scheduler.build_task_xml(
+                command=sys.executable, arguments=subprocess.list2cmdline(["-c", program]),
+                working_dir=str(root), schedules=[schedule], description="Same-day fixture",
+                uri=path, user_id=task_scheduler.current_user_id(), now=now)
+            xml_file = root / "task.xml"
+            xml_file.write_text(document, encoding="utf-16")
+            try:
+                code, _out, error = task_scheduler._run([
+                    "/Create", "/TN", path, "/XML", str(xml_file), "/F"])
+                self.assertEqual(0, code, error)
+                registered = task_scheduler.read_definition(path)
+                self.assertIsNotNone(registered)
+                self.assertEqual(task_scheduler.trigger_signature([schedule]),
+                                 task_scheduler._definition_signature(registered))
+                query = (
+                    f"$info = Get-ScheduledTaskInfo -TaskName '{name}' "
+                    f"-TaskPath '{task_scheduler.TASK_FOLDER}\\'; "
+                    "$info.NextRunTime.ToString('o')")
+                readback = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+                next_run = datetime.fromisoformat(readback.stdout.strip())
+                self.assertEqual(due.replace(tzinfo=None), next_run.replace(tzinfo=None))
+                deadline = time.monotonic() + (due - now).total_seconds() + 30
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                self.assertTrue(marker.exists(), "the native scheduled occurrence never fired")
+                fired = datetime.fromisoformat(marker.read_text())
+                self.assertGreaterEqual(fired, due, "task caught up immediately on registration")
+                self.assertLess((fired - due).total_seconds(), 30)
+                self.assertEqual(registered, task_scheduler.read_definition(path))
+                print(f"Native same-day firing: expected {due.isoformat()}, observed {fired.isoformat()}")
+            finally:
+                code, _out, error = task_scheduler._run(["/Delete", "/TN", path, "/F"])
+                self.assertEqual(0, code, error)
 
     @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
     @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "native tests require explicit opt-in")

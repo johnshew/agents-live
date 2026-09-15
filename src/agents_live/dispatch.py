@@ -27,6 +27,7 @@ _LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
 _RECORDED_MAX_CHARS = 4096
 # Where run-scoped provider configuration lives for the length of a run.
 PROVIDER_DIRECTORY = "provider"
+_CLOCK_ACTIVATION_WAIT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -131,45 +132,42 @@ def _dispatch(
 ) -> Outcome:
     root = Path(firing.root).resolve()
     run_id = uuid.uuid4().hex
-    if firing.origin != "manual":
-        try:
-            if not state.is_started(root, firing.agent_id):
-                return _skip(run_id, "not-started")
-        except state.StartedStateUnavailable as exc:
-            return _failure(run_id, "state_unavailable", str(exc))
-
+    instant = now or datetime.now().astimezone()
+    timeout = _CLOCK_ACTIVATION_WAIT_SECONDS if firing.origin == "clock" else 0
     try:
-        spec = agent.load(firing.agent_id, root=root)
-    except agent.UnsupportedSchemaVersion as exc:
-        return _failure(run_id, "runtime_outdated", str(exc))
-    except agent.DefinitionError as exc:
-        return _failure(run_id, "agent_invalid", str(exc))
-
-    # However the agent was named, record it under its canonical
-    # identifier. `run --name <display name>` otherwise writes a second
-    # log file that identifier-keyed readers never find, which hid manual
-    # runs from the dashboard's history, cost, and health columns.
-    if spec.identifier != firing.agent_id:
-        firing = replace(firing, agent_id=spec.identifier)
-    accounting.identifier = spec.identifier
-
-    config = spec.execution
-    if config is None:
-        return _failure(
-            run_id, "agent_invalid",
-            f"skill '{spec.name}' has no Agents Live execution metadata")
-    accounting.transcript_enabled = config.transcript
-    if firing.origin == "clock":
-        instant = now or datetime.now().astimezone()
-        if not any(parse_schedule(item).matches(instant) for item in config.schedules):
-            return _skip(run_id, "not-due")
-
-    lock = _RunLock(root, firing.agent_id)
-    try:
-        with handoff.gate():
+        with handoff.gate(timeout=timeout):
+            if firing.origin != "manual":
+                try:
+                    if not state.is_started(root, firing.agent_id):
+                        return _skip(run_id, "not-started")
+                except state.StartedStateUnavailable as exc:
+                    return _failure(run_id, "state_unavailable", str(exc))
+            try:
+                spec = agent.load(firing.agent_id, root=root)
+            except agent.UnsupportedSchemaVersion as exc:
+                return _failure(run_id, "runtime_outdated", str(exc))
+            except agent.DefinitionError as exc:
+                return _failure(run_id, "agent_invalid", str(exc))
+            if spec.identifier != firing.agent_id:
+                firing = replace(firing, agent_id=spec.identifier)
+            accounting.identifier = spec.identifier
+            config = spec.execution
+            if config is None:
+                return _failure(
+                    run_id, "agent_invalid",
+                    f"skill '{spec.name}' has no Agents Live execution metadata")
+            accounting.transcript_enabled = config.transcript
+            if firing.origin == "clock" and not any(
+                    parse_schedule(item).matches(instant) for item in config.schedules):
+                return _skip(run_id, "not-due")
+            lock = _RunLock(root, firing.agent_id)
             if not lock.acquire():
                 return _skip(run_id, "already-running")
     except hostruntime.LockBusy:
+        if firing.origin == "clock":
+            return _failure(
+                run_id, "runtime_activation_timeout",
+                f"scheduled launch could not acquire the activation gate within {timeout:g}s")
         return _skip(run_id, "runtime-activation")
     try:
         budget = claim_budget(

@@ -81,6 +81,36 @@ The standard loop for any change that lands as commits:
 
 ### Active bake routing
 
+The active cycle uses numbered release candidates under
+[#511](https://github.com/johnshew/agents-live/issues/511). The stable target is
+`6.9.2` and the integration branch is `bake/v6.9.2-rc`. The manifest retains
+the last validated RC2 deployment observation, not a universal installed state.
+RC3 failed packaged readiness (#516); RC4 passed that gate on its preparing
+environment but still needs installed recovery verification (#522).
+`6.9.2rc5` is the next unused candidate number. Recover retained RC4 only with
+its original preparation evidence and `--recover-provider-readiness`.
+This explicitly supersedes the former 6.9.2 and 6.9.3
+bake routing without rewriting either branch's history.
+
+The manifest records `6.9.2rc1` as the legacy rejected attempt whose actual
+package version was `6.9.2`. Its original artifacts and preparation/checkpoint
+records were recovered in the preparing checkout; hashes are recorded in the
+manifest. This is not an rc1 package or full acceptance. Preserve the original
+tag conflict and private receipts for the explicit #511 finalization migration.
+
+Local numbered RC deployment is available through
+`tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
+It preserves side-by-side versions and does not create a tag or GitHub release.
+Full lifecycle preparation uses `tools/release.py --prepare-rc` from synchronized
+bake. Accept that exact attempt, record approval for its source, then promote
+to main and use `--prepare-final --from-rc`. Final stable bytes require their own
+acceptance before explicit `--finalize` and `--publish`, each with `--attempt`.
+Run attempt commands from the retained worktree printed during allocation.
+Legacy implicit commands remain blocked; do not use an older checkout to bypass
+the guard. Historical local-deploy receipts do not replace full acceptance. See
+[development-release-process.md](docs/development-release-process.md) for the
+adopted lifecycle, including side-by-side versions and independent stable tests.
+
 When the report marks the configured version `released`, do not prepare or
 publish that version again. Use the separately configured later bake cycle
 identified by the report, reading its manifest and report before choosing a

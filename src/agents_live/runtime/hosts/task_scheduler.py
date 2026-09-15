@@ -608,18 +608,28 @@ def _covering_interval(minutes: set[int]) -> dict[str, object]:
 
 
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
-    """The first firing time for *trigger*, at or after *now*.
-
-    Anchored forward rather than at a fixed date in the past: Task
-    Scheduler treats a long-missed start as something to catch up on, so
-    a past anchor would run the agent once the moment it is registered.
-    """
+    """Keep an active calendar period's phase, otherwise choose a future start."""
     start = now.replace(second=0, microsecond=0)
     if trigger["kind"] == "boot":
         return start.isoformat(timespec="seconds")
     target_hour = int(trigger["hour"])
     target_minute = int(trigger["minute"])
     start = start.replace(hour=target_hour, minute=target_minute)
+    interval = int(trigger.get("interval_minutes") or 0)
+    duration = int(trigger.get("duration_minutes") or 0)
+    if interval and duration and start <= now:
+        elapsed = (now - start).total_seconds()
+        following = (int(elapsed // (interval * 60)) + 1) * interval
+        weekdays = trigger.get("weekdays") or (trigger.get("weekday"),)
+        days = trigger.get("days") or (trigger.get("day"),)
+        months = trigger.get("months") or tuple(range(1, 13))
+        eligible = (
+            trigger["kind"] == "daily"
+            or trigger["kind"] == "weekly" and (start.weekday() + 1) % 7 in weekdays
+            or trigger["kind"] == "monthly" and start.day in days and start.month in months
+        )
+        if eligible and following < duration:
+            return start.isoformat(timespec="seconds")
     if trigger["kind"] == "daily":
         if start <= now:
             start += timedelta(days=1)

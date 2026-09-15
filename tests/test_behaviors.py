@@ -66,7 +66,7 @@ from agents_live.state import registry as repos
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(REPOSITORY))
-from tests.host_safety import isolated_host, native_guard
+from tests.host_safety import allow_native_runtime, isolated_host, native_guard
 
 _ISOLATED_HOMES = {
     "XDG_STATE_HOME": "state",
@@ -83,6 +83,112 @@ _ISOLATED_HOMES = {
 _INSTALL_ROOT: tempfile.TemporaryDirectory | None = None
 _PREVIOUS_INSTALL_ROOT: str | None = None
 _PREVIOUS_CONFIG_HOME: str | None = None
+
+
+@unittest.skipUnless(os.name == "nt", "Windows bootstrap")
+class TestWindowsBootstrap(unittest.TestCase):
+    def test_fresh_uv_and_empty_inventory_complete_in_supported_shells(self):
+        compiler = shutil.which("powershell")
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {
+                key: value for key, value in os.environ.items()
+                if key.upper() != "PSMODULEPATH"
+            }
+            source = root / "UvFixture.cs"
+            source.write_text('''
+using System;
+using System.IO;
+using System.Reflection;
+public class UvFixture {
+    public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "--version") {
+            Console.WriteLine("agents-live 6.9.2rc4");
+            return 0;
+        }
+        if (args.Length > 1 && args[1] == "list") {
+            Console.Error.WriteLine("No tools installed");
+            return 0;
+        }
+        if (args.Length > 1 && args[1] == "run") {
+            int index = Array.IndexOf(args, "--install-root");
+            string directory = Path.Combine(args[index + 1], "current", "Scripts");
+            Directory.CreateDirectory(directory);
+            File.Copy(Assembly.GetExecutingAssembly().Location,
+                      Path.Combine(directory, "agents-live.exe"), true);
+            return 0;
+        }
+        return 42;
+    }
+}
+''', encoding="utf-8")
+            fixture = root / "uv-fixture.exe"
+            compiled = subprocess.run(
+                [compiler, "-NoProfile", "-Command",
+                 "Add-Type -Path $env:FIXTURE_SOURCE -OutputAssembly "
+                 "$env:FIXTURE_EXE -OutputType ConsoleApplication"],
+                env={**environment, "FIXTURE_SOURCE": str(source),
+                     "FIXTURE_EXE": str(fixture)},
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, compiled.returncode, compiled.stderr)
+            script = root / "bootstrap-test.ps1"
+            script.write_text('''
+$ErrorActionPreference = 'Stop'
+function Get-Command {
+    param([string]$Name, $ErrorAction)
+    if ($Name -eq 'uv') { return $null }
+    Microsoft.PowerShell.Core\\Get-Command -Name $Name -ErrorAction $ErrorAction
+}
+function Invoke-RestMethod {
+    param($Uri, $Headers, [switch]$UseBasicParsing)
+    @{
+        tag_name = 'v6.9.2rc4'; draft = $false; prerelease = $true
+        assets = @(@{
+            name = 'agents_live-6.9.2rc4-py3-none-any.whl'
+            state = 'uploaded'; size = 1
+            digest = 'sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881'
+            browser_download_url = 'https://github.com/johnshew/agents-live/releases/download/v6.9.2rc4/agents_live-6.9.2rc4-py3-none-any.whl'
+        })
+    }
+}
+function Invoke-WebRequest {
+    param($Uri, $OutFile, [switch]$UseBasicParsing)
+    if ($Uri -eq 'https://astral.sh/uv/install.ps1') {
+        Set-Content -LiteralPath $OutFile -Value @'
+$bin = Join-Path $env:USERPROFILE '.local\\bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Copy-Item -LiteralPath $env:FIXTURE_EXE -Destination (Join-Path $bin 'uv.exe')
+'@
+    } else {
+        [IO.File]::WriteAllText($OutFile, 'x')
+    }
+}
+& $env:BOOTSTRAP_SCRIPT -Version '6.9.2rc4'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+agents-live --version
+exit $LASTEXITCODE
+''', encoding="utf-8")
+            shells = [compiler]
+            if shell := shutil.which("pwsh"):
+                shells.append(shell)
+            for index, shell in enumerate(shells):
+                with self.subTest(shell=Path(shell).name):
+                    home = root / str(index)
+                    result = subprocess.run(
+                        [shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                         "-File", str(script)],
+                        env={**environment, "USERPROFILE": str(home),
+                             "AGENTS_LIVE_INSTALL_ROOT": str(home / "install"),
+                             "AGENTS_LIVE_RELEASE_API": "",
+                             "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": "",
+                             "FIXTURE_EXE": str(fixture),
+                             "BOOTSTRAP_SCRIPT": str(REPOSITORY / "install.ps1")},
+                        capture_output=True, text=True, timeout=60)
+                    self.assertEqual(0, result.returncode,
+                                     result.stdout + result.stderr)
+                    self.assertIn("Agents Live is ready:", result.stdout)
+                    self.assertEqual(2, result.stdout.count("agents-live 6.9.2rc4"))
 
 
 def setUpModule() -> None:
@@ -289,6 +395,118 @@ class TestOwnershipEnforcement(TempRepository):
         with mock.patch.object(ownership, "_require_backend") as backend:
             self.assertEqual({}, ownership.load_owners(root=self.root))
         backend.assert_not_called()
+
+    def test_doctor_provider_health_follows_local_started_eligibility(self):
+        self.skill("provider-agent", [
+            'agents-live.selector: "claude"',
+            'agents-live.schedule: "0 9 * * *"',
+        ])
+        spec = agent.load("provider-agent", root=self.root)
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        previous = runtime.current()
+        runtime.configure(MemoryHost())
+        self.addCleanup(runtime.configure, previous)
+        for owner in (ownership.current_owner_id(), "*", None,
+                      "otherhost/windows/" + "a" * 32):
+            for started in (False, True):
+                with self.subTest(local=owner is None or ownership.owns(owner),
+                                  wildcard=owner == "*", started=started):
+                    state.replace(self.root, {spec.identifier} if started else set())
+                    owners = {} if owner is None else {spec.name: owner}
+                    output = io.StringIO()
+                    with (
+                        mock.patch.object(repos, "load", return_value={
+                            "repos": {"test": str(self.root)}}),
+                        mock.patch.object(ownership, "load_owners", return_value=owners),
+                        mock.patch.object(ownership, "validate_registry"),
+                        mock.patch.object(hostruntime, "id", return_value="windows"),
+                        mock.patch.object(hostruntime, "pin_executable", side_effect=
+                                          hostruntime.ExecutableNotFound("CLI absent")),
+                        mock.patch.object(doctor, "_git_index_check", return_value=None),
+                        mock.patch.object(doctor, "_health_payload", return_value=None),
+                        mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        code = doctor.main([])
+                    eligible = owner is None or ownership.owns(owner)
+                    self.assertEqual(int(started and eligible), code, output.getvalue())
+                    if eligible and not started:
+                        self.assertIn("on-demand", output.getvalue())
+                        self.assertIn("CLI absent", output.getvalue())
+                    elif not eligible:
+                        self.assertNotIn("provider CLI claude", output.getvalue())
+
+    def test_doctor_keeps_unavailable_ownership_a_hard_failure(self):
+        self.skill("provider-agent", ['agents-live.selector: "claude"'])
+        (self.root / ".agents-live.toml").write_text(
+            'ownership = "registry"\n', encoding="utf-8")
+        state.replace(self.root, set())
+        previous = runtime.current()
+        runtime.configure(MemoryHost())
+        self.addCleanup(runtime.configure, previous)
+        output = io.StringIO()
+        unavailable = ownership.OwnershipUnavailableError("registry unavailable")
+        with (
+            mock.patch.object(repos, "load", return_value={
+                "repos": {"test": str(self.root)}}),
+            mock.patch.object(ownership, "load_owners", side_effect=unavailable),
+            mock.patch.object(ownership, "validate_registry", side_effect=unavailable),
+            mock.patch.object(hostruntime, "id", return_value="windows"),
+            mock.patch.object(hostruntime, "pin_executable", side_effect=
+                              hostruntime.ExecutableNotFound("CLI absent")) as probe,
+            mock.patch.object(doctor, "_git_index_check", return_value=None),
+            mock.patch.object(doctor, "_health_payload", return_value=None),
+            mock.patch.object(doctor.update_check, "interactive", return_value=False),
+            contextlib.redirect_stdout(output),
+        ):
+            code = doctor.main([])
+        self.assertEqual(1, code, output.getvalue())
+        self.assertIn("registry unavailable", output.getvalue())
+        probe.assert_not_called()
+
+    def test_doctor_requires_local_duplicate_and_adopted_agent_providers(self):
+        self.skill("provider-agent", [
+            'agents-live.selector: "claude"',
+            'agents-live.schedule: "0 9 * * *"',
+        ])
+        spec = agent.load("provider-agent", root=self.root)
+        previous = runtime.current()
+        host = MemoryHost()
+        runtime.configure(host)
+        self.addCleanup(runtime.configure, previous)
+        subscription = Subscription.create(
+            scope=f"repo:{self.root}", target=f"agent:{spec.identifier}",
+            kind="schedule", trigger="0 9 * * *")
+        host.trigger_store.install(host.render(subscription))
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                if duplicate:
+                    self.skill("provider-agent", ['agents-live.selector: "claude"'],
+                               root=self.root / "extra")
+                    (self.root / ".agents-live.toml").write_text(
+                        'agent_directories = ["Agents", "extra/Agents"]\n',
+                        encoding="utf-8")
+                    state.replace(self.root, {spec.identifier})
+                else:
+                    self.assertFalse(state.load(self.root).initialized)
+                output = io.StringIO()
+                with (
+                    mock.patch.object(repos, "load", return_value={
+                        "repos": {"test": str(self.root)}}),
+                    mock.patch.object(hostruntime, "id", return_value="windows"),
+                    mock.patch.object(hostruntime, "pin_executable", side_effect=
+                                      hostruntime.ExecutableNotFound("CLI absent")),
+                    mock.patch.object(doctor, "_git_index_check", return_value=None),
+                    mock.patch.object(doctor, "_health_payload", return_value=None),
+                    mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                    contextlib.redirect_stdout(output),
+                ):
+                    code = doctor.main([])
+                self.assertEqual(1, code, output.getvalue())
+                self.assertIn("ERROR: provider CLI claude:", output.getvalue())
+                if not duplicate:
+                    self.assertFalse(state.load(self.root).initialized)
 
 
 class TestCrontabTriggerStore(TempRepository):
@@ -1019,6 +1237,43 @@ class TestFailuresAreVisible(TempRepository):
             from agents_live.cli.scripts import dashboard
         return dashboard
 
+    def test_dashboard_late_interrupt_does_not_interrupt_stopped_cleanup(self) -> None:
+        import signal
+
+        dashboard = self._dashboard()
+        original = signal.getsignal(signal.SIGINT)
+        delivered = []
+        try:
+            for started in (False, True):
+                signal.signal(signal.SIGINT, lambda *_args: delivered.append("interrupt"))
+                with mock.patch.object(sys, "argv", ["dashboard.py"]), \
+                        mock.patch.object(dashboard, "build_page"), \
+                        mock.patch.object(dashboard.app, "is_started", started), \
+                        mock.patch.object(dashboard.ui, "run"):
+                    dashboard.main()
+                signal.raise_signal(signal.SIGINT)
+                self.assertEqual(["interrupt"] if started else [], delivered)
+        finally:
+            signal.signal(signal.SIGINT, original)
+
+    def test_dashboard_reloads_configured_effort_without_stale_model_override(self) -> None:
+        dashboard = self._dashboard()
+        definition = self.skill("sample", ['agents-live.selector: "copilot/gpt-5:high"']) / "SKILL.md"
+        for effort in ("high", "low"):
+            definition.write_text(definition.read_text().replace(":high", f":{effort}"))
+            views = dashboard.agent_view.repository_agents(self.root)
+            self.assertEqual(1, len(views))
+            self.assertEqual(effort, views[0].effort)
+            agents = [dashboard._agent_view_dict(views[0])]
+            with mock.patch.object(dashboard, "_scan", return_value=({}, {})), \
+                    mock.patch.dict(dashboard.STATE, {"models": {views[0].identifier: "old-model"}}):
+                for reports in (None, {views[0].identifier: "old-model"}, {}):
+                    row = dashboard._agent_rows_for(self.root, agents, reports)[0]
+                    self.assertEqual(f"gpt-5:{effort}", row["model"])
+                    self.assertEqual("stopped", row["state"])
+                    self.assertIn(f"effort: {effort}", row["model_tip"])
+                    self.assertEqual(None if reports == {} else "old-model", row["reported_model"])
+
     def test_the_header_counts_a_failure_written_under_an_identifier(self) -> None:
         """Records key on the identifier and the row shows the display
         name. Matching only display names filed every failed run under
@@ -1111,6 +1366,42 @@ class TestFailuresAreVisible(TempRepository):
                 self.assertEqual(
                     obs.query.resolve_since(value)[:16],
                     qlog._resolve_ts(value)[:16])
+
+    def test_log_queries_preserve_usage_across_different_json_shapes(self) -> None:
+        directory = self.root / "mixed-usage"
+        directory.mkdir()
+        values = [[], {"ai_credits": "0.25", "list_cost_usd": "0.01"}, None]
+        for index, usage in enumerate(values):
+            (directory / f"run-{index}.jsonl").write_text(json.dumps({
+                "ts": "2026-09-11T00:00:00Z", "agent_name": "probe",
+                "log_schema": 5, "run_id": str(index), "usage": usage,
+                "attributes": [["level", None], ["duration_s", 1.25]],
+            }) + "\n", encoding="utf-8")
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, [str(directory / "*.jsonl")])
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id").fetchall()
+        self.assertEqual(values, [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * len(values), [row[1] for row in rows])
+        archive = directory / "archive"
+        archive.mkdir()
+        with qlog.duckdb.connect(":memory:") as connection:
+            for log in directory.glob("*.jsonl"):
+                parquet = archive / f"{log.stem}.parquet"
+                connection.sql(
+                    f"COPY (SELECT * FROM read_json_auto('{log}')) "
+                    f"TO '{parquet}' (FORMAT PARQUET)")
+            qlog.build_view(
+                connection, [str(directory / "*.jsonl")], archives=archive)
+            rows = connection.sql(
+                "SELECT usage, duration_s FROM log ORDER BY run_id, _archive"
+            ).fetchall()
+        self.assertEqual([value for value in values for _ in range(2)], [
+            json.loads(row[0]) if row[0] is not None else None for row in rows
+        ])
+        self.assertEqual([1.25] * (2 * len(values)), [row[1] for row in rows])
 
     def test_schema_check_names_where_a_handler_record_is_invalid(self) -> None:
         """A count alone cannot tell a handler author what to fix."""
@@ -2854,6 +3145,215 @@ class TestActivationHandoff(TempRepository):
         self.assert_restored(self.old.name)
 
 
+class TestClockActivationHandoff(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(isolated_host(self.root))
+        bundle = self.skill("clock-work", [
+            'agents-live.selector: "none"',
+            'agents-live.schedule: "0 9 * * *"',
+            'agents-live.post-processor: "record.py"',
+        ])
+        (bundle / "record.py").write_text(
+            "print('done')\n", encoding="utf-8")
+        self.identifier = agent.load("clock-work", root=self.root).identifier
+        state.replace(self.root, {self.identifier})
+        self.runner = mock.Mock()
+        self.runner.run_child.return_value = ChildResult(("processor",), 0, "done", "")
+        self.instant = datetime(2026, 9, 15, 9, 0, 59).astimezone()
+
+    @contextlib.contextmanager
+    def held_gate(self):
+        from agents_live.runtime import handoff
+
+        holder = subprocess.Popen(
+            [sys.executable, "-c", (
+                "from unittest.mock import patch\n"
+                "from agents_live.cli import lifecycle\n"
+                "from agents_live import runtime\n"
+                "from agents_live.runtime.hosts.memory import MemoryHost\n"
+                "runtime.configure(MemoryHost())\n"
+                "collect = lifecycle.collect\n"
+                "def paused_collect(**kwargs):\n"
+                " print('locked', flush=True)\n"
+                " input()\n"
+                " return collect(**kwargs)\n"
+                "with patch.object(lifecycle, 'collect', side_effect=paused_collect):\n"
+                " lifecycle.converge()\n"
+            )], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertEqual("locked", holder.stdout.readline().strip())
+            with self.assertRaises(hostruntime.LockBusy), handoff.gate():
+                pass
+            yield holder
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+            holder.communicate()
+
+    def fire(self, *, now=None):
+        return dispatch(
+            Firing(self.identifier, str(self.root), "clock"),
+            runner=self.runner, now=now,
+        )
+
+    def test_clock_waits_for_interprocess_activation_gate(self) -> None:
+        with self.held_gate() as holder:
+            release = threading.Timer(0.3, lambda: holder.communicate("release\n"))
+            release.start()
+            try:
+                outcome = self.fire(now=self.instant)
+            finally:
+                release.join(10)
+        self.assertEqual("success", outcome.status, outcome)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_original_due_minute_survives_wait(self) -> None:
+        with self.held_gate() as holder:
+            with mock.patch("agents_live.dispatch.datetime") as clock:
+                clock.now.return_value = self.instant
+
+                def release():
+                    clock.now.return_value = self.instant + timedelta(seconds=2)
+                    holder.communicate("release\n")
+
+                timer = threading.Timer(0.3, release)
+                timer.start()
+                try:
+                    outcome = self.fire()
+                finally:
+                    timer.join(10)
+        self.assertEqual("success", outcome.status, outcome)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_stopped_during_wait_does_not_execute(self) -> None:
+        with self.held_gate() as holder:
+            def stop_and_release():
+                state.replace(self.root, set())
+                holder.communicate("release\n")
+
+            timer = threading.Timer(0.3, stop_and_release)
+            timer.start()
+            try:
+                outcome = self.fire(now=self.instant)
+            finally:
+                timer.join(10)
+        self.assertEqual("not-started", outcome.message)
+        self.runner.run_child.assert_not_called()
+
+    def test_competing_clock_launch_keeps_single_flight(self) -> None:
+        entered = threading.Event()
+        finish = threading.Event()
+        outcomes = []
+
+        def process(*args, **kwargs):
+            entered.set()
+            if not finish.wait(10):
+                raise RuntimeError("test processor release timed out")
+            return ChildResult(("processor",), 0, "done", "")
+
+        self.runner.run_child.side_effect = process
+        with self.held_gate() as holder:
+            first = threading.Thread(target=lambda: outcomes.append(self.fire(now=self.instant)))
+            first.start()
+            holder.communicate("release\n")
+            try:
+                self.assertTrue(entered.wait(10))
+                second = self.fire(now=self.instant)
+                self.assertEqual("already-running", second.message)
+            finally:
+                finish.set()
+                first.join(10)
+        self.assertEqual(1, len(outcomes))
+        self.assertEqual("success", outcomes[0].status)
+        self.assertEqual(1, self.runner.run_child.call_count)
+
+    def test_deadline_exhaustion_is_a_failure_not_a_skip(self) -> None:
+        with self.held_gate(), mock.patch(
+                "agents_live.dispatch._CLOCK_ACTIVATION_WAIT_SECONDS", 0.1):
+            outcome = self.fire(now=self.instant)
+        self.assertFalse(outcome.ok)
+        self.assertEqual("failed", outcome.status)
+        self.assertEqual("runtime_activation_timeout", outcome.category)
+        self.runner.run_child.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Task Scheduler")
+    @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "explicit native opt-in")
+    @allow_native_runtime()
+    def test_native_clock_survives_maintenance_exactly_once(self) -> None:
+        import socket
+        import uuid
+        from agents_live.runtime.hosts import task_scheduler
+
+        now = datetime.now().astimezone()
+        due = (now + timedelta(minutes=2)).replace(second=0, microsecond=0)
+        schedule = f"{due.minute} {due.hour} * * *"
+        definition = self.root / "Agents" / "clock-work" / "SKILL.md"
+        definition.write_text(definition.read_text().replace("0 9 * * *", schedule), encoding="utf-8")
+        marker = self.root / "executions.txt"
+        (definition.parent / "record.py").write_text(
+            "from pathlib import Path\n"
+            f"with Path({str(marker)!r}).open('a', encoding='utf-8') as output:\n"
+            " output.write('executed\\n')\n", encoding="utf-8")
+        name = f"test_clock_maintenance_{uuid.uuid4().hex}"
+        task_path = f"{task_scheduler.TASK_FOLDER}\\{name}"
+        environment = {key: os.environ[key] for key in (
+            *_ISOLATED_HOMES, deploy.layout.ENV_INSTALL_ROOT, "AGENTS_LIVE_REPO")}
+        with socket.socket() as listener, self.held_gate() as holder:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            listener.settimeout((due - now).total_seconds() + 40)
+            program = self.root / "native-clock.py"
+            program.write_text(
+                "import json, os, socket\n"
+                f"os.environ.update({environment!r})\n"
+                "from agents_live.dispatch import Firing, dispatch\n"
+                "from agents_live.runtime import handoff\n"
+                "from agents_live.runtime.hosts import system\n"
+                "from agents_live.runtime.hosts.processes import LocalChildRunner\n"
+                f"with socket.create_connection({listener.getsockname()!r}) as connection:\n"
+                " try:\n"
+                "  with handoff.gate():\n"
+                "   connection.sendall(b'not-contended\\n')\n"
+                " except system.LockBusy:\n"
+                "  connection.sendall(b'contended\\n')\n"
+                f" outcome = dispatch(Firing({self.identifier!r}, {str(self.root)!r}, 'clock'), runner=LocalChildRunner())\n"
+                " connection.sendall((json.dumps({'status': outcome.status, 'message': outcome.message, 'run_id': outcome.run_id}) + '\\n').encode())\n",
+                encoding="utf-8")
+            document = task_scheduler.build_task_xml(
+                command=sys.executable,
+                arguments=subprocess.list2cmdline([str(program)]),
+                working_dir=str(self.root), schedules=[schedule],
+                description="Isolated clock/maintenance regression",
+                uri=task_path, user_id=task_scheduler.current_user_id(), now=now)
+            xml_file = self.root / "task.xml"
+            xml_file.write_text(document, encoding="utf-16")
+            try:
+                code, _output, error = task_scheduler._run([
+                    "/Create", "/TN", task_path, "/XML", str(xml_file), "/F"])
+                self.assertEqual(0, code, error)
+                connection, _address = listener.accept()
+                with connection:
+                    connection.settimeout(45)
+                    with connection.makefile("r", encoding="utf-8") as messages:
+                        self.assertEqual("contended", messages.readline().strip())
+                        timer = threading.Timer(0.3, lambda: holder.communicate("release\n"))
+                        timer.start()
+                        try:
+                            outcome = json.loads(messages.readline())
+                        finally:
+                            timer.join(10)
+                self.assertEqual("success", outcome["status"], outcome)
+                self.assertEqual(["executed"], marker.read_text().splitlines())
+                print(f"Native clock survived maintenance: due={due.isoformat()} run_id={outcome['run_id']} executions=1")
+            finally:
+                code, _output, error = task_scheduler._run([
+                    "/Delete", "/TN", task_path, "/F"])
+                self.assertEqual(0, code, error)
+
+
 class TestInstallationGenerations(unittest.TestCase):
     """Where an installation may write, and what it may never guess.
 
@@ -2912,28 +3412,31 @@ class TestInstallationGenerations(unittest.TestCase):
 
     def test_generation_listing_names_candidate_and_rejected_status(self) -> None:
         from agents_live.cli.commands import generations
-        self._activate_generation("6.9.0")
-        built = deploy.generation.load("6.9.0")
         from dataclasses import replace
-        candidate = replace(built, provenance=deploy.generation.Provenance(
-            "local-artifact", "candidate.whl", "a" * 64),
-            validated="2026-09-06T12:30:00+02:00")
-        with mock.patch.object(deploy.generation, "load", return_value=candidate):
-            deploy.generation.classify("6.9.0", "rejected")
-            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    generations.main(["list"])
-                row = json.loads(output.getvalue())["versions"][0]
-            self.assertEqual("release-candidate", row["channel"])
-            self.assertEqual("local-artifact", row["source"])
-            self.assertEqual("rejected", row["status"])
-            self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
-            with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    generations.main(["list"])
-            self.assertIn("local release candidate (rejected)", output.getvalue())
+        for version, channel in (("6.9.0", "release-candidate"), ("6.9.2rc3", "candidate")):
+            self._activate_generation(version)
+            built = deploy.generation.load(version)
+            candidate = replace(built, provenance=deploy.generation.Provenance(
+                "local-artifact", "candidate.whl", "a" * 64),
+                validated="2026-09-06T12:30:00+02:00")
+            with self.subTest(version=version), \
+                    mock.patch.object(deploy.generation, "load", return_value=candidate), \
+                    mock.patch.object(deploy.layout, "installed_generations", return_value=[version]):
+                deploy.generation.classify(version, "rejected")
+                with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "1"}):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        generations.main(["list"])
+                    row = json.loads(output.getvalue())["versions"][0]
+                self.assertEqual(channel, row["channel"])
+                self.assertEqual("local-artifact", row["source"])
+                self.assertEqual("rejected", row["status"])
+                self.assertEqual("2026-09-06T10:30:00Z", row["validated"])
+                with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        generations.main(["list"])
+                self.assertIn("local release candidate (rejected)", output.getvalue())
 
     def test_public_versions_command_replaces_generations(self) -> None:
         self._activate_generation("6.9.0.dev0+g123abcd")
@@ -3913,6 +4416,526 @@ class TestInstallationGenerations(unittest.TestCase):
 
 
 class TestCrossModuleAgreements(unittest.TestCase):
+    def test_numbered_attempt_retry_preserves_build_and_defers_tag(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = script["prepare_attempt"]
+        scope = prepare.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "pyproject.toml"
+            package = root / "package.py"
+            version_file = root / "VERSION"
+            changelog = root / "changelog.md"
+            project.write_text('version = "1.2.2"\n')
+            package.write_text('__version__ = "1.2.2"\n')
+            version_file.write_text("1.2.2\n")
+            changelog.write_text("## Unreleased\n\n- fix: Correct behavior.\n")
+            workflow = root / ".github" / "workflows" / "test.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Test\n")
+
+            def git(*arguments):
+                return subprocess.run(["git", *arguments], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            source = git("rev-parse", "HEAD")
+            record = {"id": "1.2.3rc1", "version": "1.2.3rc1", "target": "1.2.3",
+                      "source_commit": source, "kind": "rc",
+                      "branch": "release/v1.2.3rc1-candidate"}
+            git("switch", "-c", record["branch"])
+            builds = []
+            ready = False
+
+            def run(command, **_kwargs):
+                if command[:2] == ["uv", "version"]:
+                    project.write_text(f'version = "{command[2]}"\n')
+                elif "--build-artifacts" in command:
+                    builds.append(command)
+                    dist = root / "dist"
+                    dist.mkdir(exist_ok=True)
+                    for name in ("agents_live-1.2.3rc1-py3-none-any.whl",
+                                 "agents_live-1.2.3rc1.tar.gz", "install.ps1", "install.sh"):
+                        (dist / name).write_bytes(name.encode())
+                elif command == ["ready"]:
+                    if not ready:
+                        raise script["ReleaseError"]("readiness failed")
+                else:
+                    return git(*command[1:])
+                return ""
+
+            (root / ".git" / "info" / "exclude").write_text("dist/\n")
+            with mock.patch.dict(scope, {
+                "ROOT": root, "PYPROJECT": project, "VERSION_FILES": (package, version_file),
+                "CHANGELOG": changelog, "RELEASE_FILES": (project, package, version_file, changelog),
+                "ACTIVE_ATTEMPT": record, "_git": git, "_run": run,
+                "_gate_commands": lambda: [["build", "--build-artifacts"], ["ready"]],
+            }):
+                with self.assertRaisesRegex(script["ReleaseError"], "readiness failed"):
+                    prepare()
+                original = script["_candidate_wheel"](record["version"]).read_bytes()
+                self.assertEqual("", git("tag", "--list"))
+                self.assertIn("## Unreleased\n\n- fix:", changelog.read_text())
+                ready = True
+                prepare()
+                prepare()
+                self.assertEqual(1, len(builds))
+                self.assertEqual(original, script["_candidate_wheel"](record["version"]).read_bytes())
+                script["_candidate_wheel"](record["version"]).write_bytes(b"changed")
+                with self.assertRaises(script["ReleaseError"]):
+                    prepare()
+                self.assertEqual(1, len(builds))
+                self.assertEqual("", git("tag", "--list"))
+
+    def test_final_attempt_requires_independent_acceptance_before_tag(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        finalize = script["finalize_attempt"]
+        scope = finalize.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                if arguments[0] == "ls-remote":
+                    return ""
+                return subprocess.run(["git", *arguments], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "source").write_text("source")
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            preparation = root / ".git" / "preparation.json"
+            preparation.write_text('{"version":"1.2.3"}')
+            acceptance = root / ".git" / "acceptance.json"
+            accepted = False
+
+            def check_acceptance(_version):
+                if not accepted:
+                    raise script["ReleaseError"]("independent acceptance missing")
+                return {}
+
+            record = {"id": "1.2.3-final-1", "target": "1.2.3", "kind": "final",
+                      "version": "1.2.3", "source_commit": git("rev-parse", "HEAD")}
+            with mock.patch.dict(scope, {
+                "ROOT": root, "ACTIVE_ATTEMPT": record, "_git": git,
+                "_run": lambda command, **_kwargs: git(*command[1:]),
+                "_check_attempt_checkout": lambda: None,
+                "_check_preparation": lambda _version: {},
+                "_check_candidate_acceptance": check_acceptance,
+                "_preparation_path": lambda _version: preparation,
+                "_acceptance_path": lambda _version: acceptance,
+            }):
+                with self.assertRaisesRegex(script["ReleaseError"], "independent"):
+                    finalize()
+                self.assertEqual("", git("tag", "--list"))
+                acceptance.write_text('{"accepted":true}')
+                accepted = True
+                finalize()
+                tag_object = git("rev-parse", "v1.2.3")
+                finalize()
+                self.assertEqual(tag_object, git("rev-parse", "v1.2.3"))
+                self.assertEqual("tag", git("cat-file", "-t", "v1.2.3"))
+                acceptance.write_text('{"accepted":true,"changed":true}')
+                with self.assertRaisesRegex(script["ReleaseError"], "identity changed"):
+                    finalize()
+                scope["ACTIVE_ATTEMPT"] = {**record, "kind": "rc", "version": "1.2.3rc2"}
+                with self.assertRaises(script["ReleaseError"]):
+                    finalize()
+
+    def test_installed_attempt_refuses_same_version_different_bytes(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = script["_check_installed_attempt"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"accepted build")
+            record = root / "versions" / "1.2.3" / "generation.json"
+            record.parent.mkdir(parents=True)
+            with mock.patch.dict(check.__globals__, {"_install_root": lambda: root}):
+                for digest in ("0" * 64, script["_sha256"](wheel)):
+                    record.write_text(json.dumps({"provenance": {"sha256": digest}}))
+                    if digest.startswith("0"):
+                        with self.assertRaisesRegex(script["ReleaseError"], "different bytes"):
+                            check("1.2.3", wheel)
+                    else:
+                        check("1.2.3", wheel)
+                record.write_text("{}")
+                with self.assertRaisesRegex(script["ReleaseError"], "provenance"):
+                    check("1.2.3", wheel)
+
+    def test_rc_rejection_to_independent_final_acceptance_and_retry(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        scope = script["prepare_attempt"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            alias = Path(temporary) / "path-alias"
+            alias.mkdir()
+            root = alias / ".."
+            project = root / "pyproject.toml"
+            package = root / "package.py"
+            version_file = root / "VERSION"
+            changelog = root / "changelog.md"
+            project.write_text('version = "1.2.2"\n')
+            package.write_text('__version__ = "1.2.2"\n')
+            version_file.write_text("1.2.2\n")
+            changelog.write_text("## Unreleased\n\n- fix: Correct behavior.\n")
+            workflow = root / ".github" / "workflows" / "test.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Test\n")
+            manifest = root / ".github" / "release-channels.toml"
+            manifest.write_text('[bake]\nversion = "1.2.3"\n[bake.candidate_cycle]\nmodel = "numbered-rc"\n')
+
+            def git(*arguments):
+                if arguments[0] == "ls-remote":
+                    return ""
+                return subprocess.run(["git", *arguments], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            source = git("rev-parse", "HEAD")
+            (root / ".git" / "info" / "exclude").write_text("dist/\n")
+
+            def run(command, **_kwargs):
+                if command[:2] == ["uv", "version"]:
+                    project.write_text(f'version = "{command[2]}"\n')
+                elif "--build-artifacts" in command:
+                    dist = root / "dist"
+                    dist.mkdir(exist_ok=True)
+                    version = scope["ACTIVE_ATTEMPT"]["version"]
+                    for name in (f"agents_live-{version}-py3-none-any.whl",
+                                 f"agents_live-{version}.tar.gz", "install.ps1", "install.sh"):
+                        (dist / name).write_bytes((scope["ACTIVE_ATTEMPT"]["id"] + name).encode())
+                else:
+                    return git(*command[1:])
+                return ""
+
+            with mock.patch.dict(scope, {
+                "ROOT": root, "PYPROJECT": project, "VERSION_FILES": (package, version_file),
+                "CHANGELOG": changelog, "RELEASE_FILES": (project, package, version_file, changelog),
+                "_git": git, "_run": run, "_gate_commands": lambda: [
+                    ["build", "--build-artifacts", str(scope["ROOT"])]],
+                "_installed_version": lambda: "1.2.2",
+                "_installed_all_json": lambda _command: {"ok": True},
+            }):
+                accepted_rc = None
+                final_paths = []
+                for identifier in ("1.2.3rc1", "1.2.3rc2", "1.2.3-final-1", "1.2.3-final-2"):
+                    git("switch", "main")
+                    shutil.rmtree(root / "dist", ignore_errors=True)
+                    kind = "rc" if "rc" in identifier else "final"
+                    record = {"schema": 1, "id": identifier, "target": "1.2.3",
+                              "version": identifier if kind == "rc" else "1.2.3", "kind": kind,
+                              "source_commit": source, "branch": f"release/v{identifier}-candidate",
+                              "accepted_rc": accepted_rc}
+                    if kind == "final":
+                        rc_path = script["_cycle_directory"]("1.2.3") / accepted_rc / "acceptance.json"
+                        record["rc_acceptance_sha256"] = script["_sha256"](rc_path)
+                    scope["ACTIVE_ATTEMPT"] = record
+                    script["_write_once"](script["_attempt_path"]() / "attempt.json", record)
+                    git("switch", "-c", record["branch"])
+                    script["prepare_attempt"]()
+                    self.assertEqual("", git("tag", "--list"))
+                    if identifier in ("1.2.3rc1", "1.2.3-final-1"):
+                        if kind == "final":
+                            with self.assertRaises(script["ReleaseError"]):
+                                script["finalize_attempt"]()
+                            final_paths.append(script["_candidate_wheel"]("1.2.3"))
+                        script["reject_attempt"]("behavior rejected")
+                        with self.assertRaisesRegex(script["ReleaseError"], "rejected"):
+                            script["_load_attempt"](identifier)
+                        continue
+                    version = record["version"]
+                    if kind == "final":
+                        with self.assertRaises(script["ReleaseError"]):
+                            script["finalize_attempt"]()
+                        final_paths.append(script["_candidate_wheel"](version))
+                        self.assertIn("## 1.2.3 -", changelog.read_text())
+                    script["_write_candidate_acceptance"](
+                        version, root, script["_candidate_wheel"](version), operation_id=None,
+                        watchers=((str(root), "safe-watch"),), operational_agent="safe-watch", cost_agent="safe-cost")
+                    script["_retained_preparation"](record, accepted=True)
+                    cycle_directory = script["_cycle_directory"]("1.2.3")
+                    evidence = script["_evidence_identity"]()
+                    with mock.patch.dict(scope, {
+                        "ROOT": root / "another-worktree",
+                        "_cycle_directory": lambda _target: cycle_directory,
+                        "_evidence_identity": lambda: evidence,
+                    }):
+                        script["_retained_preparation"](record, accepted=True)
+                    if kind == "rc":
+                        accepted_rc = identifier
+                        with self.assertRaisesRegex(script["ReleaseError"], "restoration baseline"):
+                            script["reject_attempt"]("missing live baseline must refuse rejection")
+                        git("switch", "main")
+                        manifest.write_text(manifest.read_text() + (
+                            '[bake.promotion]\ndecision = "approved"\n'
+                            f'commit = "{source}"\ndecided_on = "2026-09-14"\n'))
+                        git("add", ".github/release-channels.toml")
+                        git("commit", "-m", "approve accepted source")
+                        source = git("rev-parse", "HEAD")
+                    else:
+                        script["finalize_attempt"]()
+                        script["_check_finalization"](version)
+                        self.assertEqual("tag", git("cat-file", "-t", "v1.2.3"))
+                        uploaded = {}
+                        publication_commands = []
+
+                        def publish_command(command, **_kwargs):
+                            publication_commands.append(command)
+                            if command[:3] == ["gh", "release", "view"]:
+                                return json.dumps({"assets": [
+                                    {"name": name, "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+                                    for name, data in uploaded.items()]})
+                            if command[:3] == ["gh", "release", "upload"]:
+                                asset = Path(command[-1])
+                                self.assertNotIn(asset.name, uploaded)
+                                uploaded[asset.name] = asset.read_bytes()
+                            return ""
+
+                        process = mock.Mock(run=mock.Mock(return_value=subprocess.CompletedProcess(
+                            ["gh"], 1, stdout="", stderr="not found")))
+                        with mock.patch.dict(scope, {
+                            "_require_tools": lambda: None, "_check_publish_state": lambda _version: False,
+                            "_release_notes": lambda _version: "Accepted stable release notes.",
+                            "_run": publish_command, "subprocess": process,
+                        }):
+                            script["publish"]()
+                            self.assertEqual(final_paths[-1].read_bytes(), uploaded[final_paths[-1].name])
+                            self.assertIn("release-evidence.json", uploaded)
+                            self.assertTrue(any("--draft=false" in command for command in publication_commands))
+                            process.run.return_value = subprocess.CompletedProcess(
+                                ["gh"], 0, stdout=json.dumps({"isDraft": True}), stderr="")
+                            publication_commands.clear()
+                            script["publish"]()
+                            self.assertFalse(any("upload" in command for command in publication_commands))
+                            uploaded[final_paths[-1].name] = b"unexpected draft replacement"
+                            publication_commands.clear()
+                            with self.assertRaisesRegex(script["ReleaseError"], "never replace"):
+                                script["publish"]()
+                            self.assertFalse(any("--draft=false" in command for command in publication_commands))
+                self.assertNotEqual(final_paths[0], final_paths[1])
+                self.assertNotEqual(final_paths[0].read_bytes(), final_paths[1].read_bytes())
+                self.assertTrue(final_paths[0].exists())
+                rows = {row["attempt"]: row["state"] for row in script["cycle_status"]()}
+                self.assertEqual({"1.2.3rc1": "rejected", "1.2.3rc2": "accepted",
+                                  "1.2.3-final-1": "rejected", "1.2.3-final-2": "finalized"}, rows)
+                final_paths[1].write_bytes(b"tampered")
+                rows = {row["attempt"]: row["state"] for row in script["cycle_status"]()}
+                self.assertEqual("invalid-evidence", rows["1.2.3-final-2"])
+
+    def test_release_attempt_evidence_is_immutable_and_scoped(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scope = script["_write_once"].__globals__
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_git": lambda *_args: str(root / "common"),
+                "ACTIVE_ATTEMPT": {"id": "1.2.3-final-1", "target": "1.2.3",
+                                   "version": "1.2.3", "source_commit": "a" * 40},
+            }):
+                first = script["_preparation_path"]("1.2.3")
+                payload = {"wheel_sha256": "a" * 64}
+                script["_write_once"](first, payload)
+                script["_write_once"](first, payload)
+                with self.assertRaises(script["ReleaseError"]):
+                    script["_write_once"](first, {"wheel_sha256": "b" * 64})
+                with self.assertRaises(script["ReleaseError"]):
+                    script["_acceptance_path"]("1.2.3rc1")
+                scope["ACTIVE_ATTEMPT"] = {
+                    **scope["ACTIVE_ATTEMPT"], "id": "1.2.3-final-2"}
+                second = script["_preparation_path"]("1.2.3")
+                self.assertNotEqual(first, second)
+                self.assertFalse(second.exists())
+                self.assertEqual(payload, json.loads(first.read_text()))
+                self.assertIsNone(script["_receipt_tag_object"]("1.2.3"))
+
+    def test_stable_publication_rejects_noncanonical_and_candidate_tags(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        validate = script["_stable_tag_version"]
+        self.assertEqual("1.2.3", validate("v1.2.3"))
+        for tag in ("v1.2.3rc1", "v1.2.3.dev0+g12345678", "v1.2.3+local",
+                    "v01.2.3", "1.2.3", "v1.2.3\n", "main"):
+            with self.subTest(tag=tag):
+                with self.assertRaises(script["ReleaseError"]):
+                    validate(tag)
+
+    def test_publication_requires_stable_metadata_and_finalized_artifact_hashes(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        verify = script["verify_publication_assets"]
+        scope = verify.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dist = root / "dist"
+            dist.mkdir()
+            filenames = ("agents_live-1.2.3-py3-none-any.whl", "agents_live-1.2.3.tar.gz",
+                         "install.ps1", "install.sh")
+            for name in filenames:
+                (dist / name).write_bytes(name.encode())
+            evidence = {"schema": 1, "version": "1.2.3", "tag": "v1.2.3",
+                        "commit": "a" * 40, "tag_object": "b" * 40,
+                        "attempt": "1.2.3-final-2", "accepted": True,
+                        "artifacts": {name: script["_sha256"](dist / name) for name in filenames}}
+            (dist / "release-evidence.json").write_text(json.dumps(evidence))
+            metadata = {"tagName": "v1.2.3", "isDraft": False, "isPrerelease": False}
+            with mock.patch.dict(scope, {
+                "ROOT": root, "_current_version": lambda: "1.2.3",
+                "_run": lambda *_args, **_kwargs: json.dumps(metadata),
+                "_git": lambda *args: "b" * 40 if args[-1] == "refs/tags/v1.2.3" else "a" * 40,
+            }):
+                verify("v1.2.3")
+                for field in ("isDraft", "isPrerelease"):
+                    metadata[field] = True
+                    with self.assertRaises(script["ReleaseError"]):
+                        verify("v1.2.3")
+                    metadata[field] = False
+                evidence["attempt"] = "1.2.3rc2"
+                (dist / "release-evidence.json").write_text(json.dumps(evidence))
+                with self.assertRaises(script["ReleaseError"]):
+                    verify("v1.2.3")
+                evidence["attempt"] = "1.2.3-final-2"
+                (dist / "release-evidence.json").write_text(json.dumps(evidence))
+                (dist / filenames[0]).write_bytes(b"replacement")
+                with self.assertRaisesRegex(script["ReleaseError"], "differ"):
+                    verify("v1.2.3")
+
+    def test_rc_allocation_refuses_consumed_local_and_remote_identities(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = script["prepare_cycle"]
+        scope = prepare.__globals__
+        for consumed_by in ("history", "remote", "local-deploy", "attempt", "higher"):
+            with self.subTest(consumed_by=consumed_by), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                common = root / "common"
+                common.mkdir()
+                bake = {"version": "1.2.3", "branch": "bake/v1.2.3-rc",
+                        "candidate_cycle": {"model": "numbered-rc", "next": "1.2.3rc2", "history": {}}}
+                if consumed_by == "history":
+                    bake["candidate_cycle"]["history"]["1.2.3rc2"] = {"status": "rejected"}
+                elif consumed_by == "local-deploy":
+                    (common / "agents-live-local-deploy" / "candidates" / "1.2.3rc2").mkdir(parents=True)
+                elif consumed_by in {"attempt", "higher"}:
+                    number = "1.2.3rc3" if consumed_by == "higher" else "1.2.3rc2"
+                    (common / "agents-live-release" / "cycle-1.2.3" / number).mkdir(parents=True)
+                commands = []
+
+                def git(*args):
+                    if args[0] == "status":
+                        return ""
+                    if args[0] == "branch":
+                        return bake["branch"]
+                    if args == ("rev-parse", "--git-common-dir"):
+                        return str(common)
+                    if args[0] == "rev-parse":
+                        return "a" * 40
+                    if args[0] == "ls-remote" and consumed_by == "remote":
+                        return "a" * 40 + "\trefs/tags/v1.2.3rc2"
+                    return ""
+
+                with mock.patch.dict(scope, {
+                    "ROOT": root, "_require_tools": lambda: None,
+                    "_cycle_configuration": lambda: bake, "_git": git,
+                    "_run": lambda command, **_kwargs: commands.append(command),
+                }):
+                    with self.assertRaises(script["ReleaseError"]):
+                        prepare(rc="1.2.3rc2")
+                    self.assertFalse(any(command[:2] == ["git", "worktree"] for command in commands))
+
+    def test_final_source_requires_exact_approval_and_only_promotion_metadata(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = script["_check_final_source"]
+        original = '[bake]\nversion = "1.2.3"\n[bake.promotion]\ndecision = "continue-bake"\n'
+        promoted = ('[bake]\nversion = "1.2.3"\n[bake.promotion]\n'
+                    'decision = "approved"\ncommit = "' + "a" * 40 + '"\ndecided_on = "2026-09-14"\n')
+        changed = ".github/release-channels.toml"
+
+        def git(*args):
+            if args[0] == "merge-base":
+                return "a" * 40
+            if args[0] == "diff":
+                return changed
+            return original if args[1].startswith("a" * 40) else promoted
+
+        with mock.patch.dict(check.__globals__, {"_git": git}):
+            check("a" * 40, "b" * 40)
+            for replacement in (promoted.replace("a" * 40, "c" * 40),
+                                promoted.replace("approved", "continue-bake"),
+                                promoted.replace("1.2.3", "1.2.4"),
+                                promoted.replace("2026-09-14", "not-a-date")):
+                with mock.patch.dict(check.__globals__, {"_git": lambda *args: (
+                        replacement if args[0] == "show" and args[1].startswith("b" * 40) else git(*args))}):
+                    with self.assertRaises(script["ReleaseError"]):
+                        check("a" * 40, "b" * 40)
+            changed += "\nsrc/agents_live/__init__.py"
+            with self.assertRaises(script["ReleaseError"]):
+                check("a" * 40, "b" * 40)
+
+    def test_legacy_tag_migration_preserves_object_and_refuses_remote_tags(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        migrate = script["migrate_legacy_tag"]
+        scope = migrate.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote = ""
+
+            def git(*args):
+                if args[0] == "ls-remote":
+                    return remote
+                return subprocess.run(["git", *args], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "source").write_text("legacy source")
+            git("add", ".")
+            git("commit", "-m", "legacy candidate")
+            git("tag", "-a", "v1.2.3", "-m", "legacy candidate")
+            original = git("rev-parse", "v1.2.3")
+            receipt = {"commit": git("rev-parse", "HEAD"), "tag_object": original, "installers": []}
+            for name in ("wheel", "sdist", "install.ps1", "install.sh"):
+                path = root / ".git" / name
+                path.write_bytes(name.encode())
+                if name in {"wheel", "sdist"}:
+                    receipt[name] = str(path)
+                    receipt[f"{name}_sha256"] = script["_sha256"](path)
+                else:
+                    receipt["installers"].append({"path": str(path), "sha256": script["_sha256"](path)})
+            store = root / ".git" / "agents-live-release"
+            store.mkdir()
+            preparation = store / "preparation-1.2.3.json"
+            preparation.write_text(json.dumps(receipt))
+            before = preparation.read_bytes()
+            legacy = {"kind": "legacy-candidate", "status": "rejected", "artifact_version": "1.2.3",
+                      **{key: receipt[key] for key in ("commit", "wheel_sha256", "sdist_sha256")}}
+            with mock.patch.dict(scope, {
+                "ROOT": root, "_git": git,
+                "_run": lambda command, **_kwargs: git(*command[1:]),
+                "_cycle_configuration": lambda: {"candidate_cycle": {"history": {"1.2.3rc1": legacy}}},
+            }):
+                remote = original + "\trefs/tags/v1.2.3"
+                with self.assertRaisesRegex(script["ReleaseError"], "remote"):
+                    migrate("v1.2.3")
+                self.assertEqual(original, git("rev-parse", "v1.2.3"))
+                remote = ""
+                migrate("v1.2.3")
+                migrate("v1.2.3")
+                archive = f"refs/tags/archive/legacy-v1.2.3-{original[:12]}"
+                self.assertEqual(original, git("rev-parse", archive))
+                self.assertEqual("tag", git("cat-file", "-t", archive))
+                self.assertEqual("", git("tag", "--list", "v1.2.3"))
+                self.assertEqual(before, preparation.read_bytes())
+
+
     def test_release_reads_commit_qualified_installed_bake_version(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         installed_version = release["_installed_version"]
@@ -4007,6 +5030,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
         render = script["_render"]
         config = tomllib.loads((REPOSITORY / ".github" / "release-channels.toml").read_text())
+        config["bake"].pop("candidate_cycle", None)
         def github(*arguments):
             if arguments[1] == "repo":
                 return {"nameWithOwner": "example/project", "url": "https://github.com/example/project"}
@@ -5669,6 +6693,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
             )
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("--repo", completed.stdout)
+        self.assertIn("--rc", completed.stdout)
+
+    def test_local_deploy_accepts_rc_release_lines(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        self.assertEqual((6, 9, 2), script["_version_tuple"]("6.9.2rc2"))
+        for invalid in ("6.9.2rc", "6.9.2garbage", "6.9.2rc2junk"):
+            with self.subTest(version=invalid), self.assertRaises(
+                    script["LocalDeployError"]):
+                script["_version_tuple"](invalid)
 
     def test_local_deploy_rejects_an_implicit_version_downgrade(self) -> None:
         script = runpy.run_path(
@@ -5684,6 +6717,73 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.assertRaisesRegex(
                     script["LocalDeployError"], "pass --allow-downgrade"):
                 deploy(Path("C:/repo"))
+
+    def test_local_deploy_rc_retains_bytes_across_failed_readiness(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["_prepare_artifact"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            wheel = root / "agents_live-6.9.2rc2-py3-none-any.whl"
+            wheel.write_bytes(b"immutable candidate")
+            digest = script["RELEASE"]["_sha256"](wheel)
+            build = mock.Mock(return_value=(wheel, digest))
+            ready = mock.Mock(side_effect=script["LocalDeployError"]("readiness failed"))
+            with mock.patch.dict(scope, {
+                "_state_directory": lambda: root,
+                "_build_new_artifact": build,
+                "_run": ready,
+                "_require_unchanged_checkout": mock.Mock(),
+            }):
+                with self.assertRaisesRegex(script["LocalDeployError"], "readiness failed"):
+                    script["_prepare_artifact"]("first-commit", "6.9.2rc2")
+                state = root / "candidates" / "6.9.2rc2"
+                self.assertFalse((state / "preparation.json").exists())
+                self.assertFalse((state / "prepare.lock").exists())
+                ready.side_effect = None
+                self.assertEqual((wheel, digest), script["_prepare_artifact"](
+                    "first-commit", "6.9.2rc2"))
+                self.assertEqual((wheel, digest), script["_prepare_artifact"](
+                    "first-commit", "6.9.2rc2"))
+                build.assert_called_once()
+                self.assertEqual(2, ready.call_count)
+                self.assertEqual("first-commit", json.loads(
+                    (state / "preparation.json").read_text())["commit"])
+                with self.assertRaisesRegex(script["LocalDeployError"], "different source"):
+                    script["_prepare_artifact"]("changed-commit", "6.9.2rc2")
+                wheel.write_bytes(b"modified candidate")
+                with self.assertRaisesRegex(script["LocalDeployError"], "identity changed"):
+                    script["_prepare_artifact"]("first-commit", "6.9.2rc2")
+                build.assert_called_once()
+
+    def test_local_deploy_rc_cli_rejects_unreserved_candidates(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["main"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            channels = root / "channels.toml"
+            channels.write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'next = "6.9.2rc2"\n'
+                '[bake.candidate_cycle.history."6.9.2rc1"]\nstatus = "rejected"\n',
+                encoding="utf-8")
+            prepare = mock.Mock(side_effect=script["LocalDeployError"]("reached preparation"))
+            with mock.patch.dict(scope, {
+                "CHANNELS": channels,
+                "_synchronize": lambda: "commit",
+                "_bake_configuration": lambda: ("bake/v6.9.2-rc", "6.9.2"),
+                "_prepare_artifact": prepare,
+            }), mock.patch.dict(scope["RELEASE"], {"_installed_version": lambda: "6.9.1"}):
+                for version in ("6.9.2rc1", "6.9.2rc3", "6.9.3rc2", "../rc2"):
+                    with self.subTest(version=version), mock.patch.object(
+                            sys, "argv", ["local-deploy.py", "--repo", str(root), "--rc", version]):
+                        with self.assertRaises(script["LocalDeployError"]):
+                            script["main"]()
+                prepare.assert_not_called()
+                with mock.patch.object(sys, "argv", [
+                    "local-deploy.py", "--repo", str(root), "--rc", "6.9.2rc2",
+                ]), self.assertRaisesRegex(script["LocalDeployError"], "reached preparation"):
+                    script["main"]()
+                prepare.assert_called_once_with("commit", "6.9.2rc2")
 
     def test_release_report_includes_standalone_promotion_decisions(self) -> None:
         script = runpy.run_path(
@@ -5856,6 +6956,82 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertNotIn("Prepare and accept 6.9.0 before publication", report)
         self.assertIn("does not independently verify PyPI", report)
 
+    def test_release_report_blocks_a_migrated_rc_cycle_even_after_promotion(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
+        render = script["_render"]
+        cycle = {
+            "model": "numbered-rc", "implementation": "pending", "next": "6.9.2rc2",
+            "history": {"6.9.2rc1": {
+                "status": "rejected", "kind": "legacy-candidate",
+                "artifact_version": "6.9.2", "evidence": "unavailable",
+            }},
+        }
+        config = {
+            "release": {"branch": "main"},
+            "bake": {
+                "branch": "bake/v6.9.2-rc", "version": "6.9.2",
+                "candidate_cycle": cycle, "deployed_commit": "d" * 40,
+                "deployed_version": "6.9.2.dev0+gdddddddd", "validated_on": "2026-09-11",
+                "promotion": {"decision": "approved", "commit": "d" * 40,
+                              "decided_on": "2026-09-13"},
+                "issues": {}, "recommendations": {
+                    "overall": "Implement RC tooling before preparation.",
+                    "testing": "Accept the exact final stable bytes independently.",
+                },
+            },
+        }
+
+        def response(*arguments):
+            if arguments[:3] == ("gh", "repo", "view"):
+                return {"nameWithOwner": "owner/repository", "url": "https://example.invalid"}
+            if arguments[:3] == ("gh", "release", "view"):
+                return {"tagName": "v6.9.1", "publishedAt": "2026-09-07T20:02:47Z",
+                        "isDraft": False, "isPrerelease": False, "url": "https://example.invalid"}
+            return []
+
+        with mock.patch.dict(render.__globals__, {
+            "_json": response, "_run": lambda *_args: "0",
+            "_sha": lambda _ref: "d" * 40, "_count": lambda *_args: (0, 0),
+            "subprocess": mock.Mock(run=mock.Mock(return_value=mock.Mock(returncode=0))),
+        }):
+            report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
+            result = json.loads(render(
+                config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
+            cycle["implementation"] = "numbered-rc-v1"
+            with mock.patch.dict(render.__globals__, {"_local_attempts": lambda _bake: [
+                    {"attempt": "6.9.2-final-1", "state": "finalized"}]}):
+                implemented = json.loads(render(
+                    config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
+                implemented_report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
+            cycle["implementation"] = "pending"
+            with mock.patch.dict(render.__globals__, {
+                "_count": lambda *_args: (1, 1),
+            }):
+                active_report = render(
+                    config, datetime(2026, 9, 13, tzinfo=timezone.utc))
+
+        self.assertIn("**`blocked`**", report)
+        self.assertIn("`6.9.2rc1` | rejected (legacy-candidate) | `6.9.2` | unavailable", report)
+        self.assertIn("Next package: `6.9.2rc2`", report)
+        self.assertNotIn("Prepare and accept the official 6.9.2 candidate", report)
+        self.assertEqual("blocked", result["development_state"])
+        self.assertEqual("bake/v6.9.2-rc", result["target_branch"])
+        self.assertTrue(result["active_bake"])
+        self.assertFalse(result["bake"]["promotion_approved"])
+        self.assertEqual(cycle, result["candidate_cycle"])
+        self.assertIn("#511", result["next_actions"][0])
+        self.assertIn(
+            "uv run --script tools/local-deploy.py --repo <live-repository>"
+            " --rc 6.9.2rc2\n", active_report)
+        self.assertNotIn("--repo <live-repository>\n", active_report)
+        self.assertIn("## Last recorded tested deployment", active_report)
+        self.assertEqual("main", implemented["target_branch"])
+        self.assertFalse(implemented["active_bake"])
+        self.assertIn("--publish --attempt 6.9.2-final-1", implemented["next_actions"][0])
+        self.assertIn("`6.9.2-final-1` | finalized", implemented_report)
+        self.assertFalse(implemented["publication"]["github"]["target_published"])
+        self.assertEqual("not-verified", implemented["publication"]["pypi"]["status"])
+
     def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
@@ -5882,6 +7058,200 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertEqual([
             "git", "pull", "--ff-only", "origin", "bake/v6.7.0-local",
         ], commands[0])
+
+    def test_recorded_rc_is_recoverable_but_cannot_be_prepared_again(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        select_rc = script["_requested_rc"]
+        with tempfile.TemporaryDirectory() as temporary:
+            channels = Path(temporary) / "channels.toml"
+            channels.write_text(
+                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
+                'next = "1.2.3rc5"\n'
+                '[bake.candidate_cycle.history."1.2.3rc4"]\n'
+                'status = "prepared"\nkind = "numbered-rc"\n'
+                'artifact_version = "1.2.3rc4"\n', encoding="utf-8")
+            with mock.patch.dict(select_rc.__globals__, {"CHANNELS": channels}):
+                self.assertEqual("1.2.3rc4", select_rc(
+                    "1.2.3rc4", "1.2.3", recovery=True))
+                self.assertEqual("1.2.3rc5", select_rc("1.2.3rc5", "1.2.3"))
+                for version, recovery in (("1.2.3rc4", False),
+                                          ("1.2.3rc5", True),
+                                          ("1.2.3rc3", True)):
+                    with self.subTest(version=version, recovery=recovery):
+                        with self.assertRaises(script["LocalDeployError"]):
+                            select_rc(version, "1.2.3", recovery=recovery)
+                original = channels.read_text(encoding="utf-8")
+                for before, after in (
+                    ('status = "prepared"', 'status = "rejected"'),
+                    ('kind = "numbered-rc"', 'kind = "legacy-candidate"'),
+                    ('artifact_version = "1.2.3rc4"',
+                     'artifact_version = "1.2.3"'),
+                    ('model = "numbered-rc"', 'model = "legacy"'),
+                ):
+                    with self.subTest(replacement=after):
+                        channels.write_text(original.replace(before, after),
+                                            encoding="utf-8")
+                        with self.assertRaises(script["LocalDeployError"]):
+                            select_rc("1.2.3rc4", "1.2.3", recovery=True)
+
+    def test_provider_recovery_requires_candidate_confirmed_optional_failure(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        decide = script["_recovery_health"]
+        baseline = {"ok": False, "checks": [
+            {"check": name, "ok": True, "detail": "healthy"}
+            for name in ("installation", "host runtime", "repository registry", "ownership test")
+        ] + [{"check": "provider CLI example", "ok": False, "detail": "CLI absent"}]}
+        candidate = json.loads(json.dumps(baseline))
+        candidate["ok"] = True
+        candidate["checks"][-1].update(
+            ok=True, detail="on-demand launch not ready; CLI absent")
+        self.assertEqual(("provider CLI example",), decide(baseline, candidate))
+        for change in ("runtime", "missing", "candidate", "required", "duplicate", "malformed"):
+            with self.subTest(change=change):
+                old = json.loads(json.dumps(baseline))
+                new = json.loads(json.dumps(candidate))
+                if change == "runtime":
+                    old["checks"][1]["ok"] = False
+                elif change == "missing":
+                    new["checks"].pop(3)
+                elif change == "candidate":
+                    new["ok"] = False
+                elif change == "required":
+                    new["checks"][-1]["detail"] = "launchable executable"
+                elif change == "duplicate":
+                    new["checks"].append(new["checks"][0])
+                else:
+                    old["checks"][0]["ok"] = "true"
+                with self.assertRaises(script["LocalDeployError"]):
+                    decide(old, new)
+
+    def test_candidate_recovery_probe_executes_exact_wheel_without_activation(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        probe = script["_candidate_json"]
+        with tempfile.TemporaryDirectory() as temporary:
+            wheel = Path(temporary) / "agents_live-1.2.3rc4-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("agents_live/__init__.py", '__version__ = "1.2.3rc4"\n')
+                archive.writestr("agents_live/cli/__init__.py", "")
+                archive.writestr("agents_live/cli/__main__.py",
+                    'import json,sys\nprint(json.dumps({"argv":sys.argv[1:]}))\n')
+            with mock.patch.dict(probe.__globals__, {
+                "_installed_cli": lambda: Path(sys.executable).parent / "agents-live",
+            }):
+                self.assertEqual({"argv": ["--json", "doctor", "--all-repos"]},
+                                 probe(wheel, "1.2.3rc4", "doctor"))
+                with self.assertRaises(script["LocalDeployError"]):
+                    probe(wheel, "1.2.3rc5", "doctor")
+
+    def test_provider_recovery_preserves_receipts_refusals_and_rollback(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy_candidate = script["deploy"]
+        scope = deploy_candidate.__globals__
+        for scenario in ("success", "changed-source", "missing-readiness", "unhealthy", "postcheck"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                wheel = root / "agents_live-1.2.3rc4-py3-none-any.whl"
+                wheel.write_bytes(b"retained wheel")
+                digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+                (root / "preparation.json").write_text(
+                    json.dumps({"commit": "a" * 40}), encoding="utf-8")
+                status = {"agents": [{"repository": str(root), "identifier": "sample",
+                                      "state": "started", "loadable": True}]}
+                old = {"ok": False, "checks": [
+                    {"check": name, "ok": True, "detail": "healthy"}
+                    for name in ("installation", "host runtime", "repository registry")
+                ] + [{"check": "provider CLI example", "ok": False, "detail": "absent"}]}
+                new = json.loads(json.dumps(old))
+                new["ok"] = True
+                new["checks"][-1].update(ok=True, detail="on-demand launch not ready; absent")
+                if scenario == "unhealthy":
+                    old["checks"][1]["ok"] = False
+                selected = ["1.2.2"]
+                operations = []
+                payload_file = root / "payload"
+                payload_file.write_bytes(b"previous payload")
+                dashboard = script["Dashboard"](8231, 100, str(root), ())
+                dashboard_versions = {8231: "1.2.2"}
+
+                def installed(*arguments):
+                    if arguments == ("--json", "doctor", "--all-repos"):
+                        return subprocess.CompletedProcess(arguments, 1, json.dumps(old), "")
+                    if arguments == ("--repo", str(root), "upgrade", "--skills-only"):
+                        self.assertEqual("1.2.2", selected[0])
+                        payload_file.write_bytes(b"previous payload")
+                        operations.append("refresh")
+                        return subprocess.CompletedProcess(arguments, 0, "", "")
+                    self.assertEqual(("versions", "activate", "1.2.2"), arguments)
+                    self.assertEqual({}, dashboard_versions)
+                    operations.append("rollback")
+                    selected[0] = "1.2.2"
+                    return subprocess.CompletedProcess(arguments, 0, "", "")
+
+                def upgrade_candidate(*_arguments):
+                    operations.append("upgrade")
+                    selected[0] = "1.2.3rc4"
+                    payload_file.write_bytes(b"candidate payload")
+
+                def stop_dashboard(item):
+                    operations.append("stop " + dashboard_versions.pop(item.port))
+
+                def restart_dashboards(items):
+                    for item in items:
+                        dashboard_versions.setdefault(item.port, selected[0])
+                    operations.append("dashboards")
+
+                def postcheck(*_arguments):
+                    operations.append("postcheck")
+                    if scenario == "postcheck":
+                        raise script["LocalDeployError"]("postcheck failed")
+
+                with mock.patch.dict(scope, {
+                    "_synchronize": lambda: "b" * 40,
+                    "_bake_configuration": lambda: ("bake/v1.2.3-rc", "1.2.3"),
+                    "_requested_rc": lambda version, _target, **_options: version,
+                    "_preparation_directory": lambda _version: root,
+                    "_git": lambda *args: "a" * 40 if args[0] == "merge-base" else (
+                        "src/changed.py" if scenario == "changed-source" else ""),
+                    "_prepared_artifact": lambda *_args: None if scenario == "missing-readiness" else (wheel, digest),
+                    "_require_unchanged_checkout": lambda _commit: None,
+                    "_installed_run": installed,
+                    "_candidate_json": lambda _wheel, _version, command: new if command == "doctor" else status,
+                    "_installed_cli": lambda: root / "current" / "Scripts" / "agents-live.exe",
+                    "watchers_on_host": lambda **_kwargs: [],
+                    "_running_dashboards": lambda: (dashboard,),
+                    "_port_answers": lambda port: port in dashboard_versions,
+                    "_stop_dashboard": stop_dashboard,
+                    "_restart_dashboards": restart_dashboards,
+                    "_upgrade": upgrade_candidate,
+                    "_postcheck": postcheck,
+                }), mock.patch.dict(scope["RELEASE"], {
+                    "_installed_version": lambda: selected[0],
+                    "_installed_all_json": lambda _command: status,
+                    "_started_watchers": lambda _payload: (),
+                }):
+                    if scenario == "success":
+                        receipt = deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
+                        payload = json.loads(receipt.read_text(encoding="utf-8"))
+                        self.assertTrue(payload["deployed"])
+                        self.assertEqual("a" * 40, payload["commit"])
+                        self.assertEqual("b" * 40, payload["recovery"]["tool_commit"])
+                        self.assertEqual(digest, payload["wheel_sha256"])
+                        self.assertEqual("1.2.3rc4", selected[0])
+                        self.assertEqual({8231: "1.2.3rc4"}, dashboard_versions)
+                    else:
+                        with self.assertRaises(script["LocalDeployError"]):
+                            deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
+                        self.assertFalse((root / "receipt.json").exists())
+                        self.assertEqual("1.2.2", selected[0])
+                        self.assertEqual(b"previous payload", payload_file.read_bytes())
+                        self.assertEqual({8231: "1.2.2"}, dashboard_versions)
+                        if scenario == "postcheck":
+                            self.assertIn("rollback", operations)
+                            self.assertIn("stop 1.2.3rc4", operations)
+                            self.assertIn("refresh", operations)
+                            self.assertEqual("dashboards", operations[-1])
+                        else:
+                            self.assertEqual([], operations)
 
     def test_local_deploy_stamps_only_the_archived_bake_source(self) -> None:
         script = runpy.run_path(
@@ -6573,8 +7943,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             positive = json.loads(completed.stdout)
             self.assertEqual([
-                '["ai_credits","25"]',
-                '["list_cost_usd","0.25"]',
+                ["ai_credits", "25"],
+                ["list_cost_usd", "0.25"],
             ], positive["records"][0]["usage"])
             positive["records"][0]["usage"].insert(0, "{malformed")
             with mock.patch.dict(scope, {

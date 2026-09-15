@@ -148,6 +148,16 @@ discarded and rebuilt.
 
 ### Activation
 
+Numbered release attempts keep runtime identity separate from release evidence.
+An RC uses its full `X.Y.ZrcN` directory beside stable versions. Final build
+attempts have distinct Git-local records (`X.Y.Z-final-N`) but all use package
+version `X.Y.Z`; they cannot share or overwrite a sealed installed directory
+containing different wheel bytes. Restore another retained version with the
+public `versions activate` command and verify agent/watcher convergence, then
+remove only the inactive failed version with `versions remove` before testing
+different final bytes. Git-local artifacts, hashes, and rejection decisions
+remain retained independently of installed-version removal.
+
 On POSIX, activation creates a temporary relative symbolic link and replaces
 `current` with `os.replace`. On Windows, activation replaces the local directory
 junction and restores the previous target if creating the new junction fails.
@@ -168,9 +178,9 @@ dispatches resolve through `current`; an in-flight dispatch, watcher, or
 dashboard may finish from the immutable generation where it began.
 
 The hidden installation commands implement this installation and switching
-protocol for bootstrap, upgrade, and bake acceptance. They are not a public
-version-manager command surface. A future public selector can use the same
-protocol without adding a second active-version record.
+protocol for bootstrap and upgrade. Public `versions activate` and
+`versions remove` use the same ownership and liveness checks without adding a
+second active-version record.
 
 ### Failure semantics
 

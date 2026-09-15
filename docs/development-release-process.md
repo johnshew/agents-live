@@ -1,7 +1,7 @@
 ---
 title: Development and Release Process
 description: State machine for moving Agents Live changes through bake, candidate acceptance, and public release
-ms.date: 2026-09-06
+ms.date: 2026-09-14
 ms.topic: concept
 ---
 
@@ -32,14 +32,16 @@ stateDiagram-v2
     [*] --> Released
     Released --> Baking: configure bake branch
     Baking --> Baking: fix, merge, deploy, validate
-    Baking --> PromotionApproved: developer approves exact bake commit
+    Baking --> Candidate: prepare numbered RC from synchronized bake
+    Candidate --> Baking: RC rejected; retain evidence and advance RC number
+    Candidate --> PromotionApproved: exact RC accepted and developer approves source
     PromotionApproved --> Baking: bake commit changes or approval withdrawn
     PromotionApproved --> PromotionProposed: open bake-to-main PR
     PromotionProposed --> Baking: PR closed or bake changes
-    PromotionProposed --> ReadyForCandidate: checks pass and PR merges to main
-    ReadyForCandidate --> Candidate: prepare exact release candidate
-    Candidate --> Baking: candidate rejected; reopen bake
-    Candidate --> Released: candidate accepted and published
+    PromotionProposed --> StablePreparation: checks pass and PR merges to main
+    StablePreparation --> StableAcceptance: build final stable bytes
+    StableAcceptance --> Baking: source fix needed; retain attempt and advance RC
+    StableAcceptance --> Released: final bytes accepted, approved, tagged, and published
 ```
 
 ## State ownership
@@ -50,8 +52,9 @@ stateDiagram-v2
 | `baking` | Configured bake branch plus `decision = "continue-bake"` | Direct administrative commits or focused PRs to bake | Developer approves an exact tested commit |
 | `promotion approved` | `decision = "approved"`, full bake commit, and decision date | No new code without invalidating approval | Open the bake-to-`main` PR |
 | `promotion proposed` | Open bake-to-`main` PR for the approved commit | Promotion PR only | Merge after required checks pass |
-| `ready for candidate` | Bake commit is in synchronized `main` | Release preparation from `main` | Prepare the candidate |
-| `candidate` | Preparation receipt, candidate branch, tag, and immutable artifacts | Candidate acceptance only | Publish or reject back to bake |
+| `candidate` | Numbered RC identity, preparation receipt, and immutable artifacts; no stable tag | RC acceptance only | Approve and promote the source or reject back to bake |
+| `stable preparation` | Accepted RC and approved source commit | Release-metadata changes only | Build final stable artifacts |
+| `stable acceptance` | Attempt-specific stable preparation and artifact hashes | Independent final artifact and installed gates | Tag and publish accepted bytes, or retain a rejected attempt |
 | `released` | Stable tag, GitHub release, and verified PyPI publication | Close the cycle | Start later work in a new bake |
 
 ## Bake development
@@ -110,15 +113,65 @@ and record a new decision. Once approved, open one pull request from bake to
 
 ## Candidate and release
 
-After the promotion pull request passes Ubuntu and Windows checks and merges,
-synchronize clean `main` and use `tools/release.py` to prepare a new candidate.
-The release tool creates `release/v<version>-candidate`; that temporary branch
-is not a development channel.
+The adopted lifecycle uses a stable target and separate PEP 440 candidate
+versions, for example `6.9.2rc1`, `6.9.2rc2`, then `6.9.2`. Rejection consumes
+an RC number, not a stable patch number. Retain immutable commits, tags,
+artifacts, decisions, and receipts for each attempt; resume only identical
+inputs. Fixes return to bake and invalidate prior exact-commit approval.
 
-Install and accept the exact candidate through the required operational flow.
-If it fails, reject it and reopen bake from current `origin/main`. If it passes,
-publish the receipt-bound candidate to GitHub and PyPI, then regenerate the
-release report.
+After required Windows/Linux checks and source approval, prepare and accept an
+RC through the installed operational flow. Full package versions support
+side-by-side installation with stable. Staging is distinct from activation;
+select the tested version deliberately and verify rollback, ownership, and
+watcher restoration. Multiple installations must not create duplicate
+schedulers or watchers against a live repository.
+
+An accepted RC permits final stable preparation, not publication. Build final
+stable artifacts from the approved source with only reviewed release-metadata
+changes, then independently accept those exact bytes. Do not reuse RC receipts
+as stable acceptance. Create the stable tag only after acceptance and publish
+the accepted files without rebuilding them. Retain failed final builds by
+attempt identity; source changes return to the next RC, while infrastructure
+failures may resume identical bytes. Recovery must not overwrite a sealed
+installation sharing the stable version name.
+
+Optional RC distribution uses explicit GitHub prereleases, never latest.
+Normal upgrades and PyPI publication remain stable-only, including manual
+dispatch. Final publication requires developer approval and independent
+GitHub and PyPI verification.
+
+### Current migration and implementation boundary
+
+The developer selected this model for the current `6.9.2` cycle on 2026-09-13.
+`bake/v6.9.2-rc` replaces the earlier 6.9.2 and 6.9.3 routing without rewriting
+shared history. The manifest reserves `6.9.2rc1` for the legacy rejected
+candidate, whose actual package version was `6.9.2`. Original preparation
+artifacts and the upgrade-complete checkpoint were recovered in the preparing
+checkout. Preserve those bytes and the original local tag conflict; they are
+not a numbered RC package or reusable full acceptance.
+RC2 has historical local evaluation evidence. RC3 failed packaged readiness
+(#516), while RC4 passed the unchanged Windows gate on its preparing environment.
+RC4 is prepared but still needs guarded installed recovery verification (#522).
+RC5 is the next unused identity. Different environments can select different
+retained versions; the manifest's deployment observation is not a global fact.
+
+The explicit numbered lifecycle under
+[#511](https://github.com/johnshew/agents-live/issues/511) uses
+`release.py --prepare-rc` from bake, receipt-bound `--accept-candidate --attempt`,
+then source approval and promotion. Only the promotion fields in the channel
+manifest may change between the accepted RC source and final source on main.
+`--prepare-final --from-rc` allocates a distinct `<target>-final-N` identity and
+stamps stable release metadata. Independent stable acceptance precedes
+`--finalize --attempt` and `--publish --attempt`. No tag exists before finalization.
+See [.agents/release.md](../.agents/release.md) for the commands and retry rules.
+
+Artifacts and private receipts live under the common Git directory, never the
+exported tree. `--cycle-status` and the report validate local attempt evidence;
+they do not claim another environment's operational results. Rejection retains
+bytes and decisions, and legacy stable-tag migration is an explicit verified
+operation that refuses remote tags. The old implicit release commands remain
+blocked. The current release still needs real operational acceptance and scope
+decisions; tooling availability is not release approval.
 
 ## Keeping guidance aligned
 

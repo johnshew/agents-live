@@ -142,7 +142,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
-    receipt = _state_directory() / "preparation.json"
+    receipt = _preparation_directory(version) / "preparation.json"
     try:
         payload = json.loads(receipt.read_text(encoding="utf-8"))
         wheel = Path(payload["wheel"])
@@ -169,10 +169,104 @@ def _prepared_artifact(commit: str, version: str) -> tuple[Path, str] | None:
     return wheel.resolve(), digest
 
 
+def _preparation_directory(version: str) -> Path:
+    root = _state_directory()
+    return root / "candidates" / version if "rc" in version else root
+
+
+def _requested_rc(version: str, target: str, *, recovery: bool = False) -> str:
+    if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", version) is None:
+        raise LocalDeployError(f"RC must be a numbered candidate of {target}")
+    cycle = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"].get(
+        "candidate_cycle", {})
+    if recovery:
+        record = cycle.get("history", {}).get(version, {})
+        if (cycle.get("model") != "numbered-rc"
+                or record.get("status") != "prepared"
+                or record.get("kind") != "numbered-rc"
+                or record.get("artifact_version") != version):
+            raise LocalDeployError(f"{version} is not a recorded prepared RC")
+        return version
+    if cycle.get("model") != "numbered-rc" or cycle.get("next") != version \
+            or version in cycle.get("history", {}):
+        raise LocalDeployError(
+            f"{version} is not the configured next, unused RC")
+    return version
+
+
 def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
+    if "rc" not in version:
+        return _build_artifact(commit, version)
+    directory = _preparation_directory(version)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / "prepare.lock"
+    try:
+        descriptor = lock.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise LocalDeployError(
+            f"RC preparation is locked; inspect the retained state at {lock}") from exc
+    try:
+        descriptor.close()
+        identity = directory / "identity.json"
+        expected = {"commit": commit, "version": version}
+        if identity.exists():
+            if json.loads(identity.read_text(encoding="utf-8")) != expected:
+                raise LocalDeployError(
+                    f"{version} already belongs to different source; use the next RC")
+        else:
+            _atomic_json(identity, expected)
+        return _build_artifact(commit, version)
+    finally:
+        lock.unlink()
+
+
+def _build_artifact(commit: str, version: str) -> tuple[Path, str]:
     reusable = _prepared_artifact(commit, version)
     if reusable is not None:
         return reusable
+    directory = _preparation_directory(version)
+    retained = directory / "artifact.json"
+    if "rc" in version and retained.exists():
+        payload = json.loads(retained.read_text(encoding="utf-8"))
+        artifact = Path(payload["wheel"])
+        digest = payload["wheel_sha256"]
+        if payload.get("commit") != commit or payload.get("version") != version \
+                or not artifact.is_file() or RELEASE["_sha256"](artifact) != digest:
+            raise LocalDeployError("retained RC artifact identity changed")
+    else:
+        artifact, digest = _build_new_artifact(commit, version)
+        if "rc" in version:
+            _atomic_json(retained, {
+                "commit": commit, "version": version,
+                "wheel": str(artifact), "wheel_sha256": digest,
+            })
+    _run([
+        "uv", "run", "--script", "tools/dashboard-readiness.py",
+        "--wheel", str(artifact.resolve()),
+    ])
+    _require_unchanged_checkout(commit)
+    _atomic_json(directory / "preparation.json", {
+        "schema": LOCAL_PREPARATION_SCHEMA,
+        "prepared": True,
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+        "commit": commit,
+        "version": version,
+        "wheel": str(artifact.resolve()),
+        "wheel_sha256": digest,
+        "platform": sys.platform,
+        "os_name": os.name,
+        "architecture": platform.machine(),
+        "gates": [list(command) for command in LOCAL_GATES],
+        "python": sys.version,
+    })
+    return artifact.resolve(), digest
+
+
+def _build_new_artifact(commit: str, version: str) -> tuple[Path, str]:
+    candidate = _preparation_directory(version) / f"agents_live-{version}-py3-none-any.whl"
+    if "rc" in version and candidate.exists():
+        raise LocalDeployError(
+            "RC wheel exists without its identity receipt; inspect retained evidence")
     with tempfile.TemporaryDirectory(prefix="agents-live-local-deploy-") as temp:
         temporary = Path(temp)
         archive = temporary / "source.zip"
@@ -191,30 +285,13 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         artifact = (
             _state_directory() / "artifacts" /
             f"{commit}-{digest}" / wheel.name)
+        if "rc" in version:
+            artifact = candidate
         artifact.parent.mkdir(parents=True, exist_ok=True)
         if not artifact.is_file():
             shutil.copy2(wheel, artifact)
     if RELEASE["_sha256"](artifact) != digest:
         raise LocalDeployError("immutable deployment artifact digest changed")
-    _run([
-        "uv", "run", "--script", "tools/dashboard-readiness.py",
-        "--wheel", str(artifact.resolve()),
-    ])
-    _require_unchanged_checkout(commit)
-    _atomic_json(_state_directory() / "preparation.json", {
-        "schema": LOCAL_PREPARATION_SCHEMA,
-        "prepared": True,
-        "prepared_at": datetime.now(timezone.utc).isoformat(),
-        "commit": commit,
-        "version": version,
-        "wheel": str(artifact.resolve()),
-        "wheel_sha256": digest,
-        "platform": sys.platform,
-        "os_name": os.name,
-        "architecture": platform.machine(),
-        "gates": [list(command) for command in LOCAL_GATES],
-        "python": sys.version,
-    })
     return artifact.resolve(), digest
 
 
@@ -240,7 +317,9 @@ def _stamp_bake_version(source: Path, current: str, target: str) -> None:
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
-    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:\.|\+|$)", value)
+    match = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)(?:rc[1-9]\d*|\.dev\d+)?(?:\+[a-z0-9.]+)?",
+        value)
     if match is None:
         raise LocalDeployError(f"invalid package version: {value!r}")
     return tuple(int(part) for part in match.groups())
@@ -252,6 +331,66 @@ def _installed_cli() -> Path:
 
 def _installed_run(*args: str) -> subprocess.CompletedProcess[str]:
     return RELEASE["_installed_run"](list(args))
+
+
+def _recovery_health(previous: dict, candidate: dict) -> tuple[str, ...]:
+    def checks(payload: dict) -> dict[str, dict]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("checks"), list):
+            raise LocalDeployError("recovery requires structured doctor checks")
+        result = {}
+        for item in payload["checks"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("check"), str)
+                    or not isinstance(item.get("ok"), bool)
+                    or not isinstance(item.get("detail"), str)
+                    or item["check"] in result):
+                raise LocalDeployError("recovery doctor checks are malformed or duplicated")
+            result[item["check"]] = item
+        for required in ("installation", "host runtime", "repository registry"):
+            if required not in result or not result[required]["ok"]:
+                raise LocalDeployError(f"recovery requires healthy {required}")
+        return result
+
+    old = checks(previous)
+    new = checks(candidate)
+    if candidate.get("ok") is not True or any(not item["ok"] for item in new.values()):
+        raise LocalDeployError("candidate doctor is unhealthy; recovery refused")
+    failures = tuple(name for name, item in old.items() if not item["ok"])
+    if previous.get("ok") is not False or not failures:
+        raise LocalDeployError("provider recovery requires a failed installed diagnostic")
+    for name, item in old.items():
+        if name not in new and not name.startswith("provider CLI "):
+            raise LocalDeployError(f"candidate omitted health check {name}")
+        if item["ok"]:
+            continue
+        replacement = new.get(name)
+        if (not name.startswith("provider CLI ") or replacement is None
+                or not replacement["detail"].startswith("on-demand launch not ready; ")):
+            raise LocalDeployError(f"not an obsolete optional-provider failure: {name}")
+    return failures
+
+
+def _candidate_json(wheel: Path, version: str, command: str) -> dict:
+    interpreter = _installed_cli().parent / hostruntime.executable_filename(
+        hostruntime.interpreter_name())
+    program = (
+        "import runpy,sys; wheel=sys.argv.pop(1); sys.path.insert(0,wheel); "
+        "import agents_live; expected=sys.argv.pop(1); "
+        "identity=(agents_live.__version__ == expected "
+        "and agents_live.__file__.startswith(wheel)); "
+        "identity or sys.exit('candidate import identity mismatch'); "
+        "runpy.run_module('agents_live.cli',run_name='__main__')"
+    )
+    completed = _run([
+        str(interpreter), "-c", program, str(wheel), version,
+        "--json", command, "--all-repos",
+    ], capture=True)
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise LocalDeployError("candidate preflight did not return JSON") from exc
+    if not isinstance(payload, dict):
+        raise LocalDeployError("candidate preflight did not return an object")
+    return payload
 
 
 def _logical_watchers(
@@ -503,7 +642,7 @@ def _write_receipt(
     watchers: tuple[tuple[str, str], ...],
     dashboards: tuple[Dashboard, ...],
 ) -> Path:
-    destination = _state_directory() / "receipt.json"
+    destination = _preparation_directory(version) / "receipt.json"
     _atomic_json(destination, {
         "schema": LOCAL_DEPLOYMENT_SCHEMA,
         "deployed": True,
@@ -524,10 +663,18 @@ def _write_receipt(
     return destination
 
 
-def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
-    commit = _synchronize()
+def deploy(
+    repo: Path, *, allow_downgrade: bool = False, rc: str | None = None,
+    recover_provider_readiness: bool = False,
+) -> Path:
+    tool_commit = _synchronize()
+    commit = tool_commit
     _branch, target = _bake_configuration()
-    version = f"{target}.dev0+g{commit[:8]}"
+    version = _requested_rc(
+        rc, target, recovery=recover_provider_readiness,
+    ) if rc else f"{target}.dev0+g{commit[:8]}"
+    if recover_provider_readiness and rc is None:
+        raise LocalDeployError("provider recovery requires a retained numbered RC")
     previous_version = RELEASE["_installed_version"]()
     if _version_tuple(version) < _version_tuple(previous_version) \
             and not allow_downgrade:
@@ -537,14 +684,63 @@ def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
     root = repo.expanduser().resolve()
     if not root.is_dir():
         raise LocalDeployError(f"repository does not exist: {root}")
-    wheel, digest = _prepare_artifact(commit, version)
-    _require_unchanged_checkout(commit)
+    if recover_provider_readiness:
+        try:
+            preparation = json.loads((
+                _preparation_directory(version) / "preparation.json"
+            ).read_text(encoding="utf-8"))
+            commit = preparation["commit"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise LocalDeployError("recovery requires retained preparation evidence") from exc
+        if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            raise LocalDeployError("retained source identity is invalid")
+        if _git("merge-base", commit, tool_commit) != commit:
+            raise LocalDeployError("retained candidate is not an ancestor of recovery tooling")
+        if _git("diff", "--name-only", commit, tool_commit, "--",
+                "src", "pyproject.toml", "install.ps1", "install.sh"):
+            raise LocalDeployError("candidate package inputs changed; use a new RC")
+        prepared = _prepared_artifact(commit, version)
+        if prepared is None:
+            raise LocalDeployError("recovery requires matching successful packaged readiness")
+        wheel, digest = prepared
+    else:
+        wheel, digest = _prepare_artifact(commit, version)
+    _require_unchanged_checkout(tool_commit)
     with ThreadPoolExecutor(max_workers=3) as pool:
         status_future = pool.submit(RELEASE["_installed_all_json"], "status")
-        doctor_future = pool.submit(RELEASE["_installed_all_json"], "doctor")
+        doctor_future = pool.submit(
+            _installed_run, "--json", "doctor", "--all-repos") if recover_provider_readiness else pool.submit(
+                RELEASE["_installed_all_json"], "doctor")
     baseline_status = status_future.result()
     baseline = RELEASE["_status_contract"](baseline_status)
-    if not doctor_future.result().get("ok"):
+    recovery = None
+    if recover_provider_readiness:
+        old_result = doctor_future.result()
+        if old_result.returncode != 1:
+            raise LocalDeployError("recovery requires an installed doctor health failure")
+        try:
+            old_health = json.loads(old_result.stdout)
+        except ValueError as exc:
+            raise LocalDeployError("installed doctor returned invalid JSON") from exc
+        candidate_health = _candidate_json(wheel, version, "doctor")
+        recovered = _recovery_health(old_health, candidate_health)
+        candidate_status = _candidate_json(wheel, version, "status")
+        if RELEASE["_status_contract"](candidate_status) != baseline:
+            raise LocalDeployError("candidate preflight changed the agent-state interpretation")
+        if (RELEASE["_installed_version"]() != previous_version
+                or RELEASE["_sha256"](wheel) != digest
+                or RELEASE["_status_contract"](
+                    RELEASE["_installed_all_json"]("status")) != baseline):
+            raise LocalDeployError("installation or candidate changed during recovery preflight")
+        recovery = {
+            "tool_commit": tool_commit, "candidate_commit": commit,
+            "wheel_sha256": digest, "previous_version": previous_version,
+            "old_doctor": old_health, "candidate_doctor": candidate_health,
+            "reclassified_checks": list(recovered),
+            "baseline": [list(row) for row in baseline],
+        }
+        _atomic_json(_preparation_directory(version) / "recovery-preflight.json", recovery)
+    elif not doctor_future.result().get("ok"):
         raise LocalDeployError("all-repository doctor is unhealthy before upgrade")
     all_watchers = RELEASE["_started_watchers"]({
         "agents": RELEASE["_status_rows"](baseline_status),
@@ -566,13 +762,31 @@ def deploy(repo: Path, *, allow_downgrade: bool = False) -> Path:
         _postcheck(
             wheel, version, baseline, all_watchers, tuple(stopped))
     except BaseException:
-        with contextlib.suppress(Exception):
-            _restart_dashboards(tuple(stopped))
+        try:
+            if recovery is not None and RELEASE["_installed_version"]() != previous_version:
+                for dashboard in stopped:
+                    if _port_answers(dashboard.port):
+                        _stop_dashboard(dashboard)
+                restored = _installed_run("versions", "activate", previous_version)
+                if restored.returncode != 0 or RELEASE["_installed_version"]() != previous_version:
+                    raise LocalDeployError("recovery failed and rollback needs operator attention")
+                refreshed = _installed_run("--repo", str(root), "upgrade", "--skills-only")
+                if refreshed.returncode != 0:
+                    raise LocalDeployError("rollback skill refresh needs operator attention")
+                if RELEASE["_status_contract"](RELEASE["_installed_all_json"]("status")) != baseline:
+                    raise LocalDeployError("rollback did not restore the agent-state baseline")
+        finally:
+            with contextlib.suppress(Exception):
+                _restart_dashboards(tuple(stopped))
         raise
     receipt = _write_receipt(
         commit=commit, version=version, previous_version=previous_version,
         wheel=wheel, wheel_sha256=digest, operation_id=None,
         baseline=baseline, watchers=all_watchers, dashboards=tuple(stopped))
+    if recovery is not None:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        payload["recovery"] = recovery
+        _atomic_json(receipt, payload)
     _say(f"deployed {commit[:8]} from {wheel.name}")
     _say(f"receipt: {receipt}")
     return receipt
@@ -586,8 +800,15 @@ def main() -> int:
     parser.add_argument(
         "--allow-downgrade", action="store_true",
         help="Allow a local package version below the installed version")
+    parser.add_argument(
+        "--rc", metavar="VERSION",
+        help="Build and select the configured next RC locally, without publication")
+    parser.add_argument(
+        "--recover-provider-readiness", action="store_true",
+        help="Recover only candidate-confirmed optional-provider health failures using a retained RC")
     args = parser.parse_args()
-    deploy(args.repo, allow_downgrade=args.allow_downgrade)
+    options = {"recover_provider_readiness": True} if args.recover_provider_readiness else {}
+    deploy(args.repo, allow_downgrade=args.allow_downgrade, rc=args.rc, **options)
     return 0
 
 

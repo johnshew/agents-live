@@ -29,6 +29,31 @@ the defect.
 
 ## Test boundaries
 
+For the numbered-RC cycle tracked in
+[#511](https://github.com/johnshew/agents-live/issues/511), use the explicit
+`release.py` attempt workflow in [release.md](release.md). Source regression
+tests exercise real temporary commits, artifacts, rejection, approval-only
+promotion, independent final acceptance records, and deferred annotated tags.
+Their synthetic builder and operational receipts do not prove live acceptance.
+Test RC rejection followed by the next RC,
+side-by-side stable/RC installation, deliberate selection and rollback, and
+restoration of watchers without duplicate automation. Resume may reuse only
+unchanged bytes and matching evidence. Historical legacy rejection records with
+unavailable artifacts are not executing evidence.
+
+RC acceptance never satisfies the final stable wheel's artifact or installed
+gates. Final stable failures must preserve an attempt-specific record and allow
+safe recovery without overwriting sealed installations or consuming the next
+stable version. Publication must upload exactly the accepted stable bytes.
+
+Preparation and acceptance receipts bind attempt, source and metadata commits,
+gate commands, environment, artifact hashes, and each other. `--cycle-status`
+rechecks retained bytes and decisions; malformed or changed evidence is invalid,
+not accepted. Full installed acceptance retains a state baseline for rejection
+even after its resumable checkpoint is retired. Restoring through `versions activate`
+and removing only an inactive failed version through `versions remove` are
+separate live operations; temporary Git lifecycle tests never perform them.
+
 Keep these execution modes distinct. A passing editable-source command does
 not prove that the built wheel or installed PyPI tool works.
 
@@ -244,6 +269,64 @@ actions, or authorize publication. Run focused source tests before deployment.
 Prepared releases still require the complete preparation gates and
 `tools/release.py --accept-candidate`; their release receipts and resumable
 acceptance checkpoints remain authoritative.
+
+### Local numbered RCs
+
+From the clean synchronized bake, local-only RC evaluation uses:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
+```
+
+The command accepts only the manifest's next unused RC, builds an archived copy
+with that exact package version, and installs through `upgrade --from`. Existing
+versions remain installed side by side; `current` selects the RC. No GitHub tag,
+release, or PyPI upload is created. Use `versions list` to inspect retained
+versions and `versions activate <version>` to deliberately select a previous version.
+
+Per-RC source identity, wheel, preparation evidence, and deployment receipt live
+under the common Git directory's `agents-live-local-deploy/candidates/<version>`.
+A retry uses the same wheel even after readiness fails. Changed source must use
+the next RC; changed retained bytes fail closed. An interrupted lock or wheel
+without its identity receipt requires inspection, not deletion or rebuilding
+under the same version. Local deployment is not provider-backed acceptance or
+approval of final stable bytes. Stable preparation and publication remain
+blocked on #511.
+
+### Recover obsolete provider diagnostics
+
+When an installed version fails doctor solely because a stopped local agent's
+provider CLI is unavailable, a retained RC may already correct that diagnostic.
+Use the explicit recovery path only after its wheel has passed packaged
+readiness:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <retained-rc> --recover-provider-readiness
+```
+
+The manifest must record the retained numbered RC with `status = "prepared"`
+and its matching `artifact_version`. Recovery selects that recorded identity,
+not the next unused RC. Normal preparation cannot reuse a historical identity.
+
+Recovery does not rebuild or restamp the candidate. It requires the original
+preparation receipt, wheel hash, source ancestry, platform, interpreter, and
+gate list. Package and installer inputs must be unchanged; later deployment
+tool and test corrections can consume the older candidate without pretending
+they were included in its package.
+
+Before any replacement, the retained wheel runs read-only doctor and status
+commands with the installed interpreter and plugin dependencies. The candidate
+must explicitly classify each old failed provider check as on-demand readiness,
+pass every health check, and report the same agent state. Unknown, malformed,
+missing, or unrelated failed checks refuse recovery. The installed runtime's
+ownership and host-health checks must already pass. Tool execution approval is
+still required where the environment restricts candidate execution.
+
+The regular upgrade, post-install health, exact-version, direct-wheel identity,
+state, and dashboard checks remain mandatory. A post-upgrade failure attempts
+rollback to the prior retained version. Diagnostic comparisons and the tooling
+commit are recorded alongside the original candidate identity. This recovery
+does not authorize stable publication or replace installed acceptance.
 
 ## Validate a published bake
 
