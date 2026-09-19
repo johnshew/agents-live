@@ -323,3 +323,48 @@ boundary is where the failure occurred.
 
 Written after the 6.0.0 to 6.0.6 series, alongside the restoration of the
 deleted behavioral coverage and the built-wheel dashboard gate.
+
+<!-- glp-update:v1 id=721374ca-2859-4b77-9eb1-a513c7a0979d -->
+<a id="glp-721374ca-2859-4b77-9eb1-a513c7a0979d"></a>
+### GLP Update: Watcher Identity Includes Process Role
+
+- Update-ID: 721374ca-2859-4b77-9eb1-a513c7a0979d
+- Recorded-UTC: 2026-09-19T16:42:00Z
+- Kind: addition
+- Topics: watcher inventory, installed activation safety
+- Workstream: numbered RC installed validation, #538
+- Target: testing-methodology.md, installed operational acceptance at 0ee8d17
+- Source-Session: live release validation on 2026-09-19
+- Evidence-Basis: observed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Agent-target metadata is not enough to identify a watcher. Compare the process
+role as well as repository and agent identity before interpreting an extra
+process as an orphan watcher. Do not kill ordinary agent work to satisfy an
+inventory assertion.
+
+#### Evidence
+During RC1 activation, `watchers_on_host` returned a scheduled `run --metadata`
+process group alongside the actual `watch-loop` group. Public status and exact
+process arguments distinguished them. `_watcher_name` returns agent metadata
+before checking the watcher command. The deployment baseline refused before
+replacement; the separate activation guard also refused running work. Details
+and the executing-regression requirements are in
+[#538](https://github.com/johnshew/agents-live/issues/538).
+
+#### Previous Knowledge
+The installed acceptance policy requires exact watcher and agent-state baselines.
+This finding adds a process-role distinction, not an exception to those checks.
+
+#### Verification and Limits
+The blocking scheduled run exited naturally; no work was killed or gate bypassed.
+Consumers include deployment inventory and uninstall. No runtime fix or broader
+uninstall conclusion is claimed. Source and packaged gates do not replace live
+acceptance, and an existing immutable package must not be rebuilt with a fix.
+
+#### Follow-up
+Implement and test role-aware classification under #538 in a later candidate.
+Obtain release disposition for newly discovered defects before publication.
+<!-- /glp-update:v1 id=721374ca-2859-4b77-9eb1-a513c7a0979d -->
