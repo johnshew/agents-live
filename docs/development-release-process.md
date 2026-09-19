@@ -129,6 +129,13 @@ It does not advance the candidate to accepted. A final packaging or infrastructu
 failure may retry an unchanged attempt or allocate a distinct final attempt
 without consuming another stable version; runtime changes require another RC.
 
+A dashboard-validator correction can requalify an already recorded immutable
+build through the [release recovery commands](../.agents/release.md#retry-and-rejection).
+The receipt binds the committed validator snapshot and actual gate commands to
+the unchanged package hashes. All gates still execute; neither the correction nor
+requalification implies installed acceptance. Broader staged evidence reuse and
+fast activation remain tracked in [#535](https://github.com/johnshew/agents-live/issues/535).
+
 ### Local RC loop
 
 1. Select a target and scope in the release-cycle manifest. Confirm source,

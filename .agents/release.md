@@ -91,6 +91,25 @@ and `--yes` only when a matching upgrade checkpoint exists. Cycle mutation and
 allocation locks refuse concurrent operations; after a crash, verify no operation
 is active before removing only the stale lock directory. Never delete receipts.
 
+If a committed dashboard validator defect blocked an already recorded build,
+run the following from clean, reviewed tooling that contains the correction:
+
+```bash
+uv run --script tools/release.py --requalify-attempt <attempt> --yes
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <rc> --requalified
+```
+
+Requalification retains a byte-exact copy of the committed validator, records its
+commit and hash, reruns all gates in the exact candidate checkout and reuses the
+four recorded build artifacts without rebuilding. The preparation receipt names
+the actual validator command. A missing build or changed artifact is refused;
+an existing preparation is validated, not replaced. Deployment requires validator
+ancestry and permits only the named release tools, release guide, changelog,
+tests and design documentation to differ from the retained source. It does not
+bypass provider health. Use the corrected tooling for subsequent explicit
+`--attempt` acceptance, finalization and publication; it selects and verifies
+the retained checkout before acting. Operational acceptance remains separate.
+
 To reject, deliberately restore a retained version through `versions activate`,
 verify all-repository doctor, agent state, and representative watchers, then run
 `--reject-attempt <attempt> --reason <reason> --yes`. The tool verifies the retained

@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: requalify immutable release candidates with committed readiness evidence.
+  Explicit recovery retains validator provenance, runs all gates against the
+  unchanged artifacts, and rejects runtime drift before local activation.
 - fix: tolerate slower dashboard readiness responses and bound failure diagnostics.
   Packaged validation no longer rejects a healthy local API solely because it
   exceeds a two-second request timeout, or waits indefinitely for a running
