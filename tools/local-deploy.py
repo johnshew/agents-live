@@ -675,9 +675,12 @@ def _write_receipt(
 def deploy(
     repo: Path, *, allow_downgrade: bool = False, rc: str | None = None,
     recover_provider_readiness: bool = False,
+    requalified: bool = False,
 ) -> Path:
     if rc is None:
         raise LocalDeployError("local deployment requires an explicit numbered --rc")
+    if requalified and recover_provider_readiness:
+        raise LocalDeployError("readiness requalification cannot bypass provider health")
     tool_commit = _synchronize()
     commit = tool_commit
     _branch, target = _release_configuration()
@@ -712,6 +715,22 @@ def deploy(
         if prepared is None:
             raise LocalDeployError("recovery requires matching successful packaged readiness")
         wheel, digest = prepared
+    elif requalified:
+        record = RELEASE["_load_attempt"](version)
+        commit = record["source_commit"]
+        if _git("merge-base", commit, tool_commit) != commit:
+            raise LocalDeployError("retained source is not an ancestor of deployment tooling")
+        changed = set(_git("diff", "--name-only", commit, tool_commit).splitlines())
+        collateral = {".agents/release.md", "tools/release.py", "tools/local-deploy.py",
+                      "tools/dashboard-readiness.py", "src/agents_live/skill/docs/changelog.md"}
+        if any(path not in collateral and not path.startswith(("docs/", "tests/"))
+               for path in changed):
+            raise LocalDeployError("candidate package inputs changed; use a new RC")
+        preparation = RELEASE["_retained_preparation"](record)
+        validator = preparation.get("readiness_recovery")
+        if not validator or _git("merge-base", validator["tool_commit"], tool_commit) != validator["tool_commit"]:
+            raise LocalDeployError("deployment requires reviewed readiness requalification")
+        wheel, digest = Path(preparation["wheel"]), preparation["wheel_sha256"]
     else:
         wheel, digest = _prepare_candidate(commit, version)
     _require_unchanged_checkout(tool_commit)
@@ -814,8 +833,13 @@ def main() -> int:
     parser.add_argument(
         "--recover-provider-readiness", action="store_true",
         help="Recover only candidate-confirmed optional-provider health failures using a retained RC")
+    parser.add_argument(
+        "--requalified", action="store_true",
+        help="Select immutable RC bytes requalified with a committed readiness validator")
     args = parser.parse_args()
     options = {"recover_provider_readiness": True} if args.recover_provider_readiness else {}
+    if args.requalified:
+        options["requalified"] = True
     deploy(args.repo, allow_downgrade=args.allow_downgrade, rc=args.rc, **options)
     return 0
 

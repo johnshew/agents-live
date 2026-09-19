@@ -5823,6 +5823,85 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         release["ReleaseError"], "stale.*wheel_sha256"):
                     check("1.2.3")
 
+    def test_readiness_recovery_binds_committed_validator_and_commands(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        gates = release["_preparation_gates"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            validator = root / "tools" / "dashboard-readiness.py"
+            validator.parent.mkdir()
+            validator.write_bytes(b"print('fixture readiness')\n")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run([
+                "git", "-C", str(root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "commit", "-qm", "validator",
+            ], check=True)
+            commit = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            digest = release["_sha256"](validator)
+            attempt = root / "attempt"
+            harness = attempt / "validators" / digest / validator.name
+            harness.parent.mkdir(parents=True)
+            harness.write_bytes(validator.read_bytes())
+            wheel = attempt / "artifacts" / "fixture.whl"
+            recovery = {"tool_commit": commit, "sha256": digest, "path": str(harness)}
+            preparation = {"checkout": str(root), "wheel": str(wheel),
+                           "readiness_recovery": recovery}
+            with mock.patch.dict(gates.__globals__, {"ROOT": root}):
+                expected = release["_gate_commands"]()
+                expected[-1] = ["uv", "run", "--script", str(harness), "--wheel", str(wheel)]
+                self.assertEqual(expected, gates(preparation))
+                harness.write_bytes(b"changed")
+                with self.assertRaisesRegex(release["ReleaseError"], "validator changed"):
+                    gates(preparation)
+                replacement = release["_sha256"](harness)
+                alternate = attempt / "validators" / replacement / validator.name
+                alternate.parent.mkdir()
+                alternate.write_bytes(harness.read_bytes())
+                recovery.update(sha256=replacement, path=str(alternate))
+                with self.assertRaisesRegex(release["ReleaseError"], "committed source"):
+                    gates(preparation)
+
+    def test_readiness_recovery_requires_build_and_restores_checkout(self) -> None:
+        release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        recover = release["requalify_attempt"]
+        scope = recover.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            cycle = Path(temporary)
+            record = {"id": "1.2.3rc1", "target": "1.2.3"}
+            directory = cycle / record["id"]
+            directory.mkdir()
+            checkout = cycle / "worktrees" / record["id"]
+            checkout.mkdir(parents=True)
+            original_root = scope["ROOT"]
+            original_files = scope["RELEASE_FILES"]
+            executions = []
+
+            def prepare(**kwargs):
+                executions.append(kwargs)
+                self.assertEqual(checkout, scope["ROOT"])
+                self.assertTrue(all(path.is_relative_to(checkout) for path in scope["RELEASE_FILES"]))
+                raise release["ReleaseError"]("fixture failed gate")
+
+            with mock.patch.dict(scope, {
+                "ACTIVE_ATTEMPT": record,
+                "_git": lambda *args: "" if args[0] == "status" else "a" * 40,
+                "_cycle_directory": lambda _target: cycle,
+                "_attempt_path": lambda: directory,
+                "prepare_attempt": prepare,
+            }), mock.patch.object(subprocess, "check_output", return_value=b"fixture"):
+                with self.assertRaisesRegex(release["ReleaseError"], "immutable build"):
+                    recover()
+                self.assertEqual([], executions)
+                (directory / "build.json").write_text("{}", encoding="utf-8")
+                with self.assertRaisesRegex(release["ReleaseError"], "failed gate"):
+                    recover()
+                self.assertEqual(original_root, scope["ROOT"])
+                self.assertEqual(original_files, scope["RELEASE_FILES"])
+                self.assertEqual(1, len(executions))
+                self.assertFalse((directory / "preparation.json").exists())
+
     def test_release_receipts_consume_real_worktree_artifacts(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         scope = release["_write_preparation"].__globals__
@@ -7228,6 +7307,51 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         script["LocalDeployError"], "checkout changed"):
                     deploy(root, rc="1.2.3rc1")
             dashboards.assert_not_called()
+
+    def test_requalified_deploy_rejects_runtime_drift_before_activation(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy = script["deploy"]
+        scope = deploy.__globals__
+        source, tool = "a" * 40, "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preparation = {"wheel": str(root / "candidate.whl"), "wheel_sha256": "digest",
+                           "readiness_recovery": {"tool_commit": tool}}
+            unchanged = mock.Mock(side_effect=script["LocalDeployError"]("preflight boundary"))
+            dashboards = mock.Mock()
+            changed = "tools/dashboard-readiness.py"
+
+            def git(*args):
+                return args[1] if args[0] == "merge-base" else changed
+
+            with mock.patch.dict(scope, {
+                "_synchronize": lambda: tool,
+                "_release_configuration": lambda: ("main", "1.2.3"),
+                "_requested_rc": lambda version, target, **options: version,
+                "_git": git,
+                "_require_unchanged_checkout": unchanged,
+                "_running_dashboards": dashboards,
+            }), mock.patch.dict(scope["RELEASE"], {
+                "_installed_version": lambda: "1.2.2",
+                "_load_attempt": lambda _version: {"source_commit": source},
+                "_retained_preparation": lambda _record: preparation,
+            }):
+                with self.assertRaisesRegex(script["LocalDeployError"], "preflight boundary"):
+                    deploy(root, rc="1.2.3rc1", requalified=True)
+                unchanged.assert_called_once_with(tool)
+                unchanged.reset_mock()
+                for changed in ("src/agents_live/dispatch.py", "install.ps1", "pyproject.toml"):
+                    with self.subTest(path=changed), self.assertRaisesRegex(
+                            script["LocalDeployError"], "package inputs changed"):
+                        deploy(root, rc="1.2.3rc1", requalified=True)
+                changed = "tools/dashboard-readiness.py"
+                preparation.pop("readiness_recovery")
+                with self.assertRaisesRegex(script["LocalDeployError"], "reviewed readiness"):
+                    deploy(root, rc="1.2.3rc1", requalified=True)
+                with self.assertRaisesRegex(script["LocalDeployError"], "cannot bypass"):
+                    deploy(root, rc="1.2.3rc1", requalified=True, recover_provider_readiness=True)
+                unchanged.assert_not_called()
+                dashboards.assert_not_called()
 
     def test_local_deploy_postcheck_uses_release_contract_helpers(self) -> None:
         script = runpy.run_path(

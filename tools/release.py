@@ -1129,6 +1129,85 @@ def _load_attempt(identifier: str) -> dict:
     return record
 
 
+def _preparation_gates(preparation: dict) -> list[list[str]]:
+    checkout = preparation.get("checkout", str(ROOT))
+    commands = [[checkout if argument == str(ROOT) else argument for argument in command]
+                for command in _gate_commands()]
+    recovery = preparation.get("readiness_recovery")
+    if recovery is None:
+        return commands
+    if not isinstance(recovery, dict):
+        raise ReleaseError("invalid readiness recovery evidence")
+    commit = recovery.get("tool_commit", "")
+    digest = recovery.get("sha256", "")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None \
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ReleaseError("invalid readiness validator identity")
+    wheel = Path(preparation["wheel"])
+    harness = wheel.parent.parent / "validators" / digest / "dashboard-readiness.py"
+    if recovery.get("path") != str(harness) or _sha256(harness) != digest:
+        raise ReleaseError("retained readiness validator changed")
+    committed = subprocess.check_output(
+        ["git", "show", f"{commit}:tools/dashboard-readiness.py"], cwd=ROOT)
+    if hashlib.sha256(committed).hexdigest() != digest:
+        raise ReleaseError("readiness validator does not match its committed source")
+    original = ["uv", "run", "--script", "tools/dashboard-readiness.py"]
+    if commands.count(original) != 1:
+        raise ReleaseError("readiness recovery requires the standard gate list")
+    commands[commands.index(original)] = [
+        "uv", "run", "--script", str(harness), "--wheel", str(wheel)]
+    return commands
+
+
+@contextlib.contextmanager
+def _attempt_checkout(record: dict):
+    global ROOT, PYPROJECT, VERSION_FILES, CHANGELOG, RELEASE_FILES, BOOTSTRAP_BUILD_INPUTS
+    checkout = _cycle_directory(record["target"]) / "worktrees" / record["id"]
+    if not checkout.is_dir():
+        raise ReleaseError("retained attempt checkout is missing")
+    previous = ROOT, PYPROJECT, VERSION_FILES, CHANGELOG, RELEASE_FILES, BOOTSTRAP_BUILD_INPUTS
+    try:
+        PYPROJECT = checkout / PYPROJECT.relative_to(ROOT)
+        VERSION_FILES = tuple(checkout / path.relative_to(ROOT) for path in VERSION_FILES)
+        CHANGELOG = checkout / CHANGELOG.relative_to(ROOT)
+        RELEASE_FILES = tuple(checkout / path.relative_to(ROOT) for path in RELEASE_FILES)
+        BOOTSTRAP_BUILD_INPUTS = tuple(checkout / path.relative_to(ROOT)
+                                      for path in BOOTSTRAP_BUILD_INPUTS)
+        ROOT = checkout
+        yield
+    finally:
+        ROOT, PYPROJECT, VERSION_FILES, CHANGELOG, RELEASE_FILES, BOOTSTRAP_BUILD_INPUTS = previous
+
+
+def requalify_attempt() -> None:
+    if ACTIVE_ATTEMPT is None:
+        raise ReleaseError("select an attempt explicitly")
+    if _git("status", "--porcelain"):
+        raise ReleaseError("readiness recovery requires clean committed tooling")
+    commit = _git("rev-parse", "HEAD")
+    content = subprocess.check_output(
+        ["git", "show", f"{commit}:tools/dashboard-readiness.py"], cwd=ROOT)
+    digest = hashlib.sha256(content).hexdigest()
+    directory = _attempt_path()
+    if (directory / "preparation.json").exists():
+        _retained_preparation(ACTIVE_ATTEMPT)
+        print("Existing preparation is valid; no recovery required")
+        return
+    if not (directory / "build.json").is_file():
+        raise ReleaseError("readiness recovery requires a retained immutable build")
+    harness = directory / "validators" / digest / "dashboard-readiness.py"
+    harness.parent.mkdir(parents=True, exist_ok=True)
+    if harness.exists():
+        if harness.read_bytes() != content:
+            raise ReleaseError("retained readiness validator changed")
+    else:
+        with harness.open("xb") as stream:
+            stream.write(content)
+    recovery = {"tool_commit": commit, "sha256": digest, "path": str(harness)}
+    with _attempt_checkout(ACTIVE_ATTEMPT):
+        prepare_attempt(readiness_recovery=recovery)
+
+
 def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
     directory = _cycle_directory(record["target"]) / record["id"]
     try:
@@ -1137,8 +1216,7 @@ def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
         checkout = preparation["checkout"]
         if not isinstance(checkout, str) or not Path(checkout).is_absolute():
             raise ReleaseError("retained preparation checkout is invalid")
-        gate_commands = [[checkout if argument == str(ROOT) else argument for argument in command]
-                         for command in _gate_commands()]
+        gate_commands = _preparation_gates(preparation)
         expected = {"schema": PREPARATION_SCHEMA, "prepared": True,
                     "attempt": record["id"], "version": record["version"],
                     "source_commit": record["source_commit"], "commit": commit,
@@ -1271,7 +1349,7 @@ def _check_attempt_checkout() -> None:
         raise ReleaseError("attempt package version changed")
 
 
-def prepare_attempt() -> None:
+def prepare_attempt(*, readiness_recovery: dict | None = None) -> None:
     if ACTIVE_ATTEMPT is None:
         raise ReleaseError("select an attempt explicitly")
     record = ACTIVE_ATTEMPT
@@ -1303,7 +1381,10 @@ def prepare_attempt() -> None:
         print(f"Reused exact preparation for {record['id']}")
         return
     build_record = directory / "build.json"
-    for command in _gate_commands():
+    commands = _preparation_gates({"checkout": str(ROOT),
+                                  "wheel": str(_candidate_wheel(version)),
+                                  "readiness_recovery": readiness_recovery}) if readiness_recovery else _gate_commands()
+    for command in commands:
         if "--build-artifacts" in command:
             if build_record.exists():
                 retained = json.loads(build_record.read_text(encoding="utf-8"))
@@ -1324,7 +1405,7 @@ def prepare_attempt() -> None:
     wheel = _candidate_wheel(version)
     if json.loads(build_record.read_text(encoding="utf-8")) != _release_identity(version, wheel):
         raise ReleaseError("attempt artifacts changed during readiness")
-    _write_preparation(version, wheel)
+    _write_preparation(version, wheel, readiness_recovery=readiness_recovery)
     print(f"Prepared {record['id']} without a tag. Bootstrap exact wheel: {wheel}")
     print(f"Run --accept-candidate --attempt {record['id']} with the required live-agent arguments.")
 
@@ -1359,7 +1440,7 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     }
 
 
-def _write_preparation(version: str, wheel: Path) -> Path:
+def _write_preparation(version: str, wheel: Path, *, readiness_recovery: dict | None = None) -> Path:
     destination = _preparation_path(version)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1372,6 +1453,9 @@ def _write_preparation(version: str, wheel: Path) -> Path:
     }
     if ACTIVE_ATTEMPT is not None:
         payload["checkout"] = str(ROOT)
+        if readiness_recovery is not None:
+            payload["readiness_recovery"] = readiness_recovery
+            payload["gates"] = _preparation_gates(payload)
         _write_once(destination, payload)
         return destination
     temporary = destination.with_suffix(".tmp")
@@ -1400,7 +1484,7 @@ def _check_preparation(version: str) -> dict:
         "prepared": True,
         **_release_identity(version, wheel),
         **_evidence_identity(),
-        "gates": _gate_commands(),
+        "gates": _preparation_gates(receipt),
     }
     if ACTIVE_ATTEMPT is not None:
         expected["checkout"] = str(ROOT)
@@ -2317,6 +2401,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-final", action="store_true")
     parser.add_argument("--from-rc", metavar="ATTEMPT")
     parser.add_argument("--prepare-attempt", metavar="ATTEMPT")
+    parser.add_argument("--requalify-attempt", metavar="ATTEMPT",
+                        help="Revalidate retained bytes using the committed readiness harness")
     parser.add_argument("--attempt", metavar="ATTEMPT")
     parser.add_argument("--finalize", action="store_true")
     parser.add_argument("--reject-attempt", metavar="ATTEMPT")
@@ -2401,12 +2487,13 @@ def main(argv: list[str] | None = None) -> int:
                     args.gates, args.build_artifacts, args.notes is not None,
                     args.verify_publication is not None, args.prepare_rc is not None,
                     args.prepare_final, args.prepare_attempt is not None,
+                    args.requalify_attempt is not None,
                     args.finalize, args.reject_attempt is not None,
                     args.migrate_legacy_tag is not None,
                     args.verify_publication_assets is not None, args.cycle_status))
     if selected != 1:
         parser.error("choose exactly one release operation; see --help")
-    cycle_write = (args.prepare_rc or args.prepare_final or args.prepare_attempt
+    cycle_write = (args.prepare_rc or args.prepare_final or args.prepare_attempt or args.requalify_attempt
                    or args.finalize or args.reject_attempt or args.migrate_legacy_tag)
     if cycle_write and not args.yes:
         parser.error("release attempt changes require --yes")
@@ -2439,8 +2526,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--bump applies only to --dry-run and --prepare")
     mutation_lock = None
+    checkout_context = contextlib.ExitStack()
     try:
-        identifier = args.attempt or args.prepare_attempt or args.reject_attempt
+        identifier = args.attempt or args.prepare_attempt or args.reject_attempt or args.requalify_attempt
         ACTIVE_ATTEMPT = _load_attempt(identifier) if identifier else None
         if ACTIVE_ATTEMPT is not None:
             lock = _cycle_directory(ACTIVE_ATTEMPT["target"]) / "mutation.lock"
@@ -2467,6 +2555,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.prepare_attempt:
             prepare_attempt()
             return 0
+        if args.requalify_attempt:
+            requalify_attempt()
+            return 0
+        if ACTIVE_ATTEMPT is not None and (args.accept_candidate or args.finalize or args.publish):
+            if _git("status", "--porcelain"):
+                raise ReleaseError("attempt operations require clean committed tooling")
+            checkout_context.enter_context(_attempt_checkout(ACTIVE_ATTEMPT))
         if args.finalize:
             finalize_attempt()
             return 0
@@ -2514,6 +2609,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"release error: {exc}", file=sys.stderr)
         return 1
     finally:
+        checkout_context.close()
         if mutation_lock is not None:
             mutation_lock.rmdir()
         ACTIVE_ATTEMPT = None
