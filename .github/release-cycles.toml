@@ -16,7 +16,7 @@ decided_on = "2026-09-19"
 
 [cycles."6.9.2".issues]
 delivered = [502, 509, 517, 518]
-deferred = [528, 530, 531, 532, 533]
+deferred = [528, 530, 531, 532, 533, 538, 539]
 
 [cycles."6.9.2".decisions]
 "528" = "Developer approved deferral to 6.9.3 on 2026-09-19."
@@ -24,6 +24,8 @@ deferred = [528, 530, 531, 532, 533]
 "531" = "Developer approved deferral to 6.9.3 on 2026-09-19."
 "532" = "Developer approved deferral to 6.9.3 on 2026-09-19."
 "533" = "Developer approved publication with this issue open on 2026-09-19."
+"538" = "Developer explicitly approved deferral on 2026-09-19; wait for ordinary scheduled work to finish before activation. Full acceptance remains required."
+"539" = "Developer explicitly approved deferral on 2026-09-19; intermittent log-query schema race remains known. RC5 and final stable bytes must independently pass full acceptance."
 
 [cycles."6.9.2".history."6.9.2rc1"]
 status = "rejected"
