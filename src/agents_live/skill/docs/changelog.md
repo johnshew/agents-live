@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.2 - 2026-09-19
+
 - fix: separate numbered RC acceptance from final stable release attempts. (#511)
   Immutable attempt records retain builds, rejection decisions, and source-bound
   acceptance across retries. Final stable bytes require independent acceptance
