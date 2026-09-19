@@ -653,11 +653,12 @@ def _check_publish_state(version: str) -> bool:
     _stable_tag_version(f"v{version}")
     if ACTIVE_ATTEMPT is not None:
         _check_finalization(version)
-        _run(["git", "fetch", "--quiet", "origin", "main"])
+        branch = _cycle_configuration()["branch"]
+        _run(["git", "fetch", "--quiet", "origin", branch])
         head = _git("rev-parse", "HEAD")
-        origin = _git("rev-parse", "origin/main")
+        origin = _git("rev-parse", f"origin/{branch}")
         if origin not in {head, ACTIVE_ATTEMPT["source_commit"]}:
-            raise ReleaseError("main changed since final preparation; accept a new RC")
+            raise ReleaseError(f"{branch} changed since final preparation; accept a new RC")
         remote = _git("ls-remote", "--tags", "origin", f"refs/tags/v{version}")
         tag_object = _git("rev-parse", f"refs/tags/v{version}")
         if remote and remote.split()[0] != tag_object:
@@ -2295,9 +2296,10 @@ def publish() -> None:
         })
         evidence_assets = (evidence,)
     if needs_push:
+        branch = _cycle_configuration()["branch"] if ACTIVE_ATTEMPT is not None else "main"
         _run([
             "git", "push", "--atomic", "origin",
-            f"{preparation['commit']}:refs/heads/main",
+            f"{preparation['commit']}:refs/heads/{branch}",
             f"{preparation['tag_object']}:refs/tags/{tag}",
         ])
     _write_release_notes(

@@ -7,6 +7,55 @@ ms.topic: concept
 
 # Development and release process
 
+## Publication Routing Correction: 2026-09-19
+
+For numbered final attempts, both the publication guard and atomic commit/tag
+push use the configured cycle branch. For this cycle that is `release/6.9.2`,
+not `main`, which already contains later runtime changes. The remote branch
+must still equal the prepared source or the finalized commit; a moved branch
+is refused. This changes no accepted package bytes or acceptance requirements.
+
+The developer explicitly approved deferring #538 and #539 on 2026-09-19 and
+temporarily selecting RC5 and final stable bytes for independent acceptance,
+with RC1 restored afterward. These approvals do not waive validation gates.
+
+<!-- glp-update:v1 id=cc4d9a28-2218-4b5b-8c28-3999a56adff1 -->
+<a id="glp-cc4d9a28-2218-4b5b-8c28-3999a56adff1"></a>
+### GLP Update: Final Push Follows the Cycle Branch
+
+- Update-ID: cc4d9a28-2218-4b5b-8c28-3999a56adff1
+- Recorded-UTC: 2026-09-19T18:00:00Z
+- Kind: correction
+- Topics: stable publication, isolated release branches
+- Workstream: 6.9.2 publication, #511
+- Target: stable branch correction at 030ad04
+- Source-Session: authorized release execution on 2026-09-19
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Final preparation branch routing alone is insufficient: the finalization guard
+and atomic publication push must use that same configured branch.
+
+#### Evidence
+The guard and push still named main after the preparation routing correction.
+Executing temporary-Git coverage now permits an isolated stable source while
+main contains newer code, rejects a moved release branch, and checks the exact
+atomic push target. The RC rejection/final acceptance lifecycle test also passes.
+
+#### Previous Knowledge
+The earlier stable-branch correction described preparation but did not establish
+that publication preserved the independent development branch.
+
+#### Verification and Limits
+The focused tests pass; exact package acceptance and public availability remain
+independent gates. No runtime source or retained artifact changed.
+
+#### Follow-up
+Publish only accepted final bytes and consolidate release policy under #511/#535.
+<!-- /glp-update:v1 id=cc4d9a28-2218-4b5b-8c28-3999a56adff1 -->
+
 ## Stable Branch Correction: 2026-09-19
 
 This retained RC5-source branch uses

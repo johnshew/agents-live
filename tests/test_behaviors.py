@@ -4339,6 +4339,57 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with self.assertRaises(script["ReleaseError"]):
                     finalize()
 
+    def test_final_publication_guard_uses_cycle_branch(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = script["_check_publish_state"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote = root / "remote.git"
+            checkout = root / "checkout"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                           capture_output=True)
+            checkout.mkdir()
+
+            def git(*arguments):
+                return subprocess.run(["git", *arguments], cwd=checkout, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            git("remote", "add", "origin", str(remote))
+            (checkout / "source").write_text("accepted source")
+            git("add", ".")
+            git("commit", "-m", "source")
+            source = git("rev-parse", "HEAD")
+            git("push", "origin", "HEAD:refs/heads/release/1.2.3")
+            (checkout / "source").write_text("newer main runtime")
+            git("commit", "-am", "new development")
+            git("push", "origin", "main")
+            git("switch", "-c", "final", source)
+            (checkout / "version").write_text("1.2.3")
+            git("add", ".")
+            git("commit", "-m", "final metadata")
+            git("tag", "-a", "v1.2.3", "-m", "final")
+            with mock.patch.dict(check.__globals__, {
+                "ACTIVE_ATTEMPT": {"source_commit": source},
+                "_check_finalization": lambda _version: None,
+                "_cycle_configuration": lambda: {"branch": "release/1.2.3"},
+                "_git": git,
+                "_run": lambda command: git(*command[1:]),
+            }):
+                self.assertTrue(check("1.2.3"))
+                git("push", "--atomic", "origin", "HEAD:refs/heads/release/1.2.3", "v1.2.3")
+                self.assertFalse(check("1.2.3"))
+                git("switch", "-c", "concurrent")
+                (checkout / "other").write_text("concurrent change")
+                git("add", ".")
+                git("commit", "-m", "concurrent")
+                git("push", "origin", "HEAD:refs/heads/release/1.2.3")
+                git("switch", "final")
+                with self.assertRaisesRegex(script["ReleaseError"], "release/1.2.3 changed"):
+                    check("1.2.3")
+
     def test_installed_attempt_refuses_same_version_different_bytes(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = script["_check_installed_attempt"]
@@ -4495,11 +4546,18 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         process = mock.Mock(run=mock.Mock(return_value=subprocess.CompletedProcess(
                             ["gh"], 1, stdout="", stderr="not found")))
                         with mock.patch.dict(scope, {
-                            "_require_tools": lambda: None, "_check_publish_state": lambda _version: False,
+                            "_require_tools": lambda: None, "_check_publish_state": lambda _version: True,
+                            "_cycle_configuration": lambda: {"branch": "release/1.2.3"},
                             "_release_notes": lambda _version: "Accepted stable release notes.",
                             "_run": publish_command, "subprocess": process,
                         }):
                             script["publish"]()
+                            pushes = [command for command in publication_commands
+                                      if command[:2] == ["git", "push"]]
+                            self.assertEqual(1, len(pushes))
+                            self.assertIn(f"{git('rev-parse', 'HEAD')}:refs/heads/release/1.2.3", pushes[0])
+                            self.assertFalse(any(argument.endswith(":refs/heads/main")
+                                                 for argument in pushes[0]))
                             self.assertEqual(final_paths[-1].read_bytes(), uploaded[final_paths[-1].name])
                             self.assertIn("release-evidence.json", uploaded)
                             self.assertTrue(any("--draft=false" in command for command in publication_commands))
