@@ -296,3 +296,55 @@ retired; historical packages, commits and evidence were not changed. This ledger
 closes only these knowledge deltas. CI, packaged readiness, live acceptance,
 RC activation and stable publication still require their own evidence. Consumer
 repository authorization remains an operational prerequisite, not a waiver.
+
+<!-- glp-update:v1 id=64604e5e-870b-4ce2-965c-4567855aaf73 -->
+<a id="glp-64604e5e-870b-4ce2-965c-4567855aaf73"></a>
+### GLP Update: Rapid RC evidence and readiness budgets
+
+- Update-ID: 64604e5e-870b-4ce2-965c-4567855aaf73
+- Recorded-UTC: 2026-09-19
+- Kind: addition
+- Topics: release-process, validation-reuse, dashboard-readiness
+- Workstream: Rapid local RC delivery
+- Target: Business requirements BR2 and BR8 in this document
+- Source-Session: Developer fast-RC request and retained RC1 validation, 2026-09-19
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: broader lifecycle integration pending under #535
+
+#### Change
+Separate build, activation and qualification evidence in the planned fast-RC
+workflow. Detailed work and acceptance criteria live in
+[#535](https://github.com/johnshew/agents-live/issues/535), discoverable from
+[the backlog](backlog.md#rapid-local-release-candidates). Current release gates
+remain authoritative until that policy and tooling change is validated.
+
+#### Evidence
+An unchanged preparation retry spent 82.175 seconds on seam tests and 163.991
+seconds on behavior tests. Full dashboard qualification with the corrected
+harness took 207 seconds. The original two-second API request timed out while
+a five-second request returned the expected fixture row in 2.55 seconds.
+Failure diagnostics also waited indefinitely for a live dashboard's stdout EOF.
+The corrected harness allows ten seconds per API request and bounds failure
+output collection. Real HTTP and child-process regressions fail against the
+original harness and pass with the correction; all packaged dashboard journeys
+passed against the unchanged RC1 wheel.
+
+#### Previous Knowledge
+BR2 requires rapid activation and BR8 requires evidence reuse, but preparation
+still repeats complete source gates on retry and couples activation to complete
+qualification. A healthy endpoint can exceed a fixed short request budget.
+
+#### Verification and Limits
+These are individual timings, not a performance guarantee. The proposed warm
+build-and-activation objective of under two minutes needs measurement before
+adoption. Passing the corrected harness does not manufacture a preparation
+receipt, establish installed acceptance, or authorize publication. Retained
+candidate bytes and original failed evidence remain unchanged.
+
+#### Follow-up
+Implement #535 in bounded steps with evidence-invalidation and rollback tests.
+The bounded knowledge pass records this delta and routes it through the backlog;
+it does not supersede the current lifecycle. Broader lifecycle consolidation is
+pending implementation under #535, not implicitly completed by this addendum.
+<!-- /glp-update:v1 id=64604e5e-870b-4ce2-965c-4567855aaf73 -->

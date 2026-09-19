@@ -8629,6 +8629,55 @@ class TestCrossModuleAgreements(unittest.TestCase):
             invalid.stderr,
         )
 
+    def test_dashboard_readiness_accepts_a_slow_healthy_api(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                threading.Event().wait(2.2)
+                self.send_response(200)
+                self.end_headers()
+                with contextlib.suppress(ConnectionError):
+                    self.wfile.write(b'{"agents": [{"name": "fixture"}]}')
+
+            def log_message(self, *args):
+                pass
+
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            worker = threading.Thread(target=server.serve_forever)
+            worker.start()
+            try:
+                result = readiness["_api_agents"](server.server_port)
+                self.assertEqual({"agents": [{"name": "fixture"}]}, result)
+            finally:
+                server.shutdown()
+                worker.join(timeout=5)
+
+    def test_dashboard_readiness_does_not_read_a_running_child_to_eof(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        finished = threading.Event()
+
+        def collect():
+            readiness["_output"](process)
+            finished.set()
+
+        worker = threading.Thread(target=collect)
+        worker.start()
+        try:
+            self.assertTrue(finished.wait(1), "failure output blocked on a live child")
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+            worker.join(timeout=5)
+            process.stdin.close()
+            process.stdout.close()
+
     def test_dashboard_readiness_waits_for_new_action_completion(self) -> None:
         readiness = runpy.run_path(
             str(REPOSITORY / "tools" / "dashboard-readiness.py"))
