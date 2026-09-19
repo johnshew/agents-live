@@ -161,7 +161,7 @@ def classify(name: str, status: str, *, root: Path | None = None) -> None:
                 layout.deployment_lock_path(install_root), blocking=False):
             generation = load(name, root=install_root)
             if ".dev" in generation.name:
-                raise GenerationError("bake generations cannot be classified as releases")
+                raise GenerationError("development generations cannot be classified as releases")
             record = install_root / "release-status" / f"{generation.name}.json"
             record.parent.mkdir(parents=True, exist_ok=True)
             paths.atomic_write_text(record, json.dumps({

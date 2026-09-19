@@ -285,7 +285,7 @@ def interpret(
         try:
             completion = provider.parse(raw)
         except (ValueError, TypeError):
-            if not raw.timed_out and raw.returncode == 0:
+            if not raw.timed_out and not raw.output_limited and raw.returncode == 0:
                 raise
     result = _interpret(spec, step, launch, raw, signals, completion)
     if completion is not None:
@@ -302,6 +302,10 @@ def _interpret(
     signals: StepSignals,
     completion: Completion | None,
 ) -> StepResult:
+    if raw.output_limited:
+        return StepResult(
+            step, False, category="diagnostic_output_limit",
+            message="child diagnostic stream exceeded its capture limit; output is incomplete")
     if raw.timed_out:
         return StepResult(
             step, False, retryable=step is Step.AGENT,
@@ -340,7 +344,7 @@ def _interpret(
         return StepResult(
             step, False, retryable=True, category="empty_output",
             message="provider returned no output")
-    return _validate_completion(spec, completion, raw.stdout)
+    return _validate_completion(spec, completion)
 
 
 def _skip_on_stdout(text: str) -> bool:
@@ -383,12 +387,13 @@ def outcome(spec: AgentSpec, results: Mapping[Step, StepResult]) -> Outcome:
 def _validate_completion(
     spec: AgentSpec,
     completion: Completion,
-    raw_text: str,
 ) -> StepResult:
     config = _config(spec)
-    size = len(raw_text.encode("utf-8", errors="replace"))
+    value = (json.dumps(completion.structured, ensure_ascii=False)
+             if completion.structured is not None else completion.text)
+    size = len(value.encode("utf-8", errors="replace"))
     cap = config.output_max_bytes or DEFAULT_OUTPUT_MAX_BYTES
-    if size > cap:
+    if config.mode != "pipeline" and size > cap:
         return StepResult(
             Step.AGENT, False, category="agent_output_invalid",
             message=f"agent output is {size} bytes, over the {cap}-byte cap")

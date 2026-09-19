@@ -179,6 +179,16 @@ class PipelineMcp:
         with self._lock:
             return path in self._store, self._store.get(path)
 
+    def begin_attempt(self, attempt: int) -> None:
+        import copy
+
+        with self._lock:
+            if attempt == 1:
+                self._prepared_inputs = copy.deepcopy(self._store)
+            self._store = copy.deepcopy(self._prepared_inputs)
+            self._frozen = set(self._prepared_inputs)
+        self._log_event(op="attempt", path="/", ok=True)
+
     def seed(self, items: list[tuple[str, Any]]) -> None:
         """Pre-populate the store with ``(path, value)`` pairs from a
         trusted host (e.g. fenced ``put`` blocks parsed from an agent definition).

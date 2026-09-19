@@ -5,15 +5,18 @@ import re
 
 
 _RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
+_CANDIDATE_VERSION = re.compile(r"\d+\.\d+\.\d+rc\d+\Z")
 _COMMIT = re.compile(r"(?:^|[.+])g([0-9a-f]+)(?:\Z|[.])", re.IGNORECASE)
 
 
 def channel(version: str) -> str:
-    """Classify stable releases and local development bake artifacts."""
+    """Classify stable releases, numbered candidates, and historical development builds."""
     if _RELEASE_VERSION.fullmatch(version):
         return "release"
+    if _CANDIDATE_VERSION.fullmatch(version):
+        return "candidate"
     if ".dev" in version:
-        return "bake"
+        return "development"
     return "unknown"
 
 

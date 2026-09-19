@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from agents_live.paths import repo_state_dir, resolve_root  # noqa: E402
 
 SUMMARY_TEXT_LIMIT = 6000
 SUMMARY_TOOL_LIMIT = 100
+ENVELOPE_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _logs_dir() -> Path:
@@ -42,6 +44,7 @@ def _select(
     errors: bool,
     last: int,
 ) -> list[dict[str, object]]:
+    since = query.resolve_since(since)
     records = [
         record for record in query.load(query.files(_logs_dir()), since=since)
         if record.get("phase") == "done"
@@ -50,6 +53,41 @@ def _select(
             record.get("agent_name", "")).casefold())
         and (not errors or record.get("status") == "error")
     ]
+    if run_id is None or re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        grouped = {record["run_id"]: record for record in records}
+        for path in _runs_dir().glob(f"*/{run_id or '*'}-agent-*.json"):
+            if not path.resolve().is_relative_to(_runs_dir().resolve()):
+                continue
+            identifier, _, number = path.stem.rpartition("-agent-")
+            if not number.isdigit() or (agent and agent.casefold() not in path.parent.name.casefold()):
+                continue
+            record = grouped.get(identifier)
+            if record is None:
+                try:
+                    if path.stat().st_size > ENVELOPE_MAX_BYTES:
+                        continue
+                    envelope = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(envelope, dict):
+                    continue
+                try:
+                    timestamp = query.resolve_since(str(envelope["timestamp"])) if envelope.get("timestamp") else ""
+                except ValueError:
+                    continue
+                if errors or (since and timestamp < since):
+                    continue
+                record = {"run_id": identifier, "agent_name": path.parent.name,
+                          "ts": timestamp, "status": "unknown" if envelope.get("pruned_at") else "unfinished",
+                          "transcript_state": "not_yet_finalized", "transcript": str(path),
+                          "attempts": []}
+                grouped[identifier] = record
+            attempts = record.setdefault("attempts", [])
+            if not any(item.get("attempt") == int(number) for item in attempts):
+                attempts.append({"attempt": int(number), "transcript": str(path)})
+            if record.get("status") == "unfinished":
+                record["transcript"] = max(attempts, key=lambda item: item["attempt"])["transcript"]
+        records = list(grouped.values())
     records.sort(key=lambda record: str(record.get("ts", "")), reverse=True)
     return records[:last]
 
@@ -125,6 +163,9 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
         "final": None,
         "tool_calls": [],
         "turns": [],
+        "attempt": record.get("attempt"),
+        "attempts": [{key: value for key, value in item.items() if key != "transcript"}
+                 for item in record.get("attempts", [])],
     }
     if not isinstance(path_value, str) or not path_value:
         return base, None
@@ -142,6 +183,9 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
         base["transcript_state"] = "missing"
         return base, None
     try:
+        if path.stat().st_size > ENVELOPE_MAX_BYTES:
+            base["transcript_state"] = "oversized"
+            return base, None
         raw = path.read_text(encoding="utf-8", errors="replace")
         envelope = json.loads(raw)
     except (OSError, json.JSONDecodeError):
@@ -150,6 +194,24 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
     if not isinstance(envelope, dict):
         base["transcript_state"] = "corrupt"
         return base, raw
+
+    if envelope.get("pruned_at"):
+        base.update(transcript_state="pruned", pruned_at=envelope["pruned_at"])
+        return base, None
+
+    if envelope.get("finalized") is False:
+        prefix = envelope.get("capture_prefix")
+        if isinstance(prefix, str) and Path(prefix).is_absolute():
+            for stream in ("stdout", "stderr"):
+                try:
+                    captured_path = Path(prefix + "." + stream).resolve()
+                    if not captured_path.is_relative_to(managed):
+                        continue
+                    with captured_path.open("rb") as captured:
+                        envelope[stream] = captured.read(64 * 1024 * 1024).decode("utf-8", errors="replace")
+                except OSError:
+                    pass
+        raw = json.dumps(envelope, ensure_ascii=False)
 
     provider = _provider(envelope)
     stdout = envelope.get("stdout")
@@ -182,12 +244,21 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
             for turn in turns):
         turns.append({"role": "assistant", "text": final})
     base.update({
-        "transcript_state": "available",
+        "transcript_state": "not_yet_finalized" if envelope.get("finalized") is False else "available",
         "provider": provider,
+        "model": envelope.get("model"),
+        "effort": envelope.get("effort"),
+        "timed_out": envelope.get("timed_out"),
+        "returncode": envelope.get("returncode") if envelope.get("finalized", True) else None,
         "prompt": prompt,
         "final": final,
         "tool_calls": tools,
         "turns": turns,
+        "attempt": envelope.get("attempt", record.get("attempt")),
+        "finalized": envelope.get("finalized", True),
+        "usage": envelope.get("usage", record.get("usage", {})),
+        "diagnostic_retention": envelope.get("diagnostic_retention", "unknown"),
+        "timestamp": envelope.get("timestamp", base["timestamp"]),
     })
     if structured is not None:
         base["structured"] = structured
@@ -224,7 +295,7 @@ def _summary(item: dict[str, object]) -> dict[str, object]:
 def _render(item: dict[str, object], summary: bool) -> None:
     print(f"Run {item['run_id']} ({item['agent']})")
     print(f"Status: {item['status']} | Transcript: {item['transcript_state']}")
-    if item["transcript_state"] != "available":
+    if item["transcript_state"] not in {"available", "not_yet_finalized"}:
         return
     if summary:
         sections = (("Prompt", _clip(item.get("prompt"))),
@@ -257,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--last", type=int, default=1)
     parser.add_argument("--since")
     parser.add_argument("--errors", action="store_true")
+    parser.add_argument("--attempt", type=int)
+    parser.add_argument("--attempts", action="store_true")
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--raw", action="store_true")
     parser.add_argument("--format", choices=("readable", "json", "raw"),
@@ -266,6 +339,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("provide exactly one of RUN_ID or --agent NAME")
     if args.last < 1:
         parser.error("--last must be a positive integer")
+    if args.attempt is not None and args.attempt < 1:
+        parser.error("--attempt must be a positive integer")
+    if args.attempts and (args.attempt is not None or args.raw or args.format == "raw"):
+        parser.error("--attempts cannot be combined with --attempt or raw output")
     if args.run_id and args.last != 1:
         parser.error("--last is available only with --agent")
     output_format = "raw" if args.raw else args.format
@@ -281,8 +358,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not records:
         preflight.emit_failure(
-            "logs transcript", "no matching terminal run", code="not_found")
+            "logs transcript", "no matching run or retained attempt", code="not_found")
         return 1
+    if args.attempt is not None or args.attempts:
+        selected = []
+        for record in records:
+            for attempt in record.get("attempts", []):
+                if args.attempts or attempt.get("attempt") == args.attempt:
+                    selected.append(record | attempt)
+        if not selected:
+            preflight.emit_failure("logs transcript", "attempt not found", code="not_found")
+            return 1
+        records = selected
     normalized = [_normalize(record) for record in records]
     if output_format == "raw":
         raw = normalized[0][1]

@@ -76,6 +76,8 @@ class ChildResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    output_limited: bool = False
+    cleanup_s: float = 0.0
 
 
 @dataclass(frozen=True)

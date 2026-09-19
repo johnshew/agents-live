@@ -106,7 +106,7 @@ def _upgrade_self_managed(
     try:
         version, digest = _wheel_identity(source)
         if candidate and ".dev" in version:
-            raise ValueError("a bake wheel cannot be installed as a release candidate")
+            raise ValueError("a development wheel cannot be installed as a release candidate")
         provenance = deploy.generation.Provenance(
             "local-artifact", source.name, digest)
         try:

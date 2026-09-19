@@ -22,6 +22,7 @@ class AgentView:
     ownership_error: str | None
     runtime: str | None
     model: str | None
+    effort: str | None
     mode: str | None
     schedules: tuple[str, ...]
     watch: str | None
@@ -210,6 +211,7 @@ def repository_agents(
             ownership_error=ownership_error,
             runtime=execution.selector.provider if execution else None,
             model=execution.selector.model if execution else None,
+            effort=execution.selector.effort if execution else None,
             mode=execution.mode if execution else None,
             schedules=execution.schedules if execution else (),
             watch=execution.watch if execution else None,
@@ -232,6 +234,7 @@ def repository_agents(
             ownership_error=ownership_error,
             runtime=None,
             model=None,
+            effort=None,
             mode=None,
             schedules=(),
             watch=None,

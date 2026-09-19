@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -156,6 +156,8 @@ class LocalProcesses:
 
 
 class LocalChildRunner:
+    diagnostic_limit = 64 * 1024 * 1024
+
     def run_child(
         self,
         argv: Sequence[str],
@@ -188,33 +190,89 @@ class LocalChildRunner:
         if use_pty and os.name != "nt":
             return self._run_pty(
                 argv, cwd=cwd, env=env, input_text=input_text, timeout=timeout)
+        started = time.monotonic()
+        limited = threading.Event()
+        capture_failed = threading.Event()
+        capture_errors = []
+        buffers = [bytearray(), bytearray()]
+        process = subprocess.Popen(
+            argv, cwd=cwd, env=env,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
+            creationflags=0x00000004 if os.name == "nt" else 0,
+        )
+        terminate_child = system.supervise_child(process)
+
+        capture_prefix = (env or {}).get("AGENTS_LIVE_CAPTURE_PREFIX")
+
+        def collect(stream, buffer, suffix):
+            snapshot = None
+            try:
+                if capture_prefix:
+                    descriptor = os.open(capture_prefix + suffix, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    snapshot = os.fdopen(descriptor, "wb")
+                while chunk := stream.read1(65536):
+                    remaining = self.diagnostic_limit - len(buffer)
+                    buffer.extend(chunk[:remaining])
+                    if snapshot is not None:
+                        snapshot.write(chunk[:remaining])
+                        snapshot.flush()
+                    if len(chunk) > remaining:
+                        limited.set()
+                        return
+            except OSError as exc:
+                capture_errors.append(exc)
+                capture_failed.set()
+            finally:
+                stream.close()
+                if snapshot is not None:
+                    snapshot.close()
+
+        def feed():
+            try:
+                process.stdin.write(input_text.encode("utf-8"))
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                process.stdin.close()
+
+        workers = [threading.Thread(target=collect, args=(stream, buffer, suffix), daemon=True)
+               for stream, buffer, suffix in zip((process.stdout, process.stderr), buffers,
+                                 (".stdout", ".stderr"))]
+        if input_text is not None:
+            workers.append(threading.Thread(target=feed, daemon=True))
+        for worker in workers:
+            worker.start()
+        timed_out = False
+        cleanup_s = 0.0
+
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=cwd,
-                env=env,
-                input=input_text,
-                stdin=subprocess.DEVNULL if input_text is None else None,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return ChildResult(
-                tuple(argv),
-                -1,
-                _text(exc.stdout),
-                _text(exc.stderr),
-                True,
-            )
+            while process.poll() is None or any(worker.is_alive() for worker in workers):
+                timed_out = timeout is not None and time.monotonic() - started >= timeout
+                if timed_out or limited.is_set() or capture_failed.is_set():
+                    cleanup_started = time.monotonic()
+                    terminate_child()
+                    process.wait(timeout=5)
+                    cleanup_deadline = time.monotonic() + 5
+                    for worker in workers:
+                        worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
+                    cleanup_s = time.monotonic() - cleanup_started
+                    if any(worker.is_alive() for worker in workers):
+                        raise RuntimeError("child stream cleanup did not complete")
+                    break
+                limited.wait(0.02)
+        finally:
+            terminate_child()
+            if process.poll() is None:
+                process.wait(timeout=5)
+        if capture_errors:
+            raise RuntimeError("child diagnostic capture failed") from capture_errors[0]
         return ChildResult(
-            tuple(argv),
-            completed.returncode,
-            completed.stdout,
-            completed.stderr,
+            tuple(argv), process.returncode,
+            _text(bytes(buffers[0])), _text(bytes(buffers[1])), timed_out,
+            limited.is_set(), cleanup_s,
         )
 
     def _run_pty(
@@ -226,48 +284,19 @@ class LocalChildRunner:
         input_text: str | None,
         timeout: float | None,
     ) -> ChildResult:
-        command = shlex.join(argv)
-        with tempfile.NamedTemporaryFile(
-            prefix="agents-live-pty-", delete=False
-        ) as handle:
-            transcript = Path(handle.name)
-        try:
-            try:
-                completed = subprocess.run(
-                    ["script", "-qec", command, str(transcript)],
-                    cwd=cwd,
-                    env=env,
-                    input=input_text,
-                    stdin=subprocess.DEVNULL if input_text is None else None,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                return ChildResult(
-                    tuple(argv), -1, _text(exc.stdout), _text(exc.stderr), True)
-            try:
-                output = transcript.read_text(
-                    encoding="utf-8", errors="replace")
-            except OSError:
-                output = completed.stdout
-            return ChildResult(
-                tuple(argv),
-                completed.returncode,
-                output.replace("\r", ""),
-                completed.stderr,
-            )
-        finally:
-            transcript.unlink(missing_ok=True)
+        from dataclasses import replace
+
+        result = self.run_child(
+            ["script", "-qec", shlex.join(argv), os.devnull],
+            cwd=cwd, env=env, input_text=input_text, timeout=timeout)
+        return replace(result, argv=tuple(argv), stdout=result.stdout.replace("\r", ""))
 
 
 def _text(value: bytes | str | None) -> str:
     if value is None:
         return ""
-    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _shell_processor_argv(argv: Sequence[str]) -> tuple[str, ...]:

@@ -299,7 +299,7 @@ class TestDefinitionLoader(TempRepository):
         self.assertEqual(
             {
                 "version": "6.6.0.dev0+gabc1234",
-                "channel": "bake",
+                "channel": "development",
                 "commit": "abc1234",
             },
             payload["runtime"],
@@ -308,15 +308,18 @@ class TestDefinitionLoader(TempRepository):
 
     def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
         self.assertEqual("release", identity.channel("6.6.0"))
-        self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
-        self.assertEqual("unknown", identity.channel("6.6.0rc1"))
+        self.assertEqual("development", identity.channel("6.6.0.dev0+gabc1234"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc1"))
+        self.assertEqual("candidate", identity.channel("6.6.0rc12"))
+        for invalid in ("6.6.0rc", "6.6.0rc1junk", "6.6.0beta1"):
+            self.assertEqual("unknown", identity.channel(invalid))
         self.assertEqual(
             "agents-live 6.6.0 (channel: release)",
             identity.label("6.6.0"),
         )
         self.assertEqual(
             "agents-live 6.6.0.dev0+gabc1234 "
-            "(channel: bake, commit: abc1234)",
+            "(channel: development, commit: abc1234)",
             identity.label("6.6.0.dev0+gabc1234"),
         )
 
@@ -1085,6 +1088,7 @@ class TestDoctor(unittest.TestCase):
 
     def test_unknown_metadata_reports_both_possible_remedies(self) -> None:
         collected = mock.Mock(
+            subscriptions=(),
             unavailable_repositories=(), broken_definitions=(),
             unknown_metadata=((Path("Agents/sample/SKILL.md"),
                                ("agents-live.schedul",)),),
@@ -1183,6 +1187,35 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestReleaseTool(unittest.TestCase):
+    def test_numbered_rc_cycle_blocks_legacy_candidate_commands(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "tools" / "release.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / ".github").mkdir()
+            script = root / "tools" / "release.py"
+            shutil.copy2(source, script)
+            (root / ".github" / "release-cycles.toml").write_text(
+                'schema = 2\ndefault_cycle = "6.9.3"\n'
+                '[cycles."6.9.3"]\nnext_rc = "6.9.3rc1"\n',
+                encoding="utf-8")
+            for arguments in (
+                ["--dry-run"], ["--prepare", "--yes"],
+                ["--prepare", "--resume", "--yes"], ["--publish", "--yes"],
+                ["--accept-candidate", "--yes", "--repo", str(root),
+                 "--agent", "safe", "--cost-agent", "provider"],
+            ):
+                with self.subTest(arguments=arguments):
+                    completed = subprocess.run(
+                        [sys.executable, str(script), *arguments],
+                        cwd=root, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", check=False)
+                    self.assertEqual(1, completed.returncode)
+                    self.assertIn("numbered RC workflow", completed.stderr)
+                    self.assertIn("#511", completed.stderr)
+                    self.assertEqual("", completed.stdout)
+                    self.assertFalse((root / ".git").exists())
+
     def test_installed_version_accepts_channel_identity(self) -> None:
         root = Path(__file__).resolve().parents[1]
         release = runpy.run_path(str(root / "tools" / "release.py"))
@@ -1378,9 +1411,19 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual(
             "agents-live 6.6.0.dev0+gabc1234 "
-            "(channel: bake, commit: abc1234)",
+            "(channel: development, commit: abc1234)",
             output.getvalue().strip(),
         )
+
+    def test_version_command_identifies_a_numbered_candidate(self) -> None:
+        module = importlib.import_module("agents_live.cli.main")
+        output = io.StringIO()
+        with mock.patch.object(module, "__version__", "6.9.2rc3"), \
+                contextlib.redirect_stdout(output):
+            result = module.main(["--version"])
+        self.assertEqual(0, result)
+        self.assertEqual("agents-live 6.9.2rc3 (channel: candidate)",
+                         output.getvalue().strip())
 
     def test_windows_uninstall_queues_owned_tree_removal(self) -> None:
         stdout = io.StringIO()
@@ -2991,6 +3034,39 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertIn("pty", result.stdout)
 
+    def test_child_capture_is_bounded_and_timeout_stops_descendants(self) -> None:
+        from agents_live.runtime.hosts import system
+
+        runner = LocalChildRunner()
+        runner.diagnostic_limit = 1024
+        result = runner.run_child(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 100000)"], timeout=10)
+        self.assertTrue(result.output_limited)
+        self.assertEqual(1024, len(result.stdout))
+        result = runner.run_child([
+            sys.executable, "-c",
+            "import subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+            "print(child.pid, flush=True); time.sleep(60)",
+        ], timeout=1)
+        self.assertTrue(result.timed_out)
+        self.assertTrue(result.stdout.strip().isdigit())
+        self.assertFalse(system.is_alive(int(result.stdout.strip())))
+
+    def test_child_capture_failure_is_explicit_and_orphaned_pipes_are_closed(self) -> None:
+        runner = LocalChildRunner()
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ | {"AGENTS_LIVE_CAPTURE_PREFIX": str(Path(temporary) / "missing" / "capture")}
+            with self.assertRaisesRegex(RuntimeError, "diagnostic capture failed"):
+                runner.run_child([sys.executable, "-c", "print('output')"], env=environment, timeout=2)
+        result = runner.run_child([
+            sys.executable, "-c",
+            "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+            "'import time; time.sleep(60)']); print('parent exited', flush=True)",
+        ], timeout=1)
+        self.assertTrue(result.timed_out)
+        self.assertIn("parent exited", result.stdout)
+
     def test_dead_run_lock_is_recovered(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3996,6 +4072,57 @@ class TestProviderPromptDelivery(TempRepository):
 
 
 class TestTranscriptRetrieval(TempRepository):
+    def test_retention_leaves_bounded_pruning_evidence(self) -> None:
+        from agents_live.obs import retention
+
+        envelope = self._envelope("pruned-run", {"stdout": "private content"})
+        self._record("pruned-run", transcript=envelope)
+        os.utime(envelope, (1, 1))
+        retention.maintain_state(paths.repo_state_dir(self.root), days=30)
+        item = self._json("pruned-run")["transcripts"][0]
+        self.assertEqual("pruned", item["transcript_state"])
+        self.assertNotIn("private content", envelope.read_text(encoding="utf-8"))
+        os.utime(envelope, (1, 1))
+        retention.maintain_state(paths.repo_state_dir(self.root), days=30)
+        self.assertEqual("missing", self._json("pruned-run")["transcripts"][0]["transcript_state"])
+
+    def test_unfinished_snapshot_honors_relative_time_filter(self) -> None:
+        self._envelope("old-run", {"timestamp": "2000-01-01T00:00:00Z", "finalized": False})
+        self._envelope("new-run", {"timestamp": datetime.now(timezone.utc).isoformat(), "finalized": False})
+        items = self._json("--agent", "reader", "--since", "30m")["transcripts"]
+        self.assertEqual(["new-run"], [item["run_id"] for item in items])
+
+    def test_attempt_selection_and_unfinished_snapshot(self) -> None:
+        self.skill("partial", ['agents-live.selector: "fake"'])
+        def run_child(argv, **kwargs):
+            prefix = Path(kwargs["env"]["AGENTS_LIVE_CAPTURE_PREFIX"])
+            run_id = prefix.parent.name
+            Path(str(prefix) + ".stdout").write_text('{"text":"still working"}')
+            item = self._json(run_id, "--attempt", "1")["transcripts"][0]
+            self.assertEqual("unfinished", item["status"])
+            self.assertFalse(item["finalized"])
+            self.assertEqual("not_yet_finalized", item["transcript_state"])
+            self.assertEqual("still working", item["final"])
+            return ChildResult(tuple(argv), 0, '{"text":"finished"}', "")
+        result = dispatch(Firing("partial", str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+        item = self._json(result.run_id, "--attempt", "1")["transcripts"][0]
+        self.assertTrue(item["finalized"])
+        self.assertEqual("finished", item["final"])
+
+    def test_retry_attempts_remain_individually_readable(self) -> None:
+        self.skill("retried", ['agents-live.selector: "fake"'])
+        result = dispatch(Firing("retried", str(self.root), "manual"), runner=RecordingRunner([
+            ChildResult(("fake",), 0, '{"text":"partial first"}', "", True),
+            ChildResult(("fake",), 0, '{"text":"final second"}', ""),
+        ]))
+        self.assertTrue(result.ok, result)
+        first = self._json(result.run_id, "--attempt", "1")["transcripts"][0]
+        self.assertEqual("partial first", first["final"])
+        self.assertEqual("failed", first["status"])
+        items = self._json(result.run_id, "--attempts")["transcripts"]
+        self.assertEqual([1, 2], [item["attempt"] for item in items])
+        self.assertEqual(["partial first", "final second"], [item["final"] for item in items])
+
     def _record(
         self,
         run_id: str,
@@ -4359,6 +4486,91 @@ class TestTranscriptAcceptance(TempRepository):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_retry_isolates_partial_results_and_preserves_prepared_inputs(self) -> None:
+        original_resource = dispatch_module._resource
+        for publish_again in (False, True):
+            name = "retry-new" if publish_again else "retry-missing"
+            self.skill(name, [
+                'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+                'agents-live.result-path: "/output/result"',
+                'agents-live.timeout: "10"', 'agents-live.overall-timeout: "30"',
+            ], body='Do work.\n\n```put /input\n{"prepared":true}\n```')
+            sessions = []
+            @contextlib.contextmanager
+            def resource(*args, **kwargs):
+                with original_resource(*args, **kwargs) as resources:
+                    sessions.append(resources[1])
+                    yield resources
+
+            calls = []
+            def run_child(argv, **kwargs):
+                calls.append(kwargs["timeout"])
+                session = sessions[0]
+                self.assertEqual((True, {"prepared": True}), session.snapshot("/input"))
+                self.assertEqual((False, None), session.snapshot("/output/result"))
+                if len(calls) == 1 or publish_again:
+                    session._mcp.seed([("/output/result", {"attempt": len(calls)})])
+                return ChildResult(tuple(argv), 0, '{"text":"done"}', "", len(calls) == 1)
+
+            with mock.patch.object(dispatch_module, "_resource", resource):
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+            self.assertTrue(result.ok, result)
+            self.assertEqual(2, len(calls))
+            self.assertEqual({"attempt": 2} if publish_again else None, result.structured)
+            first = Path(result.transcript.replace("-agent-2.json", "-agent-1.json"))
+            self.assertEqual({"attempt": 1}, json.loads(first.read_text())["pipeline_result"]["value"])
+
+    def test_retry_policy_and_overall_deadline_bound_all_attempts(self) -> None:
+        for retries, elapsed_per_call, expected_calls in ((0, 3, 1), (1, 3, 2), (1, 10, 1)):
+            name = f"deadline-{retries}-{elapsed_per_call}"
+            self.skill(name, [
+                'agents-live.selector: "fake"', 'agents-live.timeout: "10"',
+                f'agents-live.timeout-retries: "{retries}"', 'agents-live.empty-retries: "0"',
+            ])
+            elapsed = 0.0
+            budgets = []
+            def run_child(argv, **kwargs):
+                nonlocal elapsed
+                budgets.append(kwargs["timeout"])
+                elapsed += elapsed_per_call
+                return ChildResult(tuple(argv), 0, '{"text":"partial"}', "", True)
+            with mock.patch.object(dispatch_module.time, "monotonic", side_effect=lambda: elapsed):
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+            self.assertFalse(result.ok)
+            self.assertEqual(expected_calls, len(budgets))
+            self.assertEqual([10.0, 7.0][:expected_calls], budgets)
+
+    def test_pipeline_result_cap_prevents_postprocessing(self) -> None:
+        directory = self.skill("large-result", [
+            'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"', 'agents-live.output-max-bytes: "32"',
+            'agents-live.post-processor: "post.py"',
+        ], body='Do work.\n\n```put /output/result\n' + json.dumps("x" * 33) + '\n```')
+        (directory / "post.py").write_text("pass\n")
+        runner = RecordingRunner([ChildResult(("fake",), 0, '{"text":"done"}', "")])
+        result = dispatch(Firing("large-result", str(self.root), "manual"), runner=runner)
+        self.assertEqual("agent_output_invalid", result.category)
+        self.assertEqual(1, len(runner.argv))
+
+    def test_completion_bound_is_independent_of_provider_telemetry(self) -> None:
+        self.skill("telemetry", [
+            'agents-live.selector: "copilot"',
+            'agents-live.output-max-bytes: "128"',
+        ])
+        for answer, expected in (("done", True), ("x" * 129, False)):
+            with self.subTest(expected=expected):
+                stdout = "\n".join(json.dumps(event) for event in [
+                    {"type": "session.info", "data": {"detail": "x" * 1024}},
+                    {"type": "assistant.message", "data": {"content": answer}},
+                    {"type": "session.usage_checkpoint", "data": {"totalNanoAiu": 1000000000}},
+                ])
+                result = dispatch(Firing("telemetry", str(self.root), "manual"),
+                                  runner=RecordingRunner([ChildResult(("copilot",), 0, stdout, "")]))
+                self.assertEqual(expected, result.ok, result)
+                self.assertEqual("0.01", dict(result.usage)["list_cost_usd"])
+                if not expected:
+                    self.assertEqual("agent_output_invalid", result.category)
+
     def test_phase_accounting_survives_skips_and_late_failures(self) -> None:
         original_resource = dispatch_module._resource
         for scenario in ("success", "skip", "skip-timeout", "skip-cleanup",
@@ -5034,6 +5246,16 @@ class TestAgentPipeline(TempRepository):
         self.assertEqual(list(argv), transcript["argv"])
         self.assertEqual("fake", transcript["provider"])
         self.assertEqual("Do the work.", transcript["prompt"])
+
+    def test_truncated_diagnostics_report_limit_even_when_parser_fails(self) -> None:
+        self.skill("truncated", ['agents-live.selector: "fake"'])
+        result = dispatch(
+            Firing("truncated", str(self.root), "manual"),
+            runner=RecordingRunner([
+                ChildResult(("fake",), 0, '{"text":', "", output_limited=True),
+            ]))
+        self.assertFalse(result.ok)
+        self.assertEqual("diagnostic_output_limit", result.category)
 
     def test_post_processor_preserves_agent_usage_and_transcript(self) -> None:
         self.skill("telemetry", [
@@ -6719,17 +6941,38 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertIn("Attention in all registered repositories", attention)
         self.assertIn("1 failing agents", attention)
 
-    def test_dashboard_model_shows_reported_configured_and_default_values(self) -> None:
+    def test_dashboard_model_shows_configured_effort_and_default_values(self) -> None:
         dashboard = self._dashboard_module()
         row = {"runtime": "copilot", "identifier": "sample-123", "name": "sample",
                "model": "configured-model"}
-        for reports, expected in (({}, "configured-model"),
-                                  ({"sample": "legacy-model"}, "legacy-model"),
-                                  ({"sample-123": "reported-model"}, "reported-model")):
-            with self.subTest(reports=reports):
-                self.assertEqual(expected, dashboard._agent_model(row, reports))
-        self.assertEqual("default", dashboard._agent_model({**row, "model": None}, {}))
-        self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}, {}))
+        for effort in ("high", "low"):
+            self.assertEqual(f"configured-model:{effort}", dashboard._agent_model(
+                {**row, "effort": effort}))
+        self.assertEqual("configured-model", dashboard._agent_model(row))
+        self.assertEqual("provider default", dashboard._agent_model({**row, "model": None}))
+        self.assertEqual("-", dashboard._agent_model({**row, "runtime": "none"}))
+
+    def test_dashboard_rows_reload_configured_model_and_effort(self) -> None:
+        dashboard = self._dashboard_module()
+        directory = self.skill(
+            "current-model", ['agents-live.selector: "fake/new-model:high"'])
+        definition = directory / "SKILL.md"
+        original = definition.read_text(encoding="utf-8")
+        repos._add(str(self.root))
+        dashboard.STATE["all_repos"]["repo"] = "All"
+        for effort in ("high", "low"):
+            with self.subTest(effort=effort):
+                definition.write_text(
+                    original.replace(":high", f":{effort}"), encoding="utf-8")
+                spec = agent.load("current-model", root=self.root)
+                dashboard.STATE["models"] = {spec.identifier: "old-model"}
+                single = dashboard.agent_rows()
+                aggregate = dashboard.operational_snapshot()["rows"]
+                for rows in (single, aggregate):
+                    selected = next(
+                        row for row in rows if row["identifier"] == spec.identifier)
+                    self.assertEqual(f"new-model:{effort}", selected["model"])
+                    self.assertEqual(effort, selected["effort"])
 
     def test_dashboard_attention_includes_degraded_host_health(self) -> None:
         dashboard = self._dashboard_module()
@@ -7239,6 +7482,38 @@ class TestDashboardRepositorySurface(TempRepository):
 
 
 class TestWindowsTaskScheduling(unittest.TestCase):
+    def test_repeating_calendar_keeps_today_when_future_slots_remain(self) -> None:
+        from xml.etree import ElementTree as ET
+
+        cases = (
+            ("37 * * * *", "2026-09-14T09:10:00", "2026-09-14T00:37:00"),
+            ("17 */2 * * *", "2026-09-14T09:10:00", "2026-09-14T00:17:00"),
+            ("0 */5 * * *", "2026-09-14T09:10:00", "2026-09-14T00:00:00"),
+            ("0 */5 * * *", "2026-09-14T20:00:01", "2026-09-15T00:00:00"),
+            ("37 * * * *", "2026-09-14T09:37:00", "2026-09-14T00:37:00"),
+            ("37 * * * *", "2026-09-14T23:37:01", "2026-09-15T00:37:00"),
+            ("0 9-17 * * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
+            ("0 9-17 * * *", "2026-09-14T17:01:00", "2026-09-15T09:00:00"),
+            ("*/10 9-17 * * MON-FRI", "2026-09-14T10:10:01", "2026-09-14T09:00:00"),
+            ("*/10 9-17 * * MON-FRI", "2026-09-13T10:10:01", "2026-09-14T09:00:00"),
+            ("0 9-17 14 * *", "2026-09-14T10:10:00", "2026-09-14T09:00:00"),
+        )
+        for expression, timestamp, boundary in cases:
+            for offset in ("-07:00", "-08:00"):
+                with self.subTest(expression=expression, timestamp=timestamp, offset=offset):
+                    document = task_scheduler.build_task_xml(
+                        command="fixture.exe", arguments="", working_dir=".",
+                        schedules=[expression], description="fixture", uri="fixture",
+                        user_id="user", now=datetime.fromisoformat(timestamp + offset))
+                    root = ET.fromstring(document)
+                    namespace = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+                    triggers = root.findall("t:Triggers/*", namespace)
+                    self.assertEqual(1, len(triggers))
+                    self.assertEqual(boundary + offset, triggers[0].findtext(
+                        "t:StartBoundary", namespaces=namespace))
+                    self.assertEqual("true", root.findtext(
+                        "t:Settings/t:StartWhenAvailable", namespaces=namespace))
+
     def test_daily_boundary_preserves_local_utc_offset(self) -> None:
         local_now = datetime(
             2026, 8, 23, 16, 0,
@@ -7455,6 +7730,64 @@ class TestWindowsTaskScheduling(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
     @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "native tests require explicit opt-in")
     @allow_native_runtime()
+    def test_new_hourly_task_fires_today_without_registration_catchup(self) -> None:
+        import time
+        import uuid
+
+        if task_scheduler.probe() is not None:
+            self.skipTest("Task Scheduler is not accessible on this host")
+        now = datetime.now().astimezone()
+        due = (now + timedelta(minutes=2)).replace(second=0, microsecond=0)
+        if due.date() != now.date() or now.hour == 0:
+            self.skipTest("requires a passed daily anchor and a remaining same-day occurrence")
+        name = f"test_same_day_{uuid.uuid4().hex}"
+        path = f"{task_scheduler.TASK_FOLDER}\\{name}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            marker = root / "fired.txt"
+            program = (
+                "from datetime import datetime; from pathlib import Path; "
+                f"Path({str(marker)!r}).write_text(datetime.now().astimezone().isoformat())")
+            schedule = f"{due.minute} * * * *"
+            document = task_scheduler.build_task_xml(
+                command=sys.executable, arguments=subprocess.list2cmdline(["-c", program]),
+                working_dir=str(root), schedules=[schedule], description="Same-day fixture",
+                uri=path, user_id=task_scheduler.current_user_id(), now=now)
+            xml_file = root / "task.xml"
+            xml_file.write_text(document, encoding="utf-16")
+            try:
+                code, _out, error = task_scheduler._run([
+                    "/Create", "/TN", path, "/XML", str(xml_file), "/F"])
+                self.assertEqual(0, code, error)
+                registered = task_scheduler.read_definition(path)
+                self.assertIsNotNone(registered)
+                self.assertEqual(task_scheduler.trigger_signature([schedule]),
+                                 task_scheduler._definition_signature(registered))
+                query = (
+                    f"$info = Get-ScheduledTaskInfo -TaskName '{name}' "
+                    f"-TaskPath '{task_scheduler.TASK_FOLDER}\\'; "
+                    "$info.NextRunTime.ToString('o')")
+                readback = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+                next_run = datetime.fromisoformat(readback.stdout.strip())
+                self.assertEqual(due.replace(tzinfo=None), next_run.replace(tzinfo=None))
+                deadline = time.monotonic() + (due - now).total_seconds() + 30
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                self.assertTrue(marker.exists(), "the native scheduled occurrence never fired")
+                fired = datetime.fromisoformat(marker.read_text())
+                self.assertGreaterEqual(fired, due, "task caught up immediately on registration")
+                self.assertLess((fired - due).total_seconds(), 30)
+                self.assertEqual(registered, task_scheduler.read_definition(path))
+                print(f"Native same-day firing: expected {due.isoformat()}, observed {fired.isoformat()}")
+            finally:
+                code, _out, error = task_scheduler._run(["/Delete", "/TN", path, "/F"])
+                self.assertEqual(0, code, error)
+
+    @unittest.skipUnless(os.name == "nt", "schtasks round-trip is Windows-specific")
+    @unittest.skipUnless(os.environ.get("AGENTS_LIVE_TEST_NATIVE") == "1", "native tests require explicit opt-in")
+    @allow_native_runtime()
     def test_installed_windows_task_scheduler_round_trip(self) -> None:
         """Installed Task Scheduler XML preserves Repetition in CalendarTrigger and matches signature (#488)."""
         if task_scheduler.probe() is not None:
@@ -7534,6 +7867,7 @@ class TestArchitectureFitness(unittest.TestCase):
         allowed = {
             "runtime/hosts/filesystem.py",
             "runtime/hosts/system.py",
+            "runtime/hosts/processes.py",
         }
         found: set[str] = set()
         for path in package.rglob("*.py"):

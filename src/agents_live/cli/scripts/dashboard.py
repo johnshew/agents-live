@@ -206,6 +206,7 @@ def _agent_view_dict(row: agent_view.AgentView) -> dict:
         "ownershipError": row.ownership_error,
         "runtime": row.runtime,
         "model": row.model,
+        "effort": row.effort,
         "mode": row.mode,
         "schedule": list(row.schedules),
         "watch": row.watch,
@@ -1058,7 +1059,17 @@ def _agent_rows_for(root: Path, agents: list[dict],
             agent_cost(identifier, costs) if runtime != "none"
             else ("-", "-"))
         cost_values = costs.get(identifier)
-        model = _agent_model(agent, reported_models or STATE["models"])
+        model = _agent_model(agent)
+        telemetry = STATE["models"] if reported_models is None else reported_models
+        reported_model = telemetry.get(identifier) or telemetry.get(name)
+        model_tip = (
+            f"Configured model: {agent.get('model') or 'provider default'}; "
+            f"effort: {agent.get('effort') or 'provider default'}; "
+            f"last reported model: {reported_model or 'unknown'}")
+        if agent.get("runtime") == "none":
+            model_tip = "No provider"
+        elif not agent.get("runtime"):
+            model_tip = "Configuration unavailable"
         collection_available = (
             not state_error and not definition_error
             and ownership_available)
@@ -1113,6 +1124,9 @@ def _agent_rows_for(root: Path, agents: list[dict],
             "owner": owner,
             "ownershipError": agent.get("ownershipError"),
             "model": model,
+            "effort": agent.get("effort"),
+            "reported_model": reported_model,
+            "model_tip": model_tip,
             "last_ok": ok_ago,
             "last_err": err_ago,
             "cost_day": cost_day,
@@ -1189,13 +1203,15 @@ def _cost_totals(rows: list[dict]) -> tuple[str, str]:
     return total("cost_day"), total("cost_week")
 
 
-def _agent_model(agent: dict, reported_models: dict[str, str]) -> str:
-    runtime = agent.get("runtime") or "agency copilot"
+def _agent_model(agent: dict) -> str:
+    runtime = agent.get("runtime")
     if runtime == "none":
         return "-"
-    return (reported_models.get(agent["identifier"])
-            or reported_models.get(agent["name"])
-            or agent.get("model") or "default")
+    if not runtime:
+        return "unknown"
+    model = agent.get("model") or "provider default"
+    effort = agent.get("effort")
+    return f"{model}:{effort}" if effort else model
 
 
 def system_health() -> dict:
@@ -1505,7 +1521,7 @@ def _add_agent_information_slots(table) -> None:
     )
     table.add_slot(
         "body-cell-model",
-        '<q-td :props="props"><div style="white-space:nowrap">'
+        '<q-td :props="props"><div style="white-space:nowrap" :title="props.row.model_tip">'
         '{{ props.row.model }}</div></q-td>',
     )
     table.add_slot("body-cell-trigger", '''
@@ -1626,7 +1642,7 @@ def agent_grid() -> None:
     )
     table.add_slot(
         "body-cell-model",
-        '<q-td :props="props"><div style="white-space:nowrap">'
+        '<q-td :props="props"><div style="white-space:nowrap" :title="props.row.model_tip">'
         '{{ props.row.model }}</div></q-td>',
     )
     table.add_slot("body-cell-trigger", '''
@@ -3056,7 +3072,9 @@ def main() -> None:
         # and must not dump a traceback on the way out (#249).
         pass
     finally:
-        signal.signal(signal.SIGINT, previous_interrupt)
+        signal.signal(
+            signal.SIGINT,
+            previous_interrupt if app.is_started else signal.SIG_IGN)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

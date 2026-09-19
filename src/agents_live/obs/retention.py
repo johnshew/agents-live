@@ -197,7 +197,21 @@ def _maintain_runs(directory: Path, *, cutoff: datetime) -> int:
         try:
             if artifact.stat().st_mtime >= cutoff_epoch:
                 continue
-            artifact.unlink()
+            if re.fullmatch(r".+-agent-\d+\.json", artifact.name) and not artifact.is_symlink():
+                tombstone = {}
+                if artifact.stat().st_size <= 4096:
+                    with contextlib.suppress(ValueError):
+                        tombstone = json.loads(artifact.read_text(encoding="utf-8"))
+                if isinstance(tombstone, dict) and tombstone.get("pruned_at"):
+                    artifact.unlink()
+                else:
+                    paths.atomic_write_text(artifact, json.dumps({
+                        "pruned_at": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": datetime.fromtimestamp(artifact.stat().st_mtime, timezone.utc).isoformat(),
+                        "attempt": int(artifact.stem.rsplit("-", 1)[1]),
+                    }) + "\n", mode=0o600)
+            else:
+                artifact.unlink()
         except (FileNotFoundError, PermissionError):
             continue
         removed += 1

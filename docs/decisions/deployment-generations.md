@@ -43,8 +43,8 @@ An installation owns this layout:
 ```
 
 The directory key is the package's complete PEP 440 version, not its release
-base. Stable releases therefore use names such as `6.6.1`, while local bake
-artifacts use names such as `6.6.1.dev0+gabc1234`. Multiple bakes of the same
+base. Stable releases therefore use names such as `6.6.1`, while local candidates
+use names such as `6.6.1rc1`. Multiple candidates of the same
 release line coexist without collision and remain independently selectable.
 
 The default root is `%LOCALAPPDATA%\agents-live` on Windows and
@@ -64,7 +64,7 @@ candidate. `upgrade --from <wheel> --candidate` records candidate intent;
 decision for an installed generation. The decision lives outside its immutable
 directory and is bound to the complete validation record, so removing and
 rebuilding the same version cannot inherit an unrelated decision. Development
-versions are always bake releases and cannot receive a release classification.
+versions are historical development builds and cannot receive a release classification.
 An unclassified local stable-numbered build remains unclassified.
 
 `versions list` separates release, source, and validation time. Human output
@@ -94,7 +94,7 @@ bytes and hands them to the package; it does not know the installation layout.
 The bootstrap does not create `versions/`, does not name a staging directory,
 and does not promote anything. Every generation on every host is therefore
 built by one code path, whether it comes from bootstrap, upgrade, or a local
-bake. Before 6.8 the shell scripts laid out the generation themselves and the
+candidate. Before 6.8 the shell scripts laid out the generation themselves and the
 package sealed what they had built, which put the layout, the staging
 convention, and the promotion step into three places in two languages.
 
@@ -148,6 +148,16 @@ discarded and rebuilt.
 
 ### Activation
 
+Numbered release attempts keep runtime identity separate from release evidence.
+An RC uses its full `X.Y.ZrcN` directory beside stable versions. Final build
+attempts have distinct Git-local records (`X.Y.Z-final-N`) but all use package
+version `X.Y.Z`; they cannot share or overwrite a sealed installed directory
+containing different wheel bytes. Restore another retained version with the
+public `versions activate` command and verify agent/watcher convergence, then
+remove only the inactive failed version with `versions remove` before testing
+different final bytes. Git-local artifacts, hashes, and rejection decisions
+remain retained independently of installed-version removal.
+
 On POSIX, activation creates a temporary relative symbolic link and replaces
 `current` with `os.replace`. On Windows, activation replaces the local directory
 junction and restores the previous target if creating the new junction fails.
@@ -168,9 +178,9 @@ dispatches resolve through `current`; an in-flight dispatch, watcher, or
 dashboard may finish from the immutable generation where it began.
 
 The hidden installation commands implement this installation and switching
-protocol for bootstrap, upgrade, and bake acceptance. They are not a public
-version-manager command surface. A future public selector can use the same
-protocol without adding a second active-version record.
+protocol for bootstrap and upgrade. Public `versions activate` and
+`versions remove` use the same ownership and liveness checks without adding a
+second active-version record.
 
 ### Failure semantics
 
@@ -208,8 +218,8 @@ stable generated command under `current`, while running watchers and dashboards
 finish on their original immutable version. Release assets consist of the wheel,
 source distribution, Windows and POSIX bootstrap scripts, and checksum manifest.
 
-Local bake deployment derives a commit-bearing PEP 440 version and uses the same
-generation builder and selection protocol as a release. Repeated bakes on one
+Local candidate deployment uses an explicitly allocated PEP 440 RC version and the same
+generation builder and selection protocol as a release. Repeated candidates on one
 release line therefore accumulate testable generations instead of overwriting a
 shared environment.
 

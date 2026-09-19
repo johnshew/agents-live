@@ -8,11 +8,123 @@ source since 2026-07-18.
 Use [testing.md](testing.md) to validate source, target-version artifacts, and
 the installed PyPI tool as separate execution modes.
 
-Before release review, generate a local channel report using the policy and
-command in [release-report.md](release-report.md). The report shows what has
-reached bake, what remains deferred or needs a promotion decision, whether the
-deployed artifact matches the channel tip, and the next promotion target. It is
+Before release review, generate a local cycle report using the policy and
+command in [release-report.md](release-report.md). The report shows all cycles,
+open work, selected RCs, retained attempts, approval and validation gaps, and
+publication evidence. It is
 gitignored and summarizes evidence without replacing any gate below.
+
+## Numbered RC lifecycle
+
+The process and business requirements are canonical in
+[development-release-process.md](../docs/development-release-process.md).
+There is no bake channel. The manifest selects RC5 source for `6.9.2` finalization
+while `main` advances toward `6.9.3rc1`. Historical RC1-RC6 artifacts and their
+different readiness states remain retained; none is silently relabeled accepted.
+
+The numbered lifecycle is implemented by `tools/release.py`. Existing
+`local-deploy.py --rc` prepares or reuses the canonical numbered attempt, then
+activates its exact wheel. Historical local evaluation receipts support recovery,
+not full operational acceptance. Never rebuild those consumed identities or
+import their limited readiness evidence as full acceptance. The current release
+still requires the issue dispositions, exact RC acceptance, publication approval,
+and independent stable acceptance described by the generated report.
+
+### Numbered attempt commands
+
+Run preflight with the live repository and safe agent arguments before allocating
+an attempt. From the clean, synchronized configured cycle branch, prepare the next RC:
+
+```bash
+uv run --script tools/release.py --prepare-rc <configured-next-rc> --yes
+```
+
+Allocation consumes an identity across manifest history, local evidence and refs,
+and origin refs. It creates a dedicated `release/v<attempt>-candidate` worktree
+and retains evidence under the common Git directory's
+`agents-live-release/cycle-<target>/<attempt>/`. Preparation commits release
+metadata, preserves `Unreleased` for RCs, builds once, and runs the source and
+packaged gates. No tag is created. Run subsequent commands from the printed
+retained worktree, using its script, not a different checkout's version.
+
+```bash
+agents-live upgrade --from <retained-wheel> --candidate
+uv run --script tools/release.py --accept-candidate --attempt <rc> \
+  --repo <live-repository> --agent <safe-agent-identifier> \
+  --cost-agent <safe-provider-agent-identifier> --yes
+```
+
+After exact RC acceptance, obtain developer approval naming its original source
+commit and record it in the cycle's approval fields. Do not include later runtime
+changes. From the clean synchronized cycle branch:
+
+```bash
+uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
+```
+
+The final attempt has package version `<target>` but a separate identity such
+as `<target>-final-1`. Its preparation stamps the accumulated stable changelog,
+builds new stable bytes, and reruns the required gates. Bootstrap and independently
+accept those bytes using the same command above with the final attempt identifier.
+RC acceptance can never substitute for this receipt. After explicit approval:
+
+```bash
+uv run --script tools/release.py --finalize --attempt <final-attempt> --yes
+uv run --script tools/release.py --publish --attempt <final-attempt> --yes
+```
+
+Finalization creates the annotated stable tag and an immutable record binding it
+to final preparation and acceptance. Publication pushes the exact commit and tag
+atomically, uploads retained bytes and a privacy-safe evidence digest, and refuses
+replacement of existing draft assets. Both automatic and manual PyPI workflow
+paths require a canonical stable tag and matching public evidence. Publication
+never rebuilds accepted assets. Verify GitHub and PyPI availability independently.
+
+### Retry and rejection
+
+Use `--prepare-attempt <attempt> --yes` in its retained worktree to retry unchanged
+preparation. Completed builds are reused byte-for-byte; changed or unreceipted
+bytes are refused. An interruption before the commit/build record is complete
+may require a new identity after preserving the failed attempt for inspection.
+Use `--accept-candidate --attempt <attempt> --resume` with all live arguments
+and `--yes` only when a matching upgrade checkpoint exists. Cycle mutation and
+allocation locks refuse concurrent operations; after a crash, verify no operation
+is active before removing only the stale lock directory. Never delete receipts.
+
+To reject, deliberately restore a retained version through `versions activate`,
+verify all-repository doctor, agent state, and representative watchers, then run
+`--reject-attempt <attempt> --reason <reason> --yes`. The tool verifies the retained
+state baseline when acceptance has started and records rejection without deleting
+artifacts. Advance the configured RC for source fixes. A failed final attempt
+does not consume a stable patch: after restoration, remove only the inactive
+failed installed version through `versions remove`, then allocate a new final
+attempt. The installed wheel digest must match; sealed versions are never
+overwritten. Runtime removal does not remove the Git-local evidence store.
+
+The existing rejected local stable tag needs explicit migration before finalization:
+`--migrate-legacy-tag v<target> --yes`. This verifies the original receipt and
+artifacts, preserves the exact annotated object under an archive ref, and removes
+only the matching unpublished local canonical ref. It refuses remote tags and
+conflicting identities. It does not install or publish anything.
+
+`--cycle-status` reports local attempt evidence without exposing receipt paths.
+Legacy preview/prepare and implicit acceptance/publication remain blocked in
+numbered cycles; the later legacy examples apply only to non-numbered cycles.
+Do not use an older checkout to bypass the guard.
+
+The adopted policy keeps a stable target while advancing RC numbers on
+rejection. Keep immutable artifacts and receipts for every attempt. An
+accepted RC permits preparation of final stable bytes, not their publication.
+Final stable artifacts must pass independent required acceptance. Create the
+stable tag only afterward and publish exactly those accepted bytes, without
+rebuilding them. A failed final build needs a distinct retained attempt identity
+and safe installed-version recovery, not another stable patch number.
+
+Stage RCs beside the existing stable installation and select one deliberately
+for testing. Verify rollback and watcher restoration without duplicate native
+automation. Optional GitHub RC releases must be prereleases and never latest;
+normal upgrades and the PyPI publishing workflow remain stable-only, including
+manual workflow dispatch. Existing immutable tags and evidence are not rewritten.
 
 ## Changelog readiness
 
@@ -75,7 +187,7 @@ Publication consumes those receipts instead of rerunning local tests.
 uv run --script tools/pre-release-audit.py
 uv run --with-editable . python -m unittest discover -s tests -v
 uv run --with-editable . agents-live smoketest
-uv run --script tools/release.py --build-artifacts
+uv build
 ```
 
 After the build, run the built-wheel dashboard readiness check described in
@@ -96,14 +208,11 @@ CLI to be installed. `tools/release.py` runs these gates during `--prepare`;
 
 `uv build` resolves its build backend from PyPI, so on a network that
 intercepts TLS it fails with `HandshakeFailure` while every other gate
-passes. That is a local condition, not a release defect: the published
-artifacts are built by `.github/workflows/publish.yml` on a GitHub
-runner, which reaches PyPI normally. `uv build --offline` succeeds from
-the local cache and is enough to confirm the package still builds, but
-`release.py` deliberately offers no offline mode, because a release
-cannot be cut from a host that cannot reach the index it publishes to.
-Either run the release from a host with direct access, or dispatch the
-publish workflow against the tag.
+passes. That is a local condition, not permission to replace accepted bytes.
+Use an environment that reaches the approved package source for preparation.
+An offline diagnostic build is not a preparation receipt. The publish workflow
+downloads and verifies the accepted release assets rather than rebuilding them;
+manual dispatch cannot bypass missing finalization or artifact evidence.
 For machine-specific names that generic patterns cannot detect, create the
 gitignored `.agents-live-machine-names` file at the repository root. Put one
 literal machine name on each line; blank lines and lines beginning with `#`
@@ -140,10 +249,10 @@ read-only prerequisites ahead of the expensive preparation gates.
 Prepare the release locally:
 
 ```bash
-uv run --script tools/release.py --prepare --bump patch --yes
+uv run --script tools/release.py --prepare-rc <next-numbered-rc> --yes
 ```
 
-Replace `patch` with the bump recommended by changelog maintenance. The script
+Configure the stable target and next RC after changelog review. The script
 rejects an empty `Unreleased` section and any bump below the minimum implied by
 `feat:`, conventional `type!:` or `BREAKING CHANGE:` notes. Every changelog
 bullet must start with a standalone one-line summary; supporting detail belongs
@@ -151,7 +260,7 @@ on indented continuation lines. The script requires a clean `main`
 synchronized with `origin/main`, creates an isolated
 `release/v<version>-candidate` branch, updates all package, skill,
 documentation-link, and changelog versions, runs every release gate, and
-creates the release commit, annotated tag, and preparation receipt locally.
+creates the candidate commit and preparation receipt locally. RCs are not tagged.
 The receipt binds the exact gate list, commit, base commit, tag object, wheel,
 source distribution, installer scripts, and artifact hashes.
 Preparation copies the complete set into Git-local immutable release storage and all later
@@ -166,13 +275,12 @@ candidate commit, retain the candidate branch, tag, and Git-local artifacts.
 From the clean candidate checkout, run:
 
 ```bash
-uv run --script tools/release.py --prepare --resume --yes
+uv run --script tools/release.py --prepare-attempt <retained-attempt> --yes
 ```
 
-Resume does not bump the version again. It requires the candidate to remain
-one release commit ahead of current `origin/main`, rejects remote tags and
-local tags that are unannotated or point elsewhere, and checks the release
-file set. An exact valid preparation receipt is reused. Otherwise all release
+Resume does not allocate another identity. It requires the retained candidate
+source and release-file commit to remain unchanged. An exact valid preparation
+receipt is reused. Otherwise all release
 gates, including artifact build and packaged readiness, must pass again before
 a new receipt can be written. Interrupted copies do not replace the preserved
 artifact set. Successfully replaced copies remain in Git-local `retained-*`
@@ -185,14 +293,14 @@ prepare a different version from clean, synchronized `main`.
 
 ## Candidate acceptance
 
-The local release commit, annotated tag, and artifacts are not public yet.
+The local candidate commit and artifacts are not public yet.
 Install that exact wheel into the user-level tool through the supported local
 artifact upgrade path, restore a healthy representative repository with at
 least one started watcher, then run the mandatory acceptance command:
 
 ```bash
 agents-live upgrade --from <receipt-bound-wheel-path-printed-by-prepare>
-uv run --script tools/release.py --accept-candidate \
+uv run --script tools/release.py --accept-candidate --attempt <rc-or-final-attempt> \
   --repo <live-repository> --agent <safe-agent-identifier> \
   --cost-agent <safe-provider-agent-identifier> --yes
 ```
@@ -219,7 +327,7 @@ later operational phase fails and cleanup restores that exact baseline, resume
 without repeating replacement:
 
 ```bash
-uv run --script tools/release.py --accept-candidate \
+uv run --script tools/release.py --accept-candidate --attempt <rc-or-final-attempt> \
   --repo <live-repository> --agent <safe-agent-identifier> \
   --cost-agent <safe-provider-agent-identifier> --resume --yes
 ```
@@ -248,10 +356,13 @@ SHA-256. `--publish` checks both preparation and acceptance receipts and refuses
 a missing or stale receipt. Never use a source-only or isolated `uvx` check as
 a substitute; those do not exercise replacement of the installed consumer tool.
 
-Publish the prepared commit and tag:
+Prepare and independently accept final-version bytes, then finalize and publish:
 
 ```bash
-uv run --script tools/release.py --publish --yes
+uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
+uv run --script tools/release.py --accept-candidate --attempt <final-attempt> --repo <live-repository> --agent <safe-agent> --cost-agent <safe-provider-agent> --yes
+uv run --script tools/release.py --finalize --attempt <final-attempt> --yes
+uv run --script tools/release.py --publish --attempt <final-attempt> --yes
 ```
 
 Publication validates the two receipts instead of rerunning identical local
@@ -295,85 +406,11 @@ confirms consumer availability. If JSON succeeds while `uvx` reports that the
 version does not exist, allow the Simple API to propagate and retry the exact
 check. Do not republish or alter the tag.
 
-## Publish a bake for remote testing
+## Historical Evidence
 
-Use a GitHub prerelease only when another machine must install the exact bake
-that has already passed local deployment validation. This is distribution for
-testing, not stable promotion. It does not replace changelog review, candidate
-acceptance, or `tools/release.py` for the eventual stable release.
-
-The public bake identity is the complete commit-qualified PEP 440 version,
-such as `6.7.0.dev0+g<commit>`. Before publication, require all of the
-following:
-
-- the work is merged to a clean `main` synchronized with `origin/main`;
-- the version's `g<commit>` suffix names that exact commit;
-- source tests, smoketest, audit, build, dashboard readiness, and bootstrap
-  readiness passed for that commit;
-- the commit-qualified wheel was installed and accepted on a live host;
-- the annotated tag is `v<complete-version>` and targets that commit; and
-- the asset directory contains exactly one wheel, one source archive,
-  `install.ps1`, `install.sh`, and `SHA256SUMS-<complete-version>`.
-
-Build the source archive and copy the installers from a Git archive of the
-same commit used for the validated wheel. Stamp that archive with the same
-complete bake version; never edit tracked version files in the shared checkout
-to manufacture prerelease assets. Hash all four executable/package assets into
-the versioned manifest. Do not replace an existing tag or asset: a correction
-gets a new commit-qualified version and tag.
-
-After checking every manifest entry against its file, create a draft with the
-complete set so consumers cannot observe a release missing bootstrap assets:
-
-```powershell
-$repo = "johnshew/agents-live"
-$version = "<complete-commit-qualified-version>"
-$tag = "v$version"
-$commit = git rev-parse HEAD
-$assets = @(
-    "<artifact-directory>\agents_live-$version-py3-none-any.whl",
-    "<artifact-directory>\agents_live-$version.tar.gz",
-    "<artifact-directory>\install.ps1",
-    "<artifact-directory>\install.sh",
-    "<artifact-directory>\SHA256SUMS-$version"
-)
-
-git tag -a $tag $commit -m "agents-live $version bake"
-git push origin $tag
-gh release create $tag @assets --repo $repo --verify-tag `
-    --title "agents-live $version" --notes-file <notes-file> `
-  --prerelease --draft
-```
-
-The release notes must say that this is a bake, is not on PyPI, and give the
-exact-version installation command. If `gh release create` fails after the tag
-push, diagnose and resume against that immutable tag; do not delete or rewrite
-it. While the release is still a draft, verify all five asset names, positive
-sizes, GitHub digests, and manifest hashes. Publish only after those checks:
-
-```powershell
-gh release view $tag --repo $repo --json isDraft,isPrerelease,assets
-gh release edit $tag --repo $repo `
-  --draft=false --prerelease --latest=false
-```
-
-Then verify the final state:
-
-```powershell
-gh release view $tag --repo $repo `
-    --json tagName,isDraft,isPrerelease,name,publishedAt,url,assets
-gh api "repos/$repo/releases/tags/$tag"
-```
-
-Require `isDraft: false`, `isPrerelease: true`, and GitHub digest and positive
-size metadata for every asset. Confirm the stable release remains latest and
-that PyPI still reports the prior stable version. GitHub renders `+` as `%2B`
-in direct asset URLs; this is expected, and bootstrap compares the decoded URL
-to the exact tag identity.
-
-If a failure or interruption occurs before the release commit, the script
-restores every version file and clears its staged changes. A failure after the
-commit remains visible for recovery. Rerun `--publish --yes` if GitHub release
-creation fails after the atomic push; publication accepts the exact tagged
-commit locally or on `origin/main` and skips a release that already exists. Do
-not rewrite or delete a pushed release tag.
+Retain original development-build versions, tags, hashes, receipts, and rejected
+attempts. They describe historical bytes, not a second active release channel.
+Use the explicit legacy-tag migration command only for the recorded unpublished
+conflict. Never relabel historical deployment observations as package acceptance
+or overwrite a published tag. Remote testing distribution requires separate
+authorization and does not confer stable-publication approval.

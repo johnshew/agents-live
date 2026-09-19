@@ -29,6 +29,31 @@ the defect.
 
 ## Test boundaries
 
+For the numbered-RC cycle tracked in
+[#511](https://github.com/johnshew/agents-live/issues/511), use the explicit
+`release.py` attempt workflow in [release.md](release.md). Source regression
+tests exercise real temporary commits, artifacts, rejection, approval-only
+promotion, independent final acceptance records, and deferred annotated tags.
+Their synthetic builder and operational receipts do not prove live acceptance.
+Test RC rejection followed by the next RC,
+side-by-side stable/RC installation, deliberate selection and rollback, and
+restoration of watchers without duplicate automation. Resume may reuse only
+unchanged bytes and matching evidence. Historical legacy rejection records with
+unavailable artifacts are not executing evidence.
+
+RC acceptance never satisfies the final stable wheel's artifact or installed
+gates. Final stable failures must preserve an attempt-specific record and allow
+safe recovery without overwriting sealed installations or consuming the next
+stable version. Publication must upload exactly the accepted stable bytes.
+
+Preparation and acceptance receipts bind attempt, source and metadata commits,
+gate commands, environment, artifact hashes, and each other. `--cycle-status`
+rechecks retained bytes and decisions; malformed or changed evidence is invalid,
+not accepted. Full installed acceptance retains a state baseline for rejection
+even after its resumable checkpoint is retired. Restoring through `versions activate`
+and removing only an inactive failed version through `versions remove` are
+separate live operations; temporary Git lifecycle tests never perform them.
+
 Keep these execution modes distinct. A passing editable-source command does
 not prove that the built wheel or installed PyPI tool works.
 
@@ -184,24 +209,24 @@ Use temporary projects for mutating smoke tests. Do not start, stop, migrate,
 or initialize agents in `~/repos/<target-project>` unless that operational change is part
 of the test.
 
-## Deploy the current bake locally
+## Deploy a numbered RC locally
 
 Use the focused local deployment workflow after a pull request or direct
-administrative commit reaches the configured bake branch. Prefer pull requests
+administrative commit reaches the configured source branch. Prefer pull requests
 for substantive fixes so review and CI evidence remain attached to each change:
 
 ```bash
-git pull --ff-only origin <configured-bake-branch>
-uv run --script tools/local-deploy.py --repo <live-repository>
+git pull --ff-only origin <configured-source-branch>
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
 ```
 
-Run these commands from a clean checkout of the configured bake branch, using
+Run these commands from a clean checkout of the configured source branch, using
 the primary checkout when it is already clean and on that branch or a dedicated
 worktree otherwise. Remove a temporary worktree after deployment. The command
-requires the clean bake branch configured in
-`.github/release-channels.toml`, fast-forwards it from `origin`, and prepares
-one commit-and-digest-addressed development wheel. The archived build copy is
-stamped as `<target>.dev0+g<commit>` without changing tracked release versions.
+requires the clean source branch configured in
+`.github/release-cycles.toml`, fast-forwards it from `origin`, and prepares
+one immutable numbered candidate wheel. The archived build copy is
+stamped as `<target>rc<N>` without changing tracked release versions.
 It runs the built-wheel
 dashboard readiness gate in normal and development modes, then records the
 validated commit, artifact digest, and exact gate list. A later deployment of
@@ -218,7 +243,7 @@ Never delete this common artifact storage when removing a worktree.
 Do not repeat a passing check simply because work moved from implementation to
 release or to another agent. Record the command, tested revision or artifact
 digest, environment, and result; rerun only when a relevant input changed or
-the earlier result failed or is unavailable. A newly stamped bake wheel is a
+the earlier result failed or is unavailable. A newly stamped RC wheel is a
 new artifact, so its first check is not covered by an ordinary-version wheel.
 Post-install identity, watcher, and dashboard restoration checks validate the
 changed installation and are not substitutes for, or repetitions of, the
@@ -226,8 +251,8 @@ artifact tests.
 
 The optional `--allow-downgrade` bypasses only the guard against moving to a
 lower numeric `major.minor.patch` release. It is not needed when replacing a
-stable candidate with a commit-qualified bake on the same release line, or
-when moving between bakes on that release line. It does not bypass artifact,
+stable version with a numbered RC on the same release line, or
+when moving between RCs on that release line. It does not bypass artifact,
 health, watcher, dashboard, or post-install identity checks.
 
 Before replacement, the workflow snapshots release-owned all-repository status
@@ -245,16 +270,74 @@ Prepared releases still require the complete preparation gates and
 `tools/release.py --accept-candidate`; their release receipts and resumable
 acceptance checkpoints remain authoritative.
 
-## Validate a published bake
+### Local numbered RCs
 
-A published bake is a GitHub prerelease used to move already-validated bytes
-to another machine. It is distinct from both local bake deployment and a
-stable PyPI release. Install it through the public bootstrap with the complete
-commit-qualified version, then validate the stable generation path rather than
+From the clean synchronized cycle branch, local-only RC evaluation uses:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
+```
+
+The command accepts only the manifest's next unused RC, builds an archived copy
+with that exact package version, and installs through `upgrade --from`. Existing
+versions remain installed side by side; `current` selects the RC. No GitHub tag,
+release, or PyPI upload is created. Use `versions list` to inspect retained
+versions and `versions activate <version>` to deliberately select a previous version.
+
+Per-RC source identity, wheel, preparation evidence, and deployment receipt live
+under the common Git directory's `agents-live-local-deploy/candidates/<version>`.
+A retry uses the same wheel even after readiness fails. Changed source must use
+the next RC; changed retained bytes fail closed. An interrupted lock or wheel
+without its identity receipt requires inspection, not deletion or rebuilding
+under the same version. Local deployment is not provider-backed acceptance or
+approval of final stable bytes. Stable preparation and publication remain
+blocked on #511.
+
+### Recover obsolete provider diagnostics
+
+When an installed version fails doctor solely because a stopped local agent's
+provider CLI is unavailable, a retained RC may already correct that diagnostic.
+Use the explicit recovery path only after its wheel has passed packaged
+readiness:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <retained-rc> --recover-provider-readiness
+```
+
+The manifest must record the retained numbered RC with `status = "prepared"`
+and its matching `artifact_version`. Recovery selects that recorded identity,
+not the next unused RC. Normal preparation cannot reuse a historical identity.
+
+Recovery does not rebuild or restamp the candidate. It requires the original
+preparation receipt, wheel hash, source ancestry, platform, interpreter, and
+gate list. Package and installer inputs must be unchanged; later deployment
+tool and test corrections can consume the older candidate without pretending
+they were included in its package.
+
+Before any replacement, the retained wheel runs read-only doctor and status
+commands with the installed interpreter and plugin dependencies. The candidate
+must explicitly classify each old failed provider check as on-demand readiness,
+pass every health check, and report the same agent state. Unknown, malformed,
+missing, or unrelated failed checks refuse recovery. The installed runtime's
+ownership and host-health checks must already pass. Tool execution approval is
+still required where the environment restricts candidate execution.
+
+The regular upgrade, post-install health, exact-version, direct-wheel identity,
+state, and dashboard checks remain mandatory. A post-upgrade failure attempts
+rollback to the prior retained version. Diagnostic comparisons and the tooling
+commit are recorded alongside the original candidate identity. This recovery
+does not authorize stable publication or replace installed acceptance.
+
+## Validate a published testing package
+
+A separately authorized GitHub prerelease can distribute already-validated bytes
+to another machine. It is distinct from local RC activation and a
+stable PyPI release. Install it through the public bootstrap with its exact
+version, then validate the stable generation path rather than
 an editable checkout or uv tool environment:
 
 ```powershell
-$version = "<complete-commit-qualified-version>"
+$version = "<published-prerelease-version>"
 $tag = [Uri]::EscapeDataString("v$version")
 $installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
 Invoke-WebRequest `
@@ -390,16 +473,16 @@ Preview and prepare the release locally:
 
 ```bash
 uv run --script tools/release.py --dry-run --bump patch
-uv run --script tools/release.py --prepare --bump patch --yes
+uv run --script tools/release.py --prepare-rc <next-numbered-rc> --yes
 ```
 
 Run `/changelog-maintenance` first and replace `patch` with its recommended
 bump. Preparation rejects an empty changelog or an undersized bump, creates an
 isolated candidate branch, updates every version surface, runs the gates, builds
-the target artifacts, and creates a local commit, annotated tag, and immutable
+the target artifacts, and creates a local commit and immutable
 preparation receipt. Before publication:
 
-1. Review the release commit and tag.
+1. Review the candidate commit and artifact hashes.
 2. Inspect the target-version wheel and source distribution.
 3. Run the built-wheel checks from this runbook.
 4. Confirm bare `agents-live` still represents the previously published tool.
@@ -408,7 +491,7 @@ preparation receipt. Before publication:
 7. Run the enforced installed-candidate acceptance:
 
    ```bash
-   uv run --script tools/release.py --accept-candidate \
+  uv run --script tools/release.py --accept-candidate --attempt <rc-or-final-attempt> \
      --repo <live-repository> --agent <safe-agent-identifier> \
      --cost-agent <safe-provider-agent-identifier> --yes
    ```
@@ -440,7 +523,10 @@ runs last, after CLI and browser lifecycle checks.
 Publish only after those checks pass:
 
 ```bash
-uv run --script tools/release.py --publish --yes
+uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
+uv run --script tools/release.py --accept-candidate --attempt <final-attempt> --repo <live-repository> --agent <safe-agent> --cost-agent <safe-provider-agent> --yes
+uv run --script tools/release.py --finalize --attempt <final-attempt> --yes
+uv run --script tools/release.py --publish --attempt <final-attempt> --yes
 ```
 
 After the GitHub workflow succeeds, verify the exact release from PyPI and

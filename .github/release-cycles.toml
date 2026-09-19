@@ -1,0 +1,83 @@
+schema = 2
+development_branch = "main"
+default_cycle = "6.9.3"
+
+[cycles."6.9.2"]
+branch = "release/6.9.2"
+source_ref = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+selected_rc = "6.9.2rc5"
+next_rc = "6.9.2rc7"
+recommendation = "Publish the RC5 runtime source as 6.9.2 after exact final-package validation. The developer reports successful RC5 operation and approved publication on 2026-09-19. Do not include the subsequent scheduled-launch fix or new pipeline changes. Prepared RC6 remains retained, not selected for this release."
+
+[cycles."6.9.2".approval]
+decision = "approved"
+commit = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+decided_on = "2026-09-19"
+
+[cycles."6.9.2".deployment]
+version = "6.9.2rc5"
+commit = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+validated_on = "2026-09-14"
+evidence = "Selected local runtime verified on 2026-09-19; developer reports successful operation. This observation does not replace exact final-package acceptance."
+
+[cycles."6.9.2".issues]
+delivered = [502, 509, 517, 518]
+partial = [508, 511, 522]
+deferred = [105, 388, 434, 478, 486, 489, 528, 530, 531, 532, 533]
+decision_needed = [508, 516, 519, 522]
+
+[cycles."6.9.2".decisions]
+"528" = "Developer approved deferral to 6.9.3 on 2026-09-19; RC5 does not include the maintenance-contention scheduling fix."
+"530" = "Developer approved deferral to 6.9.3 on 2026-09-19; large diagnostic output can reject a valid small pipeline result."
+"531" = "Developer approved deferral to 6.9.3 on 2026-09-19; timeout retry budgets and inherited pipeline output require correction."
+"532" = "Developer approved deferral to 6.9.3 on 2026-09-19; earlier-attempt and interrupted-run inspection remain limited."
+"533" = "Developer approved publication with this issue open and outside the initial 6.9.3 fix scope on 2026-09-19."
+"508" = "Model and effort display is delivered; provider-aware editing and context controls remain in #525."
+"516" = "Keep the packaged focus-readiness gate. Historical RC3 failure is not relabelled as passing."
+"519" = "Existing real-child tests pass, but the reported older installed failure was not independently reproduced."
+"522" = "Recovery tooling is delivered; original retained artifacts are required for historical recovery."
+
+[cycles."6.9.2".history."6.9.2rc1"]
+status = "rejected"
+kind = "legacy-candidate"
+artifact_version = "6.9.2"
+commit = "b1a11103e2dee6ae1152430a17bfefc9b9e460a6"
+wheel_sha256 = "f453408846d2c7c07880a4631bf33ba069563f9af39a618f0af6298b47e5e9e0"
+sdist_sha256 = "90c7c5896f59aa98f82b82e0afe49ba54d0bb4e7ed275cdd168c54c6d5880b2d"
+evidence = "Legacy attempt used stable-numbered bytes. Preserve its original receipts and unpublished tag conflict for explicit migration; not an rc1 package."
+
+[cycles."6.9.2".history."6.9.2rc2"]
+status = "local-testing"
+evidence = "Packaged readiness, local installation, dashboard restoration and rollback passed. Historical local evaluation, not final stable acceptance."
+
+[cycles."6.9.2".history."6.9.2rc3"]
+status = "readiness-failed"
+evidence = "Exact wheel failed packaged refresh focus readiness twice; not installed. Original receipts and bytes remain retained."
+
+[cycles."6.9.2".history."6.9.2rc4"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.2rc4"
+commit = "bfe63bba4b8a0d14c4a37a97a101cdaa3dacf9b7"
+wheel_sha256 = "a67438423cf0b188a95c9697320c64e0a5e12e9b5222c00c215737cd418fe4b0"
+evidence = "Preparing environment reported passing packaged readiness; installation stopped at old provider-health checks. Historical recovery remains unverified."
+
+[cycles."6.9.2".history."6.9.2rc5"]
+status = "local-testing"
+evidence = "Installed and selected; developer reports successful operation and selects this runtime source for 6.9.2. Exact formal acceptance remains independently recorded."
+
+[cycles."6.9.2".history."6.9.2rc6"]
+status = "prepared"
+evidence = "Retained attempt includes #528. Not selected for 6.9.2; carry the fix into 6.9.3 without replacing RC6 bytes."
+
+[cycles."6.9.3"]
+branch = "main"
+next_rc = "6.9.3rc1"
+recommendation = "Integrate the scheduled-launch fix and issues #530, #531 and #532. Prepare and activate RC1 locally, restoring dashboards and watchers. Publication requires a separate decision after validation."
+
+[cycles."6.9.3".approval]
+decision = "testing"
+
+[cycles."6.9.3".issues]
+delivered = [528]
+planned = [530, 531, 532]

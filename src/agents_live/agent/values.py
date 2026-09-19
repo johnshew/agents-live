@@ -57,6 +57,9 @@ class AgentsLiveConfig:
     output_max_bytes: int | None
     output_path_roots: tuple[str, ...]
     output_provenance: str | None
+    timeout_retries: int = 1
+    empty_retries: int = 2
+    overall_timeout: int | None = None
 
 
 @dataclass(frozen=True)
@@ -328,6 +331,7 @@ class RawOutput:
     stdout: str
     stderr: str
     timed_out: bool = False
+    output_limited: bool = False
 
 
 @dataclass(frozen=True)

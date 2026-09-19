@@ -76,13 +76,13 @@ agents-live --version
 agents-live upgrade
 ```
 
-`agents-live --version` reports the selected release or commit-suffixed bake.
+`agents-live --version` reports the selected stable release or numbered RC.
 Self-managed installation retains complete versions side by side under
 `versions/`; `current` selects one. `agents-live upgrade` installs and selects
 the latest stable generation, includes plugin wheels declared by registered
 repositories before sealing it, and converges host integrations through the
-selected version. Local bake deployment uses the full commit-bearing package
-version, so repeated bakes on the same release line do not collide.
+selected version. Local RC deployment uses a new numbered package version for
+each changed candidate, so successive candidates do not collide.
 
 Use `agents-live --repo <project> upgrade` to upgrade the runtime and refresh
 that project's installed skill payload. `agents-live --repo <project> doctor`

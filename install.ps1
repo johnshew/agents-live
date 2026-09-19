@@ -108,7 +108,9 @@ try {
         $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
         if (-not $uvCommand) {
             $candidate = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
-            if (Test-Path -LiteralPath $candidate) { $uvCommand = Get-Item $candidate }
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $uvCommand = Get-Command -Name $candidate -ErrorAction Stop
+            }
         }
     }
     if (-not $uvCommand) { throw 'uv installation completed but uv.exe was not found.' }
@@ -128,9 +130,21 @@ try {
 
     # Only after the new installation answers: a uv-managed one would otherwise
     # keep answering to agents-live on PATH alongside it.
-    $uvTools = & $uvCommand.Source tool list 2>$null
-    if ($uvTools -and ($uvTools | Where-Object { $_ -match '^agents-live\s' })) {
-        & $uvCommand.Source tool uninstall agents-live 2>$null | Out-Null
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $uvTools = & $uvCommand.Source tool list 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Legacy tool inventory failed with exit code $LASTEXITCODE."
+        }
+        if ($uvTools -and ($uvTools | Where-Object { $_ -match '^agents-live\s' })) {
+            & $uvCommand.Source tool uninstall agents-live 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Legacy tool cleanup failed with exit code $LASTEXITCODE."
+            }
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
     $executable = Join-Path $installRoot 'current\Scripts\agents-live.exe'
     & $executable --version

@@ -1234,6 +1234,99 @@ else:
 # Spawning
 # ---------------------------------------------------------------------------
 
+def supervise_child(process: subprocess.Popen) -> Callable[[], None]:
+    """Own descendants until cleanup; Windows callers must launch suspended."""
+    if not _IS_WINDOWS:
+        def stop_group() -> None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return stop_group
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                    ("flags", wintypes.DWORD), ("min_working", ctypes.c_size_t),
+                    ("max_working", ctypes.c_size_t), ("active", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                    ("scheduling", wintypes.DWORD)]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6),
+                    ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                    ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD),
+                    ("thread_id", wintypes.DWORD), ("process_id", wintypes.DWORD),
+                    ("priority", wintypes.LONG), ("base_priority", wintypes.LONG),
+                    ("flags", wintypes.DWORD)]
+
+    _kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    _kernel32.Thread32First.restype = wintypes.BOOL
+    _kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    _kernel32.Thread32Next.restype = wintypes.BOOL
+    _kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenThread.restype = wintypes.HANDLE
+    _kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    _kernel32.ResumeThread.restype = wintypes.DWORD
+    job = _kernel32.CreateJobObjectW(None, None)
+
+    def close_job() -> None:
+        nonlocal job
+        if job:
+            _kernel32.CloseHandle(job)
+            job = None
+
+    try:
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000
+        if not job or not _kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        handle = _kernel32.OpenProcess(0x0101, False, process.pid)
+        try:
+            if not handle or not _kernel32.AssignProcessToJobObject(job, handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if handle:
+                _kernel32.CloseHandle(handle)
+        snapshot = _kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        resumed = False
+        try:
+            entry = ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            more = _kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.process_id == process.pid:
+                    thread = _kernel32.OpenThread(0x0002, False, entry.thread_id)
+                    try:
+                        if not thread or _kernel32.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        resumed = True
+                    finally:
+                        if thread:
+                            _kernel32.CloseHandle(thread)
+                more = _kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            _kernel32.CloseHandle(snapshot)
+        if not resumed:
+            raise OSError("suspended child has no resumable thread")
+    except BaseException:
+        close_job()
+        process.kill()
+        process.wait(timeout=5)
+        raise
+    return close_job
+
+
 WAIT_FOR_ENVIRONMENT_S = 900
 
 
