@@ -963,8 +963,8 @@ def reject_attempt(reason: str) -> None:
 
 def migrate_legacy_tag(tag: str) -> None:
     version = _stable_tag_version(tag)
-    bake = _cycle_configuration()
-    legacy = next((item for item in bake["candidate_cycle"].get("history", {}).values()
+    cycle = _cycle_configuration(tag.removeprefix("v"))
+    legacy = next((item for item in cycle.get("history", {}).values()
                    if item.get("kind") == "legacy-candidate"
                    and item.get("status") == "rejected"
                    and item.get("artifact_version") == version), None)
@@ -1013,24 +1013,22 @@ def _attempt_identity() -> dict:
 
 
 def _check_final_source(accepted_source: str, final_source: str) -> None:
-    manifest = ".github/release-channels.toml"
+    manifest = ".github/release-cycles.toml"
     if _git("merge-base", accepted_source, final_source) != accepted_source:
-        raise ReleaseError("accepted RC source has not reached main")
+        raise ReleaseError("final source must descend from the accepted RC source")
     changed = set(_git("diff", "--name-only", accepted_source, final_source).splitlines())
-    if changed - {manifest}:
+    collateral = {manifest, "tools/release.py", "tools/dashboard-readiness.py"}
+    if any(path not in collateral and not path.startswith(("docs/", "tests/")) for path in changed):
         raise ReleaseError("final source differs from accepted RC code; accept a new RC")
-    original = tomllib.loads(_git("show", f"{accepted_source}:{manifest}"))
-    promoted = tomllib.loads(_git("show", f"{final_source}:{manifest}"))
-    original["bake"].pop("promotion", None)
-    approval = promoted["bake"].pop("promotion", {})
-    if original != promoted:
-        raise ReleaseError("release policy changed since accepted RC; accept a new RC")
+    configuration = tomllib.loads(_git("show", f"{final_source}:{manifest}"))
+    target = ACTIVE_ATTEMPT["target"] if ACTIVE_ATTEMPT else _cycle_configuration()["version"]
+    approval = configuration["cycles"].get(target, {}).get("approval", {})
     if approval.get("decision") != "approved" or approval.get("commit") != accepted_source:
-        raise ReleaseError("final preparation requires promotion approval for the accepted RC source")
+        raise ReleaseError("final preparation requires publication approval for the accepted RC source")
     try:
         datetime.strptime(approval["decided_on"], "%Y-%m-%d")
     except (KeyError, TypeError, ValueError) as exc:
-        raise ReleaseError("promotion approval requires a valid decision date") from exc
+        raise ReleaseError("publication approval requires a valid decision date") from exc
 
 
 def _check_accepted_rc(record: dict) -> None:
@@ -1046,13 +1044,14 @@ def _check_accepted_rc(record: dict) -> None:
     _check_final_source(accepted["source_commit"], record["source_commit"])
 
 
-def _cycle_configuration() -> dict:
-    with (ROOT / ".github" / "release-channels.toml").open("rb") as stream:
-        bake = tomllib.load(stream)["bake"]
-    if bake.get("candidate_cycle", {}).get("model") != "numbered-rc":
-        raise ReleaseError("attempt commands require a numbered RC cycle")
-    _stable_tag_version(f"v{bake['version']}")
-    return bake
+def _cycle_configuration(target: str | None = None) -> dict:
+    with (ROOT / ".github" / "release-cycles.toml").open("rb") as stream:
+        configuration = tomllib.load(stream)
+    if configuration.get("schema") != 2:
+        raise ReleaseError("expected release cycles manifest schema 2")
+    target = target or (ACTIVE_ATTEMPT["target"] if ACTIVE_ATTEMPT else configuration["default_cycle"])
+    _stable_tag_version(f"v{target}")
+    return dict(configuration["cycles"][target], version=target)
 
 
 def cycle_status() -> list[dict]:
@@ -1176,9 +1175,10 @@ def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
 
 def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
     _require_tools()
-    bake = _cycle_configuration()
-    target = bake["version"]
-    branch = bake["branch"] if rc else "main"
+    identifier = rc or from_rc or ""
+    target = identifier.split("rc", 1)[0]
+    cycle = _cycle_configuration(target)
+    branch = cycle["branch"]
     if _git("status", "--porcelain") or _git("branch", "--show-current") != branch:
         raise ReleaseError(f"prepare from a clean synchronized {branch} checkout")
     _run(["git", "fetch", "--quiet", "origin", branch])
@@ -1189,8 +1189,7 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
     if rc:
         if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", rc) is None:
             raise ReleaseError("RC must belong to the configured stable target")
-        cycle = bake["candidate_cycle"]
-        if cycle.get("next") != rc or rc in cycle.get("history", {}):
+        if cycle.get("next_rc") != rc or rc in cycle.get("history", {}):
             raise ReleaseError("RC must be the configured next unused identity")
     else:
         if not from_rc:
@@ -1211,7 +1210,7 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
     try:
         remote = _git("ls-remote", "--heads", "--tags", "origin")
         remote += "\n" + _git("for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags")
-        consumed = set(bake["candidate_cycle"].get("history", {}))
+        consumed = set(cycle.get("history", {}))
         consumed.update(path.name for path in directory.iterdir())
         common = Path(_git("rev-parse", "--git-common-dir"))
         if not common.is_absolute():
@@ -2475,11 +2474,9 @@ def main(argv: list[str] | None = None) -> int:
             migrate_legacy_tag(args.migrate_legacy_tag)
             return 0
         if args.dry_run or args.prepare or args.accept_candidate or args.publish:
-            manifest = ROOT / ".github" / "release-channels.toml"
+            manifest = ROOT / ".github" / "release-cycles.toml"
             if manifest.is_file():
-                with manifest.open("rb") as stream:
-                    cycle = tomllib.load(stream).get("bake", {}).get("candidate_cycle", {})
-                if cycle.get("model") == "numbered-rc" and ACTIVE_ATTEMPT is None:
+                if ACTIVE_ATTEMPT is None:
                     raise ReleaseError(
                         "the numbered RC workflow requires --prepare-rc or --prepare-final, "
                         "and --attempt for acceptance or publication. The legacy "

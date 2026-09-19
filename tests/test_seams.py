@@ -1195,9 +1195,9 @@ class TestReleaseTool(unittest.TestCase):
             (root / ".github").mkdir()
             script = root / "tools" / "release.py"
             shutil.copy2(source, script)
-            (root / ".github" / "release-channels.toml").write_text(
-                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
-                'implementation = "pending"\nnext = "6.9.2rc2"\n',
+            (root / ".github" / "release-cycles.toml").write_text(
+                'schema = 2\ndefault_cycle = "6.9.2"\n'
+                '[cycles."6.9.2"]\nnext_rc = "6.9.2rc2"\n',
                 encoding="utf-8")
             for arguments in (
                 ["--dry-run"], ["--prepare", "--yes"],

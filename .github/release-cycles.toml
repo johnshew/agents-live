@@ -1,0 +1,34 @@
+schema = 2
+development_branch = "main"
+default_cycle = "6.9.2"
+
+[cycles."6.9.2"]
+branch = "release/6.9.2"
+source_ref = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+selected_rc = "6.9.2rc5"
+next_rc = "6.9.2rc7"
+recommendation = "Publish the accepted RC5 runtime source after independent final-package validation. Later runtime changes belong to 6.9.3."
+
+[cycles."6.9.2".approval]
+decision = "approved"
+commit = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+decided_on = "2026-09-19"
+
+[cycles."6.9.2".issues]
+delivered = [502, 509, 517, 518]
+deferred = [528, 530, 531, 532, 533]
+
+[cycles."6.9.2".decisions]
+"528" = "Developer approved deferral to 6.9.3 on 2026-09-19."
+"530" = "Developer approved deferral to 6.9.3 on 2026-09-19."
+"531" = "Developer approved deferral to 6.9.3 on 2026-09-19."
+"532" = "Developer approved deferral to 6.9.3 on 2026-09-19."
+"533" = "Developer approved publication with this issue open on 2026-09-19."
+
+[cycles."6.9.2".history."6.9.2rc1"]
+status = "rejected"
+kind = "legacy-candidate"
+artifact_version = "6.9.2"
+commit = "b1a11103e2dee6ae1152430a17bfefc9b9e460a6"
+wheel_sha256 = "f453408846d2c7c07880a4631bf33ba069563f9af39a618f0af6298b47e5e9e0"
+sdist_sha256 = "90c7c5896f59aa98f82b82e0afe49ba54d0bb4e7ed275cdd168c54c6d5880b2d"

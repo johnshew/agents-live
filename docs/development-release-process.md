@@ -7,6 +7,65 @@ ms.topic: concept
 
 # Development and release process
 
+## Stable Branch Correction: 2026-09-19
+
+This retained RC5-source branch uses
+[release-cycles.toml](../.github/release-cycles.toml), not the historical bake
+instructions below. Prepare `6.9.2` from accepted `6.9.2rc5` on the synchronized
+`release/6.9.2` branch. The approved runtime source is
+`a68ba1bd2da60070df42b1a378c4fcc4b92d68d6`. Only release routing, the dashboard
+validator, tests and this correction differ. Runtime code, installers and package
+metadata remain at that source until normal final-version stamping.
+
+Run `tools/release.py --prepare-final --from-rc 6.9.2rc5 --yes` only after exact
+RC5 operational acceptance. Independently validate and accept the new stable
+bytes, then finalize and publish that attempt. Preserve and verify the rejected
+legacy tag through `--migrate-legacy-tag v6.9.2 --yes` before finalization.
+Do not include subsequent fixes assigned to `6.9.3`. Current process direction
+and broader consolidation are tracked in
+[#511](https://github.com/johnshew/agents-live/issues/511) and
+[#535](https://github.com/johnshew/agents-live/issues/535).
+
+<!-- glp-update:v1 id=ea4901f1-75af-43f2-8ee3-3cdbb3c17655 -->
+<a id="glp-ea4901f1-75af-43f2-8ee3-3cdbb3c17655"></a>
+### GLP Update: Selected RC5 Final Routing
+
+- Update-ID: ea4901f1-75af-43f2-8ee3-3cdbb3c17655
+- Recorded-UTC: 2026-09-19T16:35:00Z
+- Kind: correction
+- Topics: exact-source finalization, numbered release cycles
+- Workstream: 6.9.2 stable publication
+- Target: this document, historical state machine at a68ba1b
+- Source-Session: release delivery investigation on 2026-09-19
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+The approved older runtime can be finalized on its own release branch without
+bringing newer runtime changes from main. Numbered-cycle publication approval
+replaces the bake promotion requirement for this branch.
+
+#### Evidence
+The developer selected RC5 source for stable publication. The isolated branch's
+source gates passed, including 311 behavior tests, after migrating allocation,
+approval and legacy-command refusal fixtures. The immutable RC5 preparation
+already exists; it does not prove installed acceptance.
+
+#### Previous Knowledge
+The historical state machine below required bake promotion to main. The correction
+above governs this deliberately isolated stable branch.
+
+#### Verification and Limits
+Exact-source and immutable-attempt tests pass. No runtime, installer or package
+metadata change is included in the tooling backport. Installed acceptance and
+final-package validation remain separate requirements; no publication is claimed.
+
+#### Follow-up
+Finish exact acceptance and publication; consolidate broader process documentation
+under #535 without importing newer runtime source into this stable package.
+<!-- /glp-update:v1 id=ea4901f1-75af-43f2-8ee3-3cdbb3c17655 -->
+
 This document defines how repository work moves from ordinary development to a
 published release. The current state is declared in
 [`.github/release-channels.toml`](../.github/release-channels.toml) and verified

@@ -4378,8 +4378,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             workflow = root / ".github" / "workflows" / "test.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text("name: Test\n")
-            manifest = root / ".github" / "release-channels.toml"
-            manifest.write_text('[bake]\nversion = "1.2.3"\n[bake.candidate_cycle]\nmodel = "numbered-rc"\n')
+            manifest = root / ".github" / "release-cycles.toml"
+            manifest.write_text('schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "main"\n')
 
             def git(*arguments):
                 if arguments[0] == "ls-remote":
@@ -4468,9 +4468,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             script["reject_attempt"]("missing live baseline must refuse rejection")
                         git("switch", "main")
                         manifest.write_text(manifest.read_text() + (
-                            '[bake.promotion]\ndecision = "approved"\n'
+                            '[cycles."1.2.3".approval]\ndecision = "approved"\n'
                             f'commit = "{source}"\ndecided_on = "2026-09-14"\n'))
-                        git("add", ".github/release-channels.toml")
+                        git("add", ".github/release-cycles.toml")
                         git("commit", "-m", "approve accepted source")
                         source = git("rev-parse", "HEAD")
                     else:
@@ -4608,10 +4608,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 root = Path(temporary)
                 common = root / "common"
                 common.mkdir()
-                bake = {"version": "1.2.3", "branch": "bake/v1.2.3-rc",
-                        "candidate_cycle": {"model": "numbered-rc", "next": "1.2.3rc2", "history": {}}}
+                bake = {"version": "1.2.3", "branch": "main",
+                        "next_rc": "1.2.3rc2", "history": {}}
                 if consumed_by == "history":
-                    bake["candidate_cycle"]["history"]["1.2.3rc2"] = {"status": "rejected"}
+                    bake["history"]["1.2.3rc2"] = {"status": "rejected"}
                 elif consumed_by == "local-deploy":
                     (common / "agents-live-local-deploy" / "candidates" / "1.2.3rc2").mkdir(parents=True)
                 elif consumed_by in {"attempt", "higher"}:
@@ -4634,7 +4634,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
                 with mock.patch.dict(scope, {
                     "ROOT": root, "_require_tools": lambda: None,
-                    "_cycle_configuration": lambda: bake, "_git": git,
+                    "_cycle_configuration": lambda _target: bake, "_git": git,
                     "_run": lambda command, **_kwargs: commands.append(command),
                 }):
                     with self.assertRaises(script["ReleaseError"]):
@@ -4644,10 +4644,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def test_final_source_requires_exact_approval_and_only_promotion_metadata(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = script["_check_final_source"]
-        original = '[bake]\nversion = "1.2.3"\n[bake.promotion]\ndecision = "continue-bake"\n'
-        promoted = ('[bake]\nversion = "1.2.3"\n[bake.promotion]\n'
+        original = '[cycles."1.2.3".approval]\ndecision = "testing"\n'
+        promoted = ('[cycles."1.2.3".approval]\n'
                     'decision = "approved"\ncommit = "' + "a" * 40 + '"\ndecided_on = "2026-09-14"\n')
-        changed = ".github/release-channels.toml"
+        changed = ".github/release-cycles.toml"
 
         def git(*args):
             if args[0] == "merge-base":
@@ -4656,7 +4656,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 return changed
             return original if args[1].startswith("a" * 40) else promoted
 
-        with mock.patch.dict(check.__globals__, {"_git": git}):
+        with mock.patch.dict(check.__globals__, {"_git": git, "ACTIVE_ATTEMPT": {"target": "1.2.3"}}):
             check("a" * 40, "b" * 40)
             for replacement in (promoted.replace("a" * 40, "c" * 40),
                                 promoted.replace("approved", "continue-bake"),
@@ -4711,7 +4711,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "ROOT": root, "_git": git,
                 "_run": lambda command, **_kwargs: git(*command[1:]),
-                "_cycle_configuration": lambda: {"candidate_cycle": {"history": {"1.2.3rc1": legacy}}},
+                "_cycle_configuration": lambda _target: {"history": {"1.2.3rc1": legacy}},
             }):
                 remote = original + "\trefs/tags/v1.2.3"
                 with self.assertRaisesRegex(script["ReleaseError"], "remote"):
