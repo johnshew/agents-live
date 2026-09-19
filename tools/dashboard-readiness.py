@@ -275,7 +275,7 @@ def _seed_started_state(python: list[str], directory: Path,
 def _api_agents(port: int) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/agents", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/agents", timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
@@ -284,7 +284,7 @@ def _api_agents(port: int) -> dict | None:
 def _api_all_repos(port: int) -> dict | None:
     try:
         with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/api/all-repos", timeout=2) as response:
+                f"http://127.0.0.1:{port}/api/all-repos", timeout=10) as response:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
@@ -315,11 +315,13 @@ def _output(process: subprocess.Popen) -> str:
     """
     if process.stdout is None:
         return "  (no output captured)"
+    if process.poll() is None:
+        return "  (dashboard still running; output follows after termination)"
     try:
-        text = process.stdout.read() or ""
-    except (OSError, ValueError):
+        text, _stderr = process.communicate(timeout=SHUTDOWN_GRACE_S)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return "  (output unavailable)"
-    lines = text.splitlines()[-40:]
+    lines = (text or "").splitlines()[-40:]
     return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
 
@@ -1127,7 +1129,7 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
     except (ReadinessError, PlaywrightTimeoutError) as exc:
         _terminate(process)
-        output = process.stdout.read().strip() if process.stdout and not process.stdout.closed else ""
+        output = _output(process)
         if output:
             raise ReadinessError(
                 f"{exc}\ndashboard output:\n{output[-4000:]}") from exc

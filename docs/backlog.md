@@ -1,7 +1,7 @@
 ---
 title: High-Level Backlog
 description: Themes and direction for agents-live, linked to the GitHub issues that carry the detail
-ms.date: 2026-09-14
+ms.date: 2026-09-19
 ms.topic: concept
 ---
 
@@ -142,6 +142,17 @@ Current work is tracked by [#511](https://github.com/johnshew/agents-live/issues
 The earlier #334 and #395 are delivered foundations.
 [compatibility-boundaries.md](compatibility-boundaries.md) records what the
 uv retirement does and does not break.
+
+## Rapid local release candidates
+
+Make local build and activation a short, recoverable loop, distinct from full
+qualification and stable publication. Reuse input-qualified evidence and resume
+failed checks without repeating unrelated successful work. Preserve immutable
+packages, service-state restoration and truthful pending-qualification reporting.
+The prioritized design and measurement criteria live in
+[#535](https://github.com/johnshew/agents-live/issues/535), linked to the
+[release process](development-release-process.md). This is planned work, not
+permission to bypass the current preparation or publication gates.
 
 ## Extension seams
 
