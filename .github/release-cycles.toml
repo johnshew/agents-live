@@ -23,7 +23,7 @@ evidence = "Selected local runtime verified on 2026-09-19; developer reports suc
 [cycles."6.9.2".issues]
 delivered = [502, 509, 517, 518]
 partial = [508, 511, 522]
-deferred = [105, 388, 434, 478, 486, 489, 528, 530, 531, 532, 533]
+deferred = [105, 388, 434, 478, 486, 489, 528, 530, 531, 532, 533, 538, 539]
 decision_needed = [508, 516, 519, 522]
 
 [cycles."6.9.2".decisions]
@@ -32,6 +32,8 @@ decision_needed = [508, 516, 519, 522]
 "531" = "Developer approved deferral to 6.9.3 on 2026-09-19; timeout retry budgets and inherited pipeline output require correction."
 "532" = "Developer approved deferral to 6.9.3 on 2026-09-19; earlier-attempt and interrupted-run inspection remain limited."
 "533" = "Developer approved publication with this issue open and outside the initial 6.9.3 fix scope on 2026-09-19."
+"538" = "Developer explicitly approved deferral on 2026-09-19; activation still waits for ordinary active work to finish."
+"539" = "Developer explicitly approved deferral on 2026-09-19; exact RC5 and final stable operational acceptance remain required despite the known intermittent log-query race."
 "508" = "Model and effort display is delivered; provider-aware editing and context controls remain in #525."
 "516" = "Keep the packaged focus-readiness gate. Historical RC3 failure is not relabelled as passing."
 "519" = "Existing real-child tests pass, but the reported older installed failure was not independently reproduced."
@@ -72,8 +74,15 @@ evidence = "Retained attempt includes #528. Not selected for 6.9.2; carry the fi
 
 [cycles."6.9.3"]
 branch = "main"
-next_rc = "6.9.3rc1"
-recommendation = "Integrate the scheduled-launch fix and issues #530, #531 and #532. Prepare and activate RC1 locally, restoring dashboards and watchers. Publication requires a separate decision after validation."
+selected_rc = "6.9.3rc1"
+next_rc = "6.9.3rc2"
+recommendation = "RC1 is prepared and locally deployed; retain its immutable bytes. Restore RC1 after authorized 6.9.2 acceptance and publication switches. Full operational acceptance and any stable publication require separate evidence and approval."
+
+[cycles."6.9.3".deployment]
+version = "6.9.3rc1"
+commit = "19623ae75e5f6491835f0d552781998975766cf6"
+validated_on = "2026-09-19"
+evidence = "Exact retained wheel deployed; both consumer skills refreshed, all-repository doctor passed, all 45 agent states preserved and owned watcher restored. This is local deployment evidence, not full operational acceptance."
 
 [cycles."6.9.3".approval]
 decision = "testing"
