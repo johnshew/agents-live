@@ -47,7 +47,7 @@ Report candidate preparation separately from installed acceptance and qualify
 deployment observations by environment rather than assuming one global selection.
 
 `implementation = "numbered-rc-v1"` identifies the explicit attempt workflow.
-The report reads its local evidence as reserved, prepared, accepted, finalized,
+The report reads its local evidence as reserved, prepared, accepted, approved, finalized,
 rejected, or invalid-evidence, and recommends the next operation for the latest
 valid attempt. Tool availability is not candidate acceptance or release approval.
 Historical manifests without that implementation remain blocked on tooling.
@@ -57,10 +57,13 @@ evidence qualification, and blocker. Local attempt records are not evidence of
 another environment's selection. JSON reports GitHub publication and unverified
 PyPI availability separately; changing a manifest status does not create evidence.
 
-After RC acceptance, final stable preparation and installed acceptance are
-separate states. Preserve failed attempts, advance RC numbers for source fixes,
-and require independent acceptance of final stable bytes before a stable tag
-or publication. See [development-release-process.md](../docs/development-release-process.md).
+All functional checks and in-situ evaluation belong to the RC process. After
+developer acceptance of the exact RC, final preparation performs version
+packaging only. Preserve failed packaging attempts and advance RC numbers for
+runtime changes. There is no stable functional acceptance stage. Reports must
+recommend finalization and publication using retained RC approval, never another
+provider, dashboard, bootstrap, platform, or consumer check.
+See [development-release-process.md](../docs/development-release-process.md).
 
 | Channel | Branch | Version | Moves to |
 |---|---|---|---|

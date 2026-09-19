@@ -483,15 +483,15 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
             "Recover a recorded prepared RC only with its original wheel and "
             "readiness receipt using `--recover-provider-readiness`; never "
             "rebuild it under a consumed identity. Installed verification remains separate.",
-            "Obtain exact-commit approval, build the final stable version, and "
-            "independently accept its exact bytes before tagging or publishing.",
+            "Obtain developer approval for the exact evaluated RC, build stable "
+            "artifacts, then tag and publish without functional retesting.",
             "Verify GitHub and PyPI publication independently.",
         ]
         candidate_lines = [
             "", "## Numbered release candidates", "",
             f"Stable target: `{bake['version']}`. Next package: `{candidate_cycle['next']}`.",
             "Local RC deployment retains exact wheel bytes and per-candidate evidence. "
-            "It is not final stable acceptance. Changing manifest status cannot "
+            "Developer approval of the exact evaluated RC authorizes publication. Changing manifest status cannot "
             "enable the legacy stable-numbered candidate commands.",
             "", "| Candidate record | Status | Original package version | Evidence |",
             "|---|---|---|---|",
@@ -514,15 +514,15 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
                 "blocked until required operational acceptance and release decisions are recorded.")
             release_actions = [development_state_detail]
             bake_state = "Numbered lifecycle tooling is available; operational decisions remain separate."
-            bake_next = "Accept the next RC, resolve scope decisions, and independently accept final stable bytes."
+            bake_next = "Complete RC evaluation and developer acceptance, then package and publish without functional retesting."
             next_actions = [
                 "Resolve the remaining release issues and obtain explicit scope decisions.",
                 f"Prepare a new RC with `tools/release.py --prepare-rc {candidate_cycle['next']} --yes` "
                 "from synchronized bake; existing local-deploy receipts are not full operational acceptance.",
-                "Accept the exact RC using `--accept-candidate --attempt <rc>` with the required live-agent arguments.",
-                "Obtain exact-source promotion approval and merge bake to main; prepare final bytes with "
-                "`--prepare-final --from-rc <accepted-rc> --yes` from synchronized main.",
-                "Independently accept the final attempt, explicitly migrate any rejected local legacy tag, "
+                "Complete RC checks using `--accept-candidate --attempt <rc> --yes` and in-situ evaluation before developer approval.",
+                "Record developer approval of the exact RC attempt, source, and wheel; prepare final bytes with "
+                "`--prepare-final --from-rc <accepted-rc> --yes` from the synchronized configured cycle branch.",
+                "Do not run additional functional tests. Explicitly migrate any rejected local legacy tag, "
                 "then run `--finalize --attempt <final-attempt> --yes`.",
                 "Publish finalized bytes with `--publish --attempt <final-attempt> --yes`; verify GitHub and PyPI independently.",
             ]
@@ -532,11 +532,12 @@ def _render(config: dict[str, Any], generated_at: datetime, *, as_json: bool = F
                     "-final-" in item["attempt"], int(re.split(r"rc|-final-", item["attempt"])[-1])))
                 identifier, state = current["attempt"], current["state"]
                 if "-final-" in identifier:
-                    operation = {"reserved": "--prepare-attempt", "prepared": "--accept-candidate --attempt",
-                                 "accepted": "--finalize --attempt", "finalized": "--publish --attempt"}[state]
+                    operation = {"reserved": "--prepare-attempt", "prepared": "--finalize --attempt",
+                                 "approved": "--finalize --attempt", "accepted": "--finalize --attempt",
+                                 "finalized": "--publish --attempt"}[state]
                     next_actions = [
                         f"Continue `{identifier}` with `{operation} {identifier} --yes`; "
-                        "acceptance also requires the live repository and agent arguments.",
+                        "retain RC approval; do not run functional tests or require local activation.",
                         "Resolve all release decisions before finalization or publication; verify GitHub and PyPI independently.",
                     ]
                 elif state == "accepted":

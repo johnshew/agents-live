@@ -23,6 +23,8 @@ this directory is installed by `agents-live init` or `upgrade`.
 
 ## Contents
 
+- [release-requirements.md](release-requirements.md) - release BRD: RC checks,
+  exact developer acceptance, and publication without functional retesting.
 - [development-release-process.md](development-release-process.md) - the
   state machine for bake development, promotion approval, candidate
   acceptance, rejection, and public release.

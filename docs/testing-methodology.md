@@ -1,7 +1,7 @@
 ---
 title: Testing Methodology
 description: What this project tests, at which layer, and why each gate exists
-ms.date: 2026-08-16
+ms.date: 2026-09-19
 ms.topic: concept
 ---
 
@@ -10,6 +10,12 @@ prove what, and which gate stands between a change and a release. The
 mechanics of running each suite live in
 [.agents/testing.md](../.agents/testing.md); this file says what the suites
 are for and what may not be traded away.
+
+The [release BRD](release-requirements.md) defines the phase boundary: all
+functional verification occurs during RC preparation and evaluation. Exact
+developer RC acceptance authorizes stable packaging and publication without
+functional retesting. The historical live-consumer workflow below is optional
+RC integration diagnostics, not a separate stable acceptance requirement.
 
 It exists because the policy failed once, visibly, and the failure is worth
 keeping in front of whoever reads this next.
@@ -89,8 +95,9 @@ developer uses.
 - Manual release verification has drifted between operators and has skipped
   recently filed issues that described the exact failure being encountered.
 
-The correction is to move installed operational acceptance before publication
-and make its receipt a mechanical precondition of `--publish`.
+The correction is to evaluate candidates before publication. The current
+numbered process uses RC evidence and explicit developer acceptance as the
+publication decision, not another stable functional acceptance run.
 
 ## The layers
 
@@ -221,10 +228,11 @@ hashes must match the accepted candidate's release-attached manifest.
   probes, process-tree cleanup is confirmed, and exact state restoration is
   required.
 
-CI runs the same suites on Ubuntu and Windows for code pull requests, merge
-groups, and exact release commits. Documentation-only pull requests run the
-export audit without rebuilding or starting the package twice. The publish
-workflow cannot publish until both exact-SHA host jobs pass.
+CI runs the same suites on Ubuntu and Windows for code pull requests and merge
+groups during development and RC validation. Documentation-only pull requests
+run the export audit without rebuilding or starting the package twice. The
+publish workflow relies on RC evaluation and developer acceptance and does not
+invoke those suites again.
 
 ## Fast local deployment
 
@@ -244,22 +252,23 @@ commit and immutable artifact.
 This path answers whether an already-reviewed merged artifact installs and
 leaves the current host operational. It intentionally omits provider-backed
 runs and mutating browser actions. Those are more expensive, may alter real
-scheduler state, and remain mandatory in prepared candidate acceptance before
-publication.
+scheduler state, and may be used during RC evaluation when relevant. They are
+not functional checks to be added after developer acceptance.
 
-## Verifying a live deployment
+## Optional RC Live Diagnostics
 
 Automated gates cannot cover ownership transfer, host schedulers, or behavior
 at real scale. Before a release that touches those, exercise them on a host
 and record what was observed.
 
-Prepared releases enforce this through `tools/release.py --accept-candidate`.
+The optional live `tools/release.py --accept-candidate --repo ...` path exercises
+this during RC evaluation, before developer acceptance.
 After the exact locally tagged wheel upgrades the self-managed installed tool,
 the acceptance phase snapshots every registered repository and exercises a
 safe operator-selected agent through CLI status, doctor, run, start, stop, and
 timeline queries. It then launches the installed dashboard and uses a real
 headless browser to run the health check and click Run, Start, and Stop. The
-release cannot be published unless dashboard action records and healthy state
+optional live check succeeds only when dashboard action records and healthy state
 are observed, both dashboard cost totals increase by exactly the accepted run
 cost without another run in the attribution window, the current smoketest
 passes, the dashboard process tree exits, and the final all-repository snapshot
@@ -292,11 +301,12 @@ runtime whose declared ownership plugin was never converged into its tool
 environment fails closed and cannot participate, which is invisible from the
 first host until someone tries.
 
-## Candidate stabilization loop
+## RC Stabilization Loop
 
-Release preparation creates an isolated candidate branch, local commit,
-annotated tag, wheel, source distribution, and preparation receipt. Nothing is
-public at that point. Stabilize that candidate using this loop:
+RC preparation creates an isolated candidate branch, local commit, wheel,
+source distribution, and preparation receipt, without a stable tag. Nothing is
+public at that point. Evaluate the candidate in situ; the optional live
+diagnostic path uses this loop:
 
 1. Install the exact local wheel into the self-managed user tool.
 2. Restore a healthy representative live repository and choose an agent whose
@@ -311,8 +321,8 @@ public at that point. Stabilize that candidate using this loop:
   configuration, artifacts, or baseline changed, fix on a branch, add an
   executing regression at the boundary that failed, merge through a PR,
   prepare a new local candidate, and start again from step 1.
-6. Publish only after one candidate completes the full loop without a code,
-  configuration, or manual-repair change.
+6. Obtain explicit developer acceptance of the exact RC. Package and publish
+  the approved runtime without another functional acceptance cycle.
 
 Do not weaken an assertion because a live host exposed a mismatch. First ask
 whether the test modeled the real response, process, or UI. Replace mocks with

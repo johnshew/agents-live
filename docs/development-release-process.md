@@ -1,11 +1,20 @@
 ---
 title: Development and Release Process
 description: State machine for moving Agents Live changes through bake, candidate acceptance, and public release
-ms.date: 2026-09-14
+ms.date: 2026-09-19
 ms.topic: concept
 ---
 
 # Development and release process
+
+## Current Release Contract
+
+All functional testing belongs to the RC process and in-situ evaluation.
+Developer acceptance of the exact RC authorizes stable packaging and publication
+without additional functional tests. Publication checks identity and provenance,
+not functionality. The [release BRD](release-requirements.md) and state machine
+below control; earlier dated notes requiring separate stable acceptance are
+historical and superseded by the developer decision of 2026-09-19.
 
 ## Publication Routing Correction: 2026-09-19
 
@@ -116,7 +125,9 @@ under #535 without importing newer runtime source into this stable package.
 <!-- /glp-update:v1 id=ea4901f1-75af-43f2-8ee3-3cdbb3c17655 -->
 
 This document defines how repository work moves from ordinary development to a
-published release. The current state is declared in
+published release. [Release business requirements](release-requirements.md)
+define the RC acceptance and no-retesting publication contract.
+The current state is declared in
 [`.github/release-channels.toml`](../.github/release-channels.toml) and verified
 against Git, GitHub, and local deployment evidence by
 `tools/release-report.py`.
@@ -142,14 +153,13 @@ stateDiagram-v2
     Baking --> Baking: fix, merge, deploy, validate
     Baking --> Candidate: prepare numbered RC from synchronized bake
     Candidate --> Baking: RC rejected; retain evidence and advance RC number
-    Candidate --> PromotionApproved: exact RC accepted and developer approves source
+    Candidate --> PromotionApproved: RC checks and in-situ evaluation complete; developer accepts exact RC
     PromotionApproved --> Baking: bake commit changes or approval withdrawn
     PromotionApproved --> PromotionProposed: open bake-to-main PR
     PromotionProposed --> Baking: PR closed or bake changes
-    PromotionProposed --> StablePreparation: checks pass and PR merges to main
-    StablePreparation --> StableAcceptance: build final stable bytes
-    StableAcceptance --> Baking: source fix needed; retain attempt and advance RC
-    StableAcceptance --> Released: final bytes accepted, approved, tagged, and published
+    PromotionProposed --> StablePreparation: promote approved source without functional retesting
+    StablePreparation --> Baking: runtime source changes require a new RC
+    StablePreparation --> Released: version packaging, provenance, tag, and publication
 ```
 
 ## State ownership
@@ -159,10 +169,9 @@ stateDiagram-v2
 | `released` | Latest stable GitHub release and tag | New configured bake branch | Start a bake cycle |
 | `baking` | Configured bake branch plus `decision = "continue-bake"` | Direct administrative commits or focused PRs to bake | Developer approves an exact tested commit |
 | `promotion approved` | `decision = "approved"`, full bake commit, and decision date | No new code without invalidating approval | Open the bake-to-`main` PR |
-| `promotion proposed` | Open bake-to-`main` PR for the approved commit | Promotion PR only | Merge after required checks pass |
+| `promotion proposed` | Open promotion PR for the approved commit | Promotion PR only | Carry forward RC evidence; do not rerun functional checks |
 | `candidate` | Numbered RC identity, preparation receipt, and immutable artifacts; no stable tag | RC acceptance only | Approve and promote the source or reject back to bake |
-| `stable preparation` | Accepted RC and approved source commit | Release-metadata changes only | Build final stable artifacts |
-| `stable acceptance` | Attempt-specific stable preparation and artifact hashes | Independent final artifact and installed gates | Tag and publish accepted bytes, or retain a rejected attempt |
+| `stable preparation` | Developer approval naming exact RC attempt, source commit, wheel hash, and date | Version packaging and release metadata only | Build, check provenance, tag, and publish; no functional tests |
 | `released` | Stable tag, GitHub release, and verified PyPI publication | Close the cycle | Start later work in a new bake |
 
 ## Bake development
@@ -194,15 +203,17 @@ work. Do not bypass the active bake by assumption.
 Run each gate once for its tested inputs, and carry its passing evidence into
 the next phase. Do not rerun unchanged tests at an agent handoff or immediately
 before a command that already owns those gates. Record the command, revision
-or artifact digest, environment, and result; a failed, missing, or invalidated
-record requires a new check. CI platform checks still prove their own platform.
+or artifact digest, environment, and result. Resolve failed, missing, or
+invalidated functional evidence during the RC process. CI platform checks
+still prove their own platform; they are not repeated at publication.
 
 Bake deployment builds and validates its commit-stamped artifact only when no
 matching preparation receipt exists. Receipts and wheels are shared across
 worktrees in the common Git directory and survive worktree cleanup. Release
-preparation owns candidate gates; publication verifies their receipts without
-rerunning them. Installing an artifact changes live state, so post-install
-identity, watcher restoration, and dashboard readiness remain required.
+preparation owns RC gates. Developer acceptance attests that the deployed RC has
+completed its evaluation. Stable packaging and publication rely on that decision
+and retained identity evidence, without additional functional checks. Installing
+or restoring a local version is a separate operation, not a publication gate.
 
 ## Promotion approval
 
@@ -234,11 +245,15 @@ select the tested version deliberately and verify rollback, ownership, and
 watcher restoration. Multiple installations must not create duplicate
 schedulers or watchers against a live repository.
 
-An accepted RC permits final stable preparation, not publication. Build final
-stable artifacts from the approved source with only reviewed release-metadata
-changes, then independently accept those exact bytes. Do not reuse RC receipts
-as stable acceptance. Create the stable tag only after acceptance and publish
-the accepted files without rebuilding them. Retain failed final builds by
+Developer acceptance of the exact deployed RC authorizes stable preparation and
+publication. Record the RC attempt, source commit, wheel hash, and decision date.
+Build stable artifacts from the approved runtime source with only reviewed
+version and release-metadata changes. There is no independent stable acceptance
+stage. Do not rerun source suites, platform matrices, bootstrap, dashboard,
+provider, hello-world, or consumer-agent checks from promotion through publication.
+Check provenance, packaging identity, hashes, tags, and upload results only.
+Create the stable tag and publish the retained files without rebuilding them.
+Retain failed final packaging attempts by
 attempt identity; source changes return to the next RC, while infrastructure
 failures may resume identical bytes. Recovery must not overwrite a sealed
 installation sharing the stable version name.
@@ -269,8 +284,9 @@ The explicit numbered lifecycle under
 then source approval and promotion. Only the promotion fields in the channel
 manifest may change between the accepted RC source and final source on main.
 `--prepare-final --from-rc` allocates a distinct `<target>-final-N` identity and
-stamps stable release metadata. Independent stable acceptance precedes
-`--finalize --attempt` and `--publish --attempt`. No tag exists before finalization.
+stamps stable release metadata. Retained developer RC approval authorizes
+`--finalize --attempt` and `--publish --attempt` with no functional retesting.
+No tag exists before finalization.
 See [.agents/release.md](../.agents/release.md) for the commands and retry rules.
 
 Artifacts and private receipts live under the common Git directory, never the
@@ -278,8 +294,8 @@ exported tree. `--cycle-status` and the report validate local attempt evidence;
 they do not claim another environment's operational results. Rejection retains
 bytes and decisions, and legacy stable-tag migration is an explicit verified
 operation that refuses remote tags. The old implicit release commands remain
-blocked. The current release still needs real operational acceptance and scope
-decisions; tooling availability is not release approval.
+blocked. Scope decisions and exact developer RC approval are required;
+tooling availability is not release approval.
 
 ## Keeping guidance aligned
 
@@ -289,6 +305,9 @@ process. A change to state names, branch routing, decision fields, deployment,
 or transition gates must update every affected source in the same change.
 
 ## Publication And Local Selection: 2026-09-19
+
+Historical clarification. The independent-final-acceptance requirement below is
+superseded by the RC approval policy in Candidate and release.
 
 GLP update `b32a7ab6-3d34-4c13-9246-501e164409e3`: clarification from
 the release-session review and the executing numbered-lifecycle test.
@@ -314,3 +333,72 @@ still checking accepted upload bytes, draft retry, and tamper refusal. The
 focused lifecycle and configured-branch tests pass. This clarifies existing
 behavior; it does not waive live acceptance or alter candidate bytes.
 Applied clarification; broader consolidation remains tracked under #511/#535.
+
+## Isolated Provider Acceptance: 2026-09-19
+
+Historical update. The probe remains an RC check; the independent-final-receipt
+requirement below is superseded by the RC approval policy in Candidate and release.
+
+GLP update `0edff9e6-c24e-44a7-9082-d3a84dd151c9`: developer direction replaces
+mandatory consumer-repository operational acceptance with an exact-wheel
+hello-world and cost check in a disposable repository. This supersedes the
+live-host prerequisite above, not source or packaged-artifact validation.
+
+The work-service probe failed its mail validator after reporting provider cost;
+mail connectivity was unrelated to the release behavior being checked. Numbered
+acceptance now uses built-in Copilot unless an available agency plugin source
+is supplied. The candidate loads a copied plugin and selects `agency-copilot`;
+broken or unauthenticated plugins fail rather than falling back. Neither path
+uses consumer definitions, service MCPs, or native schedules. The receipt binds
+the exact wheel, preparation, committed validator, successful run ID and cost.
+Final stable bytes still need their own independent receipt.
+
+Evidence: the retained RC5 wheel passed the real agency hello-world check with
+positive reported cost. Executing plugin-loader tests cover absent, present,
+broken and unrelated plugins; the real-Git lifecycle test covers isolated
+receipts through finalization and publication and rejects invalid costs and
+wheel hashes. This receipt proves the isolated provider boundary, not consumer
+host health. Broad consolidation remains tracked under #511/#535.
+
+<!-- glp-update:v1 id=b28055e2-8459-4ad8-b92c-d927f7cf2b62 -->
+<a id="glp-b28055e2-8459-4ad8-b92c-d927f7cf2b62"></a>
+### GLP Update: Developer RC Acceptance Authorizes Publication
+
+- Update-ID: b28055e2-8459-4ad8-b92c-d927f7cf2b62
+- Recorded-UTC: 2026-09-19T18:53:41Z
+- Kind: supersession
+- Topics: RC evaluation, publication, release BRD
+- Workstream: 6.9.2 publication, #511
+- Target: release process and runbooks compared with 38b07389d89526a99a4f24443f465f939616c65e
+- Source-Session: developer release-policy corrections on 2026-09-19
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+
+The developer explicitly prohibits additional functional testing from RC
+promotion to publication. Checks belong to RC evaluation; acceptance of the
+exact deployed RC is the release decision. This supersedes separate final
+acceptance in earlier notes, including the isolated-provider update above.
+The probe remains available during the RC process, with Luna low preferred
+for agency Copilot. Publication retains immutable provenance and hash checks.
+
+#### Evidence
+
+- Developer direction: "there should be no additional functionality testing
+    moving from rc to publication" and "update the release process and brd".
+- The real-Git lifecycle regression completes stable packaging, finalization,
+    publication, and retry without final functional gates or a stable acceptance
+    receipt, while detecting substituted artifacts.
+- The release-policy regression class passed 122 checks; full source validation
+    and framework smoke passed for the tooling changes. These are implementation
+    checks, not another RC5 acceptance run or proof of public availability.
+
+#### Disposition
+
+Applied to [the release BRD](release-requirements.md), canonical process,
+operator guides, manifest recommendations, and publication workflow. Earlier
+dated evidence is retained and marked superseded. This is a targeted policy
+correction; broader historical consolidation remains under #511/#535.
+<!-- /glp-update:v1 id=b28055e2-8459-4ad8-b92c-d927f7cf2b62 -->

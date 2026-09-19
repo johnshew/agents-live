@@ -30,13 +30,15 @@ The numbered lifecycle is implemented by `tools/release.py`. Existing
 `local-deploy.py --rc` receipts support historical local evaluation and recovery,
 not full operational acceptance. Never rebuild those consumed identities or
 import their limited readiness evidence as full acceptance. The current release
-still requires the issue dispositions, exact RC acceptance, promotion approval,
-and independent stable acceptance described by the generated report.
+still requires the issue dispositions, retained RC evidence, and developer
+approval of that exact RC. No functional verification is required from RC
+promotion through publication.
 
 ### Numbered attempt commands
 
-Run preflight with the live repository and safe agent arguments before allocating
-an attempt. From clean, synchronized bake, prepare the configured next RC:
+Numbered acceptance uses an isolated temporary repository and the exact wheel.
+It does not require a consumer repository or a local version switch. From clean,
+synchronized bake, prepare the configured next RC:
 
 ```bash
 uv run --script tools/release.py --prepare-rc <configured-next-rc> --yes
@@ -51,16 +53,32 @@ packaged gates. No tag is created. Run subsequent commands from the printed
 retained worktree, using its script, not a different checkout's version.
 
 ```bash
-agents-live upgrade --from <retained-wheel> --candidate
-uv run --script tools/release.py --accept-candidate --attempt <rc> \
-  --repo <live-repository> --agent <safe-agent-identifier> \
-  --cost-agent <safe-provider-agent-identifier> --yes
+uv run --script tools/release.py --accept-candidate --attempt <rc> --yes
 ```
 
-After exact RC acceptance, obtain developer approval naming its original bake
-source commit, record the promotion decision, and merge bake to main through
-the reviewed promotion PR. Only the promotion fields may differ from the
-accepted source. From clean synchronized main:
+When an agency plugin source is available, add `--agency-plugin <source>`.
+The source is copied into the temporary repository and loaded by the candidate
+runtime. It must provide `agency-copilot`; plugin loading, authentication, and
+execution failures are errors, not reasons for silent fallback. Without that
+option, the probe uses built-in Copilot. No domain-membership heuristic is used.
+Both paths require an exact hello-world reply, a successful correlated terminal
+event, and finite positive reported cost. No mail, Teams, calendar, consumer
+agents, schedules, or local runtime activation are required.
+
+The receipt records the provider, run ID, cost, wheel hash, preparation hash,
+and committed validator identity. Current clean committed tooling may accept a
+retained attempt without editing or rebuilding its immutable checkout or bytes.
+The existing live `--repo`/`--agent`/`--cost-agent` path is optional integration
+diagnostics, not a numbered-release prerequisite. The legacy live examples
+later in this document do not override this numbered workflow.
+
+Deploy the prepared RC for in-situ evaluation. All source, platform, packaged,
+bootstrap, dashboard, provider, and operational checks belong to the RC process.
+Once the developer accepts the deployed RC, record approval in the cycle
+manifest with its `attempt`, original source `commit`, `wheel_sha256`, and
+`decided_on`. Approval attests completion of the RC evaluation; publication
+must not rerun it or require a new acceptance receipt. From the clean synchronized
+configured cycle branch:
 
 ```bash
 uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
@@ -68,9 +86,10 @@ uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
 
 The final attempt has package version `<target>` but a separate identity such
 as `<target>-final-1`. Its preparation stamps the accumulated stable changelog,
-builds new stable bytes, and reruns the required gates. Bootstrap and independently
-accept those bytes using the same command above with the final attempt identifier.
-RC acceptance can never substitute for this receipt. After explicit approval:
+builds stable artifacts from the same runtime source, and retains the RC approval.
+Version and release metadata may change; runtime changes require a new RC and
+new developer acceptance. There is no stable acceptance stage and no functional
+test execution during final preparation, finalization, or publication:
 
 ```bash
 uv run --script tools/release.py --finalize --attempt <final-attempt> --yes
@@ -78,11 +97,13 @@ uv run --script tools/release.py --publish --attempt <final-attempt> --yes
 ```
 
 Finalization creates the annotated stable tag and an immutable record binding it
-to final preparation and acceptance. Publication pushes the exact commit and tag
+to final preparation and the exact RC approval. Publication pushes the exact commit and tag
 atomically, uploads retained bytes and a privacy-safe evidence digest, and refuses
 replacement of existing draft assets. Both automatic and manual PyPI workflow
-paths require a canonical stable tag and matching public evidence. Publication
-never rebuilds accepted assets. Verify GitHub and PyPI availability independently.
+paths require a canonical stable tag and matching public evidence. Neither calls
+the Test workflow or any functional gate. Publication never rebuilds retained
+assets. Verify GitHub and PyPI availability and hashes independently; do not run
+the installed tool as an additional release acceptance check.
 
 ### Retry and rejection
 
@@ -118,10 +139,10 @@ Do not use an older checkout to bypass the guard.
 
 The adopted policy keeps a stable target while advancing RC numbers on
 rejection. Keep immutable artifacts and receipts for every attempt. An
-accepted RC permits preparation of final stable bytes, not their publication.
-Final stable artifacts must pass independent required acceptance. Create the
-stable tag only afterward and publish exactly those accepted bytes, without
-rebuilding them. A failed final build needs a distinct retained attempt identity
+developer-accepted RC authorizes stable packaging and publication without further
+functional testing. Create the stable tag after packaging and provenance checks,
+then publish exactly those retained bytes without rebuilding them.
+A failed final build needs a distinct retained attempt identity
 and safe installed-version recovery, not another stable patch number.
 
 Stage RCs beside the existing stable installation and select one deliberately
@@ -228,7 +249,11 @@ metadata cover every file consumed by bootstrap. `agents-live --help` reports th
 documented commands, `agents-live init` installs the vendored skill,
 and no private adapter or deployment-specific agent is present.
 
-## Publish
+## Legacy Non-Numbered Workflow
+
+The following preparation and live-acceptance commands document the historical
+non-numbered workflow. They are not publication prerequisites for an approved
+numbered RC. Use the numbered attempt commands above for the current cycle.
 
 Preview the selected release without changing files or remotes:
 
@@ -376,24 +401,19 @@ entry, and a link to the full changelog at the release tag, followed by GitHub's
 generated notes (merged pull requests and the compare link).
 
 Publishing the GitHub release triggers `.github/workflows/publish.yml`,
-which resolves the release tag to one commit, runs the Test workflow against
-that exact commit on Ubuntu and Windows, then verifies and publishes the exact
-wheel and source distribution that passed installed-candidate acceptance. The
-release tool attaches those artifacts and their `SHA256SUMS` manifest while the
-GitHub release is still a draft; the publish job downloads them only after both
-test jobs pass and refuses any checksum mismatch before PyPI. Independent
-Windows and Linux builds are not expected to be byte-identical because archive
-line endings, executable modes, and build-backend metadata differ. Publication cannot start
-unless both test jobs pass. Wait
-for the workflow to succeed, verify both artifacts are attached, then follow
-the two-stage PyPI and installed-tool checks in [testing.md](testing.md). In
+which resolves the stable tag, verifies release identity and evidence, downloads
+the retained wheel and source distribution, checks hashes, and uploads them to
+PyPI. It does not run the Test workflow, functional tests, or installed-tool
+acceptance. The release tool attaches artifacts and their `SHA256SUMS` manifest
+while the GitHub release is still a draft. Wait for publication to succeed and
+verify public artifact availability and hashes. In
 an interactive terminal, `gh run watch <run-id> --exit-status` can wait for
 the workflow. Automation should use noninteractive run-status APIs or
 `GH_PAGER=cat gh run view <run-id>` after completion; `gh run watch` may take
 over the terminal's alternate screen.
 
-The exact release commit's reusable Test workflow runs clean-root bootstrap
-acceptance on Windows and Linux with package indexes disabled before publish.
+The RC process owns clean-root bootstrap acceptance on Windows and Linux with
+package indexes disabled. Publication does not repeat those checks.
 GitHub also records a SHA-256 digest and byte size for each uploaded asset in
 its release API. The generation bootstrap accepts only the uniquely named wheel
 from the official repository and fails closed when that metadata is absent,

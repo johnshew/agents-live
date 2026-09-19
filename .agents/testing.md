@@ -33,7 +33,7 @@ For the numbered-RC cycle tracked in
 [#511](https://github.com/johnshew/agents-live/issues/511), use the explicit
 `release.py` attempt workflow in [release.md](release.md). Source regression
 tests exercise real temporary commits, artifacts, rejection, approval-only
-promotion, independent final acceptance records, and deferred annotated tags.
+promotion without functional retesting, and deferred annotated tags.
 Their synthetic builder and operational receipts do not prove live acceptance.
 Test RC rejection followed by the next RC,
 side-by-side stable/RC installation, deliberate selection and rollback, and
@@ -41,10 +41,19 @@ restoration of watchers without duplicate automation. Resume may reuse only
 unchanged bytes and matching evidence. Historical legacy rejection records with
 unavailable artifacts are not executing evidence.
 
-RC acceptance never satisfies the final stable wheel's artifact or installed
-gates. Final stable failures must preserve an attempt-specific record and allow
+All functional verification belongs to the RC process. Developer acceptance of
+the exact deployed RC authorizes stable packaging and publication without any
+additional functional testing or stable acceptance receipt. Numbered RC
+acceptance runs the exact wheel in a temporary runtime
+and repository, using agency Copilot when an agency plugin source is supplied,
+otherwise built-in Copilot. It checks hello-world output and positive reported
+cost against the exact successful run ID. Work-service access and consumer
+repositories are not requirements. Source, packaged dashboard, and bootstrap
+gates remain separate; the hello-world receipt does not claim live-host coverage.
+Final packaging failures must preserve an attempt-specific record and allow
 safe recovery without overwriting sealed installations or consuming the next
-stable version. Publication must upload exactly the accepted stable bytes.
+stable version. Publication must upload exactly the retained stable bytes,
+bound to the RC approval, without rebuilding or executing them.
 
 Preparation and acceptance receipts bind attempt, source and metadata commits,
 gate commands, environment, artifact hashes, and each other. `--cycle-status`
@@ -97,8 +106,9 @@ uv run --script tools/validate.py release
 (`F811`), the export audit, all three source scripts, and framework smoke using
 the release tool's source gate list. `release` delegates the full existing
 non-provider gate sequence, including build and packaged dashboard readiness.
-It does not prepare, deploy, accept, or publish a candidate. Required CI still
-validates the exact wheel on both hosts; source evidence never replaces it.
+It does not prepare, deploy, accept, or publish a candidate. RC validation owns
+the platform checks; source evidence never replaces them. Do not invoke this
+profile as a stable promotion or publication prerequisite.
 Use `--plan` to inspect a profile without running checks.
 
 Receipts live under the common Git directory, outside the exported tree. They
@@ -134,8 +144,8 @@ failure appears only in CI.
 The Test workflow runs both Ubuntu and Windows for pull requests and merge
 groups. Documentation-only changes retain the Linux export audit and required
 job contexts but skip source suites and artifact startup. Ordinary `main` pushes
-do not repeat a PR's identical matrix; the publish workflow verifies the exact
-release commit on both hosts.
+do not repeat a PR's identical matrix. The publish workflow checks identity,
+provenance, and hashes only; it does not run the matrix again.
 For code changes, the three source suites run as independent jobs on each host
 while Linux builds the complete wheel, source distribution, and bootstrap
 scripts in parallel. Both hosts verify the wheel's recorded
@@ -146,11 +156,11 @@ the stable current command, ownership, exact version, and idempotency. The
 aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain the
 stable required checks and fail unless every selected job succeeds.
 Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
-single host needs to be isolated. The publish workflow calls the same workflow
-against the resolved release commit and cannot publish until both hosts pass.
+single host needs to be isolated. Complete these functional checks in the RC
+process before developer acceptance, not during publication.
 
 Provider-backed conformance is opt-in because it spends account credits and CI
-does not hold provider credentials. Before publishing a release that changes a
+does not hold provider credentials. During RC evaluation for a change to a
 provider, run the relevant live suite against the exact candidate on every host
 whose behavior the change claims. For 6.9, sign in to native Windows Codex and
 Copilot CLIs, install the candidate checkout or wheel, and run from PowerShell:

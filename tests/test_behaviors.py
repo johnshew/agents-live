@@ -4282,7 +4282,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(1, len(builds))
                 self.assertEqual("", git("tag", "--list"))
 
-    def test_final_attempt_requires_independent_acceptance_before_tag(self):
+    def test_final_attempt_requires_rc_approval_before_tag(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         finalize = script["finalize_attempt"]
         scope = finalize.__globals__
@@ -4303,12 +4303,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
             git("commit", "-m", "fixture")
             preparation = root / ".git" / "preparation.json"
             preparation.write_text('{"version":"1.2.3"}')
-            acceptance = root / ".git" / "acceptance.json"
+            acceptance = root / ".git" / "approval.json"
             accepted = False
 
             def check_acceptance(_version):
                 if not accepted:
-                    raise script["ReleaseError"]("independent acceptance missing")
+                    raise script["ReleaseError"]("developer RC approval missing")
                 return {}
 
             record = {"id": "1.2.3-final-1", "target": "1.2.3", "kind": "final",
@@ -4320,9 +4320,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_check_preparation": lambda _version: {},
                 "_check_candidate_acceptance": check_acceptance,
                 "_preparation_path": lambda _version: preparation,
-                "_acceptance_path": lambda _version: acceptance,
+                "_publication_decision_path": lambda _version: acceptance,
             }):
-                with self.assertRaisesRegex(script["ReleaseError"], "independent"):
+                with self.assertRaisesRegex(script["ReleaseError"], "RC approval"):
                     finalize()
                 self.assertEqual("", git("tag", "--list"))
                 acceptance.write_text('{"accepted":true}')
@@ -4411,7 +4411,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with self.assertRaisesRegex(script["ReleaseError"], "provenance"):
                     check("1.2.3", wheel)
 
-    def test_rc_rejection_to_independent_final_acceptance_and_retry(self):
+    def test_rc_approval_promotes_without_functional_retesting_and_retries(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         scope = script["prepare_attempt"].__globals__
         with tempfile.TemporaryDirectory() as temporary:
@@ -4431,6 +4431,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             workflow.write_text("name: Test\n")
             manifest = root / ".github" / "release-cycles.toml"
             manifest.write_text('schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "main"\n')
+            (root / "tools").mkdir()
+            for name in ("release.py", "candidate-operational.py"):
+                shutil.copy2(REPOSITORY / "tools" / name, root / "tools" / name)
 
             def git(*arguments):
                 if arguments[0] == "ls-remote":
@@ -4447,7 +4450,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
             (root / ".git" / "info" / "exclude").write_text("dist/\n")
 
             def run(command, **_kwargs):
-                if command[:2] == ["uv", "version"]:
+                if command[0] == "functional-check":
+                    self.assertEqual("rc", scope["ACTIVE_ATTEMPT"]["kind"])
+                elif "--hello-world" in command:
+                    self.assertEqual("rc", scope["ACTIVE_ATTEMPT"]["kind"])
+                    wheel = Path(command[command.index("--hello-world") + 1])
+                    output = Path(command[command.index("--output") + 1])
+                    output.write_text(json.dumps({
+                        "ok": True, "mode": "isolated-copilot", "provider": "copilot",
+                        "version": scope["ACTIVE_ATTEMPT"]["version"],
+                        "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                        "runs": [{"agent": "hello-world", "run_id": "a" * 32,
+                                  "list_cost_usd": 0.01}],
+                    }))
+                elif command[:2] == ["uv", "version"]:
                     project.write_text(f'version = "{command[2]}"\n')
                 elif "--build-artifacts" in command:
                     dist = root / "dist"
@@ -4464,6 +4480,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "ROOT": root, "PYPROJECT": project, "VERSION_FILES": (package, version_file),
                 "CHANGELOG": changelog, "RELEASE_FILES": (project, package, version_file, changelog),
                 "_git": git, "_run": run, "_gate_commands": lambda: [
+                    ["functional-check"],
                     ["build", "--build-artifacts", str(scope["ROOT"])]],
                 "_installed_version": lambda: "1.2.2",
                 "_installed_all_json": lambda _command: {"ok": True},
@@ -4479,8 +4496,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                               "source_commit": source, "branch": f"release/v{identifier}-candidate",
                               "accepted_rc": accepted_rc}
                     if kind == "final":
-                        rc_path = script["_cycle_directory"]("1.2.3") / accepted_rc / "acceptance.json"
-                        record["rc_acceptance_sha256"] = script["_sha256"](rc_path)
+                        rc_path = script["_cycle_directory"]("1.2.3") / accepted_rc / "approval.json"
+                        record["rc_approval_sha256"] = script["_sha256"](rc_path)
                     scope["ACTIVE_ATTEMPT"] = record
                     script["_write_once"](script["_attempt_path"]() / "attempt.json", record)
                     git("switch", "-c", record["branch"])
@@ -4488,23 +4505,34 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     self.assertEqual("", git("tag", "--list"))
                     if identifier in ("1.2.3rc1", "1.2.3-final-1"):
                         if kind == "final":
-                            with self.assertRaises(script["ReleaseError"]):
-                                script["finalize_attempt"]()
                             final_paths.append(script["_candidate_wheel"]("1.2.3"))
-                        script["reject_attempt"]("behavior rejected")
+                        script["reject_attempt"]("RC behavior rejected" if kind == "rc" else "packaging attempt abandoned")
                         with self.assertRaisesRegex(script["ReleaseError"], "rejected"):
                             script["_load_attempt"](identifier)
                         continue
                     version = record["version"]
                     if kind == "final":
-                        with self.assertRaises(script["ReleaseError"]):
-                            script["finalize_attempt"]()
                         final_paths.append(script["_candidate_wheel"](version))
                         self.assertIn("## 1.2.3 -", changelog.read_text())
-                    script["_write_candidate_acceptance"](
-                        version, root, script["_candidate_wheel"](version), operation_id=None,
-                        watchers=((str(root), "safe-watch"),), operational_agent="safe-watch", cost_agent="safe-cost")
-                    script["_retained_preparation"](record, accepted=True)
+                        self.assertFalse(script["_acceptance_path"](version).exists())
+                    if kind == "rc":
+                        with mock.patch.dict(scope, {
+                            "_installed_run": mock.Mock(side_effect=AssertionError("local runtime accessed")),
+                        }):
+                            script["accept_isolated"](None)
+                        receipt = json.loads(script["_acceptance_path"](version).read_text())
+                        self.assertEqual("isolated-copilot", receipt["mode"])
+                        self.assertEqual([], receipt["started_watchers"])
+                        for invalid_cost in (None, True, -1, 0, float("inf"), float("nan")):
+                            invalid = json.loads(json.dumps(receipt))
+                            invalid["probe"]["runs"][0]["list_cost_usd"] = invalid_cost
+                            with self.assertRaises(script["ReleaseError"]):
+                                script["_check_isolated_acceptance"](invalid)
+                        invalid = json.loads(json.dumps(receipt))
+                        invalid["probe"]["wheel_sha256"] = "f" * 64
+                        with self.assertRaises(script["ReleaseError"]):
+                            script["_check_isolated_acceptance"](invalid)
+                    script["_retained_preparation"](record, accepted=kind == "rc")
                     cycle_directory = script["_cycle_directory"]("1.2.3")
                     evidence = script["_evidence_identity"]()
                     with mock.patch.dict(scope, {
@@ -4512,7 +4540,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         "_cycle_directory": lambda _target: cycle_directory,
                         "_evidence_identity": lambda: evidence,
                     }):
-                        script["_retained_preparation"](record, accepted=True)
+                        script["_retained_preparation"](record, accepted=kind == "rc")
                     if kind == "rc":
                         accepted_rc = identifier
                         with self.assertRaisesRegex(script["ReleaseError"], "restoration baseline"):
@@ -4520,16 +4548,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         git("switch", "main")
                         manifest.write_text(manifest.read_text() + (
                             '[cycles."1.2.3".approval]\ndecision = "approved"\n'
+                            f'attempt = "{identifier}"\nwheel_sha256 = "{receipt["wheel_sha256"]}"\n'
                             f'commit = "{source}"\ndecided_on = "2026-09-14"\n'))
                         git("add", ".github/release-cycles.toml")
                         git("commit", "-m", "approve accepted source")
                         source = git("rev-parse", "HEAD")
+                        decision = script["_approved_rc"](record)
+                        script["_write_once"](cycle_directory / identifier / "approval.json", decision)
                     else:
                         local_runtime = mock.Mock(side_effect=AssertionError(
                             "finalization and publication must not access the local runtime"))
                         runtime_guards = {name: local_runtime for name in (
                             "_install_root", "_installed_cli", "_installed_run",
                             "_installed_version", "_installed_all_json", "_installed_json",
+                            "accept_isolated", "_run_candidate_operational_acceptance", "run_gates",
                         )}
                         with mock.patch.dict(scope, runtime_guards):
                             script["finalize_attempt"]()
@@ -4555,7 +4587,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         with mock.patch.dict(scope, {
                             **runtime_guards,
                             "_require_tools": lambda: None, "_check_publish_state": lambda _version: True,
-                            "_cycle_configuration": lambda: {"branch": "release/1.2.3"},
+                            "_cycle_configuration": lambda *_args: {"branch": "release/1.2.3", "approval": decision},
                             "_release_notes": lambda _version: "Accepted stable release notes.",
                             "_run": publish_command, "subprocess": process,
                         }):
@@ -4589,6 +4621,37 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 final_paths[1].write_bytes(b"tampered")
                 rows = {row["attempt"]: row["state"] for row in script["cycle_status"]()}
                 self.assertEqual("invalid-evidence", rows["1.2.3-final-2"])
+
+    def test_hello_world_selects_available_agency_plugin_without_consumer_state(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "candidate-operational.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = {**os.environ, "XDG_CONFIG_HOME": str(root / "config"),
+                           "XDG_DATA_HOME": str(root / "data"),
+                           "XDG_STATE_HOME": str(root / "state")}
+            for variant in ("absent", "agency", "broken", "unrelated"):
+                with self.subTest(variant=variant):
+                    repo = root / variant
+                    repo.mkdir()
+                    source = root / f"{variant}.py"
+                    if variant == "agency":
+                        source.write_text(
+                            "import copy\nfrom agents_live.agent.providers.copilot import COPILOT\n"
+                            "PROVIDER = copy.copy(COPILOT)\nPROVIDER.name = 'agency-copilot'\n")
+                    elif variant == "broken":
+                        source.write_text("raise RuntimeError('plugin load failed')\n")
+                    elif variant == "unrelated":
+                        source.write_text("from agents_live.agent.providers.copilot import COPILOT as PROVIDER\n")
+                    if variant in {"broken", "unrelated"}:
+                        with self.assertRaises(script["OperationalError"]):
+                            script["_hello_world_provider"](Path(sys.executable), repo, environment, source)
+                    else:
+                        selected = script["_hello_world_provider"](
+                            Path(sys.executable), repo, environment,
+                            None if variant == "absent" else source)
+                        self.assertEqual("copilot" if variant == "absent" else "agency-copilot", selected)
+                    self.assertFalse((root / "state").exists())
+                    self.assertFalse((root / "config").exists())
 
     def test_release_attempt_evidence_is_immutable_and_scoped(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -5176,6 +5239,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertNotIn("gh release upload", publish)
         self.assertNotIn("tools/release.py --gates", publish)
         self.assertNotIn("tests/test_", publish)
+        self.assertNotIn("workflows/test.yml", publish)
+        self.assertNotIn("--accept-candidate", publish)
 
     def test_ci_avoids_duplicate_main_runs_and_keeps_merge_queue_checks(
             self) -> None:

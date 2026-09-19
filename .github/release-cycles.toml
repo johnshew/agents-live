@@ -7,11 +7,13 @@ branch = "release/6.9.2"
 source_ref = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
 selected_rc = "6.9.2rc5"
 next_rc = "6.9.2rc7"
-recommendation = "Publish the accepted RC5 runtime source after independent final-package validation. Later runtime changes belong to 6.9.3."
+recommendation = "Publish the developer-accepted RC5 runtime source without additional functional testing. Later runtime changes belong to 6.9.3."
 
 [cycles."6.9.2".approval]
 decision = "approved"
+attempt = "6.9.2rc5"
 commit = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+wheel_sha256 = "8624238131a204ea6f97d3aca5183ceb69754148ecff1e8522fe1b9e21e26e9d"
 decided_on = "2026-09-19"
 
 [cycles."6.9.2".issues]
@@ -24,8 +26,8 @@ deferred = [528, 530, 531, 532, 533, 538, 539]
 "531" = "Developer approved deferral to 6.9.3 on 2026-09-19."
 "532" = "Developer approved deferral to 6.9.3 on 2026-09-19."
 "533" = "Developer approved publication with this issue open on 2026-09-19."
-"538" = "Developer explicitly approved deferral on 2026-09-19; wait for ordinary scheduled work to finish before activation. Full acceptance remains required."
-"539" = "Developer explicitly approved deferral on 2026-09-19; intermittent log-query schema race remains known. RC5 and final stable bytes must independently pass full acceptance."
+"538" = "Developer explicitly approved deferral on 2026-09-19; wait for ordinary scheduled work to finish before activation. RC approval authorizes publication without functional retesting."
+"539" = "Developer explicitly approved deferral on 2026-09-19; intermittent log-query schema race remains known. RC approval authorizes publication without functional retesting."
 
 [cycles."6.9.2".history."6.9.2rc1"]
 status = "rejected"

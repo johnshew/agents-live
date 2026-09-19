@@ -9,6 +9,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -886,7 +887,7 @@ def _check_finalization(version: str) -> dict:
         "commit": _git("rev-parse", "HEAD"), "tag": f"v{version}",
         "tag_object": _git("rev-parse", f"refs/tags/v{version}"),
         "preparation_sha256": _sha256(_preparation_path(version)),
-        "acceptance_sha256": _sha256(_acceptance_path(version)), "approved": True,
+        "acceptance_sha256": _sha256(_publication_decision_path(version)), "approved": True,
     }
     if any(record.get(key) != value for key, value in expected.items()) \
             or _git("cat-file", "-t", f"v{version}") != "tag" \
@@ -897,7 +898,7 @@ def _check_finalization(version: str) -> dict:
 
 def finalize_attempt() -> None:
     if ACTIVE_ATTEMPT is None or ACTIVE_ATTEMPT["kind"] != "final":
-        raise ReleaseError("only an independently accepted final build can be finalized")
+        raise ReleaseError("only a final build promoted from an approved RC can be finalized")
     version = ACTIVE_ATTEMPT["version"]
     _check_attempt_checkout()
     _check_preparation(version)
@@ -921,7 +922,7 @@ def finalize_attempt() -> None:
         "schema": 1, "attempt": ACTIVE_ATTEMPT["id"], "version": version,
         "commit": head, "tag": tag, "tag_object": _git("rev-parse", f"refs/tags/{tag}"),
         "preparation_sha256": _sha256(_preparation_path(version)),
-        "acceptance_sha256": _sha256(_acceptance_path(version)), "approved": True,
+        "acceptance_sha256": _sha256(_publication_decision_path(version)), "approved": True,
         "finalized_at": datetime.now(timezone.utc).isoformat(),
     })
     print(f"Finalized {tag} locally; no publication performed")
@@ -1018,7 +1019,10 @@ def _check_final_source(accepted_source: str, final_source: str) -> None:
     if _git("merge-base", accepted_source, final_source) != accepted_source:
         raise ReleaseError("final source must descend from the accepted RC source")
     changed = set(_git("diff", "--name-only", accepted_source, final_source).splitlines())
-    collateral = {manifest, "tools/release.py", "tools/dashboard-readiness.py"}
+    collateral = {manifest, ".github/release-channels.toml", "tools/release.py", "tools/dashboard-readiness.py",
+                  "tools/candidate-operational.py", "tools/release-report.py",
+                  ".github/workflows/publish.yml", ".agents/release.md",
+                  ".agents/testing.md", ".agents/release-report.md", "AGENTS.md"}
     if any(path not in collateral and not path.startswith(("docs/", "tests/")) for path in changed):
         raise ReleaseError("final source differs from accepted RC code; accept a new RC")
     configuration = tomllib.loads(_git("show", f"{final_source}:{manifest}"))
@@ -1038,11 +1042,44 @@ def _check_accepted_rc(record: dict) -> None:
     accepted = _load_attempt(record["accepted_rc"])
     if accepted["kind"] != "rc" or accepted["target"] != record["target"]:
         raise ReleaseError("final attempt refers to an incompatible RC")
-    _retained_preparation(accepted, accepted=True)
-    path = _cycle_directory(record["target"]) / accepted["id"] / "acceptance.json"
-    if _sha256(path) != record["rc_acceptance_sha256"]:
-        raise ReleaseError("accepted RC decision changed since final allocation")
+    decision = _approved_rc(accepted)
+    path = _cycle_directory(record["target"]) / accepted["id"] / "approval.json"
+    if json.loads(path.read_text(encoding="utf-8")) != decision \
+            or _sha256(path) != record["rc_approval_sha256"]:
+        raise ReleaseError("developer RC approval changed since final allocation")
     _check_final_source(accepted["source_commit"], record["source_commit"])
+
+
+def _approved_rc(record: dict) -> dict:
+    if record["kind"] != "rc":
+        raise ReleaseError("developer approval must identify an RC")
+    preparation = _retained_preparation(record)
+    approval = _cycle_configuration(record["target"]).get("approval", {})
+    expected = {"decision": "approved", "attempt": record["id"],
+                "commit": record["source_commit"],
+                "wheel_sha256": preparation["wheel_sha256"]}
+    if any(approval.get(key) != value for key, value in expected.items()):
+        raise ReleaseError("developer approval must name the exact prepared RC source and wheel")
+    try:
+        datetime.strptime(approval["decided_on"], "%Y-%m-%d")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReleaseError("developer approval requires a valid decision date") from exc
+    return {"schema": 1, **expected, "decided_on": approval["decided_on"],
+            "preparation_sha256": _sha256(
+                _cycle_directory(record["target"]) / record["id"] / "preparation.json")}
+
+
+def _publication_decision_path(version: str) -> Path:
+    if ACTIVE_ATTEMPT is not None and ACTIVE_ATTEMPT["kind"] == "final":
+        return _cycle_directory(ACTIVE_ATTEMPT["target"]) / ACTIVE_ATTEMPT["accepted_rc"] / "approval.json"
+    return _acceptance_path(version)
+
+
+def _attempt_gate_commands(record: dict | None) -> list[list[str]]:
+    commands = _gate_commands()
+    if record is not None and record["kind"] == "final":
+        return [command for command in commands if "--build-artifacts" in command]
+    return commands
 
 
 def _cycle_configuration(target: str | None = None) -> dict:
@@ -1080,15 +1117,20 @@ def cycle_status() -> list[dict]:
                     _retained_preparation(record, accepted=True)
                     _check_accepted_rc(record)
                     row["state"] = "accepted"
+                decision_path = path.parent / "acceptance.json"
+                if record["kind"] == "final" and row["state"] == "prepared":
+                    _check_accepted_rc(record)
+                    decision_path = directory / record["accepted_rc"] / "approval.json"
+                    row["state"] = "approved"
                 if (path.parent / "finalization.json").exists():
                     final = json.loads((path.parent / "finalization.json").read_text(encoding="utf-8"))
-                    if row["state"] != "accepted" or record["kind"] != "final" \
+                    if row["state"] != "approved" or record["kind"] != "final" \
                             or final.get("schema") != 1 or final.get("approved") is not True \
                             or final.get("attempt") != identifier or final.get("version") != record["version"] \
                             or final.get("tag") != f"v{record['version']}" \
                             or final.get("commit") != row["commit"] \
                             or final.get("preparation_sha256") != _sha256(path.parent / "preparation.json") \
-                            or final.get("acceptance_sha256") != _sha256(path.parent / "acceptance.json") \
+                            or final.get("acceptance_sha256") != _sha256(decision_path) \
                             or _git("rev-parse", f"refs/tags/v{record['version']}") != final.get("tag_object") \
                             or _git("cat-file", "-t", final["tag_object"]) != "tag" \
                             or _git("rev-parse", f"{final['tag_object']}^{{commit}}") != row["commit"]:
@@ -1136,7 +1178,7 @@ def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
         if not isinstance(checkout, str) or not Path(checkout).is_absolute():
             raise ReleaseError("retained preparation checkout is invalid")
         gate_commands = [[checkout if argument == str(ROOT) else argument for argument in command]
-                         for command in _gate_commands()]
+                         for command in _attempt_gate_commands(record)]
         expected = {"schema": PREPARATION_SCHEMA, "prepared": True,
                     "attempt": record["id"], "version": record["version"],
                     "source_commit": record["source_commit"], "commit": commit,
@@ -1166,9 +1208,11 @@ def _retained_preparation(record: dict, *, accepted: bool = False) -> dict:
             identity.update(schema=ACCEPTANCE_SCHEMA, accepted=True, operational=True,
                             preparation_sha256=_sha256(directory / "preparation.json"))
             if any(receipt.get(key) != value for key, value in identity.items()) \
-                    or not receipt.get("started_watchers") \
+                    or (receipt.get("mode") != "isolated-copilot" and not receipt.get("started_watchers")) \
                     or not receipt.get("operational_agent") or not receipt.get("cost_agent"):
                 raise ReleaseError("retained operational acceptance is missing or stale")
+            if receipt.get("mode") == "isolated-copilot":
+                _check_isolated_acceptance(receipt)
         return preparation
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ReleaseError("retained attempt evidence is incomplete") from exc
@@ -1198,7 +1242,8 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
         accepted_record = _load_attempt(from_rc)
         if accepted_record["kind"] != "rc" or accepted_record["target"] != target:
             raise ReleaseError("final preparation requires an RC of the current target")
-        _retained_preparation(accepted_record, accepted=True)
+        decision = _approved_rc(accepted_record)
+        _write_once(_cycle_directory(target) / accepted_record["id"] / "approval.json", decision)
         accepted_source = accepted_record["source_commit"]
         _check_final_source(accepted_source, source)
     directory = _cycle_directory(target)
@@ -1238,8 +1283,8 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
                   "accepted_rc": from_rc,
                   "reserved_at": datetime.now(timezone.utc).isoformat()}
         if accepted_record:
-            record["rc_acceptance_sha256"] = _sha256(
-                directory / accepted_record["id"] / "acceptance.json")
+            record["rc_approval_sha256"] = _sha256(
+                directory / accepted_record["id"] / "approval.json")
         _write_once(attempt_dir / "attempt.json", record)
     finally:
         lock.rmdir()
@@ -1301,7 +1346,7 @@ def prepare_attempt() -> None:
         print(f"Reused exact preparation for {record['id']}")
         return
     build_record = directory / "build.json"
-    for command in _gate_commands():
+    for command in _attempt_gate_commands(record):
         if "--build-artifacts" in command:
             if build_record.exists():
                 retained = json.loads(build_record.read_text(encoding="utf-8"))
@@ -1323,8 +1368,11 @@ def prepare_attempt() -> None:
     if json.loads(build_record.read_text(encoding="utf-8")) != _release_identity(version, wheel):
         raise ReleaseError("attempt artifacts changed during readiness")
     _write_preparation(version, wheel)
-    print(f"Prepared {record['id']} without a tag. Bootstrap exact wheel: {wheel}")
-    print(f"Run --accept-candidate --attempt {record['id']} with the required live-agent arguments.")
+    print(f"Prepared {record['id']} without a tag. Retained exact wheel: {wheel}")
+    if record["kind"] == "rc":
+        print(f"Run RC checks with --accept-candidate --attempt {record['id']} --yes; optionally supply --agency-plugin <source>.")
+    else:
+        print(f"RC approval retained; finalize {record['id']} and publish without functional retesting.")
 
 
 def _release_identity(version: str, wheel: Path) -> dict[str, object]:
@@ -1366,7 +1414,7 @@ def _write_preparation(version: str, wheel: Path) -> Path:
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         **_release_identity(version, wheel),
         **_evidence_identity(),
-        "gates": _gate_commands(),
+        "gates": _attempt_gate_commands(ACTIVE_ATTEMPT),
     }
     if ACTIVE_ATTEMPT is not None:
         payload["checkout"] = str(ROOT)
@@ -1398,7 +1446,7 @@ def _check_preparation(version: str) -> dict:
         "prepared": True,
         **_release_identity(version, wheel),
         **_evidence_identity(),
-        "gates": _gate_commands(),
+        "gates": _attempt_gate_commands(ACTIVE_ATTEMPT),
     }
     if ACTIVE_ATTEMPT is not None:
         expected["checkout"] = str(ROOT)
@@ -1624,16 +1672,84 @@ def _write_candidate_acceptance(
     return destination
 
 
+def _check_isolated_acceptance(receipt: dict) -> None:
+    probe = receipt.get("probe", {})
+    if not isinstance(probe, dict) or probe.get("ok") is not True \
+            or probe.get("mode") != "isolated-copilot" \
+            or probe.get("version") != receipt.get("version") \
+            or probe.get("wheel_sha256") != receipt.get("wheel_sha256") \
+            or probe.get("provider") not in {"copilot", "agency-copilot"}:
+        raise ReleaseError("isolated probe does not match accepted artifact")
+    runs = probe.get("runs")
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise ReleaseError("isolated acceptance requires one successful hello-world run")
+    run = runs[0]
+    cost = run.get("list_cost_usd")
+    if run.get("agent") != "hello-world" \
+            or re.fullmatch(r"[0-9a-f]{32}", str(run.get("run_id", ""))) is None \
+            or isinstance(cost, bool) or not isinstance(cost, (float, int)) \
+            or not math.isfinite(cost) or cost <= 0:
+        raise ReleaseError("isolated acceptance has invalid run identity or cost")
+    commit = receipt.get("validator_commit", "")
+    if re.fullmatch(r"[0-9a-f]{40}", str(commit)) is None:
+        raise ReleaseError("isolated acceptance has no committed validator")
+    for name in ("release.py", "candidate-operational.py"):
+        if receipt.get("validator_blobs", {}).get(name) != _git("rev-parse", f"{commit}:tools/{name}"):
+            raise ReleaseError("isolated acceptance validator identity changed")
+
+
+def accept_isolated(agency_plugin: Path | None) -> None:
+    if ACTIVE_ATTEMPT is None:
+        raise ReleaseError("isolated acceptance requires a retained --attempt")
+    if _git("status", "--porcelain"):
+        raise ReleaseError("isolated acceptance requires clean committed validator tooling")
+    preparation = _retained_preparation(ACTIVE_ATTEMPT)
+    destination = _acceptance_path(ACTIVE_ATTEMPT["version"])
+    if destination.exists():
+        _retained_preparation(ACTIVE_ATTEMPT, accepted=True)
+        print("Exact attempt already accepted")
+        return
+    validator_commit = _git("rev-parse", "HEAD")
+    validator_blobs = {name: _git("rev-parse", f"HEAD:tools/{name}")
+                       for name in ("release.py", "candidate-operational.py")}
+    with tempfile.TemporaryDirectory(prefix="agents-live-acceptance-") as temporary:
+        output = Path(temporary) / "probe.json"
+        command = ["uv", "run", "--script", str(ROOT / "tools" / "candidate-operational.py"),
+                   "--hello-world", preparation["wheel"], "--output", str(output)]
+        if agency_plugin is not None:
+            command.extend(("--agency-plugin", str(agency_plugin.resolve(strict=True))))
+        _run(command)
+        probe = json.loads(output.read_text(encoding="utf-8"))
+    if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != validator_commit:
+        raise ReleaseError("validator changed during isolated acceptance")
+    _retained_preparation(ACTIVE_ATTEMPT)
+    receipt = {key: preparation[key] for key in (
+        "attempt", "source_commit", "version", "tag", "tag_object", "commit",
+        "wheel", "wheel_sha256", "platform", "python_version", "workflow_sha256")}
+    receipt.update(schema=ACCEPTANCE_SCHEMA, accepted=True, operational=True,
+                   accepted_at=datetime.now(timezone.utc).isoformat(),
+                   mode="isolated-copilot", probe=probe,
+                   validator_commit=validator_commit, validator_blobs=validator_blobs,
+                   operational_agent="hello-world", cost_agent="hello-world",
+                   started_watchers=[], preparation_sha256=_sha256(
+                       _preparation_path(ACTIVE_ATTEMPT["version"])))
+    _check_isolated_acceptance(receipt)
+    _write_once(destination, receipt)
+    print(f"Accepted exact wheel in isolated repository; receipt: {destination}")
+
+
 def _check_candidate_acceptance(version: str) -> dict:
+    if ACTIVE_ATTEMPT is not None and ACTIVE_ATTEMPT["kind"] == "final":
+        _check_accepted_rc(ACTIVE_ATTEMPT)
+        return json.loads(_publication_decision_path(version).read_text(encoding="utf-8"))
     receipt_path = _acceptance_path(version)
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ReleaseError(
-            "prepared candidate has not passed installed-tool acceptance; "
-            "run --accept-candidate --repo <live-repository> "
-            "--agent <safe-agent-identifier> "
-            "--cost-agent <safe-provider-agent-identifier> --yes") from exc
+            "prepared candidate has not passed acceptance; "
+            "run --accept-candidate --attempt <attempt> --yes "
+            "with optional --agency-plugin <source>") from exc
     wheel = _candidate_wheel(version)
     expected = {
         "schema": ACCEPTANCE_SCHEMA,
@@ -1649,7 +1765,9 @@ def _check_candidate_acceptance(version: str) -> dict:
     }
     if ACTIVE_ATTEMPT is not None:
         expected["preparation_sha256"] = _sha256(_preparation_path(version))
-        if not isinstance(receipt.get("started_watchers"), list) or not receipt["started_watchers"]:
+        if receipt.get("mode") == "isolated-copilot":
+            _check_isolated_acceptance(receipt)
+        elif not isinstance(receipt.get("started_watchers"), list) or not receipt["started_watchers"]:
             raise ReleaseError("attempt acceptance requires a recorded started watcher")
     mismatched = [key for key, value in expected.items()
                   if receipt.get(key) != value]
@@ -1778,16 +1896,7 @@ def _build_release_artifacts() -> None:
 
 
 def _gate_commands() -> list[list[str]]:
-    """Everything a release has to pass, in order.
-
-    One list, run by both ``prepare`` and ``publish`` and printed by the
-    plan, so the three cannot describe different releases.
-
-    The build comes before the dashboard readiness check because that
-    check runs the artifact rather than the source: an editable import
-    and a ``--help`` exit are what let two packaged dashboard breaks
-    reach releases (#279).
-    """
+    """RC preparation gates; final packaging selects only artifact construction."""
     return [
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",
@@ -1803,12 +1912,7 @@ def _gate_commands() -> list[list[str]]:
 
 
 def gates() -> None:
-    """Run every gate that does not need a live agent CLI.
-
-    The publish workflow calls this instead of restating the list in
-    YAML, where a gate once lost a dependency the local run kept and
-    failed the release after the tag was pushed (#218).
-    """
+    """Run non-provider RC checks, never as a publication prerequisite."""
     smoketest = _smoketest_command()
     for command in _gate_commands():
         if command == smoketest:
@@ -2291,7 +2395,7 @@ def publish() -> None:
             "tag_object": preparation["tag_object"],
             "artifacts": {path.name: _sha256(path) for path in accepted_artifacts},
             "preparation_sha256": _sha256(_preparation_path(version)),
-            "acceptance_sha256": _sha256(_acceptance_path(version)),
+            "acceptance_sha256": _sha256(_publication_decision_path(version)),
             "finalization_sha256": _sha256(_attempt_path() / "finalization.json"),
         })
         evidence_assets = (evidence,)
@@ -2317,6 +2421,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from-rc", metavar="ATTEMPT")
     parser.add_argument("--prepare-attempt", metavar="ATTEMPT")
     parser.add_argument("--attempt", metavar="ATTEMPT")
+    parser.add_argument("--agency-plugin", type=Path,
+                        help="Available agency plugin source for isolated hello-world acceptance")
     parser.add_argument("--finalize", action="store_true")
     parser.add_argument("--reject-attempt", metavar="ATTEMPT")
     parser.add_argument("--reason")
@@ -2349,7 +2455,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--accept-candidate",
         action="store_true",
-        help="Reinstall and verify the prepared candidate before publication",
+        help="Verify the exact wheel with isolated Copilot hello-world and cost checks",
     )
     parser.add_argument(
         "--candidate-preflight",
@@ -2419,11 +2525,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--reject-attempt requires --reason")
     if (args.prepare or args.accept_candidate or args.publish) and not args.yes:
         parser.error("--prepare, --accept-candidate, and --publish require --yes")
-    if (args.accept_candidate or args.candidate_preflight) and (
+    if (args.candidate_preflight or (args.accept_candidate and any((args.repo, args.agent, args.cost_agent)))) and (
             args.repo is None or not args.agent or not args.cost_agent):
         parser.error(
             "candidate preflight and acceptance require --repo, --agent, "
             "and --cost-agent")
+    if args.agency_plugin and (not args.accept_candidate or args.repo or args.resume):
+        parser.error("--agency-plugin applies only to isolated acceptance")
+    if args.accept_candidate and not args.repo and args.resume:
+        parser.error("isolated acceptance runs fresh against the retained wheel; no --resume")
     if (args.repo is not None or args.agent is not None
             or args.cost_agent is not None) \
             and not (args.accept_candidate or args.candidate_preflight):
@@ -2493,11 +2603,13 @@ def main(argv: list[str] | None = None) -> int:
             assert args.cost_agent is not None
             candidate_preflight(args.repo, args.agent, args.cost_agent)
         elif args.accept_candidate:
-            assert args.repo is not None
-            assert args.agent is not None
-            assert args.cost_agent is not None
-            accept_candidate(
-                args.repo, args.agent, args.cost_agent, resume=args.resume)
+            if ACTIVE_ATTEMPT is not None and ACTIVE_ATTEMPT["kind"] == "final":
+                raise ReleaseError("final attempts rely on developer RC approval; do not rerun functional acceptance")
+            if args.repo is None:
+                accept_isolated(args.agency_plugin)
+            else:
+                accept_candidate(
+                    args.repo, args.agent, args.cost_agent, resume=args.resume)
         elif args.gates:
             gates()
         elif args.build_artifacts:

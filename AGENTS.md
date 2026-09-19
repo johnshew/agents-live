@@ -102,14 +102,18 @@ Local numbered RC deployment is available through
 `tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
 It preserves side-by-side versions and does not create a tag or GitHub release.
 Full lifecycle preparation uses `tools/release.py --prepare-rc` from synchronized
-bake. Accept that exact attempt, record approval for its source, then promote
-to main and use `--prepare-final --from-rc`. Final stable bytes require their own
-acceptance before explicit `--finalize` and `--publish`, each with `--attempt`.
+bake. Complete RC checks and in-situ evaluation, then record developer approval
+for the exact attempt, source commit, and wheel hash. Use the configured cycle
+branch for `--prepare-final --from-rc`. Do not perform additional functional
+testing from RC promotion through publication. Final packaging retains RC
+approval for `--finalize` and `--publish`, each with `--attempt`.
 Run attempt commands from the retained worktree printed during allocation.
 Legacy implicit commands remain blocked; do not use an older checkout to bypass
 the guard. Historical local-deploy receipts do not replace full acceptance. See
 [development-release-process.md](docs/development-release-process.md) for the
-adopted lifecycle, including side-by-side versions and independent stable tests.
+adopted lifecycle, and [release-requirements.md](docs/release-requirements.md)
+for the no-retesting publication contract. Local runtime restoration remains
+independent of publication.
 
 When the report marks the configured version `released`, do not prepare or
 publish that version again. Use the separately configured later bake cycle
