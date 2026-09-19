@@ -287,3 +287,30 @@ decisions; tooling availability is not release approval.
 `.agents/release.md`, this document, and `tools/release-report.py` describe one
 process. A change to state names, branch routing, decision fields, deployment,
 or transition gates must update every affected source in the same change.
+
+## Publication And Local Selection: 2026-09-19
+
+GLP update `b32a7ab6-3d34-4c13-9246-501e164409e3`: clarification from
+the release-session review and the executing numbered-lifecycle test.
+
+Stable publication and local runtime selection are independent workstreams.
+`prepare_cycle` reads retained RC acceptance; `finalize_attempt` and `publish`
+verify retained preparation, independent final acceptance, artifact hashes,
+and tag identity. None requires the released version to remain locally active,
+and none requires deployment or activation of a later RC. A previously accepted
+stable package can be published while a later RC is selected locally, or when
+the publisher has no active local runtime.
+
+`accept_candidate` is different: its live installation and operational checks
+require the exact candidate to be selected for the duration of those checks.
+Once that receipt exists, restoring a later RC does not invalidate it. Missing
+RC or final acceptance remains a release prerequisite; local restoration is
+not an additional publication gate. Report these states separately, and do not
+restart acceptance solely because local selection changed after success.
+
+Evidence: `test_rc_rejection_to_independent_final_acceptance_and_retry` now
+rejects every local-runtime access during finalization and publication, while
+still checking accepted upload bytes, draft retry, and tamper refusal. The
+focused lifecycle and configured-branch tests pass. This clarifies existing
+behavior; it does not waive live acceptance or alter candidate bytes.
+Applied clarification; broader consolidation remains tracked under #511/#535.

@@ -4525,8 +4525,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         git("commit", "-m", "approve accepted source")
                         source = git("rev-parse", "HEAD")
                     else:
-                        script["finalize_attempt"]()
-                        script["_check_finalization"](version)
+                        local_runtime = mock.Mock(side_effect=AssertionError(
+                            "finalization and publication must not access the local runtime"))
+                        runtime_guards = {name: local_runtime for name in (
+                            "_install_root", "_installed_cli", "_installed_run",
+                            "_installed_version", "_installed_all_json", "_installed_json",
+                        )}
+                        with mock.patch.dict(scope, runtime_guards):
+                            script["finalize_attempt"]()
+                            script["_check_finalization"](version)
                         self.assertEqual("tag", git("cat-file", "-t", "v1.2.3"))
                         uploaded = {}
                         publication_commands = []
@@ -4546,6 +4553,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         process = mock.Mock(run=mock.Mock(return_value=subprocess.CompletedProcess(
                             ["gh"], 1, stdout="", stderr="not found")))
                         with mock.patch.dict(scope, {
+                            **runtime_guards,
                             "_require_tools": lambda: None, "_check_publish_state": lambda _version: True,
                             "_cycle_configuration": lambda: {"branch": "release/1.2.3"},
                             "_release_notes": lambda _version: "Accepted stable release notes.",
@@ -4571,6 +4579,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             with self.assertRaisesRegex(script["ReleaseError"], "never replace"):
                                 script["publish"]()
                             self.assertFalse(any("--draft=false" in command for command in publication_commands))
+                        local_runtime.assert_not_called()
                 self.assertNotEqual(final_paths[0], final_paths[1])
                 self.assertNotEqual(final_paths[0].read_bytes(), final_paths[1].read_bytes())
                 self.assertTrue(final_paths[0].exists())
