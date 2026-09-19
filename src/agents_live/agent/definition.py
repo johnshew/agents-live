@@ -50,6 +50,7 @@ _EXECUTION_FIELDS = {
     "agents-live.post-processor", "agents-live.output-schema",
     "agents-live.output-max-bytes", "agents-live.output-path-roots",
     "agents-live.output-provenance",
+    "agents-live.timeout-retries", "agents-live.empty-retries", "agents-live.overall-timeout",
 }
 
 
@@ -473,6 +474,13 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
     env = _string_map(owned.get("agents-live.env"), "env")
     transcript = _boolean(owned.get("agents-live.transcript"), True, "transcript")
     timeout = _positive_integer(owned.get("agents-live.timeout"), "timeout")
+    overall_timeout = _positive_integer(owned.get("agents-live.overall-timeout"), "overall-timeout")
+    retries = []
+    for field, default in (("timeout-retries", 1), ("empty-retries", 2)):
+        value = owned.get(f"agents-live.{field}", str(default))
+        if not value.isascii() or not value.isdigit() or int(value) > 10:
+            raise DefinitionError(f"agents-live.{field} must be an integer from 0 to 10")
+        retries.append(int(value))
     pre = owned.get("agents-live.pre-processor")
     post = owned.get("agents-live.post-processor")
     _relative_file(pre, skill_root, "pre-processor")
@@ -496,6 +504,7 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
         version, schedules, watch, selector, mode, result_path, allow_tools, mcps,
         tuple(sorted(env.items())), transcript, timeout, pre, post,
         output_schema, output_max, output_roots, provenance,
+        *retries, overall_timeout,
     )
 
 

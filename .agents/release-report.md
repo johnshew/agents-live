@@ -1,252 +1,105 @@
 ---
-title: Release Channels and Reporting
-description: Channel ownership, promotion policy, and the generated release report
+title: Release Cycle Reporting
+description: Concurrent release targets, exact candidate evidence, and all in-flight work
 ---
 
-Agents Live has two named steps between writing a change and publishing it. We
-call those steps channels. The report brings together code changes, reviews,
-issues, test results, and the version installed for testing so that a passing
-pull request is never mistaken for a public release.
+# Release cycle reporting
 
-Generate and read the report at the start of repository work, before choosing
-a target branch:
+Choose a stable target, prepare and activate numbered local RCs, then accept and
+publish the selected final packages. There is no bake channel. The canonical
+business requirements and industry evidence are in
+[development-release-process.md](../docs/development-release-process.md).
 
-```bash
-git fetch origin --prune
-uv run --script tools/release-report.py
-```
-
-For automation, `uv run --script tools/release-report.py --json` prints a
-versioned routing object without writing Markdown. It includes the recommended
-target branch, active bake flag, development state, full source commits,
-published tag, and ordered next actions from the same calculation as the human
-report. Treat it as point-in-time evidence, not authorization to promote or
-publish.
-
-The report is routing guidance for development as well as release review. It
-must agree with `AGENTS.md` about the active phase, branch targets, local bake
-deployment, and the conditions for moving work to `main`. When either source
-changes those rules, update the other source and the generator wording in the
-same change.
-
-## Channel model
-
-### Active RC migration
-
-The developer adopted the numbered-RC model for the `6.9.2` target on
-2026-09-13. `bake/v6.9.2-rc` supersedes the earlier 6.9.2 and 6.9.3 bake
-branches. Read this branch's manifest and report; a report from the old
-`main` checkout does not describe the migrated cycle.
-
-`bake.candidate_cycle` records the model, next RC, superseded branches, and
-historical candidate decisions. The first record is a legacy rejection:
-logical `6.9.2rc1`, actual package version `6.9.2`. Original preparation evidence
-has been recovered in the preparing checkout, not converted to a numbered RC
-or full acceptance. RC4 is already prepared; RC5 is next for new bytes.
-Report candidate preparation separately from installed acceptance and qualify
-deployment observations by environment rather than assuming one global selection.
-
-`implementation = "numbered-rc-v1"` identifies the explicit attempt workflow.
-The report reads its local evidence as reserved, prepared, accepted, finalized,
-rejected, or invalid-evidence, and recommends the next operation for the latest
-valid attempt. Tool availability is not candidate acceptance or release approval.
-Historical manifests without that implementation remain blocked on tooling.
-Local evaluation through `local-deploy.py --rc` is not full operational acceptance.
-Markdown and JSON must show the same target, next RC, historical
-evidence qualification, and blocker. Local attempt records are not evidence of
-another environment's selection. JSON reports GitHub publication and unverified
-PyPI availability separately; changing a manifest status does not create evidence.
-
-After RC acceptance, final stable preparation and installed acceptance are
-separate states. Preserve failed attempts, advance RC numbers for source fixes,
-and require independent acceptance of final stable bytes before a stable tag
-or publication. See [development-release-process.md](../docs/development-release-process.md).
-
-| Channel | Branch | Version | Moves to |
-|---|---|---|---|
-| `bake` | `bake/v<version>-local` | Development version ending in `.dev`, with its commit ID | Local deployment, optional GitHub prerelease, then `release` by pull request to `main` |
-| `release` | `main` plus immutable `v<version>` tag | Stable semantic version | GitHub Release, then verified PyPI publication |
-
-Feature and fix branches enter the lowest channel that needs the change. During
-an active bake, focused pull requests target the bake branch. Work reaches the
-release channel only through one reviewable promotion pull request from bake to
-`main`. The official `release/v<version>-candidate` branch is a temporary branch
-created by `tools/release.py` after bake moves into a clean, up-to-date `main`;
-it is not a third channel.
-
-When the configured bake version matches the latest stable GitHub release,
-the report marks that cycle `released`, suppresses obsolete candidate/testing
-instructions, and directs work to later bake branches whose own manifests
-configure a higher version. Read that branch's report before choosing a target;
-the old manifest does not route new work back into the completed cycle. If no
-later cycle is found, configure one. GitHub publication evidence does not prove
-PyPI or proxy availability, and an index delay must not trigger republication.
-
-The configured bake branch and report state decide routing, not the branch that
-happens to be checked out when an agent starts. Work explicitly requested on
-the active bake belongs to that bake. If an active bake exists but a request
-names `main`, ask whether the developer intends a bake fix, bake-to-release
-promotion, or independent post-release work before making changes.
-
-Use the primary checkout only when it is clean and already on the intended
-target branch. Otherwise, create a dedicated worktree from that target. Verify
-the target ancestry before committing or pushing, and always remove the
-worktree when the task is complete.
-
-Developer promotion intent is durable manifest state, not an inference from a
-conversation or a green build. While testing continues, set:
-
-```toml
-[bake.promotion]
-decision = "continue-bake"
-```
-
-When the developer explicitly approves promotion, change it to:
-
-```toml
-[bake.promotion]
-decision = "approved"
-commit = "<full-current-bake-commit>"
-decided_on = "YYYY-MM-DD"
-```
-
-Approval is bound to that exact commit. Any later bake commit makes it stale;
-retest and record a new developer decision before opening or merging the
-bake-to-`main` pull request. The report validates this state and must block
-promotion when approval is absent, malformed, or stale.
-
-If local testing rejects an official candidate before publication, do not add
-fixes to its temporary candidate branch. Reopen a `bake/v<version>-local`
-branch from current `origin/main`, update `.github/release-channels.toml`, and
-route focused fixes there. The report must then describe the rejected candidate
-in the bake recommendation while the last successfully tested deployment stays
-in the deployment fields. After the corrected bake moves to `main`, prepare a
-new final attempt and retain all prior candidate evidence.
-
-A bake may be published as a GitHub prerelease when another machine must test
-the exact validated bytes. This does not move the bake to the release channel:
-the tag retains its commit-qualified development version, the GitHub release
-is marked prerelease and not latest, and the PyPI workflow does not run. Record
-the public bake tag and tested version in the report. Stable promotion still
-uses the normal release preparation and acceptance workflow.
-
-GitHub closes linked issues only when commits reach the default branch. An open
-issue can therefore be `delivered` to bake without being released. Reports must
-show issue disposition and channel separately.
-
-## Sources of truth
-
-- Git refs and tags establish exactly which commits are in each channel.
-- GitHub pull requests establish review, merge, and CI evidence.
-- GitHub issues establish whether work remains open or closed.
-- [.github/release-channels.toml](../.github/release-channels.toml) records
-  decisions APIs cannot infer: partial delivery, explicit deferral, promotion
-  approval for an exact bake commit, and the last deployed bake artifact.
-- The records created by release preparation and final testing remain the
-  authority for approving the official candidate. The report summarizes them;
-  it never replaces a required check.
-
-Keep the manifest small. Do not copy PR titles, issue titles, check results, or
-commit counts into it because the generator reads those live. Update its
-deployment fields only after installing and validating that exact artifact.
-
-## Required report contents
-
-Every generated report must include:
-
-- the current development state and the evidence or decision needed for its
-  next transition;
-- a plain-English answer to "Are we ready to release?", followed by the
-  specific decisions and actions still needed;
-- a recommended decision for each unresolved release question, plus one clear
-  overall recommendation about whether to keep testing in bake or move to
-  `main`;
-- each active channel, the branch and version it uses, where its work stands,
-  and where that work goes next;
-- the latest public release and how much newer work exists in `main` and bake;
-- pull requests already merged into each channel, pull requests still open,
-  and whether their checks passed;
-- issues delivered, partially delivered, deferred, awaiting a promotion
-  decision, or not yet assigned to a channel;
-- the version currently installed for testing, when it was tested, and whether
-  it includes the newest bake changes;
-- the ordered steps needed to move bake into release; and
-- generation time and full source SHAs so the report can be cited as a
-  point-in-time observation.
-
-The report must keep GitHub issue state separate from channel delivery state.
-It must not infer successful deployment from a merged PR, infer release
-readiness from a green check alone, or replace release preparation and
-acceptance receipts.
-
-## Writing style
-
-Write for a product owner or startup operator who understands releases but
-should not have to translate Git internals.
-
-- Lead with the conclusion: whether the version can be released now.
-- Use short sentences and familiar verbs: `finish`, `decide`, `test`, `move`,
-  and `publish`.
-- Say "move bake to release" instead of "promote the channel."
-- Say "version installed for testing" instead of "deployed artifact."
-- Say "current bake branch" instead of "channel tip."
-- Say "newer work" instead of "divergence" and "checks passed" instead of
-  "required-check state."
-- Describe what an issue means for the release, not only its tracking label.
-- Give a recommendation, not just a list of choices. Explain whether to finish
-  the work now, include only the completed part, defer the remainder, or accept
-  a known risk. State why in one or two sentences.
-- Distinguish "include the completed work in this release" from "finish every
-  remaining item in the issue." Large issues may span more than one release.
-- End the recommendation with the next concrete action and where it must happen.
-- Keep branch names, commit IDs, counts, and exact version strings in tables or
-  a final evidence section. They support the explanation; they are not the
-  explanation.
-- Define any unavoidable release term on first use. Do not use internal process
-  words such as `artifact`, `tip`, `upstream`, `provenance`, or `disposition` in
-  the summary.
-- Never use a label such as `not ready` without immediately saying what a
-  person must do next.
-- Do not claim that moving bake to `main` is recommended while any report
-  recommendation still says work must be fixed or tested in bake.
-
-## Channel states
-
-The generated summary uses evidence-based states:
-
-- `idle`: no changes beyond the upstream channel.
-- `baking`: changes are integrated but no promotion pull request is open.
-- `promotion approved`: the developer approved the exact current bake commit.
-- `promotion proposed`: a bake-to-release pull request is open.
-- `ready for candidate`: the approved bake is in `main` and release
-  preparation is next.
-- `candidate`: release preparation produced a receipt-bound candidate.
-- `released`: an immutable stable tag has a published GitHub release.
-- `blocked`: a required check failed or the developer explicitly declared a
-  work item blocking.
-
-These labels are shorthand for the evidence tables. The opening summary must
-translate them into plain English. Moving bake to release still requires every
-open decision resolved, all checks passing, the installed test version matching
-the current bake branch, complete changelog and issue review, and every gate in
-[release.md](release.md).
-
-The complete transition model and durable evidence for each state are defined
-in [development-release-process.md](../docs/development-release-process.md).
-
-## Generate the report
-
-Refresh remote refs first, then generate the local snapshot:
+At the start of repository work, refresh authorized remote state and generate:
 
 ```bash
 git fetch origin --prune
 uv run --script tools/release-report.py
+uv run --script tools/release-report.py --json
 ```
 
-The default output is `.reports/release-report.md`, which is intentionally
-gitignored. Use `--output <path>` for another local destination and `--check`
-to verify that an existing local report still matches current Git and GitHub
-data. The report carries its generation time and source SHAs so readers can
-recognize a stale snapshot. Generate it for release reviews, after channel
-promotion, and whenever the manifest's deployment or disposition decisions
-change. Do not commit generated reports.
+Markdown and JSON use the same calculation. The gitignored report is a
+point-in-time observation, not permission to publish or a replacement for
+package acceptance. Follow the repository's identity checks before remote
+operations. Missing, stale or truncated evidence must be explicit.
+
+## Routing and decisions
+
+[.github/release-cycles.toml](../.github/release-cycles.toml) uses schema 2:
+
+```toml
+schema = 2
+development_branch = "main"
+default_cycle = "1.2.3"
+
+[cycles."1.2.3"]
+branch = "main"
+next_rc = "1.2.3rc1"
+
+[cycles."1.2.3".approval]
+decision = "testing"
+```
+
+Develop on `main` by default. Configure a stabilization branch only when an
+older source must remain separate from next-version development. Every cycle
+keeps its own scope, selected RC, source identity, historical attempts, deployment
+observations and explicit issue decisions. An older selected RC is not superseded
+merely because newer source or a higher RC number exists.
+
+Publication approval records `decision = "approved"`, the exact full source
+`commit`, and `decided_on = "YYYY-MM-DD"`. A different runtime commit requires
+renewed validation and approval. An open issue can contain work delivered in an
+RC but not yet released; show those states separately. A developer-approved
+deferral is not a claim that the issue is fixed.
+
+Use the primary checkout only when clean and already on the intended branch;
+otherwise use an isolated worktree. Verify ancestry before committing or pushing.
+Remove task worktrees after delivery, preserving retained attempt worktrees and
+their immutable receipts. Never discard another writer's changes.
+
+## Evidence and report contents
+
+- Show every configured release cycle, its full source commit, selected and next
+  RC, approval, decisions, blockers, recommendation and concrete next action.
+- Show retained candidate and final attempts, including prepared but unselected,
+  rejected, finalized, missing and invalid evidence. Do not convert local
+  readiness or historical observations into operational acceptance.
+- Report the observed local runtime separately from recorded deployment history.
+  Selection is scoped to the queried environment, not universal across hosts.
+- Include all open PRs, review/check state and target branches, plus merged
+  unreleased work. Do not silently hide work outside the default cycle.
+- Include delivered, planned, partial, deferred and decision-needed issues, and
+  all unassigned open issues. Keep issue closure separate from package delivery.
+- Report latest stable GitHub release and each cycle's publication state.
+  PyPI and proxy availability need independent verification; an index delay
+  must not cause another publication of the same version.
+- Include generation time and the provenance or limitation of every observation.
+
+Git refs identify source. GitHub supplies issues, PRs and public release state.
+The manifest records decisions those APIs cannot infer. Retained receipts bind
+source, package hashes, environment and checks. Public CLI observations identify
+the current local runtime. None of these sources alone proves all the others.
+
+## Local testing and publication
+
+From a clean synchronized configured source branch:
+
+```bash
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
+```
+
+Activation, state preservation, dashboard/watcher restoration and rollback are
+official parts of the RC loop. Source changes require another RC number; never
+overwrite consumed package identities. Full final preparation and operational
+acceptance remain independent gates before publication. Use
+[release.md](release.md) for those operations and [testing.md](testing.md) for
+source, artifact and installed-state evidence boundaries.
+
+When GitHub reports a stable target published, suppress preparation/publication
+instructions for that target and direct development to a later cycle. Keep the
+published cycle's historical evidence visible. Do not infer PyPI availability
+from GitHub publication.
+
+Keep this guide, `AGENTS.md`, the canonical process, manifest and generator
+consistent. Write conclusions and next actions in ordinary release vocabulary,
+with explicit uncertainty instead of an optimistic readiness label.

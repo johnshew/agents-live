@@ -39,6 +39,9 @@ class PipelineSession(dict[str, str]):
     def snapshot(self, path: str) -> tuple[bool, object]:
         return self._mcp.snapshot(path)
 
+    def begin_attempt(self, attempt: int) -> None:
+        self._mcp.begin_attempt(attempt)
+
 
 def _bridge_path() -> Path:
     return Path(__file__).resolve().parent / "stdio_bridge.py"

@@ -299,7 +299,7 @@ class TestDefinitionLoader(TempRepository):
         self.assertEqual(
             {
                 "version": "6.6.0.dev0+gabc1234",
-                "channel": "bake",
+                "channel": "development",
                 "commit": "abc1234",
             },
             payload["runtime"],
@@ -308,7 +308,7 @@ class TestDefinitionLoader(TempRepository):
 
     def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
         self.assertEqual("release", identity.channel("6.6.0"))
-        self.assertEqual("bake", identity.channel("6.6.0.dev0+gabc1234"))
+        self.assertEqual("development", identity.channel("6.6.0.dev0+gabc1234"))
         self.assertEqual("candidate", identity.channel("6.6.0rc1"))
         self.assertEqual("candidate", identity.channel("6.6.0rc12"))
         for invalid in ("6.6.0rc", "6.6.0rc1junk", "6.6.0beta1"):
@@ -319,7 +319,7 @@ class TestDefinitionLoader(TempRepository):
         )
         self.assertEqual(
             "agents-live 6.6.0.dev0+gabc1234 "
-            "(channel: bake, commit: abc1234)",
+            "(channel: development, commit: abc1234)",
             identity.label("6.6.0.dev0+gabc1234"),
         )
 
@@ -1195,9 +1195,9 @@ class TestReleaseTool(unittest.TestCase):
             (root / ".github").mkdir()
             script = root / "tools" / "release.py"
             shutil.copy2(source, script)
-            (root / ".github" / "release-channels.toml").write_text(
-                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
-                'implementation = "pending"\nnext = "6.9.2rc2"\n',
+            (root / ".github" / "release-cycles.toml").write_text(
+                'schema = 2\ndefault_cycle = "6.9.3"\n'
+                '[cycles."6.9.3"]\nnext_rc = "6.9.3rc1"\n',
                 encoding="utf-8")
             for arguments in (
                 ["--dry-run"], ["--prepare", "--yes"],
@@ -1411,7 +1411,7 @@ class TestRuntimeCore(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual(
             "agents-live 6.6.0.dev0+gabc1234 "
-            "(channel: bake, commit: abc1234)",
+            "(channel: development, commit: abc1234)",
             output.getvalue().strip(),
         )
 
@@ -3034,6 +3034,39 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertIn("pty", result.stdout)
 
+    def test_child_capture_is_bounded_and_timeout_stops_descendants(self) -> None:
+        from agents_live.runtime.hosts import system
+
+        runner = LocalChildRunner()
+        runner.diagnostic_limit = 1024
+        result = runner.run_child(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 100000)"], timeout=10)
+        self.assertTrue(result.output_limited)
+        self.assertEqual(1024, len(result.stdout))
+        result = runner.run_child([
+            sys.executable, "-c",
+            "import subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+            "print(child.pid, flush=True); time.sleep(60)",
+        ], timeout=1)
+        self.assertTrue(result.timed_out)
+        self.assertTrue(result.stdout.strip().isdigit())
+        self.assertFalse(system.is_alive(int(result.stdout.strip())))
+
+    def test_child_capture_failure_is_explicit_and_orphaned_pipes_are_closed(self) -> None:
+        runner = LocalChildRunner()
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ | {"AGENTS_LIVE_CAPTURE_PREFIX": str(Path(temporary) / "missing" / "capture")}
+            with self.assertRaisesRegex(RuntimeError, "diagnostic capture failed"):
+                runner.run_child([sys.executable, "-c", "print('output')"], env=environment, timeout=2)
+        result = runner.run_child([
+            sys.executable, "-c",
+            "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+            "'import time; time.sleep(60)']); print('parent exited', flush=True)",
+        ], timeout=1)
+        self.assertTrue(result.timed_out)
+        self.assertIn("parent exited", result.stdout)
+
     def test_dead_run_lock_is_recovered(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4039,6 +4072,57 @@ class TestProviderPromptDelivery(TempRepository):
 
 
 class TestTranscriptRetrieval(TempRepository):
+    def test_retention_leaves_bounded_pruning_evidence(self) -> None:
+        from agents_live.obs import retention
+
+        envelope = self._envelope("pruned-run", {"stdout": "private content"})
+        self._record("pruned-run", transcript=envelope)
+        os.utime(envelope, (1, 1))
+        retention.maintain_state(paths.repo_state_dir(self.root), days=30)
+        item = self._json("pruned-run")["transcripts"][0]
+        self.assertEqual("pruned", item["transcript_state"])
+        self.assertNotIn("private content", envelope.read_text(encoding="utf-8"))
+        os.utime(envelope, (1, 1))
+        retention.maintain_state(paths.repo_state_dir(self.root), days=30)
+        self.assertEqual("missing", self._json("pruned-run")["transcripts"][0]["transcript_state"])
+
+    def test_unfinished_snapshot_honors_relative_time_filter(self) -> None:
+        self._envelope("old-run", {"timestamp": "2000-01-01T00:00:00Z", "finalized": False})
+        self._envelope("new-run", {"timestamp": datetime.now(timezone.utc).isoformat(), "finalized": False})
+        items = self._json("--agent", "reader", "--since", "30m")["transcripts"]
+        self.assertEqual(["new-run"], [item["run_id"] for item in items])
+
+    def test_attempt_selection_and_unfinished_snapshot(self) -> None:
+        self.skill("partial", ['agents-live.selector: "fake"'])
+        def run_child(argv, **kwargs):
+            prefix = Path(kwargs["env"]["AGENTS_LIVE_CAPTURE_PREFIX"])
+            run_id = prefix.parent.name
+            Path(str(prefix) + ".stdout").write_text('{"text":"still working"}')
+            item = self._json(run_id, "--attempt", "1")["transcripts"][0]
+            self.assertEqual("unfinished", item["status"])
+            self.assertFalse(item["finalized"])
+            self.assertEqual("not_yet_finalized", item["transcript_state"])
+            self.assertEqual("still working", item["final"])
+            return ChildResult(tuple(argv), 0, '{"text":"finished"}', "")
+        result = dispatch(Firing("partial", str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+        item = self._json(result.run_id, "--attempt", "1")["transcripts"][0]
+        self.assertTrue(item["finalized"])
+        self.assertEqual("finished", item["final"])
+
+    def test_retry_attempts_remain_individually_readable(self) -> None:
+        self.skill("retried", ['agents-live.selector: "fake"'])
+        result = dispatch(Firing("retried", str(self.root), "manual"), runner=RecordingRunner([
+            ChildResult(("fake",), 0, '{"text":"partial first"}', "", True),
+            ChildResult(("fake",), 0, '{"text":"final second"}', ""),
+        ]))
+        self.assertTrue(result.ok, result)
+        first = self._json(result.run_id, "--attempt", "1")["transcripts"][0]
+        self.assertEqual("partial first", first["final"])
+        self.assertEqual("failed", first["status"])
+        items = self._json(result.run_id, "--attempts")["transcripts"]
+        self.assertEqual([1, 2], [item["attempt"] for item in items])
+        self.assertEqual(["partial first", "final second"], [item["final"] for item in items])
+
     def _record(
         self,
         run_id: str,
@@ -4402,6 +4486,91 @@ class TestTranscriptAcceptance(TempRepository):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_retry_isolates_partial_results_and_preserves_prepared_inputs(self) -> None:
+        original_resource = dispatch_module._resource
+        for publish_again in (False, True):
+            name = "retry-new" if publish_again else "retry-missing"
+            self.skill(name, [
+                'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+                'agents-live.result-path: "/output/result"',
+                'agents-live.timeout: "10"', 'agents-live.overall-timeout: "30"',
+            ], body='Do work.\n\n```put /input\n{"prepared":true}\n```')
+            sessions = []
+            @contextlib.contextmanager
+            def resource(*args, **kwargs):
+                with original_resource(*args, **kwargs) as resources:
+                    sessions.append(resources[1])
+                    yield resources
+
+            calls = []
+            def run_child(argv, **kwargs):
+                calls.append(kwargs["timeout"])
+                session = sessions[0]
+                self.assertEqual((True, {"prepared": True}), session.snapshot("/input"))
+                self.assertEqual((False, None), session.snapshot("/output/result"))
+                if len(calls) == 1 or publish_again:
+                    session._mcp.seed([("/output/result", {"attempt": len(calls)})])
+                return ChildResult(tuple(argv), 0, '{"text":"done"}', "", len(calls) == 1)
+
+            with mock.patch.object(dispatch_module, "_resource", resource):
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+            self.assertTrue(result.ok, result)
+            self.assertEqual(2, len(calls))
+            self.assertEqual({"attempt": 2} if publish_again else None, result.structured)
+            first = Path(result.transcript.replace("-agent-2.json", "-agent-1.json"))
+            self.assertEqual({"attempt": 1}, json.loads(first.read_text())["pipeline_result"]["value"])
+
+    def test_retry_policy_and_overall_deadline_bound_all_attempts(self) -> None:
+        for retries, elapsed_per_call, expected_calls in ((0, 3, 1), (1, 3, 2), (1, 10, 1)):
+            name = f"deadline-{retries}-{elapsed_per_call}"
+            self.skill(name, [
+                'agents-live.selector: "fake"', 'agents-live.timeout: "10"',
+                f'agents-live.timeout-retries: "{retries}"', 'agents-live.empty-retries: "0"',
+            ])
+            elapsed = 0.0
+            budgets = []
+            def run_child(argv, **kwargs):
+                nonlocal elapsed
+                budgets.append(kwargs["timeout"])
+                elapsed += elapsed_per_call
+                return ChildResult(tuple(argv), 0, '{"text":"partial"}', "", True)
+            with mock.patch.object(dispatch_module.time, "monotonic", side_effect=lambda: elapsed):
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=run_child))
+            self.assertFalse(result.ok)
+            self.assertEqual(expected_calls, len(budgets))
+            self.assertEqual([10.0, 7.0][:expected_calls], budgets)
+
+    def test_pipeline_result_cap_prevents_postprocessing(self) -> None:
+        directory = self.skill("large-result", [
+            'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"', 'agents-live.output-max-bytes: "32"',
+            'agents-live.post-processor: "post.py"',
+        ], body='Do work.\n\n```put /output/result\n' + json.dumps("x" * 33) + '\n```')
+        (directory / "post.py").write_text("pass\n")
+        runner = RecordingRunner([ChildResult(("fake",), 0, '{"text":"done"}', "")])
+        result = dispatch(Firing("large-result", str(self.root), "manual"), runner=runner)
+        self.assertEqual("agent_output_invalid", result.category)
+        self.assertEqual(1, len(runner.argv))
+
+    def test_completion_bound_is_independent_of_provider_telemetry(self) -> None:
+        self.skill("telemetry", [
+            'agents-live.selector: "copilot"',
+            'agents-live.output-max-bytes: "128"',
+        ])
+        for answer, expected in (("done", True), ("x" * 129, False)):
+            with self.subTest(expected=expected):
+                stdout = "\n".join(json.dumps(event) for event in [
+                    {"type": "session.info", "data": {"detail": "x" * 1024}},
+                    {"type": "assistant.message", "data": {"content": answer}},
+                    {"type": "session.usage_checkpoint", "data": {"totalNanoAiu": 1000000000}},
+                ])
+                result = dispatch(Firing("telemetry", str(self.root), "manual"),
+                                  runner=RecordingRunner([ChildResult(("copilot",), 0, stdout, "")]))
+                self.assertEqual(expected, result.ok, result)
+                self.assertEqual("0.01", dict(result.usage)["list_cost_usd"])
+                if not expected:
+                    self.assertEqual("agent_output_invalid", result.category)
+
     def test_phase_accounting_survives_skips_and_late_failures(self) -> None:
         original_resource = dispatch_module._resource
         for scenario in ("success", "skip", "skip-timeout", "skip-cleanup",
@@ -5077,6 +5246,16 @@ class TestAgentPipeline(TempRepository):
         self.assertEqual(list(argv), transcript["argv"])
         self.assertEqual("fake", transcript["provider"])
         self.assertEqual("Do the work.", transcript["prompt"])
+
+    def test_truncated_diagnostics_report_limit_even_when_parser_fails(self) -> None:
+        self.skill("truncated", ['agents-live.selector: "fake"'])
+        result = dispatch(
+            Firing("truncated", str(self.root), "manual"),
+            runner=RecordingRunner([
+                ChildResult(("fake",), 0, '{"text":', "", output_limited=True),
+            ]))
+        self.assertFalse(result.ok)
+        self.assertEqual("diagnostic_output_limit", result.category)
 
     def test_post_processor_preserves_agent_usage_and_transcript(self) -> None:
         self.skill("telemetry", [
@@ -7688,6 +7867,7 @@ class TestArchitectureFitness(unittest.TestCase):
         allowed = {
             "runtime/hosts/filesystem.py",
             "runtime/hosts/system.py",
+            "runtime/hosts/processes.py",
         }
         found: set[str] = set()
         for path in package.rglob("*.py"):

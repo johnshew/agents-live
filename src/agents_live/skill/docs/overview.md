@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-09-06
+ms.date: 2026-09-19
 ms.topic: overview
 ---
 
@@ -140,12 +140,12 @@ the current PowerShell process as well as the persistent user `PATH`.
 `upgrade` uses the same authenticated generation path, and `uninstall` removes
 the owned installation.
 
-For a published Windows bake, download and run the bootstrap with the complete
-commit-qualified version. URI-encode the tag in the direct GitHub URL; the
+For an exact published Windows release, download and run the bootstrap with its
+complete version. URI-encode the tag in the direct GitHub URL; the
 downloaded script already carries the original version:
 
 ```powershell
-$version = "<complete-commit-qualified-version>"
+$version = "<published-version>"
 $tag = [Uri]::EscapeDataString("v$version")
 $installer = Join-Path $env:TEMP "agents-live-install-$version.ps1"
 Invoke-WebRequest `
@@ -164,7 +164,7 @@ for that process, when the absolute `current` command is healthy but bare
 `agents-live` is missing or resolves an older version.
 
 The installation root is a local version store: complete PEP 440 versions are
-retained side by side and `current` selects one. Commit-suffixed bake versions
+retained side by side and `current` selects one. Numbered release candidates
 therefore coexist on the same release line. Source plugins remain in their
 declaring repositories and load directly into the selected runtime; they are
 not installed into a generation. When a generation is selected, its own command

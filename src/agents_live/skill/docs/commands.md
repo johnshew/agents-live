@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-09-14
+ms.date: 2026-09-19
 ms.topic: reference
 ---
 
@@ -32,7 +32,7 @@ Use `upgrade --from <wheel> --candidate` when installing a local release
 candidate. Record a decision with `versions classify <version> rejected`
 or `versions classify <version> released`. Classification changes no
 generation files and selects no runtime. Development versions are shown as
-bake releases. `versions activate <version>` explicitly selects a runtime;
+development builds. `versions activate <version>` explicitly selects a runtime;
 successful selections appear as `generation.activate` administrative events.
 
 Numbered RC packages retain their full version, such as `1.2.3rc2`, beside stable
@@ -202,8 +202,8 @@ that ran the agent.
 
 ## Operations
 
-- `--version` reports the installed version and its `release`, `bake`, or
-  `unknown` channel. Bake artifacts also report their commit when encoded in
+- `--version` reports the installed version and its `release`, `candidate`,
+  `development`, or `unknown` classification. Historical development artifacts also report their commit when encoded in
   the package version.
 - `status [name] [--all-repos]` reports definitions and their started or
   stopped state, preceded by the same runtime identity. Its JSON envelope
@@ -224,6 +224,8 @@ that ran the agent.
   provider-neutral conversation; `--agent NAME --last N` selects recent runs,
   `--summary` bounds prompt and final text, `--json` returns normalized data,
   and `--raw` prints one private provider envelope for deep diagnosis.
+  `--attempt N` selects a retry; `--attempts` exposes retained attempt provenance.
+  Unfinished runs expose bounded snapshots without being marked complete.
 - `lock PATH [--timeout SECONDS] -- COMMAND [ARGS...]` runs one command while
   holding the same cross-platform advisory lock used by Agents Live. It opens
   the lock file in append mode so another contender cannot replace the locked
@@ -237,8 +239,8 @@ that ran the agent.
   self-managed runtime resolves and verifies the official latest stable release,
   stages it beside the active generation, and switches the `current` link;
   `--from <wheel>` uses the same generation builder for candidate acceptance.
-  The full PEP 440 version names the directory, including a local commit suffix
-  for a bake, so repeated builds on one release line do not collide. Before
+  The full PEP 440 version names the directory, including the RC number,
+  so successive candidates on one release line do not collide. Before
   sealing, the builder validates all registered repositories and installs their
   declared plugin wheels into the candidate. Version directories are retained.
   After `current` moves, the selected version runs host maintenance to converge
@@ -338,7 +340,7 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
 | status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
-| logs transcript | subprocess | registry |  | yes |  |  | --agent, --last, --since, --errors, --summary, --raw | Read a normalized run conversation. |
+| logs transcript | subprocess | registry |  | yes |  |  | --agent, --last, --since, --errors, --attempt, --attempts, --summary, --raw | Read a normalized run conversation. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
 | smoketest | in-process | required | schedule, watch | yes |  |  | --runtime, --model | Run end-to-end validation. |
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |

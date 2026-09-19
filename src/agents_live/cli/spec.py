@@ -196,6 +196,8 @@ COMMANDS = (
                         default=1),
                     Arg(("--since",), "Start time.", kind="value"),
                     Arg(("--errors",), "Show errors only."),
+                    Arg(("--attempt",), "Select a provider attempt number.", kind="value"),
+                    Arg(("--attempts",), "List retained provider attempts and availability."),
                     Arg(("--summary",), "Show bounded prompt, final text, and tools."),
                     Arg(("--raw",), "Print the private provider envelope."),
                     Arg(("--format",), "Output format.", kind="value",

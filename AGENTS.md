@@ -34,9 +34,9 @@ uv run --with-editable . python -m unittest discover -s tests -v # tests
 uv run --with-editable . agents-live smoketest          # framework smoke
 uv run --with-editable . agents-live --help              # CLI from source
 uv run --script tools/pre-release-audit.py               # release audit
-uv run --script tools/release.py --dry-run --bump patch   # release preview
-uv run --script tools/release.py --prepare --bump patch --yes # prepare patch
-uv run --script tools/release.py --publish --yes          # publish prepared
+uv run --script tools/release.py --cycle-status          # retained attempts
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <next-rc>
+uv run --script tools/release.py --publish --attempt <final-attempt> --yes
 ```
 
 ## Workflow
@@ -53,7 +53,7 @@ The standard loop for any change that lands as commits:
   ```
 
   The generated `.reports/release-report.md` identifies the active release
-  phase, configured bake branch, tested version, and next action. Treat it as
+  cycles, configured source branches, tested versions, and next actions. Treat it as
   required routing context, not as a release-only document.
 2. Investigate in place; reads and searches are fine in the primary
    checkout.
@@ -79,78 +79,41 @@ The standard loop for any change that lands as commits:
    (`git push origin --delete <branch>`) if the repository did not
    delete it already.
 
-### Active bake routing
+### Release cycle routing
 
-The active cycle uses numbered release candidates under
-[#511](https://github.com/johnshew/agents-live/issues/511). The stable target is
-`6.9.2` and the integration branch is `bake/v6.9.2-rc`. The manifest retains
-the last validated RC2 deployment observation, not a universal installed state.
-RC3 failed packaged readiness (#516); RC4 passed that gate on its preparing
-environment but still needs installed recovery verification (#522).
-`6.9.2rc5` is the next unused candidate number. Recover retained RC4 only with
-its original preparation evidence and `--recover-provider-readiness`.
-This explicitly supersedes the former 6.9.2 and 6.9.3
-bake routing without rewriting either branch's history.
+Read `.github/release-cycles.toml` and the generated report. Develop on `main`
+unless the selected cycle explicitly needs a stabilization branch. There is no
+bake channel. A branch or passing PR does not establish acceptance or publication.
+The report must show all active cycles, open work, retained candidate attempts,
+the selected local runtime, and independent publication evidence.
 
-The manifest records `6.9.2rc1` as the legacy rejected attempt whose actual
-package version was `6.9.2`. Its original artifacts and preparation/checkpoint
-records were recovered in the preparing checkout; hashes are recorded in the
-manifest. This is not an rc1 package or full acceptance. Preserve the original
-tag conflict and private receipts for the explicit #511 finalization migration.
-
-Local numbered RC deployment is available through
-`tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>`.
-It preserves side-by-side versions and does not create a tag or GitHub release.
-Full lifecycle preparation uses `tools/release.py --prepare-rc` from synchronized
-bake. Accept that exact attempt, record approval for its source, then promote
-to main and use `--prepare-final --from-rc`. Final stable bytes require their own
-acceptance before explicit `--finalize` and `--publish`, each with `--attempt`.
-Run attempt commands from the retained worktree printed during allocation.
-Legacy implicit commands remain blocked; do not use an older checkout to bypass
-the guard. Historical local-deploy receipts do not replace full acceptance. See
-[development-release-process.md](docs/development-release-process.md) for the
-adopted lifecycle, including side-by-side versions and independent stable tests.
-
-When the report marks the configured version `released`, do not prepare or
-publish that version again. Use the separately configured later bake cycle
-identified by the report, reading its manifest and report before choosing a
-target. If no later cycle is configured, configure the next cycle first.
-GitHub publication does not by itself verify PyPI or package-proxy availability.
-
-Use the generated release report together with `.github/release-channels.toml`.
-When the configured `bake.branch` exists and contains work not yet in `main`,
-that branch is the integration target for the active bake cycle. Being asked
-to change the bake branch is sufficient evidence that the work belongs to the
-bake. Focused pull requests should target the bake branch instead of `main`;
-direct commits are acceptable for small administrative changes, but
-substantive fixes should retain PR review and CI evidence.
-
-If an active bake exists but a request names `main`, do not assume the change
-should bypass bake. Ask whether the intent is to fix the current bake, perform
-release promotion, or make independent post-release work before editing or
-branching. A request to prepare or publish a release follows `.agents/release.md`
-and the report's ordered next actions.
-
-After a change reaches the bake branch, deploy its exact synchronized commit:
+Local activation is an official part of RC testing:
 
 ```bash
-git pull --ff-only origin <configured-bake-branch>
-uv run --script tools/local-deploy.py --repo <live-repository>
+git pull --ff-only origin <configured-source-branch>
+uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-next-rc>
 ```
 
-Run these commands from a clean checkout of the configured bake branch, using
-the primary checkout or a dedicated worktree according to the workflow above.
+Use a clean synchronized checkout or isolated worktree. The command preserves
+immutable packages and restores dashboards and watchers, with rollback on failed
+activation. Advance the RC number for changed bytes; never reuse a consumed
+identity. Local readiness is not full operational acceptance or permission to publish.
 
-The deployment creates and selects a commit-qualified
-`<target>.dev0+g<commit>` generation. `--allow-downgrade` is required only
-when intentionally moving to a lower numeric `major.minor.patch` release; it
-is not needed between a stable candidate and a bake on the same release line.
-When the developer approves bake promotion, update `[bake.promotion]` in
-`.github/release-channels.toml` to `decision = "approved"` and record the exact
-full bake `commit` plus `decided_on = "YYYY-MM-DD"`. Approval applies only to
-that commit; new bake changes require renewed validation and approval. Then
-move the approved bake to `main` through one promotion pull request and prepare
-a new official candidate from the resulting clean `main`.
+The `6.9.2` decision selects RC5 runtime source for final validation and publication.
+The next `6.9.3rc1` includes #528 and #530-#532; #533 remains outside that scope.
+Retained RC6 does not supersede RC5's selection. Preserve all historical packages,
+receipts and refs, including the rejected unpublished stable-tag conflict.
+
+Record explicit publication approval in `[cycles."<target>".approval]`, binding
+`decision = "approved"`, a full source `commit`, and `decided_on = "YYYY-MM-DD"`.
+Accept the exact RC, prepare final stable bytes from that source, and independently
+accept those bytes before finalizing and publishing. Later runtime fixes require
+a new RC. Never infer approval from a build, activation, or issue closure.
+Do not prepare or publish an already published version again; report GitHub,
+PyPI and package-proxy availability separately. See
+[development-release-process.md](docs/development-release-process.md) for the
+business requirements, industry evidence and complete lifecycle, and
+[.agents/release.md](.agents/release.md) for attempt commands.
 
 Keep these instructions, `.agents/release-report.md`, and
 `tools/release-report.py` aligned. When branch-routing or release-cycle guidance

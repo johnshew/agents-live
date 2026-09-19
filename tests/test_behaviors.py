@@ -1586,7 +1586,9 @@ class TestFrameworkRetention(TempRepository):
         self.assertFalse(log.exists())
         self.assertFalse(expired.exists())
         self.assertFalse(inactive_output.exists())
-        self.assertFalse(inactive_transcript.exists())
+        tombstone = json.loads(inactive_transcript.read_text(encoding="utf-8"))
+        self.assertIn("pruned_at", tombstone)
+        self.assertNotIn("stdout", tombstone)
         self.assertTrue(active_output.exists())
         self.assertTrue(active_pipeline.exists())
         self.assertEqual(
@@ -3376,7 +3378,7 @@ class TestInstallationGenerations(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(0, generations.main(["list"]))
         row = json.loads(output.getvalue())["versions"][0]
-        self.assertEqual("bake", row["channel"])
+        self.assertEqual("development", row["channel"])
         self.assertIn("source", row)
         self.assertTrue(row["validated"].endswith("Z"))
         with mock.patch.dict(os.environ, {"AGENTS_LIVE_JSON": "0"}):
@@ -3385,7 +3387,7 @@ class TestInstallationGenerations(unittest.TestCase):
                 self.assertEqual(0, generations.main(["list"]))
         rendered = output.getvalue()
         self.assertIn("Validated", rendered)
-        self.assertIn("bake", rendered)
+        self.assertIn("development", rendered)
         self.assertNotIn("T", rendered.splitlines()[-1].split("  ")[-1].split()[0])
         self.assertNotIn("+00:00", rendered)
 
@@ -3446,7 +3448,7 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         rows = json.loads(result.stdout)["versions"]
         self.assertEqual("6.9.0.dev0+g123abcd", rows[0]["version"])
-        self.assertEqual("bake", rows[0]["channel"])
+        self.assertEqual("development", rows[0]["channel"])
         retired = subprocess.run(
             [sys.executable, "-m", "agents_live.cli", "--json", "generations", "list"],
             capture_output=True, text=True, check=False)
@@ -4587,8 +4589,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             workflow = root / ".github" / "workflows" / "test.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text("name: Test\n")
-            manifest = root / ".github" / "release-channels.toml"
-            manifest.write_text('[bake]\nversion = "1.2.3"\n[bake.candidate_cycle]\nmodel = "numbered-rc"\n')
+            manifest = root / ".github" / "release-cycles.toml"
+            manifest.write_text('schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "main"\n')
 
             def git(*arguments):
                 if arguments[0] == "ls-remote":
@@ -4677,9 +4679,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
                             script["reject_attempt"]("missing live baseline must refuse rejection")
                         git("switch", "main")
                         manifest.write_text(manifest.read_text() + (
-                            '[bake.promotion]\ndecision = "approved"\n'
+                            '[cycles."1.2.3".approval]\ndecision = "approved"\n'
                             f'commit = "{source}"\ndecided_on = "2026-09-14"\n'))
-                        git("add", ".github/release-channels.toml")
+                        git("add", ".github/release-cycles.toml")
                         git("commit", "-m", "approve accepted source")
                         source = git("rev-parse", "HEAD")
                     else:
@@ -4817,10 +4819,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 root = Path(temporary)
                 common = root / "common"
                 common.mkdir()
-                bake = {"version": "1.2.3", "branch": "bake/v1.2.3-rc",
-                        "candidate_cycle": {"model": "numbered-rc", "next": "1.2.3rc2", "history": {}}}
+                cycle = {"version": "1.2.3", "branch": "main",
+                         "next_rc": "1.2.3rc2", "history": {}}
                 if consumed_by == "history":
-                    bake["candidate_cycle"]["history"]["1.2.3rc2"] = {"status": "rejected"}
+                    cycle["history"]["1.2.3rc2"] = {"status": "rejected"}
                 elif consumed_by == "local-deploy":
                     (common / "agents-live-local-deploy" / "candidates" / "1.2.3rc2").mkdir(parents=True)
                 elif consumed_by in {"attempt", "higher"}:
@@ -4832,7 +4834,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     if args[0] == "status":
                         return ""
                     if args[0] == "branch":
-                        return bake["branch"]
+                        return cycle["branch"]
                     if args == ("rev-parse", "--git-common-dir"):
                         return str(common)
                     if args[0] == "rev-parse":
@@ -4843,20 +4845,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
                 with mock.patch.dict(scope, {
                     "ROOT": root, "_require_tools": lambda: None,
-                    "_cycle_configuration": lambda: bake, "_git": git,
+                    "_cycle_configuration": lambda target=None: cycle, "_git": git,
                     "_run": lambda command, **_kwargs: commands.append(command),
                 }):
                     with self.assertRaises(script["ReleaseError"]):
                         prepare(rc="1.2.3rc2")
                     self.assertFalse(any(command[:2] == ["git", "worktree"] for command in commands))
 
-    def test_final_source_requires_exact_approval_and_only_promotion_metadata(self):
+    def test_final_source_requires_exact_approval_and_unchanged_runtime(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = script["_check_final_source"]
-        original = '[bake]\nversion = "1.2.3"\n[bake.promotion]\ndecision = "continue-bake"\n'
-        promoted = ('[bake]\nversion = "1.2.3"\n[bake.promotion]\n'
+        original = '[cycles."1.2.3".approval]\ndecision = "testing"\n'
+        promoted = ('[cycles."1.2.3".approval]\n'
                     'decision = "approved"\ncommit = "' + "a" * 40 + '"\ndecided_on = "2026-09-14"\n')
-        changed = ".github/release-channels.toml"
+        changed = ".github/release-cycles.toml"
 
         def git(*args):
             if args[0] == "merge-base":
@@ -4865,10 +4867,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 return changed
             return original if args[1].startswith("a" * 40) else promoted
 
-        with mock.patch.dict(check.__globals__, {"_git": git}):
+        with mock.patch.dict(check.__globals__, {
+            "_git": git, "ACTIVE_ATTEMPT": {"target": "1.2.3"}}):
             check("a" * 40, "b" * 40)
             for replacement in (promoted.replace("a" * 40, "c" * 40),
-                                promoted.replace("approved", "continue-bake"),
+                                promoted.replace("approved", "testing"),
                                 promoted.replace("1.2.3", "1.2.4"),
                                 promoted.replace("2026-09-14", "not-a-date")):
                 with mock.patch.dict(check.__globals__, {"_git": lambda *args: (
@@ -4920,7 +4923,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "ROOT": root, "_git": git,
                 "_run": lambda command, **_kwargs: git(*command[1:]),
-                "_cycle_configuration": lambda: {"candidate_cycle": {"history": {"1.2.3rc1": legacy}}},
+                "_cycle_configuration": lambda target=None: {"history": {"1.2.3rc1": legacy}},
             }):
                 remote = original + "\trefs/tags/v1.2.3"
                 with self.assertRaisesRegex(script["ReleaseError"], "remote"):
@@ -5025,40 +5028,44 @@ class TestCrossModuleAgreements(unittest.TestCase):
                          commands("release", []))
 
     def test_release_json_and_markdown_share_routing_decisions(self) -> None:
-        import tomllib
-
         script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
         render = script["_render"]
-        config = tomllib.loads((REPOSITORY / ".github" / "release-channels.toml").read_text())
-        config["bake"].pop("candidate_cycle", None)
+        config = {"schema": 2, "development_branch": "main", "cycles": {
+            "6.9.2": {"branch": "release/6.9.2", "selected_rc": "6.9.2rc5",
+                      "next_rc": "6.9.2rc7", "issues": {"deferred": [530]}},
+            "6.9.3": {"branch": "main", "next_rc": "6.9.3rc1",
+                      "issues": {"planned": [530]}},
+        }}
         def github(*arguments):
             if arguments[1] == "repo":
                 return {"nameWithOwner": "example/project", "url": "https://github.com/example/project"}
             if arguments[1] == "release":
-                return {"name": "v0.0.0", "tagName": "v0.0.0",
-                        "publishedAt": "2026-01-01T00:00:00Z",
-                        "isDraft": False, "isPrerelease": False,
-                        "url": "https://github.com/example/project/releases/tag/v0.0.0"}
+                return [{"tagName": "v6.9.1", "isDraft": False, "isPrerelease": False}]
+            if arguments[1] == "issue":
+                return [{"number": number, "title": f"Issue {number}", "state": "OPEN"}
+                        for number in (530, 533)]
             return []
-        for active in (False, True):
-            with self.subTest(active=active), mock.patch.dict(render.__globals__, {
-                "_json": github, "_run": lambda *_: "0",
-                "_sha": lambda *_: "d" * 40,
-                "_count": lambda *_: (0, int(active)),
-                "_issue_rows": lambda *_: ([], set()),
-                "_promotion_state": lambda *_: (False, "continue bake"),
-                "_has_runtime_changes": lambda *_: False,
-                "subprocess": mock.Mock(run=mock.Mock(return_value=mock.Mock(returncode=0))),
-            }):
-                moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
-                markdown = render(config, moment)
-                routing = json.loads(render(config, moment, as_json=True))
-                self.assertEqual(active, routing["active_bake"])
-                channel = "bake" if active else "release"
-                self.assertEqual(config[channel]["branch"], routing["target_branch"])
-                self.assertIn(f'**`{routing["development_state"]}`**', markdown)
-                self.assertTrue(routing["next_actions"])
-                self.assertTrue(all(action in markdown for action in routing["next_actions"]))
+        with mock.patch.dict(render.__globals__, {
+            "_json": github, "_run": lambda *_: "agents-live 6.9.2rc5 (channel: candidate)",
+            "_sha": lambda *_: "d" * 40,
+            "_count": lambda *_: (0, 3),
+            "_local_attempts": lambda cycle: (
+                [{"attempt": "6.9.2rc5", "state": "prepared"}]
+                if cycle["version"] == "6.9.2" else []),
+        }):
+            moment = datetime(2026, 9, 19, tzinfo=timezone.utc)
+            markdown = render(config, moment)
+            routing = json.loads(render(config, moment, as_json=True))
+            self.assertEqual(2, routing["schema"])
+            self.assertEqual("main", routing["target_branch"])
+            self.assertNotIn("active_bake", routing)
+            self.assertEqual({"6.9.2", "6.9.3"}, set(routing["cycles"]))
+            self.assertEqual("6.9.2rc5", routing["cycles"]["6.9.2"]["selected_rc"])
+            self.assertIn("6.9.3rc1", markdown)
+            self.assertIn("#533", markdown)
+            self.assertNotIn("bake", markdown.lower())
+            self.assertTrue(routing["next_actions"])
+            self.assertTrue(all(action in markdown for action in routing["next_actions"]))
 
     def _workflow_text(self, name: str) -> str:
         return (REPOSITORY / ".github" / "workflows" / name).read_text(
@@ -6710,13 +6717,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = deploy.__globals__
         with mock.patch.dict(scope, {
             "_synchronize": lambda: "abc123",
-            "_bake_configuration": lambda: ("bake/v1.2.2-local", "1.2.2"),
+            "_release_configuration": lambda: ("main", "1.2.2"),
+            "_requested_rc": lambda *args, **kwargs: "1.2.2rc1",
         }), mock.patch.dict(scope["RELEASE"], {
             "_installed_version": lambda: "1.2.3",
         }):
             with self.assertRaisesRegex(
                     script["LocalDeployError"], "pass --allow-downgrade"):
-                deploy(Path("C:/repo"))
+                deploy(Path("C:/repo"), rc="1.2.2rc1")
 
     def test_local_deploy_rc_retains_bytes_across_failed_readiness(self) -> None:
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
@@ -6760,18 +6768,17 @@ class TestCrossModuleAgreements(unittest.TestCase):
         scope = script["main"].__globals__
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            channels = root / "channels.toml"
-            channels.write_text(
-                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
-                'next = "6.9.2rc2"\n'
-                '[bake.candidate_cycle.history."6.9.2rc1"]\nstatus = "rejected"\n',
+            cycles = root / "cycles.toml"
+            cycles.write_text(
+                '[cycles."6.9.2"]\nnext_rc = "6.9.2rc2"\n'
+                '[cycles."6.9.2".history."6.9.2rc1"]\nstatus = "rejected"\n',
                 encoding="utf-8")
             prepare = mock.Mock(side_effect=script["LocalDeployError"]("reached preparation"))
             with mock.patch.dict(scope, {
-                "CHANNELS": channels,
+                "CYCLES": cycles,
                 "_synchronize": lambda: "commit",
-                "_bake_configuration": lambda: ("bake/v6.9.2-rc", "6.9.2"),
-                "_prepare_artifact": prepare,
+                "_release_configuration": lambda: ("main", "6.9.2"),
+                "_prepare_candidate": prepare,
             }), mock.patch.dict(scope["RELEASE"], {"_installed_version": lambda: "6.9.1"}):
                 for version in ("6.9.2rc1", "6.9.2rc3", "6.9.3rc2", "../rc2"):
                     with self.subTest(version=version), mock.patch.object(
@@ -6785,254 +6792,61 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     script["main"]()
                 prepare.assert_called_once_with("commit", "6.9.2rc2")
 
-    def test_release_report_includes_standalone_promotion_decisions(self) -> None:
-        script = runpy.run_path(
-            str(REPOSITORY / "tools" / "release-report.py"))
-        issue_rows = script["_issue_rows"]
-        scope = issue_rows.__globals__
-
-        with mock.patch.dict(scope, {
-            "_json": lambda *_args: {
-                "number": 395,
-                "title": "Publish bootstrap installers",
-                "state": "OPEN",
-                "url": "https://example.invalid/issues/395",
-            },
-        }):
-            rows, assigned = issue_rows(
-                "owner/repository", {"promotion_decision": [395]})
-
-        self.assertEqual({395}, assigned)
-        self.assertEqual(1, len(rows))
-        self.assertIn("Awaiting promotion decision", rows[0])
-        self.assertIn("| open | required |", rows[0])
-
-    def test_release_report_requires_current_developer_promotion_approval(
-            self) -> None:
-        script = runpy.run_path(
-            str(REPOSITORY / "tools" / "release-report.py"))
-        promotion_state = script["_promotion_state"]
-        development_state = script["_development_state"]
-        commit = "a" * 40
-
-        approved, message = promotion_state({
-            "promotion": {"decision": "continue-bake"},
-        }, commit)
-        self.assertFalse(approved)
-        self.assertIn("remain in bake", message)
-
-        approved, message = promotion_state({
-            "promotion": {
-                "decision": "approved",
-                "commit": commit,
-                "decided_on": "2026-09-06",
-            },
-        }, commit)
-        self.assertTrue(approved)
-        self.assertIn("approved bake", message)
-
-        approved, message = promotion_state({
-            "promotion": {
-                "decision": "approved",
-                "commit": "b" * 40,
-                "decided_on": "2026-09-06",
-            },
-        }, commit)
-        self.assertFalse(approved)
-        self.assertIn("Revalidate it", message)
-
-        with self.assertRaisesRegex(
-                script["ReportError"], "full commit and decided_on date"):
-            promotion_state({
-                "promotion": {
-                    "decision": "approved",
-                    "commit": "abc123",
-                },
-            }, commit)
-
-        self.assertEqual("baking", development_state(
-            bake_moved=False,
-            promotion_approved=False,
-            promotion_open=False,
-        )[0])
-        self.assertEqual("promotion approved", development_state(
-            bake_moved=False,
-            promotion_approved=True,
-            promotion_open=False,
-        )[0])
-        self.assertEqual("promotion proposed", development_state(
-            bake_moved=False,
-            promotion_approved=True,
-            promotion_open=True,
-        )[0])
-        invalid_state, invalid_detail = development_state(
-            bake_moved=False,
-            promotion_approved=False,
-            promotion_open=True,
-        )
-        self.assertEqual("baking", invalid_state)
-        self.assertIn("do not merge", invalid_detail)
-        self.assertEqual("ready for candidate", development_state(
-            bake_moved=True,
-            promotion_approved=True,
-            promotion_open=False,
-        )[0])
-        self.assertEqual("released", development_state(
-            is_released=True,
-            bake_moved=True,
-            promotion_approved=True,
-            promotion_open=False,
-        )[0])
-
-    def test_release_report_recognizes_published_version(self) -> None:
-        script = runpy.run_path(
-            str(REPOSITORY / "tools" / "release-report.py"))
-        render = script["_render"]
-        scope = render.__globals__
-
-        config = {
-            "release": {"name": "release", "branch": "main", "promotes_to": "GitHub Release and PyPI"},
-            "bake": {
-                "name": "bake",
-                "branch": "bake/v6.9.0-local",
-                "version": "6.9.0",
-                "deployed_version": "6.9.0.dev0+gd0e9b36c",
-                "deployed_commit": "d" * 40,
-                "validated_on": "2026-09-07",
-                "promotion": {"decision": "approved", "commit": "d" * 40, "decided_on": "2026-09-07"},
-                "issues": {"delivered": [], "partial": [], "deferred": [], "promotion_decision": []},
-                "recommendations": {"overall": "Original overall", "testing": "Prepare and accept 6.9.0 before publication"},
-            },
-        }
-
-        def mock_json(*args):
-            cmd = args[0]
-            sub = args[1] if len(args) > 1 else ""
-            if (cmd, sub) == ("gh", "repo"):
-                return {"nameWithOwner": "johnshew/agents-live", "url": "https://github.com/johnshew/agents-live"}
-            if (cmd, sub) == ("gh", "release"):
-                return {
-                    "name": "agents-live v6.9.0",
-                    "tagName": "v6.9.0",
-                    "publishedAt": "2026-09-07T07:42:56Z",
-                    "isDraft": False,
-                    "isPrerelease": False,
-                    "url": "https://github.com/johnshew/agents-live/releases/tag/v6.9.0",
-                }
-            if (cmd, sub) == ("gh", "pr"):
-                return []
-            if (cmd, sub) == ("gh", "issue"):
-                return []
-            return {}
-
-        def mock_run(*args):
-            if args[:2] == ("git", "for-each-ref"):
-                return "origin/bake/v6.10.0-local"
-            if args[:2] == ("git", "show"):
-                return '[bake]\nbranch = "bake/v6.10.0-local"\nversion = "6.10.0"\n'
-            return "0"
-
-        with mock.patch.dict(scope, {
-            "_run": mock_run,
-            "_json": mock_json,
-            "_sha": lambda _ref: "d" * 40,
-            "_count": lambda _left, _right: (0, 0),
-            "_promotion_state": lambda _bake, _sha: (True, "approved"),
-            "_has_runtime_changes": lambda _deployed, _ref: False,
-            "subprocess": mock.Mock(
-                run=mock.Mock(return_value=mock.Mock(returncode=0)),
-            ),
-        }):
-            report = render(config, datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc))
-
-        self.assertIn("**`released`**", report)
-        self.assertIn("**No, this release is complete.**", report)
-        self.assertIn("The 6.9.0 release is published. Direct subsequent development to the next cycle.", report)
-        self.assertIn("6.9.0 is published.", report)
-        self.assertIn("Use the next release cycle.", report)
-        self.assertIn("`bake/v6.10.0-local` (6.10.0)", report)
-        self.assertNotIn("Prepare and accept the official 6.9.0 candidate.", report)
-        self.assertNotIn("Publish `6.9.0` to GitHub Releases and PyPI", report)
-        self.assertNotIn("Prepare and accept 6.9.0 before publication", report)
-        self.assertIn("does not independently verify PyPI", report)
-
-    def test_release_report_blocks_a_migrated_rc_cycle_even_after_promotion(self) -> None:
+    def test_release_report_keeps_all_work_and_publication_evidence_separate(self) -> None:
         script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
         render = script["_render"]
-        cycle = {
-            "model": "numbered-rc", "implementation": "pending", "next": "6.9.2rc2",
-            "history": {"6.9.2rc1": {
-                "status": "rejected", "kind": "legacy-candidate",
-                "artifact_version": "6.9.2", "evidence": "unavailable",
-            }},
-        }
-        config = {
-            "release": {"branch": "main"},
-            "bake": {
-                "branch": "bake/v6.9.2-rc", "version": "6.9.2",
-                "candidate_cycle": cycle, "deployed_commit": "d" * 40,
-                "deployed_version": "6.9.2.dev0+gdddddddd", "validated_on": "2026-09-11",
-                "promotion": {"decision": "approved", "commit": "d" * 40,
-                              "decided_on": "2026-09-13"},
-                "issues": {}, "recommendations": {
-                    "overall": "Implement RC tooling before preparation.",
-                    "testing": "Accept the exact final stable bytes independently.",
-                },
-            },
-        }
+        cycle = {"branch": "main", "next_rc": "1.2.3rc3", "selected_rc": "1.2.3rc2",
+                 "issues": {"decision_needed": [395]},
+                 "history": {"1.2.3rc1": {"status": "rejected", "evidence": "retained"}}}
+        config = {"schema": 2, "development_branch": "main", "cycles": {"1.2.3": cycle}}
+        published = False
+        attempts = [{"attempt": "1.2.3rc2", "state": "prepared"}]
 
         def response(*arguments):
-            if arguments[:3] == ("gh", "repo", "view"):
-                return {"nameWithOwner": "owner/repository", "url": "https://example.invalid"}
-            if arguments[:3] == ("gh", "release", "view"):
-                return {"tagName": "v6.9.1", "publishedAt": "2026-09-07T20:02:47Z",
-                        "isDraft": False, "isPrerelease": False, "url": "https://example.invalid"}
-            return []
+            if arguments[1] == "repo":
+                return {"nameWithOwner": "owner/repository"}
+            if arguments[1] == "release":
+                return [{"tagName": "v1.2.3" if published else "v1.2.2",
+                         "isDraft": False, "isPrerelease": False}]
+            if arguments[1] == "issue":
+                return [{"number": 395, "title": "Release decision", "state": "OPEN"}]
+            return [{"number": 400, "title": "Unrelated ongoing work", "headRefName": "feature",
+                     "baseRefName": "other", "statusCheckRollup": []}]
 
         with mock.patch.dict(render.__globals__, {
-            "_json": response, "_run": lambda *_args: "0",
-            "_sha": lambda _ref: "d" * 40, "_count": lambda *_args: (0, 0),
-            "subprocess": mock.Mock(run=mock.Mock(return_value=mock.Mock(returncode=0))),
-        }):
-            report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
-            result = json.loads(render(
-                config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
-            cycle["implementation"] = "numbered-rc-v1"
-            with mock.patch.dict(render.__globals__, {"_local_attempts": lambda _bake: [
-                    {"attempt": "6.9.2-final-1", "state": "finalized"}]}):
-                implemented = json.loads(render(
-                    config, datetime(2026, 9, 13, tzinfo=timezone.utc), as_json=True))
-                implemented_report = render(config, datetime(2026, 9, 13, tzinfo=timezone.utc))
-            cycle["implementation"] = "pending"
-            with mock.patch.dict(render.__globals__, {
-                "_count": lambda *_args: (1, 1),
-            }):
-                active_report = render(
-                    config, datetime(2026, 9, 13, tzinfo=timezone.utc))
+                "_json": response, "_run": lambda *_: "1.2.3rc2",
+                "_retained_inventory": lambda: {"local_candidates": [{"attempt": "1.2.3rc1", "state": "local-deployed"}], "retained_cycles": ["1.2.3", "1.2.2"]},
+                "_sha": lambda *_: "a" * 40, "_local_attempts": lambda _: attempts}):
+            moment = datetime(2026, 9, 19, tzinfo=timezone.utc)
+            report = render(config, moment)
+            result = json.loads(render(config, moment, as_json=True))
+            self.assertEqual("RC prepared", result["cycles"]["1.2.3"]["state"])
+            self.assertIn("decision_needed", report)
+            self.assertIn("#395", report)
+            self.assertIn("#400", report)
+            self.assertIn("rejected: retained", report)
+            self.assertIn("local-deployed", report)
+            self.assertEqual(["1.2.2"], result["unconfigured_retained_cycles"])
+            self.assertFalse(result["cycles"]["1.2.3"]["approval_valid"])
+            attempts.append({"attempt": "1.2.3-final-1", "state": "finalized"})
+            result = json.loads(render(config, moment, as_json=True))
+            self.assertFalse(result["cycles"]["1.2.3"]["github_published"])
+            self.assertEqual("not-verified", result["cycles"]["1.2.3"]["pypi_status"])
+            published = True
+            result = json.loads(render(config, moment, as_json=True))
+            self.assertEqual("published", result["cycles"]["1.2.3"]["state"])
+            self.assertEqual([], result["next_actions"])
+            self.assertEqual("not-verified", result["cycles"]["1.2.3"]["pypi_status"])
 
-        self.assertIn("**`blocked`**", report)
-        self.assertIn("`6.9.2rc1` | rejected (legacy-candidate) | `6.9.2` | unavailable", report)
-        self.assertIn("Next package: `6.9.2rc2`", report)
-        self.assertNotIn("Prepare and accept the official 6.9.2 candidate", report)
-        self.assertEqual("blocked", result["development_state"])
-        self.assertEqual("bake/v6.9.2-rc", result["target_branch"])
-        self.assertTrue(result["active_bake"])
-        self.assertFalse(result["bake"]["promotion_approved"])
-        self.assertEqual(cycle, result["candidate_cycle"])
-        self.assertIn("#511", result["next_actions"][0])
-        self.assertIn(
-            "uv run --script tools/local-deploy.py --repo <live-repository>"
-            " --rc 6.9.2rc2\n", active_report)
-        self.assertNotIn("--repo <live-repository>\n", active_report)
-        self.assertIn("## Last recorded tested deployment", active_report)
-        self.assertEqual("main", implemented["target_branch"])
-        self.assertFalse(implemented["active_bake"])
-        self.assertIn("--publish --attempt 6.9.2-final-1", implemented["next_actions"][0])
-        self.assertIn("`6.9.2-final-1` | finalized", implemented_report)
-        self.assertFalse(implemented["publication"]["github"]["target_published"])
-        self.assertEqual("not-verified", implemented["publication"]["pypi"]["status"])
+    def test_release_report_refuses_truncated_work_inventory(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
+        render = script["_render"]
+        with mock.patch.dict(render.__globals__, {"_json": lambda *args: (
+                {"nameWithOwner": "owner/repository"} if args[1] == "repo" else [{}] * 1000)}):
+            with self.assertRaisesRegex(script["ReportError"], "incomplete"):
+                render({"schema": 2, "cycles": {"1.2.3": {}}}, datetime.now(timezone.utc))
 
-    def test_local_deploy_synchronizes_the_configured_bake_branch(self) -> None:
+    def test_local_deploy_synchronizes_the_configured_release_branch(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
         synchronize = script["_synchronize"]
@@ -7042,21 +6856,20 @@ class TestCrossModuleAgreements(unittest.TestCase):
         def git(*args):
             responses = {
                 ("status", "--porcelain"): "",
-                ("branch", "--show-current"): "bake/v6.7.0-local",
+                ("branch", "--show-current"): "main",
                 ("rev-parse", "HEAD"): "abc123",
-                ("rev-parse", "origin/bake/v6.7.0-local"): "abc123",
+                ("rev-parse", "origin/main"): "abc123",
             }
             return responses[args]
 
         with mock.patch.dict(scope, {
             "_git": git,
-            "_bake_configuration": lambda: (
-                "bake/v6.7.0-local", "6.7.0"),
+            "_release_configuration": lambda: ("main", "6.7.0"),
             "_run": lambda command, **_kwargs: commands.append(command),
         }):
             self.assertEqual("abc123", synchronize())
         self.assertEqual([
-            "git", "pull", "--ff-only", "origin", "bake/v6.7.0-local",
+            "git", "pull", "--ff-only", "origin", "main",
         ], commands[0])
 
     def test_recorded_rc_is_recoverable_but_cannot_be_prepared_again(self):
@@ -7065,12 +6878,12 @@ class TestCrossModuleAgreements(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             channels = Path(temporary) / "channels.toml"
             channels.write_text(
-                '[bake.candidate_cycle]\nmodel = "numbered-rc"\n'
-                'next = "1.2.3rc5"\n'
-                '[bake.candidate_cycle.history."1.2.3rc4"]\n'
+                '[cycles."1.2.3"]\n'
+                'next_rc = "1.2.3rc5"\n'
+                '[cycles."1.2.3".history."1.2.3rc4"]\n'
                 'status = "prepared"\nkind = "numbered-rc"\n'
                 'artifact_version = "1.2.3rc4"\n', encoding="utf-8")
-            with mock.patch.dict(select_rc.__globals__, {"CHANNELS": channels}):
+            with mock.patch.dict(select_rc.__globals__, {"CYCLES": channels}):
                 self.assertEqual("1.2.3rc4", select_rc(
                     "1.2.3rc4", "1.2.3", recovery=True))
                 self.assertEqual("1.2.3rc5", select_rc("1.2.3rc5", "1.2.3"))
@@ -7086,7 +6899,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     ('kind = "numbered-rc"', 'kind = "legacy-candidate"'),
                     ('artifact_version = "1.2.3rc4"',
                      'artifact_version = "1.2.3"'),
-                    ('model = "numbered-rc"', 'model = "legacy"'),
                 ):
                     with self.subTest(replacement=after):
                         channels.write_text(original.replace(before, after),
@@ -7207,7 +7019,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
                 with mock.patch.dict(scope, {
                     "_synchronize": lambda: "b" * 40,
-                    "_bake_configuration": lambda: ("bake/v1.2.3-rc", "1.2.3"),
+                    "_release_configuration": lambda: ("main", "1.2.3"),
                     "_requested_rc": lambda version, _target, **_options: version,
                     "_preparation_directory": lambda _version: root,
                     "_git": lambda *args: "a" * 40 if args[0] == "merge-base" else (
@@ -7253,7 +7065,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         else:
                             self.assertEqual([], operations)
 
-    def test_local_deploy_stamps_only_the_archived_bake_source(self) -> None:
+    def test_local_deploy_stamps_only_the_archived_candidate_source(self) -> None:
         script = runpy.run_path(
             str(REPOSITORY / "tools" / "local-deploy.py"))
         with tempfile.TemporaryDirectory() as temporary:
@@ -7267,17 +7079,17 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 '__version__ = "6.6.0"\n', encoding="utf-8")
             (skill / "VERSION").write_text("6.6.0\n", encoding="utf-8")
 
-            script["_stamp_bake_version"](
-                source, "6.6.0", "6.7.0.dev0+gabc12345")
+            script["_stamp_candidate_version"](
+                source, "6.6.0", "6.7.0rc1")
 
             self.assertIn(
-                'version = "6.7.0.dev0+gabc12345"',
+                'version = "6.7.0rc1"',
                 (source / "pyproject.toml").read_text(encoding="utf-8"))
             self.assertIn(
-                '__version__ = "6.7.0.dev0+gabc12345"',
+                '__version__ = "6.7.0rc1"',
                 (package / "__init__.py").read_text(encoding="utf-8"))
             self.assertEqual(
-                "6.7.0.dev0+gabc12345\n",
+                "6.7.0rc1\n",
                 (skill / "VERSION").read_text(encoding="utf-8"))
         self.assertEqual((6, 7, 0), script["_version_tuple"](
             "6.7.0.dev0+gabc12345"))
@@ -7374,7 +7186,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "_prepared_artifact": lambda *_args: None,
                 "_state_directory": lambda: root / "state",
-                "_stamp_bake_version": lambda *_args: None,
+                "_stamp_candidate_version": lambda *_args: None,
                 "_run": run,
                 "_require_unchanged_checkout": mock.Mock(),
             }), mock.patch.object(
@@ -7403,9 +7215,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             dashboards = mock.Mock()
             with mock.patch.dict(scope, {
                 "_synchronize": lambda: "abc123",
-                "_bake_configuration": lambda: (
-                    "bake/v1.2.3-local", "1.2.3"),
-                "_prepare_artifact": lambda *_args: (wheel, "digest"),
+                "_release_configuration": lambda: ("main", "1.2.3"),
+                "_requested_rc": lambda version, target, **options: version,
+                "_prepare_candidate": lambda *_args: (wheel, "digest"),
                 "_require_unchanged_checkout": mock.Mock(
                     side_effect=script["LocalDeployError"]("checkout changed")),
                 "_running_dashboards": dashboards,
@@ -7414,7 +7226,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             }):
                 with self.assertRaisesRegex(
                         script["LocalDeployError"], "checkout changed"):
-                    deploy(root)
+                    deploy(root, rc="1.2.3rc1")
             dashboards.assert_not_called()
 
     def test_local_deploy_postcheck_uses_release_contract_helpers(self) -> None:

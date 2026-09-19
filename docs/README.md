@@ -1,7 +1,7 @@
 ---
 title: Agents Live Repository Documentation
 description: Index of current architecture, decisions, platform guides, and backlog
-ms.date: 2026-09-05
+ms.date: 2026-09-19
 ms.topic: overview
 ---
 
@@ -24,8 +24,8 @@ this directory is installed by `agents-live init` or `upgrade`.
 ## Contents
 
 - [development-release-process.md](development-release-process.md) - the
-  state machine for bake development, promotion approval, candidate
-  acceptance, rejection, and public release.
+  business requirements, industry evidence, and lifecycle for rapid local RC
+  preparation and activation, candidate acceptance, and official publication.
 - [architecture.md](architecture.md) - normative current package ownership,
   runtime flow, state, compatibility boundary, and invariants.
 - [testing-methodology.md](testing-methodology.md) - what earns a test, which

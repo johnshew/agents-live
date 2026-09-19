@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -198,6 +198,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
         raise agent.DefinitionError(
             f"skill '{spec.name}' has no Agents Live execution metadata")
     results = {}
+    deadline = time.monotonic() + (config.overall_timeout or config.timeout or 120)
     request = Request(
         text=firing.instructions,
         changed_files=firing.changed_files,
@@ -241,11 +242,18 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                     spec, results, run_id,
                     pipeline_result=pipeline_result)
 
+            def execute(step, launch, attempt=1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return agent.StepResult(step, False, category="execution_budget_exhausted",
+                                            message="overall execution deadline exhausted")
+                return _run(spec, step, replace(launch, timeout=min(launch.timeout or remaining, remaining)),
+                            runner, run_id=run_id, attempt=attempt, scratch=scratch,
+                            accounting=accounting)
+
             if shape.has_pre:
                 launch = agent.prepare(spec, Step.PRE, context(Step.PRE))
-                results[Step.PRE] = _run(
-                    spec, Step.PRE, launch, runner, run_id=run_id,
-                    scratch=scratch, accounting=accounting)
+                results[Step.PRE] = execute(Step.PRE, launch)
                 if not results[Step.PRE].ok or results[Step.PRE].skip:
                     if results[Step.PRE].ok:
                         accounting.completion_reason = "preprocessor_skip"
@@ -262,11 +270,13 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                     return finish(snapshot())
 
             if shape.has_agent:
-                timeout_retries = 1
-                empty_retries = 2
+                timeout_retries = config.timeout_retries
+                empty_retries = config.empty_retries
                 attempt = 0
                 while True:
                     attempt += 1
+                    if session is not None:
+                        session.begin_attempt(attempt)
                     launch = agent.prepare(
                         spec,
                         Step.AGENT,
@@ -276,10 +286,19 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                             attempt=attempt,
                         ),
                     )
-                    result = _run(
-                        spec, Step.AGENT, launch, runner,
-                        run_id=run_id, attempt=attempt, scratch=scratch,
-                        accounting=accounting)
+                    result = execute(Step.AGENT, launch, attempt)
+                    if result.transcript and config.transcript:
+                        transcript = Path(result.transcript)
+                        envelope = json.loads(transcript.read_text(encoding="utf-8"))
+                        published = snapshot()
+                        if published is not None:
+                            envelope["pipeline_result"] = {
+                                "path": config.result_path, "present": published[0],
+                                "value": published[1] if published[0] else None,
+                            }
+                        envelope["usage"] = dict(result.usage)
+                        envelope["attempt"] = attempt
+                        _write_json(transcript, envelope)
                     results[Step.AGENT] = result
                     if not result.retryable:
                         break
@@ -288,7 +307,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                         continue
                     if result.category == "empty_output" and empty_retries:
                         empty_retries -= 1
-                        time.sleep(2)
+                        time.sleep(min(2, max(0, deadline - time.monotonic())))
                         continue
                     break
                 if not results[Step.AGENT].ok:
@@ -297,6 +316,14 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
             # Taken before the post-processor runs, because that is what it
             # is handed on stdin.
             published = snapshot()
+            if published is not None and published[0]:
+                size = len(_snapshot_text(published).encode("utf-8"))
+                cap = config.output_max_bytes or agent.port.DEFAULT_OUTPUT_MAX_BYTES
+                if size > cap:
+                    results[Step.AGENT] = agent.StepResult(
+                        Step.AGENT, False, category="agent_output_invalid",
+                        message=f"pipeline result is {size} bytes, over the {cap}-byte cap")
+                    return finish(published)
             if shape.has_post:
                 launch = agent.prepare(
                     spec,
@@ -323,9 +350,7 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                             "value": published[1] if published[0] else None,
                         }
                     _write_json(transcript, envelope)
-                results[Step.POST] = _run(
-                    spec, Step.POST, launch, runner, run_id=run_id,
-                    scratch=scratch, accounting=accounting)
+                results[Step.POST] = execute(Step.POST, launch)
             return finish(published)
     finally:
         _discard_if_empty(scratch)
@@ -396,7 +421,9 @@ def _run_child(
 ):
     environment = os.environ.copy()
     environment.update(launch.env)
+    environment.pop("AGENTS_LIVE_CAPTURE_PREFIX", None)
     timeout = launch.timeout
+    probe_s = 0.0
     if step is Step.AGENT and launch.provider:
         from .agent.providers import get as get_provider
         cli = get_provider(launch.provider).cli
@@ -408,13 +435,14 @@ def _run_child(
                 env=environment,
                 timeout=min(launch.timeout or 30, 30),
             )
+            probe_s = time.monotonic() - probe_started
             error = cli.version_error(
                 probe.stdout if probe.returncode == 0 and not probe.timed_out else "")
             if error:
                 return agent.StepResult(
                     step, False, category="cli_version_unsupported", message=error)
             if timeout is not None:
-                timeout -= time.monotonic() - probe_started
+                timeout -= probe_s
                 if timeout <= 0:
                     return agent.StepResult(
                         step, False, retryable=True, category="timeout",
@@ -424,8 +452,17 @@ def _run_child(
         attempt_record = {
             "attempt": attempt, "provider": launch.provider,
             "status": "failed", "usage": (), "transcript": None,
+            "probe_s": probe_s, "timeout_s": timeout,
         }
         accounting.attempts.append(attempt_record)
+    capture_prefix = None
+    if (step is Step.AGENT and spec.execution is not None
+            and spec.execution.transcript and scratch is not None):
+        capture_prefix = str(scratch / f"attempt-{attempt}")
+        environment["AGENTS_LIVE_CAPTURE_PREFIX"] = capture_prefix
+        pending = runtime.ChildResult(launch.argv, 0, "", "")
+        _write_transcript(spec, run_id, attempt, launch, pending, None,
+                          finalized=False, capture_prefix=capture_prefix)
     started = time.monotonic() if attempt_record is not None else 0.0
     try:
         raw = runner.run_child(
@@ -439,11 +476,12 @@ def _run_child(
     finally:
         if attempt_record is not None:
             attempt_record["duration_s"] = time.monotonic() - started
+    parse_started = time.monotonic() if attempt_record is not None else 0.0
     interpreted = agent.interpret(
         spec,
         step,
         launch,
-        RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out),
+        RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out, raw.output_limited),
         _signals(spec, step, scratch),
     )
     if attempt_record is not None:
@@ -451,6 +489,8 @@ def _run_child(
             status="success" if interpreted.ok else "failed",
             category=interpreted.category, usage=interpreted.usage,
             transcript=interpreted.transcript,
+            cleanup_s=raw.cleanup_s,
+            parse_s=time.monotonic() - parse_started,
         )
     if (
         not interpreted.ok
@@ -476,11 +516,16 @@ def _run_child(
         and spec.execution is not None
         and spec.execution.transcript
     ):
+        persistence_started = time.monotonic()
         transcript = _write_transcript(
             spec, run_id, attempt, launch, raw, interpreted.transcript)
         interpreted = replace(interpreted, transcript=str(transcript))
         if attempt_record is not None:
             attempt_record["transcript"] = str(transcript)
+            attempt_record["persistence_s"] = time.monotonic() - persistence_started
+        if capture_prefix:
+            for suffix in (".stdout", ".stderr"):
+                Path(capture_prefix + suffix).unlink(missing_ok=True)
     return interpreted
 
 
@@ -510,20 +555,31 @@ def _signals(spec, step: Step, scratch: Path | None) -> agent.StepSignals:
     return agent.StepSignals(control, output)
 
 
-def _write_transcript(spec, run_id: str, attempt: int, launch, raw, provider_ref):
+def _write_transcript(spec, run_id: str, attempt: int, launch, raw, provider_ref,
+                      *, finalized: bool = True, capture_prefix: str | None = None):
     from .paths import repo_state_dir
     directory = repo_state_dir(spec.root) / "runs" / spec.name
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{run_id}-agent-{attempt}.json"
     _write_json(destination, {
+        "run_id": run_id,
+        "agent": spec.name,
+        "attempt": attempt,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "finalized": finalized,
+        "capture_prefix": capture_prefix,
         "argv": list(raw.argv),
         "prompt": launch.prompt,
         "provider": launch.provider,
+        "model": spec.execution.selector.model if spec.execution else None,
+        "effort": spec.execution.selector.effort if spec.execution else None,
         "provider_transcript": provider_ref,
         "returncode": raw.returncode,
         "stderr": raw.stderr,
         "stdout": raw.stdout,
         "timed_out": raw.timed_out,
+        "diagnostic_retention": "limited" if raw.output_limited else "complete" if finalized else "in_progress",
+        "cleanup_s": raw.cleanup_s,
     })
     return destination
 

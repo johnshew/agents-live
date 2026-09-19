@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-09-07
+ms.date: 2026-09-19
 ms.topic: reference
 ---
 
@@ -60,16 +60,26 @@ metadata:
 | `agents-live.env` | JSON string map | Empty by default. Do not store secrets. |
 | `agents-live.transcript` | `true` or `false` | `true` by default. |
 | `agents-live.timeout` | positive integer | Provider or processor timeout in seconds; `120` by default. |
+| `agents-live.overall-timeout` | positive integer | Shared execution deadline in seconds, including pre/provider/post steps, probes and retries. Defaults to `agents-live.timeout` or `120`. Cleanup is separately bounded and recorded. |
+| `agents-live.timeout-retries` | integer 0-10 | Maximum timeout retries; `1` by default, only while overall time remains. Use `0` for diagnostic runs without retries. |
+| `agents-live.empty-retries` | integer 0-10 | Maximum empty-completion retries; `2` by default. Use `0` together with timeout-retries to disable retries. |
 | `agents-live.pre-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.post-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.output-schema` | JSON object or relative path | Optional JSON Schema for provider output. Claude and Codex enforce it during generation; other providers are validated after local JSON extraction. |
-| `agents-live.output-max-bytes` | positive integer | Output size cap; 10 MiB by default. |
+| `agents-live.output-max-bytes` | positive integer | Parsed completion or declared pipeline-result size cap; 10 MiB by default. Does not count provider event telemetry. |
 | `agents-live.output-path-roots` | JSON string array | Optional repository-relative path allowlist. |
 | `agents-live.output-provenance` | `strict` | Optional strict whole-output JSON requirement. |
 
 Metadata keys and values must be strings, and every metadata value must be
 quoted. JSON is compact and uses stable key ordering. Metadata owned by other
 clients is preserved.
+
+Pipeline retries start from read-only prepared inputs, not the previous attempt's
+mutable output. A retry that never writes a result does not inherit one. Earlier
+partial results remain diagnostic evidence, not postprocessor input. Each stdout
+and stderr diagnostic stream is independently capped at 64 MiB; exceeding it
+terminates the child tree with `diagnostic_output_limit` and explicit incomplete
+retention metadata. The business result is never silently truncated.
 
 ## Forward compatibility
 

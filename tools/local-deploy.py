@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema"]
 # ///
-"""Deploy the current bake branch into the active local installation."""
+"""Build, activate and verify a numbered local release candidate."""
 from __future__ import annotations
 
 import argparse
@@ -32,7 +32,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
-CHANNELS = ROOT / ".github" / "release-channels.toml"
+CYCLES = ROOT / ".github" / "release-cycles.toml"
 SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
@@ -89,27 +89,27 @@ def _git(*args: str) -> str:
     return _run(["git", *args], capture=True).stdout.strip()
 
 
-def _bake_configuration() -> tuple[str, str]:
+def _release_configuration() -> tuple[str, str]:
     try:
-        bake = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"]
-        branch = bake["branch"]
-        version = bake["version"]
+        configuration = tomllib.loads(CYCLES.read_text(encoding="utf-8"))
+        version = configuration["default_cycle"]
+        branch = configuration["cycles"][version]["branch"]
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
-        raise LocalDeployError("cannot read the configured bake channel") from exc
-    if not isinstance(branch, str) or not branch.startswith("bake/v"):
-        raise LocalDeployError(f"invalid bake branch: {branch!r}")
+        raise LocalDeployError("cannot read the configured release cycle") from exc
+    if not isinstance(branch, str) or not branch:
+        raise LocalDeployError(f"invalid release branch: {branch!r}")
     if not isinstance(version, str) or re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
-        raise LocalDeployError(f"invalid bake version: {version!r}")
+        raise LocalDeployError(f"invalid release version: {version!r}")
     return branch, version
 
 
 def _synchronize() -> str:
     if _git("status", "--porcelain"):
         raise LocalDeployError("working tree is not clean; refusing to pull")
-    branch, _version = _bake_configuration()
+    branch, _version = _release_configuration()
     if _git("branch", "--show-current") != branch:
         raise LocalDeployError(
-            f"local deployment requires the configured bake branch {branch}")
+            f"local deployment requires the configured release branch {branch}")
     _run(["git", "pull", "--ff-only", "origin", branch])
     head = _git("rev-parse", "HEAD")
     if head != _git("rev-parse", f"origin/{branch}") \
@@ -177,17 +177,15 @@ def _preparation_directory(version: str) -> Path:
 def _requested_rc(version: str, target: str, *, recovery: bool = False) -> str:
     if re.fullmatch(re.escape(target) + r"rc[1-9]\d*", version) is None:
         raise LocalDeployError(f"RC must be a numbered candidate of {target}")
-    cycle = tomllib.loads(CHANNELS.read_text(encoding="utf-8"))["bake"].get(
-        "candidate_cycle", {})
+    cycle = tomllib.loads(CYCLES.read_text(encoding="utf-8"))["cycles"][target]
     if recovery:
         record = cycle.get("history", {}).get(version, {})
-        if (cycle.get("model") != "numbered-rc"
-                or record.get("status") != "prepared"
+        if (record.get("status") != "prepared"
                 or record.get("kind") != "numbered-rc"
                 or record.get("artifact_version") != version):
             raise LocalDeployError(f"{version} is not a recorded prepared RC")
         return version
-    if cycle.get("model") != "numbered-rc" or cycle.get("next") != version \
+    if cycle.get("next_rc") != version \
             or version in cycle.get("history", {}):
         raise LocalDeployError(
             f"{version} is not the configured next, unused RC")
@@ -218,6 +216,17 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         return _build_artifact(commit, version)
     finally:
         lock.unlink()
+
+
+def _prepare_candidate(commit: str, version: str) -> tuple[Path, str]:
+    directory = RELEASE["_cycle_directory"](version.split("rc", 1)[0]) / version
+    if not (directory / "attempt.json").exists():
+        RELEASE["prepare_cycle"](rc=version)
+    record = RELEASE["_load_attempt"](version)
+    if record["source_commit"] != commit:
+        raise LocalDeployError("prepared RC belongs to different source; use the next RC")
+    preparation = RELEASE["_retained_preparation"](record)
+    return Path(preparation["wheel"]), preparation["wheel_sha256"]
 
 
 def _build_artifact(commit: str, version: str) -> tuple[Path, str]:
@@ -273,7 +282,7 @@ def _build_new_artifact(commit: str, version: str) -> tuple[Path, str]:
         _run(["git", "archive", "--format=zip", f"--output={archive}", commit])
         source = temporary / "source"
         shutil.unpack_archive(archive, source)
-        _stamp_bake_version(source, RELEASE["_current_version"](), version)
+        _stamp_candidate_version(source, RELEASE["_current_version"](), version)
         output = temporary / "dist"
         _run(["uv", "build", "--wheel", "--out-dir", str(output), str(source)])
         wheels = list(output.glob(f"agents_live-{version}-*.whl"))
@@ -295,7 +304,7 @@ def _build_new_artifact(commit: str, version: str) -> tuple[Path, str]:
     return artifact.resolve(), digest
 
 
-def _stamp_bake_version(source: Path, current: str, target: str) -> None:
+def _stamp_candidate_version(source: Path, current: str, target: str) -> None:
     replacements = (
         (source / "pyproject.toml", f'version = "{current}"',
          f'version = "{target}"'),
@@ -309,7 +318,7 @@ def _stamp_bake_version(source: Path, current: str, target: str) -> None:
             content = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise LocalDeployError(
-                f"cannot stamp bake version in {path.relative_to(source)}") from exc
+                f"cannot stamp candidate version in {path.relative_to(source)}") from exc
         if content.count(old) != 1:
             raise LocalDeployError(
                 f"cannot find one {current} version in {path.relative_to(source)}")
@@ -667,14 +676,14 @@ def deploy(
     repo: Path, *, allow_downgrade: bool = False, rc: str | None = None,
     recover_provider_readiness: bool = False,
 ) -> Path:
+    if rc is None:
+        raise LocalDeployError("local deployment requires an explicit numbered --rc")
     tool_commit = _synchronize()
     commit = tool_commit
-    _branch, target = _bake_configuration()
+    _branch, target = _release_configuration()
     version = _requested_rc(
         rc, target, recovery=recover_provider_readiness,
-    ) if rc else f"{target}.dev0+g{commit[:8]}"
-    if recover_provider_readiness and rc is None:
-        raise LocalDeployError("provider recovery requires a retained numbered RC")
+    )
     previous_version = RELEASE["_installed_version"]()
     if _version_tuple(version) < _version_tuple(previous_version) \
             and not allow_downgrade:
@@ -704,7 +713,7 @@ def deploy(
             raise LocalDeployError("recovery requires matching successful packaged readiness")
         wheel, digest = prepared
     else:
-        wheel, digest = _prepare_artifact(commit, version)
+        wheel, digest = _prepare_candidate(commit, version)
     _require_unchanged_checkout(tool_commit)
     with ThreadPoolExecutor(max_workers=3) as pool:
         status_future = pool.submit(RELEASE["_installed_all_json"], "status")
@@ -763,7 +772,7 @@ def deploy(
             wheel, version, baseline, all_watchers, tuple(stopped))
     except BaseException:
         try:
-            if recovery is not None and RELEASE["_installed_version"]() != previous_version:
+            if RELEASE["_installed_version"]() != previous_version:
                 for dashboard in stopped:
                     if _port_answers(dashboard.port):
                         _stop_dashboard(dashboard)
@@ -776,8 +785,7 @@ def deploy(
                 if RELEASE["_status_contract"](RELEASE["_installed_all_json"]("status")) != baseline:
                     raise LocalDeployError("rollback did not restore the agent-state baseline")
         finally:
-            with contextlib.suppress(Exception):
-                _restart_dashboards(tuple(stopped))
+            _restart_dashboards(tuple(stopped))
         raise
     receipt = _write_receipt(
         commit=commit, version=version, previous_version=previous_version,
@@ -801,7 +809,7 @@ def main() -> int:
         "--allow-downgrade", action="store_true",
         help="Allow a local package version below the installed version")
     parser.add_argument(
-        "--rc", metavar="VERSION",
+        "--rc", metavar="VERSION", required=True,
         help="Build and select the configured next RC locally, without publication")
     parser.add_argument(
         "--recover-provider-readiness", action="store_true",

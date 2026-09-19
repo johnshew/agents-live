@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-09-07
+ms.date: 2026-09-19
 ms.topic: troubleshooting
 ---
 
@@ -200,8 +200,8 @@ again.
 
 Self-managed versions remain under the installation root rather than replacing
 one environment in place. The complete PEP 440 version is the directory name;
-local bake versions include their commit suffix and can coexist with other
-bakes from the same release line. Selection changes only `current`, then runs
+numbered RC versions coexist with other candidates from the same release line.
+Historical development versions retain their commit suffix. Selection changes only `current`, then runs
 automatic maintenance through the selected command. A dispatch that had already
 started can finish on its original immutable version while new dispatches and
 converged watchers use the selected version.
@@ -395,6 +395,8 @@ agents-live logs transcript <run-id>
 agents-live logs transcript --agent link-check --last 3 --summary
 agents-live logs transcript --agent link-check --since 2h --errors --summary
 agents-live logs transcript <run-id> --json
+agents-live logs transcript <run-id> --attempts --json
+agents-live logs transcript <run-id> --attempt 1 --summary
 ```
 
 The default rendering shows normalized user and assistant turns plus tool
@@ -402,6 +404,21 @@ calls. `--json` returns the same provider-neutral fields in a `transcripts`
 array. `--summary` limits the prompt and final text to 6,000 characters each
 and lists at most 100 tool names. Use `--raw` with one run ID only when the
 normalized view omits provider detail needed for diagnosis.
+
+`--attempt N` selects one invocation, including a timeout before a successful
+retry. `--attempts` reports all known attempts with their usage and availability.
+With recording enabled, an envelope exists before launch and bounded diagnostic
+streams are retained while the child runs. Active or interrupted runs can be read
+without a terminal event: `status` remains `unfinished`, and an incomplete
+envelope reports `not_yet_finalized`. This state does not claim the process is
+still alive. Missing old events are never fabricated.
+
+Pruning replaces an expired provider envelope with a content-free availability
+marker for one additional retention period. The query reports `pruned` while
+that marker exists; after its expiry, surviving run events report `missing`.
+Attempt records separate probe, provider duration, cleanup, parsing and
+transcript persistence time. The provider duration includes cleanup; do not
+sum the overlapping fields as independent elapsed intervals.
 
 With transcript recording enabled, provider output is saved before
 postprocessing. A postprocessor crash or timeout retains the model transcript
@@ -418,7 +435,7 @@ Processor logs and the pipeline journal
 remain subject to normal retention; the journal records operations, not values.
 
 `transcript_state` distinguishes `available`, `no_model_call`, `disabled`,
-`missing`, `corrupt`, `invalid_path`, and `unknown`. `unknown` is retained for
+`missing`, `pruned`, `not_yet_finalized`, `oversized`, `corrupt`, `invalid_path`, and `unknown`. `unknown` is retained for
 older records whose null transcript field did not say whether a model ran. A
 transcript can become `missing` after retention removes its artifact while an
 older archived event remains queryable. `invalid_path` means a log row points
