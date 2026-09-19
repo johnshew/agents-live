@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: tolerate slower dashboard readiness responses and bound failure diagnostics.
+  Packaged validation no longer rejects a healthy local API solely because it
+  exceeds a two-second request timeout, or waits indefinitely for a running
+  dashboard's output after startup failure. Full dashboard checks remain required.
 - fix: separate provider diagnostic volume from completion and pipeline-result limits.
   Valid small results no longer fail because the provider emits a large event
   stream. Diagnostic capture is independently bounded and reports incomplete
