@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-15
+ms.date: 2026-09-19
 ms.topic: reference
 ---
 
@@ -11,6 +11,24 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: separate provider diagnostic volume from completion and pipeline-result limits.
+  Valid small results no longer fail because the provider emits a large event
+  stream. Diagnostic capture is independently bounded and reports incomplete
+  retention explicitly; oversized business results still fail before processing.
+- fix: bound retries by one execution deadline and isolate each pipeline attempt.
+  Timeout and empty retry counts are explicit metadata, including zero-retry
+  diagnostics. Attempts restart from prepared inputs instead of inheriting
+  partial output. Owned process groups and Windows Job Objects terminate
+  descendants even after their parent exits, with separate cleanup timings.
+- fix: retain earlier-attempt and unfinished-run transcript diagnostics.
+  Transcript queries select one attempt or all attempts, inspect bounded active
+  snapshots, preserve available usage and result evidence, and distinguish
+  missing artifacts from content-free pruning markers during marker retention.
+- chore: replace the bake channel with concurrent numbered release cycles.
+  Local activation reuses canonical candidate bytes and restores dashboards
+  and watchers. Reports include all open work and retained candidate evidence;
+  exact-source approval and independent final-package acceptance remain required.
+  Business requirements and primary-source release guidance document the process.
 - fix: preserve due clock launches during maintenance contention. (#528)
   Scheduled firings wait up to 60 seconds for activation exclusion, retain
   their original due minute, and recheck started state and definitions before
