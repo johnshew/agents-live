@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-09-06
+ms.date: 2026-09-25
 ms.topic: concept
 ---
 
@@ -57,11 +57,14 @@ stay in that tab. Client deletion releases page registrations without
 cancelling durable action execution. Repository-local collection failures,
 including ownership loss during discovery, preserve stale rows explicitly.
 
-## v6.6 decision
+## Historical v6.6 scope
 
-The v6.6 bake repairs the existing dashboard before broader redesign work
-begins. It does not include the full A-D dashboard roadmap and does not claim
-completion of the dashboard product target.
+The v6.6 release scope was to repair the existing dashboard before broader
+redesign work. It did not include the full A-D dashboard roadmap or claim
+completion of the dashboard product target. This section preserves that scope
+decision, not a current release stage. Current changes use numbered RCs and
+final-package acceptance as defined in
+[development-release-process.md](../development-release-process.md).
 
 - [#419](https://github.com/johnshew/agents-live/issues/419) is the mandatory
   usability recovery: keep the single-repository inventory and log together in
@@ -95,10 +98,11 @@ requires the default all-repositories experience.
 ## Delivery sequence
 
 The letters below describe the order of the longer dashboard program. They do
-not mean that all four stages ship in v6.6. Only the work assigned to v6.6 in
-the preceding section belongs in the current bake.
+not mean that all four stages ship in one release. The preceding section records
+the original v6.6 scope; the release-cycle manifest and generated report identify
+current targets and numbered RCs.
 
-### A. Stabilize the v6.6 bake
+### A. Stabilize the v6.6 dashboard
 
 Land #419 first, then #421 as a small follow-up using the existing public CLI
 boundary. Adding `--repo` is the main execution change, but the dashboard must

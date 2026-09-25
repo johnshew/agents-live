@@ -306,7 +306,7 @@ class TestDefinitionLoader(TempRepository):
         )
         self.assertEqual([], payload["agents"])
 
-    def test_runtime_identity_distinguishes_release_bake_and_unknown(self) -> None:
+    def test_runtime_identity_distinguishes_release_development_candidate_and_unknown(self) -> None:
         self.assertEqual("release", identity.channel("6.6.0"))
         self.assertEqual("development", identity.channel("6.6.0.dev0+gabc1234"))
         self.assertEqual("candidate", identity.channel("6.6.0rc1"))
@@ -1398,7 +1398,7 @@ class TestRuntimeCore(unittest.TestCase):
                 module.main(["--version"])
         helper.assert_called_once_with()
 
-    def test_version_command_identifies_a_bake_artifact(self) -> None:
+    def test_version_command_identifies_a_development_artifact(self) -> None:
         module = importlib.import_module("agents_live.cli.main")
         output = io.StringIO()
         with (
@@ -2967,25 +2967,24 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
                 self.assertFalse(internal._runtime_is_current())
 
     def test_watcher_distinguishes_running_generation_directory_from_package_version(self) -> None:
-        """A bake watcher must retire when stable activates, even if __version__ matches (#490)."""
+        """A development watcher must retire when stable activates, even if __version__ matches (#490)."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            bake_gen = "6.9.0.dev0+gd0e9b36c"
+            development_gen = "6.9.0.dev0+gd0e9b36c"
             stable_gen = "6.9.0"
             with mock.patch.dict(os.environ, {deploy.layout.ENV_INSTALL_ROOT: str(root)}):
-                bake_dir = deploy.layout.generation_dir(bake_gen, root=root)
+                development_dir = deploy.layout.generation_dir(development_gen, root=root)
                 stable_dir = deploy.layout.generation_dir(stable_gen, root=root)
-                bake_dir.mkdir(parents=True)
+                development_dir.mkdir(parents=True)
                 stable_dir.mkdir(parents=True)
 
-                # Mock watcher executing inside the bake generation directory
-                fake_exe = bake_dir / "Scripts" / "python.exe"
+                fake_exe = development_dir / "Scripts" / "python.exe"
                 with (
                     mock.patch.object(sys, "executable", str(fake_exe)),
                     mock.patch.object(internal, "__version__", "6.9.0"),
                 ):
                     hostruntime.replace_directory_link(
-                        deploy.layout.current_path(root), bake_dir, root=root)
+                        deploy.layout.current_path(root), development_dir, root=root)
                     self.assertTrue(internal._runtime_is_current())
 
                     hostruntime.replace_directory_link(

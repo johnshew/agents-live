@@ -18,7 +18,7 @@ gitignored and summarizes evidence without replacing any gate below.
 
 The process and business requirements are canonical in
 [development-release-process.md](../docs/development-release-process.md).
-There is no bake channel. The manifest selects RC5 source for `6.9.2` finalization
+The manifest selects RC5 source for `6.9.2` finalization
 while `main` advances toward `6.9.3rc1`. Historical RC1-RC6 artifacts and their
 different readiness states remain retained; none is silently relabeled accepted.
 

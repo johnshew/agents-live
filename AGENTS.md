@@ -21,7 +21,7 @@ work on it.
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
 | Adding, changing, or deleting a test | [docs/testing-methodology.md](docs/testing-methodology.md) |
 | Cutting or preparing a release | [.agents/release.md](.agents/release.md) |
-| Reporting bake and release channel state | [.agents/release-report.md](.agents/release-report.md) |
+| Reporting release cycles and numbered RC state | [.agents/release-report.md](.agents/release-report.md) |
 | Creating, running, or debugging triggered agents in this checkout | [.agents/agents-live.md](.agents/agents-live.md) |
 | Changing the skill payload, docs, or templates | [src/agents_live/skill/SKILL.md](src/agents_live/skill/SKILL.md) and [docs/](src/agents_live/skill/docs/) |
 | Recording a design decision or checking project direction | [docs/README.md](docs/README.md) and [docs/backlog.md](docs/backlog.md) |
@@ -82,8 +82,9 @@ The standard loop for any change that lands as commits:
 ### Release cycle routing
 
 Read `.github/release-cycles.toml` and the generated report. Develop on `main`
-unless the selected cycle explicitly needs a stabilization branch. There is no
-bake channel. A branch or passing PR does not establish acceptance or publication.
+unless the selected cycle explicitly needs a stabilization branch. Test numbered
+RCs within each release cycle. A branch or passing PR does not establish
+acceptance or publication.
 The report must show all active cycles, open work, retained candidate attempts,
 the selected local runtime, and independent publication evidence.
 

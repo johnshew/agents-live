@@ -3399,9 +3399,9 @@ class TestInstallationGenerations(unittest.TestCase):
             deploy.generation.classify(built.name, status)
             self.assertEqual(status, deploy.generation.release_status(built))
             self.assertEqual(built, deploy.generation.load(built.name))
-        bake = self._activate_generation("6.9.0.dev0+g123abcd")
+        development = self._activate_generation("6.9.0.dev0+g123abcd")
         with self.assertRaises(deploy.generation.GenerationError):
-            deploy.generation.classify(bake.name, "released")
+            deploy.generation.classify(development.name, "released")
 
     def test_generation_activation_records_previous_and_selected_versions(self) -> None:
         from agents_live.obs import admin
@@ -3692,8 +3692,8 @@ class TestInstallationGenerations(unittest.TestCase):
         self.assertEqual("6.5.0", deploy.pointer.read().generation)
         self.assertEqual(old.path.resolve(), deploy.layout.current_path().resolve())
 
-    def test_bake_commits_are_distinct_immutable_generations(self) -> None:
-        """Local-version commit suffixes prevent bake install collisions."""
+    def test_development_commits_are_distinct_immutable_generations(self) -> None:
+        """Local-version commit suffixes prevent development install collisions."""
         first = self._activate_generation("6.6.1.dev0+gabc1234")
         second = self._activate_generation("6.6.1.dev0+gdef5678")
 
@@ -4001,7 +4001,7 @@ class TestInstallationGenerations(unittest.TestCase):
 
     def test_explicit_prerelease_authenticates_only_prerelease_metadata(
             self) -> None:
-        """A bake is opt-in and cannot be confused with a stable release."""
+        """A prerelease is opt-in and cannot be confused with a stable release."""
         version = "6.7.0.dev0+g7b01b2d"
         name = f"agents_live-{version}-py3-none-any.whl"
         artifact_url = (
@@ -4939,14 +4939,14 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(before, preparation.read_bytes())
 
 
-    def test_release_reads_commit_qualified_installed_bake_version(self) -> None:
+    def test_release_reads_commit_qualified_installed_development_version(self) -> None:
         release = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         installed_version = release["_installed_version"]
         scope = installed_version.__globals__
         completed = mock.Mock(
             returncode=0,
             stdout=("agents-live 6.7.0.dev0+g0d2e0159 "
-                    "(channel: bake, commit: 0d2e0159)\n"),
+                    "(channel: development, commit: 0d2e0159)\n"),
             stderr="",
         )
 

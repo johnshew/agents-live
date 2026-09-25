@@ -1,7 +1,7 @@
 ---
 title: Development and Release Process
 description: Business requirements, industry evidence, and the numbered RC to stable release lifecycle
-ms.date: 2026-09-19
+ms.date: 2026-09-25
 ms.topic: concept
 ---
 
@@ -19,9 +19,9 @@ Release candidates are ordinary PEP 440 prerelease packages, not a separate
 product line. Local installation and activation are official parts of this
 process. They do not require public distribution.
 
-There is no bake channel, bake package version, bake deployment stage, or
-bake-to-release promotion approval. Running an RC in real use supplies the
-operational confidence that the former bake stage was intended to provide.
+Running a numbered RC in real use supplies operational confidence within the
+release cycle. It does not introduce another channel, version scheme,
+deployment stage, or promotion approval before final-package acceptance.
 Historical commits, packages and receipts remain intact; their existence does
 not route new work through the retired process.
 
@@ -35,7 +35,7 @@ and validated attempt records establish actual state.
 | ID | Requirement | Observable acceptance |
 |---|---|---|
 | BR1 | Choose the next official version deliberately. | One stable target owns its scope, candidates, decisions and final packages. Rejected RCs do not consume another stable patch version. |
-| BR2 | Make and deploy local RCs rapidly. | The normal RC operation builds or reuses the exact prepared package, installs it side by side, activates it, verifies health and returns a concise result. No separate bake stage or public release is required. |
+| BR2 | Make and deploy local RCs rapidly. | The normal RC operation builds or reuses the exact prepared package, installs it side by side, activates it, verifies health and returns a concise result. No additional release stage or public distribution is required. |
 | BR3 | Make activation official and recoverable. | Record the previous selection and live state; preserve started intent and ownership; restore existing dashboards and watchers; verify readiness; restore the previous runtime on failure. |
 | BR4 | Decide when a candidate is ready to publish. | The developer approves an exact candidate source and known-issue decisions. A successful build, installation, test, or period of real use is evidence, not implicit permission to publish. |
 | BR5 | Ship the selected code, not whatever is newest. | Final runtime code matches the accepted RC. Later fixes remain assigned to the next cycle unless explicitly included and tested in another RC. |
@@ -59,7 +59,7 @@ Python CLI that manages persistent local automation.
 
 | Source | Evidence | Application here |
 |---|---|---|
-| [PyPA version specification](https://packaging.python.org/en/latest/specifications/version-specifiers/#pre-releases) | Defines `X.YrcN` prereleases and final releases, with ordered numeric candidate suffixes. Prereleases are normally excluded from dependency resolution unless requested or otherwise eligible. | Use `6.9.3rcN` and `6.9.3`; advance the RC counter on changed candidate packages. No custom bake version is needed. |
+| [PyPA version specification](https://packaging.python.org/en/latest/specifications/version-specifiers/#pre-releases) | Defines `X.YrcN` prereleases and final releases, with ordered numeric candidate suffixes. Prereleases are normally excluded from dependency resolution unless requested or otherwise eligible. | Use `6.9.3rcN` and `6.9.3`; advance the RC counter on changed candidate packages. Use standard prerelease and final versions. |
 | [Trunk-Based Development: branch for release](https://trunkbaseddevelopment.com/branch-for-release/) | Describes release tags without mandatory branches, late stabilization branches when needed, and selecting an earlier known-good commit rather than necessarily the latest commit. | Develop on `main`; create a release branch only to separate stabilization from continuing development. An accepted older RC can be the release baseline. |
 | [CPython development cycle](https://devguide.python.org/developer-workflow/development-cycle/#release-candidate-rc) | Restricts changes during RC stabilization and aims for no code changes between the accepted RC and final release. Branches allow next-version development to continue. | Freeze runtime scope at acceptance. A runtime correction requires a new candidate; do not add untested fixes during final packaging. CPython's scale and review organization are not copied wholesale. |
 | [PyPA GitHub Actions publishing guide](https://packaging.python.org/en/latest/guides/publishing-package-distribution-releases-using-github-actions-ci-cd-workflows/) | Separates build jobs from publish jobs; publishing downloads already-built distributions. Recommends manual approval for the PyPI environment and describes automatic PEP 740 attestations. | Build final packages once, validate them, approve publication and upload the same files. Keep publication credentials out of build/test jobs. |
@@ -81,8 +81,8 @@ validate them, then publish those exact files without another rebuild.
 
 Independent installed checks, scheduler ownership verification, dashboard
 restoration and safe rollback are project-specific requirements justified by
-the incidents in [testing-methodology.md](testing-methodology.md). Removing bake
-does not remove those requirements. It removes overlapping lifecycle stages.
+the incidents in [testing-methodology.md](testing-methodology.md). The numbered
+RC lifecycle retains those requirements without overlapping release stages.
 
 ## Source and version model
 

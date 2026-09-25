@@ -1,7 +1,7 @@
 ---
 title: Dashboard Validation Plan
 description: Acceptance scenarios, evidence, and release gates for the Agents Live dashboard
-ms.date: 2026-09-06
+ms.date: 2026-09-25
 ms.topic: concept
 ---
 
@@ -292,11 +292,14 @@ and only partial progress toward requirements that explicitly require the
 default all-repositories view.
 
 Issue [#421](https://github.com/johnshew/agents-live/issues/421) is the separate
-qualified-action gate for the v6.6 bake. It requires Run, Start, Stop, and Claim
-from aggregate rows, repository and canonical-agent revalidation at acceptance,
-semantic command outcomes, and repository-qualified durable evidence. The v6.6
-bake is not complete until the installed test version passes this gate together
-with the #419 viewport recovery.
+qualified-action gate for the historical v6.6 release scope. It requires Run,
+Start, Stop, and Claim from aggregate rows, repository and canonical-agent
+revalidation at acceptance, semantic command outcomes, and repository-qualified
+durable evidence. That scope
+requires the installed test version to pass this gate together with the #419
+viewport recovery. Current release cycles collect this evidence against their
+selected numbered RC and independently accept final packages under the
+[release process](../development-release-process.md).
 
 ### Unified operational utility and repository settings
 
