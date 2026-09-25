@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-19
+ms.date: 2026-09-25
 ms.topic: reference
 ---
 
@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- docs: align remaining release guidance and test terminology with numbered RCs.
+  Dashboard plans distinguish historical release scope from current RC and
+  final-package acceptance. Historical records and development-version coverage
+  remain intact.
 - fix: requalify immutable release candidates with committed readiness evidence.
   Explicit recovery retains validator provenance, runs all gates against the
   unchanged artifacts, and rejects runtime drift before local activation.
