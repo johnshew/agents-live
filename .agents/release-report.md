@@ -6,8 +6,8 @@ description: Concurrent release targets, exact candidate evidence, and all in-fl
 # Release cycle reporting
 
 Choose a stable target, prepare and activate numbered local RCs, then accept and
-publish the selected final packages. There is no bake channel. The canonical
-business requirements and industry evidence are in
+publish the selected final packages. These steps form one release cycle. The
+canonical business requirements and industry evidence are in
 [development-release-process.md](../docs/development-release-process.md).
 
 At the start of repository work, refresh authorized remote state and generate:
