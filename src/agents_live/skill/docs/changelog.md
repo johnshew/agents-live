@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-25
+ms.date: 2026-10-01
 ms.topic: reference
 ---
 
@@ -107,6 +107,14 @@ history is retained in the source repository.
   totals remain unknown with per-attempt evidence preserved. Copilot cumulative
   token checkpoints retain disjoint counters, and invalid native numbers stay
   unknown. Version-probe rejection no longer reports a model invocation.
+
+- feat: add preview macOS automation with fswatch and portable installation.
+  macOS watches use FSEvents through separately installed fswatch, preserving
+  existing path filters and debounce. Native process discovery, BSD PTY
+  execution and Homebrew tool lookup support lifecycle operations and minimal
+  scheduled environments. Installer reruns use portable ownership checks.
+  macOS CI covers source and packaged behavior; scheduling retains user cron
+  with its privacy-permission and sleep limitations.
 
 ## 6.9.1 - 2026-09-07
 
