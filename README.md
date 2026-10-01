@@ -87,8 +87,8 @@ same correction task through validated, deterministic write boundaries.
 
 ## Installation
 
-Agents Live supports Linux, WSL, and native Windows. macOS is currently
-untested. First install and sign in to at least one supported provider CLI:
+Agents Live supports Linux, WSL, and native Windows, with initial macOS support
+in preview. First install and sign in to at least one supported provider CLI:
 
 - [Claude Code](https://code.claude.com/docs/en/setup)
 - [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/cli-getting-started)
@@ -121,6 +121,38 @@ the conflicting command, then run the installer again.
 On WSL, use these Linux instructions inside the distribution. The first
 convergence also stages and verifies Windows-side liveness so scheduled work
 can wake the distribution without an open terminal.
+
+### macOS preview
+
+macOS uses the user crontab for schedules and `fswatch` for file watches.
+Install `fswatch` separately with your package manager, for example:
+
+```bash
+brew install fswatch
+```
+
+Use the verified shell bootstrap from a release containing macOS support, then
+initialize your repository:
+
+```bash
+sh install.sh
+agents-live --repo /path/to/repository init
+agents-live --repo /path/to/repository doctor
+```
+
+The installer creates the same stable `agents-live` and `al` links in
+`~/.local/bin` as on Linux. Open a new shell if that directory is not on `PATH`.
+Apple Silicon Homebrew tools in `/opt/homebrew/bin` and Intel tools in
+`/usr/local/bin` are discoverable from a minimal cron environment.
+
+Native event tests cover Apple Silicon macOS 26.7.1 with `fswatch` 1.22.0.
+Intel macOS is not intentionally excluded, but has not been locally verified.
+This is preview support, not a claim for every macOS or `fswatch` version.
+Cron does not wake a sleeping Mac or catch up missed runs. Protected repository
+locations may require Full Disk Access for `/usr/sbin/cron`; see
+[macOS diagnostics](src/agents_live/skill/docs/diagnostics.md#macos-preview).
+Provider-backed and native-crontab operational acceptance remain separate from
+the automated tests.
 
 ### Windows
 

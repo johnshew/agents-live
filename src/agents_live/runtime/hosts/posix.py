@@ -152,7 +152,7 @@ class PosixHost:
         return Health(readable, detail=() if readable else ("crontab is unreadable",))
 
     def change_source(self, roots: Sequence[str]):
-        return watchsource.PosixEventSource([Path(item) for item in roots], cwd=Path.cwd())
+        return watchsource.create_source(roots, cwd=Path.cwd())
 
 
 def _address(subscription: Subscription) -> tuple[str, str]:

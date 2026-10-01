@@ -128,6 +128,18 @@ class LocalProcesses:
         system.terminate(ref.pid)
 
     def owned(self, role: str | None = None) -> list[ProcessRef]:
+        if system.id() == system.MACOS:
+            from .macos_processes import snapshot
+
+            found: list[ProcessRef] = []
+            for pid, argv, started in snapshot():
+                parsed = _markers(argv)
+                if parsed is None or (role is not None and parsed["role"] != role):
+                    continue
+                found.append(ProcessRef(
+                    pid, started, Path(argv[0]).name, parsed["role"],
+                    parsed["key"], parsed["fingerprint"]))
+            return found
         proc = Path("/proc")
         if not proc.is_dir():
             return []
@@ -286,8 +298,13 @@ class LocalChildRunner:
     ) -> ChildResult:
         from dataclasses import replace
 
+        command = (
+            ["script", "-q", os.devnull, *argv]
+            if system.id() == system.MACOS
+            else ["script", "-qec", shlex.join(argv), os.devnull]
+        )
         result = self.run_child(
-            ["script", "-qec", shlex.join(argv), os.devnull],
+            command,
             cwd=cwd, env=env, input_text=input_text, timeout=timeout)
         return replace(result, argv=tuple(argv), stdout=result.stdout.replace("\r", ""))
 

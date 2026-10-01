@@ -144,7 +144,32 @@ def _probe_watch(operation: str) -> CapabilityFailure | None:
     """Can this host be told when a file changed?"""
     if hostruntime.id() == hostruntime.WINDOWS:
         return _probe_directory_changes(operation)
+    if hostruntime.id() == hostruntime.MACOS:
+        return _probe_fswatch(operation)
     return _probe_inotify(operation)
+
+
+def _probe_fswatch(operation: str) -> CapabilityFailure | None:
+    executable = shutil.which("fswatch") or hostruntime.find_tool("fswatch")
+    if executable is None:
+        return CapabilityFailure(
+            "dependency_missing", "watch", operation,
+            "fswatch not found (install fswatch with your package manager)")
+    try:
+        completed = subprocess.run(
+            [executable, "--list-monitors"], capture_output=True, timeout=10,
+            **hostruntime.CHILD_TEXT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CapabilityFailure(
+            "dependency_missing", "watch", operation,
+            f"cannot run fswatch: {exc}")
+    if completed.returncode != 0 or "fsevents_monitor" not in completed.stdout.split():
+        detail = completed.stderr.strip()[:200]
+        return CapabilityFailure(
+            "dependency_missing", "watch", operation,
+            "fswatch FSEvents monitor is unavailable; reinstall fswatch"
+            + (f": {detail}" if detail else ""))
+    return None
 
 
 def _probe_directory_changes(operation: str) -> CapabilityFailure | None:

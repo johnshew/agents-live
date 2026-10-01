@@ -47,17 +47,12 @@ def find_uv() -> str:
     found = shutil.which("uv")
     if found:
         return found
-    candidates = [
-        Path.home() / ".local" / "bin" / "uv",
-        Path.home() / ".cargo" / "bin" / "uv",
-        Path("/usr/local/bin/uv"),
-    ]
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+    found = _hostruntime().find_tool("uv")
+    if found:
+        return found
     raise FileNotFoundError(
         "uv not found in PATH or common install locations "
-        "(~/.local/bin, ~/.cargo/bin, /usr/local/bin)"
+        "(~/.local/bin, ~/.cargo/bin, /usr/local/bin; /opt/homebrew/bin on macOS)"
     )
 
 

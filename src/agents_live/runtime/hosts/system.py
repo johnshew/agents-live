@@ -444,6 +444,9 @@ def system_path_dirs() -> list[str]:
         system32 = Path(root) / "System32"
         return [str(system32), root, str(system32 / "Wbem"),
                 str(system32 / "WindowsPowerShell" / "v1.0")]
+    if sys.platform == "darwin":
+        return ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                "/usr/sbin", "/sbin"]
     return ["/usr/local/bin", "/usr/bin", "/bin"]
 
 
@@ -501,6 +504,8 @@ def find_tool(name: str) -> str | None:
     candidates = [home / ".local" / "bin" / name,
                   home / ".cargo" / "bin" / name,
                   Path("/usr/local/bin") / name]
+    if sys.platform == "darwin":
+        candidates.insert(2, Path("/opt/homebrew/bin") / name)
     if name in ("node", "npx"):
         candidates.extend(
             sorted((home / ".nvm" / "versions" / "node").glob(f"*/bin/{name}"),
@@ -1165,6 +1170,9 @@ else:
         the process it names. None means the answer is unavailable, which
         callers must treat as unknown rather than as a match.
         """
+        if sys.platform == "darwin":
+            from .macos_processes import start_time
+            return start_time(pid)
         try:
             fields = Path(f"/proc/{pid}/stat").read_text(
                 encoding="utf-8").rsplit(")", 1)[-1].split()
@@ -1181,6 +1189,9 @@ else:
 
     def process_start_token(pid: int) -> int | None:
         """Exact kernel start ticks for durable process identity."""
+        if sys.platform == "darwin":
+            started = process_start_time(pid)
+            return round(started * 1_000_000) if started is not None else None
         try:
             fields = Path(f"/proc/{pid}/stat").read_text(
                 encoding="utf-8").rsplit(")", 1)[-1].split()
@@ -1213,6 +1224,11 @@ else:
 
     def process_command_lines() -> list[tuple[int, str]]:
         """Every visible process as ``(pid, command line)``."""
+        if sys.platform == "darwin":
+            import shlex
+
+            from .macos_processes import snapshot
+            return [(pid, shlex.join(argv)) for pid, argv, _started in snapshot()]
         try:
             completed = subprocess.run(
                 ["ps", "-eo", "pid=,args="], capture_output=True, **CHILD_TEXT,

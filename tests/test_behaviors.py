@@ -85,6 +85,341 @@ _PREVIOUS_INSTALL_ROOT: str | None = None
 _PREVIOUS_CONFIG_HOME: str | None = None
 
 
+class TestBootstrapProcessLifetime(unittest.TestCase):
+    def test_windows_cleanup_owns_descendants_after_the_leader_exits(self) -> None:
+        readiness = runpy.run_path(str(REPOSITORY / "tools" / "bootstrap-readiness.py"))
+        windows = mock.Mock()
+        windows.name = "nt"
+        process = mock.Mock(pid=42, returncode=0)
+        process.poll.return_value = 0
+        process.communicate.return_value = ("", "")
+        stop_tree = mock.Mock()
+        with (
+            mock.patch.dict(readiness["_execute"].__globals__, {"os": windows}),
+            mock.patch.object(subprocess, "Popen", return_value=process) as launch,
+            mock.patch.object(hostruntime, "supervise_child", return_value=stop_tree) as own,
+        ):
+            self.assertEqual("", readiness["_run"](["fixture"], environment={}))
+        self.assertEqual(0x00000004, launch.call_args.kwargs["creationflags"])
+        own.assert_called_once_with(process)
+        stop_tree.assert_called_once_with()
+        self.assertTrue(process.stdout.close.called)
+        self.assertTrue(process.stderr.close.called)
+
+    def test_commands_reap_descendants_after_wait_exit_and_redirected_output(self) -> None:
+        readiness = runpy.run_path(str(REPOSITORY / "tools" / "bootstrap-readiness.py"))
+        child = '''
+from pathlib import Path
+import os
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(60)
+'''
+        parent = '''
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+output = subprocess.DEVNULL if sys.argv[3] in ("failure", "success") else None
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2]], stdout=output, stderr=output)
+while not Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+if sys.argv[3] != "wait":
+    raise SystemExit(0 if sys.argv[3] == "success" else 7)
+time.sleep(60)
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            for runner in ("_run", "_run_failure"):
+                for mode in ("wait", "exit", "failure", "success"):
+                    with self.subTest(runner=runner, leader=mode):
+                        pid_file = Path(temporary) / f"{runner}-{mode}.pid"
+                        command = [
+                            sys.executable, "-c", parent, child, str(pid_file), mode]
+                        before = time.monotonic()
+                        try:
+                            succeeds = (
+                                mode == "failure" and runner == "_run_failure"
+                                or mode == "success" and runner == "_run")
+                            if succeeds:
+                                self.assertEqual("", readiness[runner](
+                                    command, environment=dict(os.environ), timeout=1))
+                            else:
+                                message = {
+                                    "failure": r"failed \(7\)",
+                                    "success": "unexpectedly succeeded",
+                                }.get(mode, "timed out")
+                                with self.assertRaisesRegex(readiness["ReadinessError"], message):
+                                    readiness[runner](
+                                        command, environment=dict(os.environ), timeout=1)
+                            self.assertLess(time.monotonic() - before, 15)
+                            self.assertTrue(pid_file.is_file())
+                            pid = int(pid_file.read_text())
+                            deadline = time.monotonic() + 5
+                            while hostruntime.is_alive(pid) and time.monotonic() < deadline:
+                                time.sleep(0.05)
+                            self.assertFalse(hostruntime.is_alive(pid))
+                        finally:
+                            if pid_file.is_file():
+                                pid = int(pid_file.read_text())
+                                if hostruntime.is_alive(pid):
+                                    hostruntime.terminate(pid, grace_s=0)
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX bootstrap")
+class TestPosixBootstrap(unittest.TestCase):
+    """Execute download and ownership checks; simulate only uv package activation."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="bootstrap with spaces-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.links = self.home / ".local" / "bin"
+        self.links.mkdir(parents=True)
+        self.install = self.root / "install"
+        self.tools = self.root / "uv tools"
+        self.legacy = self.tools / "agents-live"
+        self.actions = self.root / "actions"
+        fixture_bin = self.root / "fixture bin"
+        fixture_bin.mkdir()
+        fixture = fixture_bin / "uv.py"
+        fixture.write_text('''
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args[0] == "run":
+    script = args.index("--python") + 2
+    os.execv(sys.executable, [sys.executable, *args[script:]])
+legacy = Path(os.environ["UV_TOOL_DIR"]) / "agents-live"
+if args == ["tool", "list"]:
+    if legacy.is_dir():
+        print("agents-live v1.2.2")
+elif args == ["tool", "dir"]:
+    if os.environ.get("FIXTURE_TOOL_DIR_FAIL"):
+        raise SystemExit(42)
+    print(os.environ.get("FIXTURE_TOOL_DIR", str(legacy.parent)))
+elif args[:2] == ["tool", "run"]:
+    assert "install-release" in args and "--activate" in args
+    root = Path(args[args.index("--install-root") + 1])
+    version = args[args.index("install-release") + 1]
+    commands = root / "current" / "bin"
+    commands.mkdir(parents=True, exist_ok=True)
+    for name in ("agents-live", "al"):
+        command = commands / name
+        command.write_text("#!/bin/sh\\nprintf 'agents-live " + version + "\\\\n'\\n")
+        command.chmod(0o755)
+    with Path(os.environ["FIXTURE_ACTIONS"]).open("a") as stream:
+        stream.write("activate\\n")
+elif args == ["tool", "uninstall", "agents-live"]:
+    with Path(os.environ["FIXTURE_ACTIONS"]).open("a") as stream:
+        stream.write("uninstall\\n")
+else:
+    raise SystemExit(f"unexpected uv invocation: {args}")
+''', encoding="utf-8")
+        uv = fixture_bin / "uv"
+        uv.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+            f"{shlex.quote(str(fixture))} \"$@\"\n", encoding="utf-8")
+        uv.chmod(0o755)
+        readlink = fixture_bin / "readlink"
+        readlink.write_text(
+            "#!/bin/sh\nprintf 'readlink: unsupported option\\n' >&2\nexit 1\n",
+            encoding="utf-8")
+        readlink.chmod(0o755)
+        self.readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "bootstrap-readiness.py"))
+        server = self.readiness["_server"](
+            "1.2.3", {"agents_live-1.2.3-py3-none-any.whl": b"fixture wheel"})
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.environment = {
+            **os.environ,
+            "HOME": str(self.home),
+            "TMPDIR": str(self.root),
+            "AGENTS_LIVE_REPO": "",
+            "AGENTS_LIVE_INSTALL_ROOT": str(self.install),
+            "AGENTS_LIVE_RELEASE_API": (
+                f"http://127.0.0.1:{server.server_port}/releases"),
+            "AGENTS_LIVE_RELEASE_DOWNLOAD_ROOT": (
+                f"http://127.0.0.1:{server.server_port}/download"),
+            "UV_TOOL_DIR": str(self.tools),
+            "UV_NO_INDEX": "1",
+            "FIXTURE_ACTIONS": str(self.actions),
+            "PATH": os.pathsep.join(
+                (str(fixture_bin), str(self.links), os.defpath)),
+            **{key: str(self.root / value) for key, value in _ISOLATED_HOMES.items()},
+        }
+        self.command = ["sh", str(REPOSITORY / "install.sh"), "1.2.3"]
+
+    def _run(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            self.command, cwd=self.root, env=self.environment,
+            capture_output=True, text=True, timeout=30)
+
+    def _assert_ready(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("Agents Live is ready:", result.stdout)
+        self.assertIn("agents-live 1.2.3", result.stdout)
+        for name in ("agents-live", "al"):
+            link = self.links / name
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(
+                (self.install / "current" / "bin" / name).resolve(strict=True),
+                link.resolve(strict=True))
+
+    def _legacy_links(self) -> None:
+        commands = self.legacy / "bin"
+        commands.mkdir(parents=True)
+        for name in ("agents-live", "al"):
+            target = commands / name
+            target.write_text("legacy command\n", encoding="utf-8")
+            (self.links / name).symlink_to(
+                target.relative_to(self.links, walk_up=True))
+
+    def test_clean_and_owned_reruns_with_spaces(self) -> None:
+        self._assert_host_fixture_isolation()
+        self._assert_ready(self._run())
+        alias = self.root / "install alias"
+        alias.symlink_to(self.install, target_is_directory=True)
+        for name in ("agents-live", "al"):
+            link = self.links / name
+            link.unlink()
+            link.symlink_to(
+                (alias / "current" / "bin" / name).relative_to(
+                    self.links, walk_up=True))
+
+        self._assert_ready(self._run())
+        self.assertEqual("activate\nactivate\n", self.actions.read_text())
+        owned = (self.links / "agents-live").readlink()
+        foreign = self.root / "foreign command"
+        foreign.write_text("foreign command\n", encoding="utf-8")
+        (self.links / "al").unlink()
+        (self.links / "al").symlink_to(foreign)
+
+        refusal = self._run()
+
+        self.assertNotEqual(0, refusal.returncode, refusal.stdout + refusal.stderr)
+        self.assertIn("already exists and does not point", refusal.stderr)
+        self.assertEqual(owned, (self.links / "agents-live").readlink())
+        self.assertEqual(foreign, (self.links / "al").readlink())
+        self.assertEqual("foreign command\n", foreign.read_text())
+        self.assertEqual("activate\nactivate\n", self.actions.read_text())
+
+    def test_legacy_links_migrate_with_canonical_directory_and_missing_current(self) -> None:
+        self._legacy_links()
+        alias = self.root / "uv alias"
+        alias.symlink_to(self.tools, target_is_directory=True)
+        self.environment["FIXTURE_TOOL_DIR"] = str(alias)
+
+        self._assert_ready(self._run())
+        self.assertEqual("activate\nuninstall\n", self.actions.read_text())
+
+    def test_foreign_and_unresolved_collisions_leave_installation_untouched(self) -> None:
+        self.readiness["_posix_collision_checks"](
+            self.command, environment=self.environment)
+        self.assertFalse(self.actions.exists())
+
+    def _assert_host_fixture_isolation(self) -> None:
+        environment = dict(self.environment)
+        guard = self.root / "scheduler guard"
+        guard.mkdir()
+        blocked = guard / "crontab"
+        blocked.write_text(
+            "#!/bin/sh\nprintf 'native scheduler access blocked\\n' >&2\nexit 97\n",
+            encoding="utf-8")
+        blocked.chmod(0o755)
+        environment["PATH"] = str(guard) + os.pathsep + environment["PATH"]
+        self.readiness["_isolate_posix_host"](self.root, environment)
+        probe = '''
+from pathlib import Path
+import subprocess
+import sys
+from agents_live import runtime
+from agents_live.cli.commands.internal import main
+from agents_live.runtime.hosts.memory import MemorySupervisor
+from agents_live.runtime.hosts.posix import PosixHost
+
+assert isinstance(runtime.current(), PosixHost)
+assert isinstance(runtime.current().supervisor, MemorySupervisor)
+assert runtime.current().supervisor.owned("watcher") == []
+assert main(["maintain"]) == 0
+first = subprocess.check_output(["crontab", "-l"], text=True)
+assert first.startswith("# bootstrap fixture\\n")
+assert "agents-live:v2:" in first
+assert main(["maintain"]) == 0
+assert subprocess.check_output(["crontab", "-l"], text=True) == first
+print("isolated maintenance passed")
+'''
+        output = self.readiness["_run"](
+            [sys.executable, "-c", probe], environment=environment, timeout=30)
+        self.assertIn("isolated maintenance passed", output)
+        table = self.root / "host fixture" / "crontab.txt"
+        self.assertIn("agents-live:v2:", table.read_text())
+        before = table.read_text()
+        environment["PATH"] = os.pathsep.join(
+            entry for entry in environment["PATH"].split(os.pathsep)
+            if entry != str(table.parent))
+        failure = self.readiness["_run_failure"](
+            [sys.executable, "-c", probe], environment=environment, timeout=30)
+        self.assertIn("trigger store is unreadable", failure)
+        self.assertEqual(before, table.read_text())
+
+    def test_invalid_legacy_collisions_and_inventory_never_activate(self) -> None:
+        self._legacy_links()
+        link = self.links / "al"
+        link.unlink()
+        sibling = self.tools / "agents-live-foreign" / "al"
+        sibling.parent.mkdir()
+        sibling.write_text("foreign command\n", encoding="utf-8")
+        for kind in ("broken", "foreign", "legacy-directory", "missing-directory",
+                     "empty-directory", "failed-directory"):
+            with self.subTest(kind=kind):
+                link.unlink(missing_ok=True)
+                self.environment.pop("FIXTURE_TOOL_DIR", None)
+                self.environment.pop("FIXTURE_TOOL_DIR_FAIL", None)
+                destination = {
+                    "broken": self.legacy / "bin" / "missing",
+                    "legacy-directory": self.legacy,
+                }.get(kind, sibling)
+                link.symlink_to(destination)
+                if kind == "missing-directory":
+                    self.environment["FIXTURE_TOOL_DIR"] = str(self.root / "missing")
+                if kind == "empty-directory":
+                    self.environment["FIXTURE_TOOL_DIR"] = ""
+                if kind == "failed-directory":
+                    self.environment["FIXTURE_TOOL_DIR_FAIL"] = "1"
+                before = {
+                    name: (self.links / name).readlink()
+                    for name in ("agents-live", "al")
+                }
+
+                result = self._run()
+
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertIn("agents-live:", result.stderr)
+                if kind == "empty-directory":
+                    self.assertIn("uv returned no directory", result.stderr)
+                elif kind == "failed-directory":
+                    self.assertIn("could not locate the existing uv tool", result.stderr)
+                else:
+                    self.assertIn("already exists and does not point", result.stderr)
+                self.assertEqual(before, {
+                    name: (self.links / name).readlink()
+                    for name in ("agents-live", "al")
+                })
+                self.assertEqual("foreign command\n", sibling.read_text())
+                self.assertFalse(self.install.exists())
+                self.assertFalse(self.actions.exists())
+
+
 @unittest.skipUnless(os.name == "nt", "Windows bootstrap")
 class TestWindowsBootstrap(unittest.TestCase):
     def test_fresh_uv_and_empty_inventory_complete_in_supported_shells(self):
@@ -5340,6 +5675,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
         workflow = self._workflow_text("test.yml")
         jobs = yaml.safe_load(workflow)["jobs"]
+        hosts = ("ubuntu-latest", "windows-latest", "macos-latest")
+        for job in ("source", "readiness", "bootstrap-readiness", "test"):
+            with self.subTest(job=job):
+                matrix = jobs[job]["strategy"]["matrix"]["os"]
+                for host in hosts:
+                    self.assertIn(
+                        f"inputs.os == '{host}' && '[\"{host}\"]'", matrix)
+                self.assertIn(f"|| '{json.dumps(hosts)}'", matrix)
+                self.assertEqual("${{ matrix.os }}", jobs[job]["runs-on"])
         self.assertEqual(
             "${{ steps.upload.outputs.artifact-id }}",
             jobs["wheel"]["outputs"]["artifact-id"])
@@ -5353,6 +5697,18 @@ class TestCrossModuleAgreements(unittest.TestCase):
                              download["artifact-ids"])
             self.assertTrue(download["merge-multiple"])
             self.assertNotIn("name", download)
+            verification = next(
+                step for step in jobs[job]["steps"]
+                if "WHEEL_SHA256" in step.get("env", {}))
+            self.assertEqual(
+                "${{ needs.wheel.outputs.sha256 }}",
+                verification["env"]["WHEEL_SHA256"])
+            self.assertEqual(
+                "${{ needs.wheel.outputs.name }}",
+                verification["env"]["WHEEL_NAME"])
+            self.assertIn(
+                'echo "$WHEEL_SHA256  dist/$WHEEL_NAME" | shasum -a 256 --check -',
+                verification["run"])
         self.assertRegex(workflow, r"(?m)^  source:")
         self.assertRegex(workflow, r"(?m)^  wheel:")
         self.assertRegex(workflow, r"(?m)^  readiness:")
@@ -5361,7 +5717,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertIn("suite:", workflow)
         self.assertIn("exact-wheel-${{ github.run_id }}", workflow)
         self.assertIn("needs.wheel.outputs.sha256", workflow)
-        self.assertIn("sha256sum --check", workflow)
         self.assertIn("--wheel dist/${{ needs.wheel.outputs.name }}", workflow)
         self.assertIn("tools/release.py --build-artifacts", workflow)
         self.assertIn("tools/bootstrap-readiness.py", workflow)

@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-09-19
+ms.date: 2026-10-01
 ms.topic: overview
 ---
 
@@ -123,7 +123,7 @@ agents-live init --repo /path/to/repository
 agents-live doctor
 ```
 
-On Linux and WSL, the installer exposes `agents-live` and `al` through
+On Linux, WSL, and macOS, the installer exposes `agents-live` and `al` through
 `~/.local/bin`. Open a new shell if that directory was not already on the
 current shell's `PATH`. Installation refuses to replace either name when it
 already exists there and does not point to the stable `current` command;
@@ -179,9 +179,25 @@ The package also installs `al` as an exact shorthand for `agents-live`, so
 installation if an unrelated `al` executable already exists; remove or rename
 that executable before retrying rather than using `--force`.
 
-Python 3.12 or newer is required. POSIX schedules use the user crontab and
-watchers use `inotifywait`. Native Windows schedules use Task Scheduler and
+Python 3.12 or newer is required. Linux and WSL schedules use the user crontab
+and watchers use `inotifywait`. Native Windows schedules use Task Scheduler and
 watchers use directory change notifications.
+
+macOS support is in preview. It retains the user crontab for schedules and uses
+the `fswatch` FSEvents monitor for file watches. Install `fswatch` separately,
+for example with `brew install fswatch`, and use the verified `install.sh`
+from a release containing macOS support. Then run
+`agents-live --repo /path/to/repository init` and `doctor`.
+Homebrew tools in `/opt/homebrew/bin` on Apple Silicon and `/usr/local/bin` on
+Intel are discoverable from a minimal cron environment.
+
+Native event tests cover Apple Silicon macOS 26.7.1 and `fswatch` 1.22.0.
+Intel is not intentionally excluded but has not been locally verified; other
+macOS and `fswatch` versions are not claimed as tested. Cron neither wakes a
+sleeping Mac nor catches up missed runs. Protected repository locations may
+require Full Disk Access for `/usr/sbin/cron`. See
+[macOS diagnostics](diagnostics.md#macos-preview). Provider-backed and native
+crontab operational acceptance remain separate from automated tests.
 
 Automatic maintenance rotates framework logs and removes retained transcripts
 and processor output after 30 days by default. Set `retention_days` to a

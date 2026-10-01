@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-09-19
+ms.date: 2026-10-01
 ms.topic: troubleshooting
 ---
 
@@ -79,6 +79,50 @@ agents-live logs --columns run_id,usage,attempts
 Older records without these measurements remain null. This accounting does
 not introduce nested spans, tracing exporters, aggregate usage summaries, or
 a model-bypass processor signal.
+
+## macOS preview
+
+macOS schedules use your user crontab; file watches use `fswatch` with its
+FSEvents monitor. If `doctor` or `start` reports `fswatch not found`, install
+`fswatch` with your package manager. Homebrew users can run:
+
+```bash
+brew install fswatch
+fswatch --version
+fswatch --list-monitors
+agents-live --repo /path/to/repository doctor
+```
+
+The monitor list must include `fsevents_monitor`. A broken executable or a build
+without that monitor is reported explicitly; reinstall a macOS build rather than
+installing Linux `inotify-tools`. Watcher lifecycle logs identify the mechanism
+as `fswatch`. Unexpected child exit is reported as a watch failure, not hidden
+by an internal restart loop.
+
+The shell bootstrap links `agents-live` and `al` through `~/.local/bin`.
+If the absolute command works but the short name does not, open a new shell
+or add that directory to the current shell's `PATH`. Cron-launched work also
+searches the standard Apple Silicon and Intel Homebrew tool directories.
+
+Check scheduler readability and desired-state drift without changing it:
+
+```bash
+crontab -l
+agents-live --repo /path/to/repository status
+agents-live --repo /path/to/repository doctor --repair --dry-run
+agents-live --repo /path/to/repository logs timeline --all
+```
+
+An empty user crontab is valid. If scheduled work can run manually but cannot
+read a repository in Desktop, Documents, Downloads, or another protected
+location, review macOS privacy restrictions. Full Disk Access for
+`/usr/sbin/cron` in System Settings may be needed for that location. It is not
+required for every repository, and Agents Live does not grant it automatically.
+Cron does not wake the computer or replay schedules missed during sleep.
+
+The initial native event evidence is Apple Silicon macOS 26.7.1 with
+`fswatch` 1.22.0. Preview status does not certify other OS versions or replace
+provider-backed and native-crontab acceptance.
 
 ## Native Windows first run
 

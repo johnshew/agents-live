@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -36,6 +39,7 @@ else:
 # rather than the platform. `mechanism` decides which one this host has;
 # everything that reports on watching takes the name from here.
 INOTIFY = "inotifywait"
+FSWATCH = "fswatch"
 DIRECTORY_CHANGES = "ReadDirectoryChangesW"
 
 
@@ -139,17 +143,135 @@ class PosixEventSource:
                     stream.close()
 
 
+class MacEventSource:
+    """NUL-framed absolute paths from the fswatch FSEvents monitor."""
+
+    EVENTS = ("Created", "Updated", "Removed", "Renamed")
+    DIAGNOSTIC_LIMIT = 8192
+
+    def __init__(self, directories: Sequence[str | Path], *, cwd: Path) -> None:
+        self._cwd = cwd
+        self.directories = [(cwd / directory).resolve() for directory in directories]
+        self._process: subprocess.Popen[bytes] | None = None
+        self._pending = b""
+        self._diagnostic = b""
+        self._stderr_open = False
+        self._stdout_open = False
+
+    def start(self) -> None:
+        if self._process is not None:
+            raise WatchFailed("fswatch source is already started")
+        try:
+            self._process = subprocess.Popen(
+                [shutil.which(FSWATCH) or hostruntime.find_tool(FSWATCH) or FSWATCH,
+                 "-0", "-r", "-m", "fsevents_monitor", "-l", "0.1",
+                 *(f"--event={event}" for event in self.EVENTS),
+                 "--", *(str(directory) for directory in self.directories)],
+                cwd=self._cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            for stream in (self._process.stdout, self._process.stderr):
+                if stream is None:
+                    raise WatchFailed("fswatch output pipe was not available")
+                os.set_blocking(stream.fileno(), False)
+            self._stdout_open = self._stderr_open = True
+        except OSError as exc:
+            self.stop()
+            raise WatchFailed(f"cannot start fswatch: {exc}") from exc
+
+    def poll(self, timeout: float | None) -> list[str]:
+        import select
+
+        process = self._process
+        if process is None or process.stdout is None or process.stderr is None:
+            raise WatchFailed("fswatch source was not started")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        paths: list[str] = []
+        while True:
+            streams = []
+            if self._stdout_open:
+                streams.append(process.stdout)
+            if self._stderr_open:
+                streams.append(process.stderr)
+            if not self._stdout_open:
+                raise WatchFailed(self._exit_reason())
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            ready, _, _ = select.select(streams, [], [], remaining)
+            if not ready:
+                if process.poll() is not None:
+                    raise WatchFailed(self._exit_reason())
+                return paths
+            for stream in ready:
+                try:
+                    raw = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if stream is process.stderr:
+                    self._stderr_open = bool(raw)
+                    self._diagnostic = (
+                        self._diagnostic + raw)[-self.DIAGNOSTIC_LIMIT:]
+                elif raw:
+                    records = (self._pending + raw).split(b"\0")
+                    self._pending = records.pop()
+                    paths.extend(os.fsdecode(record) for record in records if record)
+                else:
+                    self._stdout_open = False
+            if paths:
+                return paths
+            if deadline is not None and time.monotonic() >= deadline:
+                return []
+
+    def _exit_reason(self) -> str:
+        process = self._process
+        if process is not None and process.stderr is not None:
+            try:
+                raw = os.read(process.stderr.fileno(), self.DIAGNOSTIC_LIMIT)
+            except BlockingIOError:
+                raw = b""
+            self._diagnostic = (self._diagnostic + raw)[-self.DIAGNOSTIC_LIMIT:]
+        code = process.poll() if process is not None else None
+        detail = self._diagnostic.decode("utf-8", errors="replace").strip()
+        return f"fswatch exited (rc={code})" + (f": {detail}" if detail else "")
+
+    def stop(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        finally:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            self._process = None
+            self._pending = self._diagnostic = b""
+            self._stdout_open = self._stderr_open = False
+
+
+def create_source(directories, *, cwd: Path) -> EventSource:
+    """Construct this host's source without starting its lifetime."""
+    if hostruntime.id() == hostruntime.WINDOWS:
+        return WindowsEventSource(directories)
+    if hostruntime.id() == hostruntime.MACOS:
+        return MacEventSource(directories, cwd=cwd)
+    return PosixEventSource(directories, cwd=cwd)
+
+
 def open_source(directories, *, cwd: Path) -> EventSource:
     """The event source this host has, started and ready to poll."""
-    if hostruntime.id() == hostruntime.WINDOWS:
-        source: EventSource = WindowsEventSource(directories)
-    else:
-        source = PosixEventSource(directories, cwd=cwd)
+    source = create_source(directories, cwd=cwd)
     source.start()
     return source
 
 
 def mechanism() -> str:
     """What this host watches files with, for the watcher's own log."""
-    return (DIRECTORY_CHANGES if hostruntime.id() == hostruntime.WINDOWS
-            else INOTIFY)
+    if hostruntime.id() == hostruntime.WINDOWS:
+        return DIRECTORY_CHANGES
+    return FSWATCH if hostruntime.id() == hostruntime.MACOS else INOTIFY
