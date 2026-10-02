@@ -135,26 +135,49 @@ bin="$root/current/bin"
 link_root="$HOME/.local/bin"
 legacy_root=""
 if "$uv" tool list 2>/dev/null | grep -q '^agents-live '; then
-  legacy_root=$({ "$uv" tool dir 2>/dev/null || true; } | sed -n '1p')/agents-live
+  if ! legacy_directory=$("$uv" tool dir); then
+    echo "agents-live: could not locate the existing uv tool installation" >&2
+    exit 1
+  fi
+  if [ -z "$legacy_directory" ]; then
+    echo "agents-live: uv returned no directory for the existing tool installation" >&2
+    exit 1
+  fi
+  legacy_root="$legacy_directory/agents-live"
 fi
 
 # Refuse every foreign collision before activation, profile changes, or
 # retirement of an older uv-managed installation.
-for name in agents-live al; do
-  link="$link_root/$name"
-  target="$bin/$name"
-  if [ -e "$link" ] || [ -L "$link" ]; then
-    existing=$(readlink -f "$link" 2>/dev/null || true)
-    expected=$(readlink -f "$target" 2>/dev/null || true)
-    case "$existing" in
-      "$expected") [ -n "$expected" ] && continue ;;
-      "$legacy_root"/*) [ -n "$legacy_root" ] && continue ;;
-    esac
-    echo "agents-live: cannot create $link because it already exists and does not point to $target" >&2
-    echo "Remove or rename the existing command, then run the installer again." >&2
-    exit 1
-  fi
-done
+cat >"$temporary/collisions.py" <<'PY'
+import sys
+from pathlib import Path
+
+link_root, bin_root, legacy_root = sys.argv[1:]
+for name in ("agents-live", "al"):
+    link = Path(link_root, name)
+    target = Path(bin_root, name)
+    try:
+        if link.is_symlink():
+            existing = link.resolve(strict=True)
+            if target.exists() and existing == target.resolve(strict=True):
+                continue
+            if legacy_root:
+                legacy = Path(legacy_root).resolve(strict=True)
+                if legacy.is_dir() and legacy in existing.parents:
+                    continue
+        elif not link.exists():
+            continue
+    except (OSError, RuntimeError) as error:
+        print(f"agents-live: could not resolve command ownership: {error}",
+              file=sys.stderr)
+    print(f"agents-live: cannot create {link} because it already exists "
+          f"and does not point to {target}", file=sys.stderr)
+    print("Remove or rename the existing command, then run the installer again.",
+          file=sys.stderr)
+    raise SystemExit(1)
+PY
+"$uv" run --no-project --python 3.12 \
+  "$temporary/collisions.py" "$link_root" "$bin" "$legacy_root"
 
 # The bootstrap authenticates bytes and hands them to the package. It does
 # not know the installation layout: the wheel's own install-release builds,

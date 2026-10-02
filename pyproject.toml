@@ -13,7 +13,12 @@ requires-python = ">=3.12"
 # mcp is held below 2.0: that release removed mcp.server.fastmcp, which
 # the pipeline server is written against (#205). Lift the bound with the
 # port to the 2.x server API, not before.
-dependencies = ["PyYAML", "mcp[cli]<2", "jsonschema"]
+dependencies = [
+    "PyYAML",
+    "mcp[cli]<2",
+    "jsonschema",
+    "psutil>=7; sys_platform == 'darwin'",
+]
 classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

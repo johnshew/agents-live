@@ -131,23 +131,27 @@ CI runs the same suites one file at a time
 so the query tool is started rather than skipped. Reproduce that form when a
 failure appears only in CI.
 
-The Test workflow runs both Ubuntu and Windows for pull requests and merge
+The Test workflow runs Ubuntu, Windows, and macOS for pull requests and merge
 groups. Documentation-only changes retain the Linux export audit and required
 job contexts but skip source suites and artifact startup. Ordinary `main` pushes
 do not repeat a PR's identical matrix; the publish workflow verifies the exact
-release commit on both hosts.
+release commit on all three hosts.
 For code changes, the three source suites run as independent jobs on each host
 while Linux builds the complete wheel, source distribution, and bootstrap
-scripts in parallel. Both hosts verify the wheel's recorded
+scripts in parallel. All three hosts verify the wheel's recorded
 SHA-256, run packaged dashboard readiness against those exact bytes, and run
 the platform bootstrap twice from a clean temporary root with Python indexes
 disabled for Agents Live. The bootstrap gate verifies provenance, activation,
 the stable current command, ownership, exact version, and idempotency. The
-aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain the
-stable required checks and fail unless every selected job succeeds.
-Its manual dispatch accepts `all`, `ubuntu-latest`, or `windows-latest` when a
+aggregate `test (ubuntu-latest)` and `test (windows-latest)` contexts remain
+unchanged; `test (macos-latest)` adds the preview host gate. Each fails unless
+every selected job succeeds.
+Its manual dispatch accepts `all`, `ubuntu-latest`, `windows-latest`, or
+`macos-latest` when a
 single host needs to be isolated. The publish workflow calls the same workflow
-against the resolved release commit and cannot publish until both hosts pass.
+against the resolved release commit and cannot publish until all selected hosts
+pass. The macOS source jobs install `fswatch` and exercise live FSEvents in
+temporary directories without provider credentials or real crontab writes.
 
 Provider-backed conformance is opt-in because it spends account credits and CI
 does not hold provider credentials. Before publishing a release that changes a

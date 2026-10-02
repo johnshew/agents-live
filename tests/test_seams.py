@@ -2843,6 +2843,376 @@ class TestStartedState(TempRepository):
         self.assertIn("$PROFILE", output)
 
 
+class TestMacWatchBoundary(unittest.TestCase):
+    def test_host_selection_and_watch_reporting_agree(self) -> None:
+        from agents_live.runtime import hosts
+        from agents_live.runtime.hosts.wsl import WslHost
+
+        cases = (
+            ("linux", {}, hostruntime.LINUX, PosixHost, watchsource.PosixEventSource, "inotifywait"),
+            ("linux", {"WSL_DISTRO_NAME": "test"}, hostruntime.WSL, WslHost, watchsource.PosixEventSource, "inotifywait"),
+            ("darwin", {}, hostruntime.MACOS, PosixHost, watchsource.MacEventSource, "fswatch"),
+            ("win32", {}, hostruntime.WINDOWS, WindowsHost, None, "ReadDirectoryChangesW"),
+        )
+        for platform, environment, identity, host_type, source_type, mechanism in cases:
+            with (
+                self.subTest(platform=platform, identity=identity),
+                mock.patch.object(sys, "platform", platform),
+                mock.patch.dict(os.environ, environment, clear=True),
+                mock.patch.object(hostruntime, "id", return_value=identity),
+            ):
+                host = hosts.current()
+                self.assertIsInstance(host, host_type)
+                self.assertEqual(mechanism, watchsource.mechanism())
+                if source_type is not None:
+                    self.assertIsInstance(host.change_source([str(Path.cwd())]), source_type)
+                    with mock.patch.object(source_type, "start") as start:
+                        self.assertIsInstance(
+                            watchsource.open_source([Path.cwd()], cwd=Path.cwd()),
+                            source_type)
+                        start.assert_called_once()
+
+    def test_watch_preflight_selects_dependency_and_error_category(self) -> None:
+        from agents_live import preflight
+
+        for identity, executable in (
+            (hostruntime.MACOS, "fswatch"),
+            (hostruntime.LINUX, "inotifywait"),
+            (hostruntime.WSL, "inotifywait"),
+        ):
+            with (
+                self.subTest(host=identity),
+                mock.patch.object(hostruntime, "id", return_value=identity),
+                mock.patch.object(preflight.shutil, "which", return_value=None),
+                mock.patch.object(hostruntime, "find_tool", return_value=None),
+            ):
+                failure = preflight._probe_watch("start")
+                self.assertEqual(("dependency_missing", "watch", "start"),
+                                 (failure.code, failure.capability, failure.operation))
+                self.assertIn(executable, failure.detail)
+                if identity == hostruntime.MACOS:
+                    self.assertNotIn("inotify", failure.detail)
+        with (
+            mock.patch.object(hostruntime, "id", return_value=hostruntime.MACOS),
+            mock.patch.object(preflight.shutil, "which", return_value="/tools/fswatch"),
+        ):
+            for result in (
+                subprocess.CompletedProcess([], 1, "", "cannot initialize"),
+                subprocess.CompletedProcess([], 0, "poll_monitor", ""),
+                OSError("not executable"),
+                subprocess.TimeoutExpired("fswatch", 10),
+            ):
+                with self.subTest(result=result), mock.patch.object(
+                    preflight.subprocess, "run",
+                    **({"side_effect": result} if isinstance(result, Exception)
+                       else {"return_value": result}),
+                ):
+                    self.assertIsNotNone(preflight._probe_watch("doctor"))
+            with mock.patch.object(preflight.subprocess, "run", return_value=(
+                subprocess.CompletedProcess([], 0, "fsevents_monitor\n", "")
+            )):
+                self.assertIsNone(preflight._probe_watch("doctor"))
+        with (
+            mock.patch.object(hostruntime, "id", return_value=hostruntime.WINDOWS),
+            mock.patch.object(winwatch, "probe", return_value=None),
+        ):
+            self.assertIsNone(preflight._probe_watch("start"))
+
+    def _scripted_source(self, script: str):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        source = watchsource.MacEventSource([root], cwd=root)
+        popen = subprocess.Popen
+
+        def launch(argv, **kwargs):
+            self.assertEqual("fswatch", Path(argv[0]).name)
+            self.assertIn("-0", argv)
+            self.assertIn("fsevents_monitor", argv)
+            return popen([sys.executable, "-u", "-c", script], **kwargs)
+
+        with mock.patch.object(watchsource.subprocess, "Popen", side_effect=launch):
+            source.start()
+        self.addCleanup(source.stop)
+        return source
+
+    @unittest.skipIf(os.name == "nt", "POSIX pipe selection")
+    def test_nul_stream_preserves_split_records_and_filename_bytes(self) -> None:
+        paths = ["/tmp/a b", "/tmp/line\nbreak", "/tmp/caf\u00e9", "/tmp/a b"]
+        encoded = b"\0".join(os.fsencode(path) for path in paths) + b"\0"
+        split = encoded.index(b"\xc3") + 1
+        source = self._scripted_source(
+            "import os,time\n"
+            f"os.write(1, {encoded[:split]!r})\n"
+            "time.sleep(0.15)\n"
+            f"os.write(1, {encoded[split:]!r})\n"
+            "time.sleep(30)\n")
+        observed = []
+        deadline = time.monotonic() + 5
+        while len(observed) < len(paths) and time.monotonic() < deadline:
+            observed.extend(source.poll(0.2))
+        self.assertEqual(paths, observed)
+        self.assertEqual([], source.poll(0.02))
+
+    @unittest.skipIf(os.name == "nt", "POSIX pipe selection")
+    def test_child_failure_drains_stderr_and_reports_terminal_failure(self) -> None:
+        source = self._scripted_source(
+            "import os,sys\nos.write(2, b'x' * 200000)\n"
+            "os.write(2, b'\\nterminal diagnostic\\n')\nsys.exit(7)\n")
+        deadline = time.monotonic() + 5
+        with self.assertRaisesRegex(watchsource.WatchFailed, "terminal diagnostic"):
+            while time.monotonic() < deadline:
+                source.poll(0.1)
+        process = source._process
+        source.stop()
+        self.assertEqual(7, process.returncode)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        source.stop()
+
+    @unittest.skipIf(os.name == "nt", "POSIX child cleanup")
+    def test_stop_reaps_child_even_when_sigterm_is_ignored(self) -> None:
+        source = watchsource.MacEventSource([], cwd=Path.cwd())
+        source.stop()
+        source = self._scripted_source(
+            "import os,signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "os.write(1,b'/tmp/ready\\0')\ntime.sleep(30)\n")
+        self.assertEqual(["/tmp/ready"], source.poll(5))
+        process = source._process
+        source.stop()
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    @unittest.skipIf(os.name == "nt", "POSIX child cleanup")
+    def test_failed_start_reaps_the_child(self) -> None:
+        popen = subprocess.Popen
+        child = None
+
+        def launch(*_args, **kwargs):
+            nonlocal child
+            child = popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+            return child
+
+        source = watchsource.MacEventSource([Path.cwd()], cwd=Path.cwd())
+        with (
+            mock.patch.object(watchsource.subprocess, "Popen", side_effect=launch),
+            mock.patch.object(os, "set_blocking", side_effect=OSError("denied")),
+            self.assertRaisesRegex(watchsource.WatchFailed, "cannot start fswatch"),
+        ):
+            source.start()
+        self.assertIsNotNone(child.poll())
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(child.stderr.closed)
+
+    def _wait_paths(self, source, expected: set[str]) -> None:
+        observed: set[str] = set()
+        deadline = time.monotonic() + 8
+        while not expected <= observed and time.monotonic() < deadline:
+            observed.update(source.poll(0.1))
+        self.assertLessEqual(expected, observed)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS FSEvents")
+    def test_native_events_cover_edits_moves_deletes_and_new_directories(self) -> None:
+        from agents_live import preflight
+
+        self.assertIsNone(preflight._probe_watch("test"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            watched = root / "watched"
+            watched.mkdir()
+            source = watchsource.MacEventSource([watched], cwd=root)
+            source.start()
+            try:
+                sentinel = watched / "ready"
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    sentinel.write_text(str(time.monotonic()), encoding="utf-8")
+                    if str(sentinel) in source.poll(0.2):
+                        break
+                else:
+                    self.fail("fswatch did not become responsive")
+                path = watched / "space and\nnewline.txt"
+                path.write_text("create", encoding="utf-8")
+                self._wait_paths(source, {str(path)})
+                path.write_text("direct update", encoding="utf-8")
+                self._wait_paths(source, {str(path)})
+                replacement = root / "replacement"
+                replacement.write_text("atomic", encoding="utf-8")
+                replacement.replace(path)
+                self._wait_paths(source, {str(path)})
+                renamed = watched / "renamed.txt"
+                path.rename(renamed)
+                self._wait_paths(source, {str(path), str(renamed)})
+                outside = root / "outside.txt"
+                renamed.rename(outside)
+                self._wait_paths(source, {str(renamed)})
+                outside.rename(renamed)
+                self._wait_paths(source, {str(renamed)})
+                renamed.unlink()
+                self._wait_paths(source, {str(renamed)})
+                nested = watched / "new directory"
+                nested.mkdir()
+                nested_file = nested / "child.txt"
+                nested_file.write_text("nested", encoding="utf-8")
+                self._wait_paths(source, {str(nested_file)})
+            finally:
+                process = source._process
+                source.stop()
+            self.assertIsNotNone(process.poll())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS FSEvents")
+    def test_native_policy_filters_and_debounces_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source = watchsource.MacEventSource([root], cwd=root)
+            fired: list[tuple[str, ...]] = []
+            failures: list[Exception] = []
+            stop = threading.Event()
+
+            def watch():
+                try:
+                    run_watchloop(
+                        source, parse_watch("*.txt !excluded* debounce 200ms"),
+                        root=root, fire=fired.append,
+                        should_continue=lambda: not stop.is_set(), idle_check_s=0.05)
+                except Exception as exc:
+                    failures.append(exc)
+
+            thread = threading.Thread(target=watch)
+            thread.start()
+            try:
+                deadline = time.monotonic() + 8
+                sentinel = root / "ready.txt"
+                while not fired and time.monotonic() < deadline:
+                    sentinel.write_text("ready", encoding="utf-8")
+                    time.sleep(0.4)
+                self.assertTrue(fired, failures)
+                fired.clear()
+                for _ in range(5):
+                    (root / "first.txt").write_text("one", encoding="utf-8")
+                    (root / "second.txt").write_text("two", encoding="utf-8")
+                    (root / "excluded.txt").write_text("no", encoding="utf-8")
+                    (root / "ignored.md").write_text("no", encoding="utf-8")
+                deadline = time.monotonic() + 8
+                while not fired and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual([("first.txt", "second.txt")], fired)
+                time.sleep(0.5)
+                self.assertEqual(1, len(fired))
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual([], failures)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "native macOS process inventory")
+class TestMacProcessBoundary(unittest.TestCase):
+    def test_native_inventory_preserves_argv_and_owned_child_identity(self) -> None:
+        from agents_live.runtime import artifacts
+        from agents_live.runtime.hosts import macos_processes
+
+        metadata = artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", "repo:/tmp/path with spaces", "agent:test"))
+        argv = [sys.executable, "-c", "import time; time.sleep(30)",
+                "watch-loop", "--metadata", metadata, "path with\nnewline"]
+        with allow_native_runtime():
+            child = subprocess.Popen(argv, start_new_session=True)
+            unrelated = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                start_new_session=True)
+        try:
+            native = {pid: argv for pid, argv, _started in macos_processes.snapshot()}
+            self.assertEqual(argv[1:], native[child.pid][1:])
+            owned = LocalProcesses().owned("watcher")
+            reference = next(item for item in owned if item.pid == child.pid)
+            self.assertEqual("0123456789abcdef01234567", reference.key)
+            self.assertNotIn(unrelated.pid, [item.pid for item in owned])
+            self.assertGreater(hostruntime.process_start_token(child.pid), 0)
+            self.assertEqual(
+                hostruntime.process_start_token(child.pid),
+                hostruntime.process_start_token(child.pid))
+            # Reap concurrently so the native termination wait does not see a zombie.
+            reaper = threading.Thread(target=child.wait)
+            reaper.start()
+            LocalProcesses().terminate(reference)
+            reaper.join(timeout=5)
+            self.assertIsNotNone(child.poll())
+            self.assertIsNone(unrelated.poll())
+        finally:
+            for process in (child, unrelated):
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+
+    def test_unreadable_inventory_is_not_an_empty_success(self) -> None:
+        import psutil
+        from agents_live.runtime.hosts import macos_processes
+
+        process = mock.Mock(pid=42)
+        process.name.return_value = "Python"
+        process.uids.return_value.real = os.getuid()
+        process.cmdline.side_effect = psutil.AccessDenied(42)
+        with (
+            mock.patch.object(psutil, "process_iter", return_value=[process]),
+            self.assertRaisesRegex(RuntimeError, "inventory is incomplete"),
+        ):
+            list(macos_processes.snapshot())
+
+    def test_inventory_omits_disappeared_or_reused_processes(self) -> None:
+        import psutil
+        from agents_live.runtime import artifacts
+
+        metadata = artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", "repo:/tmp/sample", "agent:test"))
+        candidate = mock.Mock(pid=42)
+        candidate.name.return_value = "Python"
+        candidate.uids.return_value.real = os.getuid()
+        candidate.cmdline.return_value = ["python", "watch-loop", "--metadata", metadata]
+        candidate.create_time.return_value = 123.0
+        survivor = mock.Mock(pid=43)
+        survivor.name.return_value = "Python"
+        survivor.uids.return_value.real = os.getuid()
+        survivor.cmdline.return_value = candidate.cmdline.return_value
+        survivor.create_time.return_value = 456.0
+        survivor.is_running.return_value = True
+        with mock.patch.object(psutil, "process_iter", return_value=[candidate, survivor]):
+            for gone in (False, psutil.NoSuchProcess(42)):
+                with self.subTest(gone=gone):
+                    candidate.is_running.side_effect = (
+                        gone if isinstance(gone, Exception) else None)
+                    candidate.is_running.return_value = False
+                    found = LocalProcesses().owned("watcher")
+                    self.assertEqual([(43, 456.0)], [
+                        (item.pid, item.created_at) for item in found])
+            candidate.is_running.side_effect = psutil.AccessDenied(42)
+            with self.assertRaisesRegex(RuntimeError, "inventory is incomplete"):
+                LocalProcesses().owned("watcher")
+
+    def test_pty_preserves_nonzero_exit_and_arguments(self) -> None:
+        result = LocalChildRunner().run_child(
+            [sys.executable, "-c",
+             "import sys; print(repr(sys.argv[1])); sys.exit(7)", "space ' quoted"],
+            use_pty=True, timeout=10)
+        self.assertEqual(7, result.returncode)
+        self.assertIn(repr("space ' quoted"), result.stdout)
+
+    def test_minimal_scheduler_path_still_finds_host_tools(self) -> None:
+        from agents_live import preflight
+
+        self.assertIn("/opt/homebrew/bin", hostruntime.system_path_dirs())
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ, {"PATH": "/usr/bin:/bin"},
+        ), mock.patch.object(Path, "home", return_value=Path(temporary)):
+            executable = Path(temporary) / ".local" / "bin" / "uv"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            self.assertIsNone(preflight._probe_watch("doctor"))
+            self.assertEqual(executable, Path(spawn.find_uv()))
+
+
 class TestRuntimeProcessPolicy(unittest.TestCase):
     def test_posix_supervisor_uses_host_spawn_policy(self) -> None:
         process = mock.Mock(pid=42)

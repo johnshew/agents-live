@@ -11,27 +11,109 @@ import http.server
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote, unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"agents_live-(?P<version>[^-]+)-py3-none-any\.whl\Z")
 STABLE_VERSION = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
+COMMAND_TIMEOUT_SECONDS = 300
+SHUTDOWN_GRACE_SECONDS = 5
 
 
 class ReadinessError(RuntimeError):
     """The public bootstrap did not produce a valid clean installation."""
 
 
-def _run(argv: list[str], *, environment: dict[str, str]) -> str:
-    completed = subprocess.run(
-        argv, cwd=ROOT, env=environment, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False)
+def _terminate(
+    process: subprocess.Popen[str], stop_tree: Callable[[], None] | None = None,
+) -> None:
+    """Reap only the process tree launched for this fixture command."""
+    if os.name == "nt":
+        if stop_tree is not None:
+            stop_tree()
+        elif process.poll() is None:
+            process.kill()
+    else:
+        # The leader can exit while a descendant still holds the output pipes.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                break
+            deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                process.poll()
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    pass
+                time.sleep(0.05)
+            else:
+                continue
+            break
+        else:
+            raise ReadinessError(
+                f"bootstrap process group {process.pid} survived cleanup")
+    try:
+        process.communicate(timeout=SHUTDOWN_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise ReadinessError(
+            f"bootstrap process {process.pid} did not finish cleanup") from exc
+
+
+def _execute(
+    argv: list[str], *, environment: dict[str, str],
+    timeout: float = COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    if os.name == "nt":
+        sys.path.insert(0, str(ROOT / "src"))
+        try:
+            from agents_live.runtime.hosts.system import supervise_child
+        finally:
+            sys.path.pop(0)
+
+    process = subprocess.Popen(
+        argv, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", start_new_session=os.name != "nt",
+        creationflags=0x00000004 if os.name == "nt" else 0)
+    stop_tree = None
+    try:
+        if os.name == "nt":
+            stop_tree = supervise_child(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise ReadinessError(
+                f"{' '.join(argv)} timed out after {timeout:g} seconds") from exc
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    finally:
+        try:
+            _terminate(process, stop_tree)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+
+def _run(
+    argv: list[str], *, environment: dict[str, str],
+    timeout: float = COMMAND_TIMEOUT_SECONDS,
+) -> str:
+    completed = _execute(argv, environment=environment, timeout=timeout)
     if completed.returncode != 0:
         raise ReadinessError(
             f"{' '.join(argv)} failed ({completed.returncode}):\n"
@@ -39,10 +121,11 @@ def _run(argv: list[str], *, environment: dict[str, str]) -> str:
     return completed.stdout
 
 
-def _run_failure(argv: list[str], *, environment: dict[str, str]) -> str:
-    completed = subprocess.run(
-        argv, cwd=ROOT, env=environment, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False)
+def _run_failure(
+    argv: list[str], *, environment: dict[str, str],
+    timeout: float = COMMAND_TIMEOUT_SECONDS,
+) -> str:
+    completed = _execute(argv, environment=environment, timeout=timeout)
     if completed.returncode == 0:
         raise ReadinessError(
             f"{' '.join(argv)} unexpectedly succeeded:\n{completed.stdout}")
@@ -108,16 +191,124 @@ def _server(version: str, assets: dict[str, bytes]):
 
 
 def _prepare_wheelhouse(wheel: Path, directory: Path) -> None:
-    completed = subprocess.run(
+    _run(
         ["uvx", "--from", "pip", "pip", "download", "--dest",
          str(directory), str(wheel)],
-        cwd=ROOT, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise ReadinessError(
-            "could not prepare the dependency wheelhouse: "
-            + (completed.stderr or completed.stdout))
+        environment=dict(os.environ))
     wheel_copy = directory / wheel.name
     wheel_copy.unlink(missing_ok=True)
+
+
+def _isolate_posix_host(root: Path, environment: dict[str, str]) -> None:
+    """Keep scheduler state and process supervision inside the bootstrap fixture."""
+    fixture = root / "host fixture"
+    fixture.mkdir()
+    table = fixture / "crontab.txt"
+    table.write_text("# bootstrap fixture\n", encoding="utf-8")
+    script = fixture / "crontab.py"
+    script.write_text('''
+from pathlib import Path
+import sys
+
+table = Path(__file__).with_name("crontab.txt")
+if sys.argv[1:] == ["-l"]:
+    sys.stdout.write(table.read_text(encoding="utf-8"))
+elif sys.argv[1:] == ["-"]:
+    table.write_text(sys.stdin.read(), encoding="utf-8")
+else:
+    raise SystemExit("bootstrap fixture: unsupported crontab arguments")
+''', encoding="utf-8")
+    command = fixture / "crontab"
+    command.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(script))} \"$@\"\n", encoding="utf-8")
+    command.chmod(0o755)
+    (fixture / "sitecustomize.py").write_text('''
+import importlib.util
+import os
+import sys
+
+try:
+    if importlib.util.find_spec("agents_live") is not None:
+        from agents_live import runtime
+        from agents_live.runtime.hosts.memory import MemorySupervisor
+        from agents_live.runtime.hosts.posix import PosixHost
+
+        host = PosixHost()
+        host.supervisor = MemorySupervisor()
+        runtime.configure(host)
+except Exception as error:
+    print(f"bootstrap fixture isolation failed: {error}", file=sys.stderr, flush=True)
+    os._exit(1)
+''', encoding="utf-8")
+    environment["PATH"] = os.pathsep.join(
+        (str(fixture), environment.get("PATH", "")))
+    environment["PYTHONPATH"] = str(fixture)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment.pop("WSL_DISTRO_NAME", None)
+
+
+def _posix_collision_checks(command: list[str], *, environment: dict[str, str]) -> None:
+    """Run the bootstrap against foreign and unresolved commands, without activation."""
+    for kind in ("file", "directory", "foreign-link", "broken-link",
+                 "loop", "missing-target"):
+        with tempfile.TemporaryDirectory(
+                prefix="agents-live-collision with spaces-") as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            install_root = root / "install"
+            link_root = home / ".local" / "bin"
+            link_root.mkdir(parents=True)
+            link = link_root / "al"
+            foreign = home / "foreign"
+            foreign.write_text("foreign command\n", encoding="utf-8")
+            target = install_root / "current" / "bin" / "al"
+            if kind == "file":
+                link.write_text("foreign command\n", encoding="utf-8")
+            elif kind == "directory":
+                link.mkdir()
+                (link / "keep").write_text("foreign command\n", encoding="utf-8")
+            else:
+                destination = {
+                    "foreign-link": foreign,
+                    "broken-link": home / "missing",
+                    "loop": link,
+                    "missing-target": target,
+                }[kind]
+                if kind == "missing-target":
+                    target.parent.mkdir(parents=True)
+                link.symlink_to(destination)
+            before = sorted(install_root.rglob("*"))
+            scenario_environment = {
+                **environment,
+                "HOME": str(home),
+                "AGENTS_LIVE_INSTALL_ROOT": str(install_root),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_STATE_HOME": str(root / "state"),
+            }
+            refusal = _run_failure(command, environment=scenario_environment)
+            if "already exists and does not point" not in refusal:
+                raise ReadinessError(
+                    f"{kind}: bootstrap collision refusal did not explain the conflict")
+            if kind == "file":
+                intact = link.is_file() and not link.is_symlink() and (
+                    link.read_text(encoding="utf-8") == "foreign command\n")
+            elif kind == "directory":
+                intact = link.is_dir() and not link.is_symlink() and (
+                    (link / "keep").read_text(encoding="utf-8") == "foreign command\n")
+            else:
+                intact = link.is_symlink() and link.readlink() == destination
+            if not intact or foreign.read_text(encoding="utf-8") != "foreign command\n":
+                raise ReadinessError(f"{kind}: bootstrap replaced a foreign command")
+            exposed = link_root / "agents-live"
+            if exposed.exists() or exposed.is_symlink():
+                raise ReadinessError(
+                    f"{kind}: bootstrap partially exposed commands after a collision")
+            if (sorted(install_root.rglob("*")) != before
+                    or install_root.exists() != (kind == "missing-target")):
+                raise ReadinessError(
+                    f"{kind}: bootstrap changed the install root after a collision")
 
 
 def main() -> int:
@@ -133,7 +324,7 @@ def main() -> int:
     server = _server(version, assets)
     try:
         with tempfile.TemporaryDirectory(
-                prefix="agents-live-bootstrap-") as temporary:
+                prefix="agents-live-bootstrap with spaces-") as temporary:
             root = Path(temporary)
             wheelhouse = root / "wheelhouse"
             wheelhouse.mkdir()
@@ -151,6 +342,9 @@ def main() -> int:
                 "USERPROFILE": str(root / "home"),
                 "APPDATA": str(root / "appdata"),
                 "LOCALAPPDATA": str(root / "localappdata"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "XDG_STATE_HOME": str(root / "state"),
                 "UV_TOOL_DIR": str(root / "uv-tools"),
                 "UV_CACHE_DIR": str(root / "uv-cache"),
                 "UV_NO_INDEX": "1",
@@ -169,24 +363,11 @@ def main() -> int:
                 link_root = root / "home" / ".local" / "bin"
                 environment["PATH"] = os.pathsep.join(
                     (str(link_root), environment.get("PATH", "")))
+                _isolate_posix_host(root, environment)
                 command = ["sh", str(wheel.parent / "install.sh")]
                 command_path = install_root / "current" / "bin" / "agents-live"
                 link_root.mkdir(parents=True)
-                foreign = link_root / "al"
-                foreign.write_text("foreign command\n", encoding="utf-8")
-                refusal = _run_failure(command, environment=environment)
-                if "already exists and does not point" not in refusal:
-                    raise ReadinessError(
-                        "bootstrap collision refusal did not explain the conflict")
-                if foreign.read_text(encoding="utf-8") != "foreign command\n":
-                    raise ReadinessError("bootstrap replaced a foreign command")
-                if (link_root / "agents-live").exists():
-                    raise ReadinessError(
-                        "bootstrap partially exposed commands after a collision")
-                if install_root.exists():
-                    raise ReadinessError(
-                        "bootstrap changed the install root after a collision")
-                foreign.unlink()
+                _posix_collision_checks(command, environment=environment)
             first = _run(command, environment=environment)
             second = _run(command, environment=environment)
             for output in (first, second):
@@ -209,7 +390,8 @@ def main() -> int:
                 for name in ("agents-live", "al"):
                     link = link_root / name
                     expected = install_root / "current" / "bin" / name
-                    if not link.is_symlink() or link.resolve() != expected.resolve():
+                    if (not link.is_symlink() or not expected.is_file()
+                            or link.resolve(strict=True) != expected.resolve(strict=True)):
                         raise ReadinessError(
                             f"bootstrap did not expose the stable {name} command")
                 stale_environment = dict(environment)
@@ -238,6 +420,8 @@ def main() -> int:
         server.shutdown()
         server.server_close()
     print(f"bootstrap readiness passed for {version} on {sys.platform}")
+    if os.name != "nt":
+        print("Host scheduler state and watcher supervision were fixture-isolated.")
     return 0
 
 
