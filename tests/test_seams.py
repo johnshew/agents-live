@@ -7480,6 +7480,100 @@ class TestDashboardRepositorySurface(TempRepository):
                 dashboard.ng_run, "io_bound", side_effect=asyncio.to_thread):
             asyncio.run(exercise())
 
+    def test_registration_preserves_draft_during_fast_scope_refresh(self) -> None:
+        dashboard = self._dashboard_module()
+        repos._add(str(self.root))
+        empty = self.root / "empty-repository"
+        (empty / "Agents").mkdir(parents=True)
+        page_state = dashboard._new_page_state()
+        page_state["all_repos"]["repo"] = self.root.name
+
+        async def refresh() -> None:
+            dashboard.repository_settings_panel(
+                dashboard.repository_rows(), page_state=page_state,
+                refresh=refresh)
+
+        async def exercise() -> None:
+            await refresh()
+            path_change = dashboard.ui.input.call_args.kwargs["on_change"]
+            path_change(mock.Mock(value=str(empty)))
+            # Complete the scope scan after typing, before the new Register click.
+            await refresh()
+            self.assertEqual(
+                str(empty), dashboard.ui.input.call_args.kwargs["value"])
+            register = next(
+                call.kwargs["on_click"]
+                for call in reversed(dashboard.ui.button.call_args_list)
+                if call.args and call.args[0] == "Register")
+            await register()
+            result = page_state["repository_result"]
+            self.assertTrue(result["ok"], result)
+            message = (
+                "Registered empty-repository successfully; discovered 0 agent "
+                f"definitions. The current view remains scoped to {self.root.name}.")
+            self.assertEqual(message, result["message"])
+            self.assertEqual(0, result["repository"]["agent_count"])
+            self.assertEqual(str(empty), repos.load()["repos"]["empty-repository"])
+            self.assertEqual("", dashboard.ui.input.call_args.kwargs["value"])
+            dashboard.ui.label.assert_any_call(message)
+            dashboard.ui.label.assert_any_call("0 agent definitions discovered")
+            dashboard.ui.label.reset_mock()
+            await refresh()
+            dashboard.ui.label.assert_any_call(message)
+            self.assertEqual(message, page_state["repository_result"]["message"])
+
+        with mock.patch.object(
+                dashboard.ng_run, "io_bound",
+                new=mock.AsyncMock(side_effect=lambda function, *args, **kwargs:
+                                   function(*args, **kwargs))):
+            asyncio.run(exercise())
+
+    def test_registration_retains_newer_draft_and_failed_feedback(self) -> None:
+        dashboard = self._dashboard_module()
+        empty = self.root / "empty-repository"
+        (empty / "Agents").mkdir(parents=True)
+        page_state = dashboard._new_page_state()
+        newer_path = str(self.root / "next-repository")
+
+        async def refresh() -> None:
+            dashboard.repository_settings_panel(
+                dashboard.repository_rows(), page_state=page_state,
+                refresh=refresh)
+
+        async def instant(function, *args, **kwargs):
+            result = function(*args, **kwargs)
+            if result["ok"]:
+                path_change = dashboard.ui.input.call_args.kwargs["on_change"]
+                path_change(mock.Mock(value=newer_path))
+            return result
+
+        async def register_path() -> None:
+            path_change = dashboard.ui.input.call_args.kwargs["on_change"]
+            path_change(mock.Mock(value=str(empty)))
+            register = next(
+                call.kwargs["on_click"]
+                for call in reversed(dashboard.ui.button.call_args_list)
+                if call.args and call.args[0] == "Register")
+            await register()
+
+        async def exercise() -> None:
+            await refresh()
+            await register_path()
+            self.assertTrue(page_state["repository_result"]["ok"])
+            self.assertEqual(
+                newer_path, dashboard.ui.input.call_args.kwargs["value"])
+            await register_path()
+            result = page_state["repository_result"]
+            self.assertFalse(result["ok"], result)
+            self.assertIn("already registered", result["error"])
+            dashboard.ui.label.assert_any_call(result["error"])
+            self.assertEqual(
+                str(empty), dashboard.ui.input.call_args.kwargs["value"])
+
+        with mock.patch.object(
+                dashboard.ng_run, "io_bound", side_effect=instant):
+            asyncio.run(exercise())
+
     def test_dashboard_repository_rows_distinguish_discovery_failure(self) -> None:
         dashboard = self._dashboard_module()
         missing = self.root / "missing"

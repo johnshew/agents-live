@@ -117,6 +117,7 @@ def _new_page_state() -> dict:
             "expanded_repositories": [],
             "settings_open": False,
         },
+        "repository_path": "",
         "repository_result": None,
     }
 
@@ -1757,11 +1758,14 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
     current_state = STATE if page_state is None else page_state
     refresh_views = _refresh_views if refresh is None else refresh
     rows = repository_rows() if rows is None else rows
-    new_path = {"value": ""}
 
     async def mutate(payload: dict) -> None:
         result = await _mutate_repository(payload, page_state=current_state)
+        current_state["repository_result"] = result
         if result.get("ok"):
+            if payload.get("action") == "add" \
+                    and current_state.get("repository_path") == payload.get("path"):
+                current_state["repository_path"] = ""
             _safe_ui(ui.notify, result["message"], type="positive",
                      multi_line=True)
         else:
@@ -1807,13 +1811,14 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                     "role=status aria-live=polite")
         with ui.row().classes("repository-register w-full items-center gap-2"):
             ui.input(
-                "Repository path", value="",
-                on_change=lambda event: new_path.update(value=event.value),
+                "Repository path", value=current_state.get("repository_path", ""),
+                on_change=lambda event: current_state.update(
+                    repository_path=event.value),
             ).props("dense outlined clearable").classes("grow")
             ui.button(
                 "Register",
                 on_click=lambda: mutate(
-                    {"action": "add", "path": new_path["value"]}),
+                    {"action": "add", "path": current_state.get("repository_path", "")}),
             ).props("dense color=primary unelevated no-caps")
             ui.button(
                 "Clear default",

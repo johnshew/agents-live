@@ -51,8 +51,13 @@ Subsequent manual, scope, periodic, and action-completion scans also run in
 workers, with serialized refreshes per page. Repository registration, plugin
 validation, and other settings mutations leave the websocket loop responsive;
 rendering resumes in the owning page context even if its initiating control
-was replaced during collection. The readiness fixture isolates the selected
-installation as well as the registry and exercises a slow source plugin.
+was replaced during collection. The repository-path draft belongs to page state,
+so a pending scope or inventory refresh cannot erase it before Register is
+clicked. A successful registration clears only the submitted draft, preserves
+any newer edit, and retains its scoped result through later refreshes; failed
+registration retains the draft and explicit error feedback. The readiness fixture
+isolates the selected installation as well as the registry, verifies draft and
+result retention across settings rebuilds, and exercises a slow source plugin.
 Foreground Ctrl+C requests cooperative server shutdown. Readiness verifies
 quiet exit and port closure through both the CLI and the direct server with
 an active browser, using an isolated hidden console on Windows.

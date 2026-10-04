@@ -683,6 +683,12 @@ def _assert_operational_viewport(
             page.get_by_role("option", name=repository_name, exact=True).click()
             page.get_by_role("button", name="Settings").click()
             page.get_by_label("Repository path").fill(str(empty))
+            path_input_id = page.get_by_label("Repository path").get_attribute("id")
+            page.get_by_role("button", name="Close-settings").click()
+            page.get_by_role("button", name="Refresh", exact=True).click()
+            page.locator(f"[id='{path_input_id}']").wait_for(state="detached")
+            page.get_by_role("button", name="Settings").click()
+            expect(page.get_by_label("Repository path")).to_have_value(str(empty))
             page.get_by_role("button", name="Register", exact=True).click()
             page.get_by_role("status").get_by_text(
                 "Registered empty-repository successfully; discovered 0 agent "
@@ -695,6 +701,18 @@ def _assert_operational_viewport(
                 has=page.get_by_text("empty-repository", exact=True))
             if "0 agent definitions discovered" not in empty_row.inner_text():
                 raise ReadinessError(f"{mode}: zero definitions is not explicit")
+            result_id = page.locator(".repository-result").get_attribute("id")
+            page.get_by_role("button", name="Close-settings").click()
+            page.get_by_role("button", name="Refresh", exact=True).click()
+            page.locator(f"[id='{result_id}']").wait_for(state="detached")
+            page.get_by_role("button", name="Settings").click()
+            page.get_by_role("status").get_by_text(
+                "Registered empty-repository successfully; discovered 0 agent "
+                f"definitions. The current view remains scoped to {repository_name}.",
+                exact=True,
+            ).wait_for()
+            empty_row.get_by_text(
+                "0 agent definitions discovered", exact=True).wait_for()
             page.get_by_role("button", name="Close-settings").click()
             scope.click()
             page.get_by_role("option", name="empty-repository", exact=True).wait_for()
