@@ -89,9 +89,13 @@ uv run --script tools/release.py --prepare-final --from-rc <accepted-rc> --yes
 
 The final attempt has package version `<target>` but a separate identity such
 as `<target>-final-1`. Its preparation stamps the accumulated stable changelog,
-builds stable artifacts from the same runtime source, and retains the RC approval.
+runs the export/privacy audit, builds stable artifacts from the same runtime
+source, and retains the RC approval.
 Version and release metadata may change; runtime changes require a new RC and
-new developer acceptance. There is no stable acceptance stage and no functional
+new developer acceptance. Reviewed `.agents/` Markdown guides and `CLAUDE.md`
+may change; publication workflows and runtime paths are not allowed collateral.
+Final source validation precedes sealing RC approval under the allocation lock.
+There is no stable acceptance stage and no functional
 test execution during final preparation, finalization, or publication:
 
 ```bash
@@ -104,7 +108,8 @@ to final preparation and the exact RC approval. Publication pushes the exact com
 atomically, uploads retained bytes and a privacy-safe evidence digest, and refuses
 replacement of existing draft assets. Both automatic and manual PyPI workflow
 paths require a canonical stable tag and matching public evidence. Neither calls
-the Test workflow or any functional gate. Publication never rebuilds retained
+the Test workflow or any functional gate; both audit the checked-out tag for
+export/privacy violations. Publication never rebuilds retained
 assets. Verify GitHub and PyPI availability and hashes independently; do not run
 the installed tool as an additional release acceptance check.
 

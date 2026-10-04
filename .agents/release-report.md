@@ -8,8 +8,9 @@ description: Concurrent release targets, exact candidate evidence, and all in-fl
 Developer approval of the exact deployed RC is the publication decision.
 Reports must recommend stable packaging, finalization, and publication using
 that approval, not additional functional testing or stable acceptance.
-Retained artifact identity, provenance, hashes, tags, and upload availability
-remain verified. See [release-requirements.md](../docs/release-requirements.md).
+Retained artifact identity, provenance, export audit, hashes, tags, and upload
+availability remain verified. See
+[release-requirements.md](../docs/release-requirements.md).
 
 Choose a stable target, prepare and activate numbered local RCs, then accept and
 publish the selected final packages. These steps form one release cycle. The
@@ -100,8 +101,9 @@ uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-
 
 Activation, state preservation, dashboard/watcher restoration and rollback are
 official parts of the RC loop. Source changes require another RC number; never
-overwrite consumed package identities. Full final preparation and operational
-acceptance remain independent gates before publication. Use
+overwrite consumed package identities. Final preparation runs identity,
+provenance, export audit, and build checks only; it does not repeat functional
+verification or require stable operational acceptance. Use
 [release.md](release.md) for those operations and [testing.md](testing.md) for
 source, artifact and installed-state evidence boundaries.
 

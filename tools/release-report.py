@@ -92,7 +92,7 @@ def _checks(pr: dict) -> str:
 
 def _local_attempts(cycle: dict) -> list[dict]:
     release_tool = runpy.run_path(str(ROOT / "tools" / "release.py"))
-    release_tool["cycle_status"].__globals__["_cycle_configuration"] = lambda: cycle
+    release_tool["cycle_status"].__globals__["_cycle_configuration"] = lambda target=None: cycle
     with contextlib.redirect_stdout(sys.stderr):
         return release_tool["cycle_status"]()
 
@@ -191,6 +191,8 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
              "", f"Latest GitHub stable release: `{latest or 'none'}`. PyPI availability is not independently verified.",
              f"Local selection: {installed}.", "",
              "Local activation is part of RC testing. Installation is not publication approval.",
+             "Final preparation runs export audit and build checks, not functional retesting. "
+             "Publication audits tagged source and uploads retained bytes without rebuilding.",
              "", "## Release Cycles", "",
              "| Target | Source branch | Source commit | Selected RC | Next RC | State |",
              "|---|---|---|---|---|---|"]

@@ -1021,10 +1021,15 @@ def _check_final_source(accepted_source: str, final_source: str) -> None:
     changed = set(_git("diff", "--name-only", accepted_source, final_source).splitlines())
     collateral = {manifest, ".github/release-channels.toml", "tools/release.py", "tools/dashboard-readiness.py",
                   "tools/candidate-operational.py", "tools/release-report.py",
-                  ".github/workflows/publish.yml", ".agents/release.md",
-                  ".agents/testing.md", ".agents/release-report.md", "AGENTS.md"}
-    if any(path not in collateral and not path.startswith(("docs/", "tests/")) for path in changed):
-        raise ReleaseError("final source differs from accepted RC code; accept a new RC")
+                  "AGENTS.md", "CLAUDE.md"}
+    offending = sorted(path for path in changed
+                       if path not in collateral and not path.startswith(("docs/", "tests/"))
+                       and not (path.startswith(".agents/") and path.endswith(".md")))
+    if offending:
+        details = "; ".join(
+            f"{'runtime' if path.startswith('src/') else 'collateral'}: {path}"
+            for path in offending)
+        raise ReleaseError(f"final source has unapproved changes ({details}); accept a new RC")
     configuration = tomllib.loads(_git("show", f"{final_source}:{manifest}"))
     target = ACTIVE_ATTEMPT["target"] if ACTIVE_ATTEMPT else _cycle_configuration()["version"]
     approval = configuration["cycles"].get(target, {}).get("approval", {})
@@ -1078,7 +1083,8 @@ def _publication_decision_path(version: str) -> Path:
 def _attempt_gate_commands(record: dict | None) -> list[list[str]]:
     commands = _gate_commands()
     if record is not None and record["kind"] == "final":
-        return [command for command in commands if "--build-artifacts" in command]
+        return [command for command in commands
+                if "tools/pre-release-audit.py" in command or "--build-artifacts" in command]
     return commands
 
 
@@ -1321,7 +1327,6 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
         if accepted_record["kind"] != "rc" or accepted_record["target"] != target:
             raise ReleaseError("final preparation requires an RC of the current target")
         decision = _approved_rc(accepted_record)
-        _write_once(_cycle_directory(target) / accepted_record["id"] / "approval.json", decision)
         accepted_source = accepted_record["source_commit"]
         _check_final_source(accepted_source, source)
     directory = _cycle_directory(target)
@@ -1332,6 +1337,8 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
     except FileExistsError as exc:
         raise ReleaseError("another allocation is active; inspect the retained lock") from exc
     try:
+        if accepted_record:
+            _write_once(directory / accepted_record["id"] / "approval.json", decision)
         remote = _git("ls-remote", "--heads", "--tags", "origin")
         remote += "\n" + _git("for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags")
         consumed = set(cycle.get("history", {}))
@@ -1530,7 +1537,7 @@ def _check_preparation(version: str) -> dict:
         "prepared": True,
         **_release_identity(version, wheel),
         **_evidence_identity(),
-    "gates": _preparation_gates(receipt, ACTIVE_ATTEMPT),
+        "gates": _preparation_gates(receipt, ACTIVE_ATTEMPT),
     }
     if ACTIVE_ATTEMPT is not None:
         expected["checkout"] = str(ROOT)
@@ -1980,7 +1987,7 @@ def _build_release_artifacts() -> None:
 
 
 def _gate_commands() -> list[list[str]]:
-    """RC preparation gates; final packaging selects only artifact construction."""
+    """RC preparation gates; final packaging selects export audit and construction."""
     return [
         ["uv", "run", "--script", "tools/pre-release-audit.py"],
         ["uv", "run", "--with-editable", ".", "--script",

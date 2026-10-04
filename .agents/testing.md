@@ -145,7 +145,7 @@ The Test workflow runs both Ubuntu and Windows for pull requests and merge
 groups. Documentation-only changes retain the Linux export audit and required
 job contexts but skip source suites and artifact startup. Ordinary `main` pushes
 do not repeat a PR's identical matrix. The publish workflow checks identity,
-provenance, and hashes only; it does not run the matrix again.
+provenance, export/privacy safety, and hashes only; it does not run the matrix again.
 For code changes, the three source suites run as independent jobs on each host
 while Linux builds the complete wheel, source distribution, and bootstrap
 scripts in parallel. Both hosts verify the wheel's recorded
