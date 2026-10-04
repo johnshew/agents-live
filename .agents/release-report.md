@@ -52,6 +52,10 @@ keeps its own scope, selected RC, source identity, historical attempts, deployme
 observations and explicit issue decisions. An older selected RC is not superseded
 merely because newer source or a higher RC number exists.
 
+There is no active bake branch, bake worktree, or bake-to-main promotion step.
+Historical bake refs and records do not route development. Immutable numbered
+attempt worktrees are retained release evidence, not another development channel.
+
 Publication approval records `decision = "approved"`, the exact full source
 `commit`, and `decided_on = "YYYY-MM-DD"`. A different runtime commit requires
 renewed validation and approval. An open issue can contain work delivered in an

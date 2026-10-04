@@ -103,6 +103,10 @@ needed for immutable attempt operations. Never discard another writer's changes.
 
 - `main` is the default integration branch. Merging a PR does not publish a
   package and does not make every commit part of an already selected release.
+- Bake branches and bake worktrees are retired. Use short-lived development
+  worktrees for isolated changes and remove them after integration. Retained
+  numbered-attempt worktrees are immutable snapshots used by release operations,
+  not a bake channel or additional promotion stage.
 - Use a short-lived branch such as `release/6.9.3` only when a candidate needs
   stabilization while `main` advances. Fix on `main` and backport where practical;
   ensure branch-only corrections reach future development too.
