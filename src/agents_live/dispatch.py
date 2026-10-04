@@ -523,7 +523,9 @@ def _run_child(
         _write_transcript(spec, run_id, attempt, launch, pending, None,
                           finalized=False, capture_prefix=capture_prefix)
     if deadline is not None:
-        timeout = deadline - time.monotonic()
+        remaining = deadline - time.monotonic()
+        # Clamp so float rounding in the deadline arithmetic never exceeds the step timeout.
+        timeout = remaining if timeout is None else min(timeout, remaining)
         if timeout <= 0:
             transcript = (_write_transcript(spec, run_id, attempt, launch, pending, None)
                           if capture_prefix is not None else None)

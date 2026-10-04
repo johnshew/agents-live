@@ -4758,7 +4758,14 @@ class TestAgentPipeline(TempRepository):
                         return ChildResult(tuple(argv), 0, "done", "")
                     return ChildResult(tuple(argv), 1 if failed else 0,
                                        json.dumps({"text": '{"ok":true}'}), "")
-                result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=child))
+                class FixedClock:
+                    # (now + 100) - now rounds above 100 at this value, as seen on Windows CI.
+                    def __getattr__(self, name):
+                        return getattr(time, name)
+                    def monotonic(self):
+                        return 4009.95194508998
+                with mock.patch("agents_live.dispatch.time", FixedClock()):
+                    result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=child))
                 self.assertEqual(not failed, result.ok, result)
                 self.assertEqual(1, len(post_timeouts))
                 self.assertGreater(post_timeouts[0], 2 if failed else 90)
