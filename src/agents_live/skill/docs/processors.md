@@ -143,6 +143,9 @@ into the current store. Processors must make external application idempotent.
 A missing declared result still supplies empty stdin, but is explicitly marked
 `AGENTS_LIVE_RESULT_STATUS=absent`. Inspect that marker before applying changes;
 empty input alone cannot distinguish absence from an intentionally empty string.
+One bridge request timeout returns an MCP tool error without closing stdio; retry
+puts are permitted. A timed-out acknowledgement may already have stored its value,
+so retry the same path idempotently rather than assuming rollback.
 
 ```bash
 account=$(jq -r .account <<< "$AGENTS_LIVE_OPTIONS")

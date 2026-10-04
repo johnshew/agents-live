@@ -5612,6 +5612,43 @@ class TestAgentPipeline(TempRepository):
             "pipeline-stdio-bridge",
             response["result"].get("serverInfo", {}).get("name"))
 
+    def test_pipeline_bridge_request_timeout_allows_retry_and_final_put(self) -> None:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        async def exercise(environment):
+            bridge = Path(dispatch_module.__file__).parent / "pipeline" / "stdio_bridge.py"
+            code = (
+                "import asyncio,runpy; "
+                f"scope=runpy.run_path({str(bridge)!r}); "
+                "scope['_run'].__globals__['_REQUEST_TIMEOUT_SECONDS']=0.05; "
+                "asyncio.run(scope['_run']())")
+            parameters = StdioServerParameters(command=sys.executable, args=["-c", code], env=dict(environment))
+            async with stdio_client(parameters) as (read, write):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    first = await client.call_tool("put", {"path": "/output/first", "value": 1})
+                    self.assertTrue(first.isError)
+                    await asyncio.sleep(0.3)
+                    retry = await client.call_tool("put", {"path": "/output/first", "value": 2})
+                    final = await client.call_tool("put", {"path": "/output/result", "value": {"done": True}})
+                    self.assertFalse(retry.isError)
+                    self.assertFalse(final.isError)
+
+        with pipeline_runtime(self.root / "pipeline.jsonl") as environment:
+            original_log = environment._mcp._log_event
+            delayed = False
+            def log_event(**fields):
+                nonlocal delayed
+                if fields.get("op") == "put" and not delayed:
+                    delayed = True
+                    time.sleep(0.2)
+                original_log(**fields)
+            with mock.patch.object(environment._mcp, "_log_event", side_effect=log_event):
+                asyncio.run(exercise(os.environ | environment))
+            self.assertEqual((True, {"done": True}), environment.snapshot("/output/result"))
+
     def test_pipeline_post_processor_reads_the_resource_not_agent_stdout(self) -> None:
         directory = self.skill("pipeline", [
             'agents-live.selector: "fake"',
