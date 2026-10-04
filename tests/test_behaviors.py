@@ -1577,7 +1577,7 @@ class TestFrameworkRetention(TempRepository):
         collected = mock.Mock(subscriptions=())
         with (
             mock.patch.object(
-                internal.lifecycle, "converge", return_value=result),
+                internal.lifecycle, "_converge", return_value=result),
             mock.patch.object(
                 internal.lifecycle, "collect", return_value=collected),
         ):
@@ -2627,6 +2627,38 @@ class TestDashboardProcessIdentity(unittest.TestCase):
 class TestOwnershipMovesInBothDirections(TempRepository):
     """An agent can be claimed here or assigned to another runtime."""
 
+    def test_unregistered_lifecycle_dry_run_is_read_only(self) -> None:
+        from agents_live.cli.main import main
+        from agents_live.state import registry
+        from tests.host_safety import isolated_host
+
+        self.skill("preview", ['agents-live.selector: "fake"'])
+        sentinel = self.root / "plugin-imported"
+        (self.root / "preview_plugin.py").write_text(
+            "from pathlib import Path\n"
+            "Path(__file__).with_name('plugin-imported').touch()\n",
+            encoding="utf-8")
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins.preview]\npath = "preview_plugin.py"\n', encoding="utf-8")
+        with isolated_host():
+            registry._write({"repos": {}, "default_repo": None})
+            before = registry.config_path().read_bytes()
+            for command, selection in (
+                ("start", ["preview"]),
+                ("stop", ["preview"]),
+                ("start", ["--all"]),
+            ):
+                with self.subTest(command=command, selection=selection):
+                    output = io.StringIO()
+                    with contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
+                        code = main(["--repo", str(self.root), command, *selection, "--dry-run"])
+                    self.assertEqual(1, code)
+                    self.assertIn("repos add", output.getvalue())
+                    self.assertFalse(sentinel.exists(), output.getvalue())
+                    self.assertEqual(before, registry.config_path().read_bytes())
+                    records = obs.load(obs.files(paths.host_logs_dir()))
+                    self.assertFalse(any(record.get("operation") == "repo-register" for record in records))
+
     def _spec(self, *, enabled: bool = True):
         if enabled:
             (self.root / ".agents-live.toml").write_text(
@@ -3148,6 +3180,135 @@ class TestActivationHandoff(TempRepository):
 
 
 class TestClockActivationHandoff(TempRepository):
+    def test_stale_holder_metadata_is_not_reported_as_current(self) -> None:
+        from agents_live.runtime import handoff
+
+        for key, value in (("acquisition", "stale"), ("pid", -1), ("acquired_at", time.time() + 3600)):
+            with self.subTest(key=key), handoff.gate(operation="dispatch", run_id="current"):
+                holder_path = paths.state_home() / "activation-holder.json"
+                holder = json.loads(holder_path.read_text(encoding="utf-8"))
+                holder[key] = value
+                paths.atomic_write_text(holder_path, json.dumps(holder))
+                with self.assertRaises(hostruntime.LockBusy) as raised:
+                    with handoff.gate():
+                        pass
+                self.assertEqual("unknown", raised.exception.observation["holder_operation"])
+                self.assertNotIn("holder_run_id", raised.exception.observation)
+
+    def test_holder_metadata_io_cannot_orphan_dispatch_lock(self) -> None:
+        from agents_live.runtime import handoff
+
+        original_write = paths.atomic_write_text
+        original_unlink = Path.unlink
+        for failure in ("write", "unlink"):
+            with self.subTest(failure=failure):
+                def write(path, *args, **kwargs):
+                    if failure == "write" and path.name == "activation-holder.json":
+                        raise PermissionError("holder write denied")
+                    return original_write(path, *args, **kwargs)
+
+                def unlink(path, *args, **kwargs):
+                    if failure == "unlink" and path.name == "activation-holder.json":
+                        raise PermissionError("holder unlink denied")
+                    return original_unlink(path, *args, **kwargs)
+
+                with mock.patch.object(paths, "atomic_write_text", side_effect=write), mock.patch.object(Path, "unlink", new=unlink):
+                    self.assertEqual("success", self.fire(now=self.instant).status)
+                    self.assertEqual("success", self.fire(now=self.instant).status)
+                with handoff.gate():
+                    pass
+
+    def test_maintenance_waits_for_dispatch_and_records_holder(self) -> None:
+        from agents_live.cli.commands import internal
+        from agents_live.runtime import handoff
+
+        repos.ensure_registered(self.root)
+        elapsed = [0.0]
+        process_clock = time.monotonic
+        original_sleep = handoff.sleep
+        gate = handoff.gate(operation="dispatch", run_id="collision", agent=self.identifier, repository=str(self.root))
+        gate.__enter__()
+        def advance(seconds):
+            elapsed[0] += seconds
+            if elapsed[0] >= 0.2:
+                gate.__exit__(None, None, None)
+            original_sleep(0)
+        try:
+            with mock.patch.object(handoff, "monotonic", side_effect=lambda: elapsed[0]), mock.patch.object(handoff, "sleep", side_effect=advance):
+                self.assertIs(process_clock, time.monotonic)
+                self.assertEqual(0, internal.main(["maintain"]))
+        finally:
+            gate.__exit__(None, None, None)
+        records = obs.load([internal.adminlog.log_path()])
+        terminal = next(record for record in reversed(records) if record.get("operation") == "maintenance" and record["status"] != "start")
+        self.assertGreaterEqual(terminal["waited_s"], 0.2)
+        self.assertEqual("dispatch", terminal["holder_operation"])
+        self.assertEqual("collision", terminal["holder_run_id"])
+        self.assertEqual(self.identifier, terminal["holder_agent"])
+        self.assertEqual(str(self.root), terminal["holder_repository"])
+        from agents_live.cli.main import main
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = main(["--repo", str(self.root), "--json", "logs", "--all", "--sql",
+                "select waited_s, holder_operation, holder_run_id, holder_agent, holder_repository from log where operation = 'maintenance' and status = 'ok'"])
+        self.assertEqual(0, code, stdout.getvalue() + stderr.getvalue())
+        queried = json.loads(stdout.getvalue())["records"][0]
+        self.assertEqual("dispatch", queried["holder_operation"])
+        self.assertEqual("collision", queried["holder_run_id"])
+        self.assertGreaterEqual(float(queried["waited_s"]), 0.2)
+        self.assertEqual(2, len(runtime.current().trigger_store.list()))
+        self.assertEqual("success", self.fire(now=self.instant).status)
+
+    def test_maintenance_expiry_defers_once_preserving_health(self) -> None:
+        from agents_live.cli.commands import internal
+        from agents_live.runtime import handoff
+
+        paths.atomic_write_text(paths.health_beacon_path(), '{"status":"healthy","ts":"retained"}\n')
+        before = paths.health_beacon_path().read_bytes()
+        elapsed = [0.0]
+        process_clock = time.monotonic
+        def advance(seconds):
+            elapsed[0] += seconds
+        with handoff.gate(operation="activation"), mock.patch.object(handoff, "monotonic", side_effect=lambda: elapsed[0]), mock.patch.object(handoff, "sleep", side_effect=advance), mock.patch.object(internal, "_retry_sleep", side_effect=advance):
+            self.assertIs(process_clock, time.monotonic)
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(before, paths.health_beacon_path().read_bytes())
+        records = obs.load([internal.adminlog.log_path()])
+        deferred = [record for record in records if record.get("operation") == "maintenance_deferred"]
+        self.assertEqual(1, len(deferred))
+        self.assertEqual("activation", deferred[0]["holder_operation"])
+        terminal = records[-1]
+        self.assertEqual(1, terminal["retry_count"])
+        self.assertEqual(30, terminal["retry_wait_s"])
+        self.assertEqual("deferred", terminal["status"])
+        self.assertEqual(0, terminal["exit_code"])
+        self.assertFalse(any(record.get("error_category") == "maintenance_failed" for record in records))
+        self.assertEqual([], runtime.current().trigger_store.list())
+
+    def test_maintenance_releases_launch_gate_before_collection_and_retention(self) -> None:
+        from agents_live.cli.commands import internal
+        from agents_live.runtime import handoff
+
+        repos.ensure_registered(self.root)
+        collect = lifecycle.collect
+        retain = internal.retention.maintain
+        checks = []
+        def collected(**kwargs):
+            if kwargs.get("persist") is False:
+                with handoff.gate(operation="probe"):
+                    checks.append("collection")
+            return collect(**kwargs)
+        def retained(root):
+            with handoff.gate(operation="probe"):
+                checks.append("retention")
+            return retain(root)
+        with mock.patch.object(lifecycle, "collect", side_effect=collected), mock.patch.object(internal.retention, "maintain", side_effect=retained):
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertIn("collection", checks)
+        self.assertIn("retention", checks)
+        self.assertEqual("success", self.fire(now=self.instant).status)
+
     def setUp(self) -> None:
         super().setUp()
         self.enterContext(isolated_host(self.root))
@@ -9569,6 +9730,30 @@ class TestCrossRepositoryResolution(TempRepository):
         self.assertEqual(1, code)
         self.assertIn("definition not found: absent", error.getvalue())
         converge.assert_not_called()
+
+    def test_lifecycle_dry_run_resolves_registered_target_from_unregistered_cwd(self) -> None:
+        from agents_live.cli.main import main
+
+        (self.root / ".agents-live.toml").write_text("", encoding="utf-8")
+        notes = self.repository("notes")
+        self.definition(notes, "remote-work")
+        before = repos.config_path().read_bytes()
+        registrations = [record for record in obs.load(obs.files(paths.host_logs_dir()))
+                 if record.get("operation") == "repo-register"]
+        with isolated_host(self.root), self.unpinned(), mock.patch.object(Path, "cwd", return_value=self.root):
+            self.assertNotIn(str(self.root), repos.load()["repos"].values())
+            for command in ("start", "stop"):
+                for selection in (["remote-work", "--dry-run"], ["--name=remote-work", "-n"]):
+                    with (
+                        self.subTest(command=command, selection=selection),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        paths.clear_cache()
+                        self.assertEqual(0, main([command, *selection]))
+                    self.assertEqual(before, repos.config_path().read_bytes())
+            self.assertEqual(registrations, [record for record in obs.load(obs.files(paths.host_logs_dir()))
+                                            if record.get("operation") == "repo-register"])
 
     def test_a_missing_name_reports_where_it_looked(self) -> None:
         notes = self.repository("notes")

@@ -157,12 +157,15 @@ class ClaudeProvider(ProviderBase):
         return super().failure(raw)
 
     def parse(self, raw: RawOutput) -> Completion:
+        if raw.completion_limited:
+            raise ValueError("provider completion envelope exceeded its capture limit")
+        stdout = raw.completion_stdout if raw.completion_stdout is not None else raw.stdout
         try:
-            payload = json.loads(raw.stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError:
-            return Completion(raw.stdout.strip())
+            return Completion(stdout.strip())
         if not isinstance(payload, dict):
-            return Completion(raw.stdout.strip(), payload)
+            return Completion(stdout.strip(), payload)
         text = payload.get("result")
         usage = payload.get("usage")
         usage_values = (
@@ -172,7 +175,7 @@ class ClaudeProvider(ProviderBase):
         if "total_cost_usd" in payload:
             usage_values += (("list_cost_usd", usage_value(payload["total_cost_usd"])),)
         return Completion(
-            text if isinstance(text, str) else raw.stdout.strip(),
+            text if isinstance(text, str) else stdout.strip(),
             structured=payload.get("structured_output"),
             usage=usage_values,
             transcript=payload.get("session_id")

@@ -260,6 +260,11 @@ def build_view(
         "attempt": "INTEGER", "model_called": "BOOLEAN",
         "transcript_state": "VARCHAR", "attempts": "VARCHAR",
         "completion_reason": "VARCHAR", "processor_record": "VARCHAR",
+        "operation": "VARCHAR", "waited_s": "DOUBLE",
+        "holder_operation": "VARCHAR", "holder_run_id": "VARCHAR",
+        "holder_agent": "VARCHAR", "holder_repository": "VARCHAR",
+        "holder_pid": "INTEGER", "holder_acquired_at": "VARCHAR",
+        "retry_count": "INTEGER", "retry_wait_s": "DOUBLE",
     }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:

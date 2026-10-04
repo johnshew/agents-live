@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-09-25
+ms.date: 2026-10-04
 ms.topic: reference
 ---
 
@@ -11,10 +11,34 @@ history is retained in the source repository.
 
 ## Unreleased
 
-- docs: align remaining release guidance and test terminology with numbered RCs.
-  Dashboard plans distinguish historical release scope from current RC and
-  final-package acceptance. Historical records and development-version coverage
-  remain intact.
+- fix: keep oversized pipeline telemetry from rejecting a valid bounded result. (#530)
+  Diagnostic streams drain into bounded prefix/tail capture with original byte
+  counts. Complete Claude envelopes retain available usage separately; oversized
+  envelopes and non-pipeline output still fail explicitly.
+- fix: enforce remaining execution budgets and reject writes from expired attempts. (#531)
+  Provider probes and transcript persistence consume the same deadline as model
+  work. Each retry gets fresh credentials and prepared inputs, so queued or
+  late puts cannot contaminate another attempt or its postprocessor snapshot.
+- fix: keep the pipeline bridge usable after an individual request times out. (#547)
+  Failed calls return MCP tool errors and later calls reconnect without closing
+  stdio. Postprocessors receive an explicit absent-result marker; acknowledged
+  timeout ambiguity requires idempotent retries rather than assumed rollback.
+- fix: wait boundedly and attribute maintenance launch-gate contention. (#549)
+  Maintenance waits up to 60 seconds, records the observed holder, and defers
+  once with a 30-second retry on expiry without replacing the health beacon.
+  Collection and retention no longer hold the launch gate.
+- fix: prevent lifecycle dry-run previews from registering repositories. (#550)
+  Unregistered targets fail before project plugins load and leave registry
+  bytes and registration events unchanged. Cross-repository previews check the
+  resolved target rather than registering the caller's directory.
+- fix: publish exact developer-approved RCs without stable functional retesting.
+  Stable preparation retains the approved source and artifacts, while
+  finalization and publication verify identity rather than activating a runtime
+  or requiring another provider probe or stable acceptance receipt.
+- fix: audit final release exports and bind approval only after source validation.
+  Final packaging and tagged-source publication run the export/privacy audit.
+  Unapproved runtime or publication-workflow changes identify offending paths;
+  rejected source checks do not seal an approval record.
 - fix: requalify immutable release candidates with committed readiness evidence.
   Explicit recovery retains validator provenance, runs all gates against the
   unchanged artifacts, and rejects runtime drift before local activation.
@@ -22,6 +46,23 @@ history is retained in the source repository.
   Packaged validation no longer rejects a healthy local API solely because it
   exceeds a two-second request timeout, or waits indefinitely for a running
   dashboard's output after startup failure. Full dashboard checks remain required.
+- feat: optionally process the final attempt's partial store after provider failure. (#540)
+  Opt-in postprocessing reserves a bounded allowance, exposes success, timeout
+  or error outcomes and result presence, and cannot turn a failed run successful.
+- feat: allow lower-only per-run timeouts and expose the absolute execution deadline. (#542)
+  `run --timeout` cannot raise the configured budget; `--no-retry` disables
+  timeout and empty-output retries. Processors receive the deadline in their
+  environment and pipeline agents can read frozen `/run/deadline`.
+- docs: align remaining release guidance and test terminology with numbered RCs.
+  Dashboard plans distinguish historical release scope from current RC and
+  final-package acceptance. Historical records and development-version coverage
+  remain intact.
+- chore: route outstanding runtime fixes through the new 6.9.4 development cycle.
+  Published cycles retain approvals and historical attempts without advertising
+  another RC. Reports separate partial 6.9.3 delivery from planned 6.9.4 work.
+
+## 6.9.3 - 2026-10-04
+
 - fix: separate provider diagnostic volume from completion and pipeline-result limits.
   Valid small results no longer fail because the provider emits a large event
   stream. Diagnostic capture is independently bounded and reports incomplete
@@ -46,6 +87,9 @@ history is retained in the source repository.
   acquiring the per-agent run lock. Deadline exhaustion is a visible failure,
   not a healthy skip. Real interprocess and native Windows clock regressions
   verify one processor execution after concurrent maintenance releases.
+
+## 6.9.2 - 2026-09-19
+
 - fix: separate numbered RC acceptance from final stable release attempts. (#511)
   Immutable attempt records retain builds, rejection decisions, and source-bound
   acceptance across retries. Final stable bytes require independent acceptance

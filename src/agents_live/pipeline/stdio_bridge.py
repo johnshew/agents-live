@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # # mcp is held below 2.0: that release removed the client and server APIs
 # # used by this bridge (#205). Lift this with the package bound, not before.
-# dependencies = ["mcp<2"]
+# dependencies = ["mcp>=1.30.0,<2"]
 # ///
 """Stdio MCP bridge to the in-process pipeline-mcp HTTP server.
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import timedelta
 
 # Strip proxy env vars before importing httpx-backed clients. The
 # pipeline-mcp server is always on 127.0.0.1, so proxy routing is
@@ -41,10 +42,14 @@ for _var in (
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ["no_proxy"] = "127.0.0.1,localhost"
 
+import httpx
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
+from mcp.types import CallToolResult, TextContent
+
+_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 async def _run() -> None:
@@ -55,29 +60,37 @@ async def _run() -> None:
     token = os.environ.get("PIPELINE_MCP_TOKEN", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as upstream:
-            await upstream.initialize()
-            tools_resp = await upstream.list_tools()
-            upstream_tools = list(tools_resp.tools)
+    async with (
+        httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30, read=300)) as http,
+        streamable_http_client(url, http_client=http) as (read, write, _),
+        ClientSession(read, write) as upstream,
+    ):
+        await upstream.initialize()
+        tools_resp = await upstream.list_tools()
+        upstream_tools = list(tools_resp.tools)
 
-            srv: Server = Server("pipeline-stdio-bridge")
+    srv: Server = Server("pipeline-stdio-bridge")
 
-            @srv.list_tools()
-            async def _list_tools():  # type: ignore[no-untyped-def]
-                return upstream_tools
+    @srv.list_tools()
+    async def _list_tools():
+        return upstream_tools
 
-            @srv.call_tool()
-            async def _call_tool(name, arguments):  # type: ignore[no-untyped-def]
-                result = await upstream.call_tool(name, arguments or {})
-                content = list(result.content)
-                structured = getattr(result, "structuredContent", None)
-                if structured is not None:
-                    return content, structured
-                return content
+    @srv.call_tool()
+    async def _call_tool(name, arguments):
+        try:
+            async with (
+                httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30, read=300)) as http,
+                streamable_http_client(url, http_client=http) as (read, write, _),
+                ClientSession(read, write) as upstream,
+            ):
+                await upstream.initialize()
+                return await upstream.call_tool(name, arguments or {}, read_timeout_seconds=timedelta(seconds=_REQUEST_TIMEOUT_SECONDS))
+        except Exception as exc:  # noqa: BLE001 - Transport failures must become MCP errors.
+            return CallToolResult(isError=True, content=[TextContent(
+                type="text", text=f"pipeline request failed; retry is permitted: {exc}")])
 
-            async with stdio_server() as (r, w):
-                await srv.run(r, w, srv.create_initialization_options())
+    async with stdio_server() as (read, write):
+        await srv.run(read, write, srv.create_initialization_options())
 
 
 def main() -> None:

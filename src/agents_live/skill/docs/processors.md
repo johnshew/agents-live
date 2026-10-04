@@ -1,7 +1,7 @@
 ---
 title: Writing a processor
 description: The contract between Agents Live and a pre- or post-processor
-ms.date: 2026-09-07
+ms.date: 2026-10-04
 ms.topic: reference
 ---
 
@@ -120,12 +120,32 @@ which is the convention `AGENTS_LIVE_CHANGED_FILES` already follows.
 | `AGENTS_LIVE_INSTRUCTIONS` | scalar | What the invocation asked for, or empty |
 | `AGENTS_LIVE_CHANGED_FILES` | JSON array | Repository-relative paths, or `[]` |
 | `AGENTS_LIVE_OPTIONS` | JSON object | The options this invocation supplied |
+| `AGENTS_LIVE_DEADLINE` | ISO-8601 UTC | Absolute overall execution deadline, also available at read-only pipeline path `/run/deadline` |
+| `AGENTS_LIVE_AGENT_OUTCOME` | scalar, post only | `success`, `timeout`, or `error` for the provider step |
+| `AGENTS_LIVE_RESULT_STATUS` | scalar, post only | `present`, `absent`, or `not_declared` for the declared pipeline result; a present JSON null is not absent |
 
 So reading one value costs one line, in any language:
 
 ```python
 options = json.loads(os.environ.get("AGENTS_LIVE_OPTIONS", "{}"))
 ```
+
+Postprocessing remains success-only by default. Set
+`agents-live.post-on-failure: "true"` to process the final attempt's partial
+store after a provider timeout or error. This reserves `agents-live.post-timeout`
+seconds (default 30, at most half the overall budget) before launching pre/provider
+work. The post-timeout cap applies only after provider failure; successful
+postprocessing keeps its normal step timeout within the remaining overall
+budget. Postprocessing cannot turn a failed provider step into a successful
+run. Earlier retry outputs are not mixed
+into the current store. Processors must make external application idempotent.
+
+A missing declared result still supplies empty stdin, but is explicitly marked
+`AGENTS_LIVE_RESULT_STATUS=absent`. Inspect that marker before applying changes;
+empty input alone cannot distinguish absence from an intentionally empty string.
+One bridge request timeout returns an MCP tool error without closing stdio; retry
+puts are permitted. A timed-out acknowledgement may already have stored its value,
+so retry the same path idempotently rather than assuming rollback.
 
 ```bash
 account=$(jq -r .account <<< "$AGENTS_LIVE_OPTIONS")

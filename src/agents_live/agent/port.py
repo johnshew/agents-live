@@ -285,7 +285,7 @@ def interpret(
         try:
             completion = provider.parse(raw)
         except (ValueError, TypeError):
-            if not raw.timed_out and not raw.output_limited and raw.returncode == 0:
+            if not raw.timed_out and not raw.output_limited and not raw.completion_limited and raw.returncode == 0:
                 raise
     result = _interpret(spec, step, launch, raw, signals, completion)
     if completion is not None:
@@ -302,7 +302,7 @@ def _interpret(
     signals: StepSignals,
     completion: Completion | None,
 ) -> StepResult:
-    if raw.output_limited:
+    if raw.output_limited and not (step is Step.AGENT and _config(spec).mode == "pipeline"):
         return StepResult(
             step, False, category="diagnostic_output_limit",
             message="child diagnostic stream exceeded its capture limit; output is incomplete")
@@ -310,6 +310,10 @@ def _interpret(
         return StepResult(
             step, False, retryable=step is Step.AGENT,
             category="timeout", message="child timed out")
+    if raw.completion_limited:
+        return StepResult(
+            step, False, category="completion_output_limit",
+            message="provider completion envelope exceeded its bounded capture limit; usage is unavailable")
     if raw.returncode != 0:
         if step is Step.AGENT:
             provider = get_provider(
@@ -339,7 +343,9 @@ def _interpret(
             if skip and isinstance(note, str) and note:
                 message = "\n".join(part for part in (note, message) if part)
         return StepResult(step, True, skip=skip, text=text, message=message)
-    assert completion is not None
+    if completion is None:
+        return StepResult(step, False, category="diagnostic_output_limit",
+                          message="no complete provider completion retained")
     if not completion.text and completion.structured is None:
         return StepResult(
             step, False, retryable=True, category="empty_output",

@@ -60,6 +60,8 @@ class AgentsLiveConfig:
     timeout_retries: int = 1
     empty_retries: int = 2
     overall_timeout: int | None = None
+    post_on_failure: bool = False
+    post_timeout: int = 30
 
 
 @dataclass(frozen=True)
@@ -332,6 +334,8 @@ class RawOutput:
     stderr: str
     timed_out: bool = False
     output_limited: bool = False
+    completion_stdout: str | None = None
+    completion_limited: bool = False
 
 
 @dataclass(frozen=True)

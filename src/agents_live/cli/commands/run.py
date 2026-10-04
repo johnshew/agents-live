@@ -24,6 +24,8 @@ def main(
     parser.add_argument("--prompt-file")
     parser.add_argument("-o", "--option", action="append", default=[])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--timeout", type=_positive_timeout)
+    parser.add_argument("--no-retry", action="store_true")
     args = parser.parse_args(argv)
     try:
         changed = tuple(json.loads(args.changed_files)) if args.changed_files else ()
@@ -58,6 +60,13 @@ def main(
             if resolution.fallback:
                 print(f"Running '{resolution.spec.name}' in {root}.",
                       file=sys.stderr)
+    if args.timeout is not None:
+        try:
+            config = agent.load(name, root=root).execution
+        except agent.DefinitionError:
+            config = None
+        if config is not None and args.timeout > (config.overall_timeout or config.timeout or 120):
+            parser.error("run --timeout cannot raise the overall timeout")
     result = dispatch(Firing(
         name,
         str(root),
@@ -66,6 +75,8 @@ def main(
         changed_files=changed,
         instructions=instructions,
         options=options,
+        timeout=args.timeout,
+        no_retry=args.no_retry,
     ))
     if os.environ.get("AGENTS_LIVE_JSON") == "1":
         payload = {
@@ -91,6 +102,13 @@ def main(
         elif not result.ok:
             print(result.message, file=sys.stderr)
     return 0 if result.ok else 1
+
+
+def _positive_timeout(value: str) -> int:
+    timeout = int(value)
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("run --timeout must be positive")
+    return timeout
 
 
 def _instructions(args) -> str:

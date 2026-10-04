@@ -26,7 +26,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         if args.all:
-            repos.ensure_registered(root)
+            if args.dry_run:
+                repos.require_registered(root)
+            else:
+                repos.ensure_registered(root)
             discovery = agent.discover(root)
             specs = tuple(
                 spec for spec in discovery.specs if spec.execution is not None)
@@ -49,7 +52,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise ownership.OwnershipUnavailableError(
                     "cross-machine ownership is not enabled for this "
                     "repository; run `agents-live ownership enable` first")
-            repos.ensure_registered(root)
+            if args.dry_run:
+                repos.require_registered(root)
+            else:
+                repos.ensure_registered(root)
             specs = (resolution.spec,)
             unloadable = ()
         if args.transfer_here or args.transfer_to:

@@ -183,8 +183,15 @@ immutable packages and restores dashboards and watchers, with rollback on failed
 activation. Advance the RC number for changed bytes; never reuse a consumed
 identity. Local readiness is not full operational acceptance or permission to publish.
 
-The `6.9.2` decision selects RC5 runtime source for final validation and publication.
-The next `6.9.3rc1` includes #528 and #530-#532; #533 remains outside that scope.
+Published `6.9.2` retains developer-approved RC5 runtime source.
+Published `6.9.3` retains developer-approved `6.9.3rc1`, including #528 and #532
+and initial #530/#531 work. Preserve its exact source and wheel approval identity.
+The developer reassigned outstanding #530 and #531 to the `6.9.4rc1` development
+scope on 2026-10-04, together with #547, #540, #542, #549 and #550. This is scope
+assignment, not delivery or candidate acceptance. Preserve 6.9.3 publication
+and retained evidence independently; #533 remains outside the requested scope.
+Published cycles have no next RC; #530/#531 remain partial in 6.9.3, with their
+outstanding work planned only in 6.9.4.
 Retained RC6 does not supersede RC5's selection. Preserve all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
 

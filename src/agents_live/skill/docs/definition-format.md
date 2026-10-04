@@ -1,7 +1,7 @@
 ---
 title: Definition format
 description: Agent Skills layout and Agents Live execution metadata schema
-ms.date: 2026-09-19
+ms.date: 2026-10-04
 ms.topic: reference
 ---
 
@@ -65,6 +65,8 @@ metadata:
 | `agents-live.empty-retries` | integer 0-10 | Maximum empty-completion retries; `2` by default. Use `0` together with timeout-retries to disable retries. |
 | `agents-live.pre-processor` | relative path | Optional, relative to the skill directory. |
 | `agents-live.post-processor` | relative path | Optional, relative to the skill directory. |
+| `agents-live.post-on-failure` | `true` or `false` | `false` by default. Run the postprocessor after provider timeout/error with the last attempt's partial store. The run remains failed. |
+| `agents-live.post-timeout` | positive integer | `30` seconds by default. Requires post-on-failure. Reserve this allowance, capped at half the overall budget, for postprocessing after failure. Only a failed provider caps the postprocessor at this timeout; after success, the processor timeout and remaining overall deadline apply. |
 | `agents-live.output-schema` | JSON object or relative path | Optional JSON Schema for provider output. Claude and Codex enforce it during generation; other providers are validated after local JSON extraction. |
 | `agents-live.output-max-bytes` | positive integer | Parsed completion or declared pipeline-result size cap; 10 MiB by default. Does not count provider event telemetry. |
 | `agents-live.output-path-roots` | JSON string array | Optional repository-relative path allowlist. |
@@ -76,10 +78,18 @@ clients is preserved.
 
 Pipeline retries start from read-only prepared inputs, not the previous attempt's
 mutable output. A retry that never writes a result does not inherit one. Earlier
-partial results remain diagnostic evidence, not postprocessor input. Each stdout
-and stderr diagnostic stream is independently capped at 64 MiB; exceeding it
-terminates the child tree with `diagnostic_output_limit` and explicit incomplete
-retention metadata. The business result is never silently truncated.
+partial results remain diagnostic evidence, not a later attempt's postprocessor
+input. In-flight puts from an expired attempt are refused. Prepared inputs,
+including `/run/deadline`, stay read-only. `run --no-retry` disables both retry
+classes; `run --timeout SECONDS` can lower, never raise, the overall budget.
+
+Each stdout and stderr diagnostic stream retains at most 64 MiB. Above that
+limit the host drains the stream, retaining a prefix and tail rather than killing
+an otherwise valid pipeline run. Transcripts expose retention strategy, original
+byte counts and limit; final tail telemetry can preserve usage. A declared pipeline
+result still fails its independent output cap. Truncated non-pipeline completion
+fails closed with `diagnostic_output_limit`, because complete business output
+cannot be certified. The business result is never silently truncated.
 
 ## Forward compatibility
 

@@ -16,6 +16,7 @@ client configuration from it. Nothing here knows a provider's name.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Generator
 
@@ -39,8 +40,15 @@ class PipelineSession(dict[str, str]):
     def snapshot(self, path: str) -> tuple[bool, object]:
         return self._mcp.snapshot(path)
 
+    def seed(self, items: list[tuple[str, object]]) -> None:
+        self._mcp.seed(items)
+
     def begin_attempt(self, attempt: int) -> None:
-        self._mcp.begin_attempt(attempt)
+        token = self._mcp.begin_attempt(attempt)
+        self.provider_endpoint = replace(self.endpoint, token=token)
+
+    def close_attempt(self) -> None:
+        self._mcp.close_attempt()
 
 
 def _bridge_path() -> Path:

@@ -51,6 +51,7 @@ _EXECUTION_FIELDS = {
     "agents-live.output-max-bytes", "agents-live.output-path-roots",
     "agents-live.output-provenance",
     "agents-live.timeout-retries", "agents-live.empty-retries", "agents-live.overall-timeout",
+    "agents-live.post-on-failure", "agents-live.post-timeout",
 }
 
 
@@ -483,6 +484,12 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
         retries.append(int(value))
     pre = owned.get("agents-live.pre-processor")
     post = owned.get("agents-live.post-processor")
+    post_on_failure = _boolean(owned.get("agents-live.post-on-failure"), False, "post-on-failure")
+    post_timeout = _positive_integer(owned.get("agents-live.post-timeout"), "post-timeout") or 30
+    if post_on_failure and not post:
+        raise DefinitionError("agents-live.post-on-failure requires a post-processor")
+    if "agents-live.post-timeout" in owned and not post_on_failure:
+        raise DefinitionError("agents-live.post-timeout requires post-on-failure")
     _relative_file(pre, skill_root, "pre-processor")
     _relative_file(post, skill_root, "post-processor")
     if selector.provider == "none" and not (pre or post):
@@ -504,7 +511,7 @@ def _execution(metadata: dict[str, str], skill_root: Path) -> AgentsLiveConfig |
         version, schedules, watch, selector, mode, result_path, allow_tools, mcps,
         tuple(sorted(env.items())), transcript, timeout, pre, post,
         output_schema, output_max, output_roots, provenance,
-        *retries, overall_timeout,
+        *retries, overall_timeout, post_on_failure, post_timeout,
     )
 
 

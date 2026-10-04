@@ -8,16 +8,16 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from . import agent, obs, runtime, state
 from .agent import Outcome, RawOutput, Request, Step, StepContext
-from .runtime import ChildRunner, parse_schedule
+from .runtime import ChildRunner, handoff, parse_schedule
 from .runtime.budget import claim as claim_budget
-from .runtime import handoff
 from .runtime.hosts import system as hostruntime
 from .runtime.hosts.processes import pid_exists
 
@@ -40,6 +40,8 @@ class Firing:
     debounce_ms: int | None = None
     instructions: str = ""
     options: tuple[tuple[str, str | bool], ...] = ()
+    timeout: int | None = None
+    no_retry: bool = False
 
     def __post_init__(self) -> None:
         if self.origin not in {"clock", "boot", "watch", "manual"}:
@@ -135,7 +137,8 @@ def _dispatch(
     instant = now or datetime.now().astimezone()
     timeout = _CLOCK_ACTIVATION_WAIT_SECONDS if firing.origin == "clock" else 0
     try:
-        with handoff.gate(timeout=timeout):
+        with handoff.gate(timeout=timeout, operation="dispatch", run_id=run_id,
+                  agent=firing.agent_id, repository=firing.root):
             if firing.origin != "manual":
                 try:
                     if not state.is_started(root, firing.agent_id):
@@ -156,6 +159,10 @@ def _dispatch(
                 return _failure(
                     run_id, "agent_invalid",
                     f"skill '{spec.name}' has no Agents Live execution metadata")
+            if firing.timeout is not None and (
+                    isinstance(firing.timeout, bool) or firing.timeout <= 0
+                    or firing.timeout > (config.overall_timeout or config.timeout or 120)):
+                raise ValueError("run --timeout must be positive and cannot raise the overall timeout")
             accounting.transcript_enabled = config.transcript
             if firing.origin == "clock" and not any(
                     parse_schedule(item).matches(instant) for item in config.schedules):
@@ -198,7 +205,13 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
         raise agent.DefinitionError(
             f"skill '{spec.name}' has no Agents Live execution metadata")
     results = {}
-    deadline = time.monotonic() + (config.overall_timeout or config.timeout or 120)
+    total_timeout = config.overall_timeout or config.timeout or 120
+    if firing.timeout is not None:
+        total_timeout = firing.timeout
+    deadline = time.monotonic() + total_timeout
+    absolute_deadline = datetime.fromtimestamp(time.time() + total_timeout, UTC).isoformat()
+    post_reserve = min(config.post_timeout, total_timeout / 2) if config.post_on_failure else 0
+    agent_deadline = deadline - post_reserve
     request = Request(
         text=firing.instructions,
         changed_files=firing.changed_files,
@@ -220,6 +233,9 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
         with _resource(
             spec, shape.needs_mcp, run_id, scratch
         ) as (resource_env, session):
+            resource_env = (*resource_env, ("AGENTS_LIVE_DEADLINE", absolute_deadline))
+            if session is not None:
+                session.seed([("/run/deadline", absolute_deadline)])
             def context(step: Step, **extra) -> StepContext:
                 return StepContext(
                     request,
@@ -243,13 +259,15 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                     pipeline_result=pipeline_result)
 
             def execute(step, launch, attempt=1):
-                remaining = deadline - time.monotonic()
+                remaining = (deadline if step is Step.POST else agent_deadline) - time.monotonic()
                 if remaining <= 0:
                     return agent.StepResult(step, False, category="execution_budget_exhausted",
                                             message="overall execution deadline exhausted")
                 return _run(spec, step, replace(launch, timeout=min(launch.timeout or remaining, remaining)),
                             runner, run_id=run_id, attempt=attempt, scratch=scratch,
-                            accounting=accounting)
+                            accounting=accounting,
+                            deadline=deadline if step is Step.POST else agent_deadline,
+                            on_child_complete=close_attempt if session is not None and step is Step.AGENT else None)
 
             if shape.has_pre:
                 launch = agent.prepare(spec, Step.PRE, context(Step.PRE))
@@ -270,23 +288,36 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                     return finish(snapshot())
 
             if shape.has_agent:
-                timeout_retries = config.timeout_retries
-                empty_retries = config.empty_retries
+                timeout_retries = 0 if firing.no_retry else config.timeout_retries
+                empty_retries = 0 if firing.no_retry else config.empty_retries
                 attempt = 0
                 while True:
                     attempt += 1
                     if session is not None:
                         session.begin_attempt(attempt)
-                    launch = agent.prepare(
-                        spec,
-                        Step.AGENT,
-                        context(
-                            Step.AGENT,
-                            pre=results.get(Step.PRE),
-                            attempt=attempt,
-                        ),
-                    )
-                    result = execute(Step.AGENT, launch, attempt)
+                    attempt_closed = False
+                    def close_attempt():
+                        nonlocal attempt_closed
+                        if session is not None and not attempt_closed:
+                            session.close_attempt()
+                            attempt_closed = True
+                    try:
+                        with contextlib.ExitStack() as attempt_resources:
+                            attempt_env = dict(resource_env)
+                            if session is not None:
+                                attempt_directory = scratch / f"attempt-{attempt}"
+                                attempt_resources.callback(_discard_if_empty, attempt_directory)
+                                attempt_env.update(attempt_resources.enter_context(_provider_files(
+                                    attempt_directory,
+                                    agent.provider_artifacts(spec, session.provider_endpoint))))
+                                attempt_env["PIPELINE_MCP_TOKEN"] = session.provider_endpoint.token
+                            launch = agent.prepare(
+                                spec, Step.AGENT,
+                                replace(context(Step.AGENT, pre=results.get(Step.PRE), attempt=attempt),
+                                        resource_env=tuple(sorted(attempt_env.items()))))
+                            result = execute(Step.AGENT, launch, attempt)
+                    finally:
+                        close_attempt()
                     if result.transcript and config.transcript:
                         transcript = Path(result.transcript)
                         envelope = json.loads(transcript.read_text(encoding="utf-8"))
@@ -300,6 +331,8 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                         envelope["attempt"] = attempt
                         _write_json(transcript, envelope)
                     results[Step.AGENT] = result
+                    if time.monotonic() >= agent_deadline:
+                        break
                     if not result.retryable:
                         break
                     if result.category == "timeout" and timeout_retries:
@@ -307,10 +340,10 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                         continue
                     if result.category == "empty_output" and empty_retries:
                         empty_retries -= 1
-                        time.sleep(min(2, max(0, deadline - time.monotonic())))
+                        time.sleep(min(2, max(0, agent_deadline - time.monotonic())))
                         continue
                     break
-                if not results[Step.AGENT].ok:
+                if not results[Step.AGENT].ok and not config.post_on_failure:
                     return finish(snapshot())
 
             # Taken before the post-processor runs, because that is what it
@@ -325,6 +358,14 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                         message=f"pipeline result is {size} bytes, over the {cap}-byte cap")
                     return finish(published)
             if shape.has_post:
+                model_result = results.get(Step.AGENT)
+                agent_outcome = (
+                    "success" if model_result is None or model_result.ok else
+                    "timeout" if model_result.category in {"timeout", "execution_budget_exhausted"} else "error")
+                post_env = (
+                    ("AGENTS_LIVE_AGENT_OUTCOME", agent_outcome),
+                    ("AGENTS_LIVE_RESULT_STATUS", "not_declared" if published is None else "present" if published[0] else "absent"),
+                )
                 launch = agent.prepare(
                     spec,
                     Step.POST,
@@ -338,6 +379,10 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
                         ),
                     ),
                 )
+                launch = replace(launch, env=(*launch.env, *post_env),
+                                 timeout=min(launch.timeout or config.post_timeout, config.post_timeout)
+                                 if model_result is not None and not model_result.ok and config.post_on_failure
+                                 else launch.timeout)
                 model_result = results.get(Step.AGENT)
                 if config.transcript and model_result and model_result.transcript:
                     transcript = Path(model_result.transcript)
@@ -358,8 +403,8 @@ def _pipeline(spec, firing: Firing, runner: ChildRunner, run_id: str, accounting
 
 def _scratch(spec, run_id: str) -> Path:
     """Where this run's children may write control, logs, and results."""
-    from .paths import repo_state_dir
     from .obs.retention import mark_active
+    from .paths import repo_state_dir
     directory = repo_state_dir(spec.root) / "runs" / spec.name / run_id
     directory.mkdir(parents=True, exist_ok=True)
     mark_active(directory)
@@ -396,12 +441,15 @@ def _run(
     attempt: int = 1,
     scratch: Path | None = None,
     accounting: _Accounting | None = None,
+    deadline: float | None = None,
+    on_child_complete: Callable[[], None] | None = None,
 ):
     started = time.monotonic() if accounting is not None else 0.0
     try:
         return _run_child(
             spec, step, launch, runner, run_id=run_id, attempt=attempt,
-            scratch=scratch, accounting=accounting)
+            scratch=scratch, accounting=accounting, deadline=deadline,
+            on_child_complete=on_child_complete)
     finally:
         if accounting is not None:
             accounting.durations[step] = (
@@ -418,22 +466,34 @@ def _run_child(
     attempt: int,
     scratch: Path | None,
     accounting: _Accounting | None,
+    deadline: float | None,
+    on_child_complete: Callable[[], None] | None,
 ):
     environment = os.environ.copy()
     environment.update(launch.env)
     environment.pop("AGENTS_LIVE_CAPTURE_PREFIX", None)
+    environment.pop("AGENTS_LIVE_CAPTURE_COMPLETION", None)
+    if step is Step.AGENT and launch.provider == "claude":
+        environment["AGENTS_LIVE_CAPTURE_COMPLETION"] = "1"
     timeout = launch.timeout
+    if timeout is not None:
+        step_deadline = time.monotonic() + timeout
+        deadline = min(deadline, step_deadline) if deadline is not None else step_deadline
     probe_s = 0.0
     if step is Step.AGENT and launch.provider:
         from .agent.providers import get as get_provider
         cli = get_provider(launch.provider).cli
         if cli.minimum_version is not None:
+            remaining = deadline - time.monotonic() if deadline is not None else 30
+            if remaining <= 0:
+                return agent.StepResult(step, False, category="execution_budget_exhausted",
+                                        message="overall execution deadline exhausted")
             probe_started = time.monotonic()
             probe = runner.run_child(
                 (launch.argv[0], *cli.probe_argv),
                 cwd=launch.cwd,
                 env=environment,
-                timeout=min(launch.timeout or 30, 30),
+                timeout=min(remaining, 30),
             )
             probe_s = time.monotonic() - probe_started
             error = cli.version_error(
@@ -454,7 +514,6 @@ def _run_child(
             "status": "failed", "usage": (), "transcript": None,
             "probe_s": probe_s, "timeout_s": timeout,
         }
-        accounting.attempts.append(attempt_record)
     capture_prefix = None
     if (step is Step.AGENT and spec.execution is not None
             and spec.execution.transcript and scratch is not None):
@@ -463,6 +522,19 @@ def _run_child(
         pending = runtime.ChildResult(launch.argv, 0, "", "")
         _write_transcript(spec, run_id, attempt, launch, pending, None,
                           finalized=False, capture_prefix=capture_prefix)
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        # Clamp so float rounding in the deadline arithmetic never exceeds the step timeout.
+        timeout = remaining if timeout is None else min(timeout, remaining)
+        if timeout <= 0:
+            transcript = (_write_transcript(spec, run_id, attempt, launch, pending, None)
+                          if capture_prefix is not None else None)
+            return agent.StepResult(step, False, category="execution_budget_exhausted",
+                                    message="overall execution deadline exhausted",
+                                    transcript=str(transcript) if transcript is not None else None)
+    if attempt_record is not None:
+        attempt_record["timeout_s"] = timeout
+        accounting.attempts.append(attempt_record)
     started = time.monotonic() if attempt_record is not None else 0.0
     try:
         raw = runner.run_child(
@@ -474,6 +546,8 @@ def _run_child(
             use_pty=launch.use_pty,
         )
     finally:
+        if on_child_complete is not None:
+            on_child_complete()
         if attempt_record is not None:
             attempt_record["duration_s"] = time.monotonic() - started
     parse_started = time.monotonic() if attempt_record is not None else 0.0
@@ -481,7 +555,8 @@ def _run_child(
         spec,
         step,
         launch,
-        RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out, raw.output_limited),
+        RawOutput(raw.returncode, raw.stdout, raw.stderr, raw.timed_out, raw.output_limited,
+              raw.completion_stdout, raw.completion_limited),
         _signals(spec, step, scratch),
     )
     if attempt_record is not None:
@@ -579,6 +654,12 @@ def _write_transcript(spec, run_id: str, attempt: int, launch, raw, provider_ref
         "stdout": raw.stdout,
         "timed_out": raw.timed_out,
         "diagnostic_retention": "limited" if raw.output_limited else "complete" if finalized else "in_progress",
+        "stdout_bytes": raw.stdout_bytes,
+        "stderr_bytes": raw.stderr_bytes,
+        "diagnostic_limit": raw.diagnostic_limit,
+        "completion_limit": raw.completion_limit,
+        "completion_retention": "limited" if raw.completion_limited else "complete" if raw.completion_stdout is not None else "not_selected",
+        "diagnostic_strategy": "prefix_tail" if raw.output_limited else "complete",
         "cleanup_s": raw.cleanup_s,
     })
     return destination
@@ -668,8 +749,8 @@ def _resource(spec, needed: bool, run_id: str, scratch: Path):
     config = spec.execution
     with contextlib.ExitStack() as stack:
         if needed:
-            from .pipeline import pipeline_runtime
             from .paths import repo_state_dir
+            from .pipeline import pipeline_runtime
             log = (
                 repo_state_dir(spec.root)
                 / "runs"
@@ -683,7 +764,7 @@ def _resource(spec, needed: bool, run_id: str, scratch: Path):
             ))
             environment.update(pipeline_session)
             endpoint = pipeline_session.endpoint
-        if config is not None:
+        if config is not None and pipeline_session is None:
             environment.update(stack.enter_context(_provider_files(
                 scratch, agent.provider_artifacts(spec, endpoint))))
         yield tuple(sorted(environment.items())), pipeline_session

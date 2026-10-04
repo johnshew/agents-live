@@ -176,6 +176,13 @@ class TempRepository(unittest.TestCase):
 
 
 class TestDefinitionLoader(TempRepository):
+    def test_post_timeout_requires_failure_postprocessing(self) -> None:
+        self.skill("orphan-post-timeout", [
+            'agents-live.selector: "fake"', 'agents-live.post-timeout: "3"',
+        ])
+        with self.assertRaisesRegex(agent.DefinitionError, "post-timeout requires post-on-failure"):
+            agent.load("orphan-post-timeout", root=self.root)
+
     def test_loads_quoted_namespaced_metadata(self) -> None:
         self.skill("sample", [
             'agents-live.selector: "fake/echo:high"',
@@ -1594,7 +1601,7 @@ class TestRuntimeCore(unittest.TestCase):
                 "0123456789abcdef01234567", "runtime:test", "runtime")
             with (
                 mock.patch.object(
-                    internal.lifecycle, "converge", return_value=result),
+                    internal.lifecycle, "_converge", return_value=result),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1652,7 +1659,7 @@ class TestRuntimeCore(unittest.TestCase):
                 log = Path(temporary) / "admin.log"
                 with (
                     mock.patch.object(
-                        internal.lifecycle, "converge", return_value=result),
+                        internal.lifecycle, "_converge", return_value=result),
                     mock.patch.object(
                         internal.lifecycle, "collect",
                         side_effect=(collected if isinstance(
@@ -1710,6 +1717,8 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.patch.object(
                     internal.lifecycle, "converge", converge_maintenance),
                 mock.patch.object(
+                    internal.lifecycle, "_converge", converge_maintenance),
+                mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
                     internal.paths, "health_beacon_path", return_value=beacon),
@@ -1745,7 +1754,7 @@ class TestRuntimeCore(unittest.TestCase):
             converge_maintenance.return_value = result
             with (
                 mock.patch.object(
-                    internal.lifecycle, "converge", converge_maintenance),
+                    internal.lifecycle, "_converge", converge_maintenance),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1813,7 +1822,7 @@ class TestRuntimeCore(unittest.TestCase):
             result = mock.Mock(failed=(), health=Health(True, "not-required"))
             collected = mock.Mock(subscriptions=subscriptions)
             with (
-                mock.patch.object(internal.lifecycle, "converge", return_value=result),
+                mock.patch.object(internal.lifecycle, "_converge", return_value=result),
                 mock.patch.object(internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
                     internal.paths, "health_beacon_path", return_value=beacon),
@@ -3051,6 +3060,30 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertTrue(result.stdout.strip().isdigit())
         self.assertFalse(system.is_alive(int(result.stdout.strip())))
+
+    def test_large_child_capture_retains_prefix_and_tail_in_linear_time(self) -> None:
+        runner = LocalChildRunner()
+        self.assertEqual(64 * 1024 * 1024, runner.diagnostic_limit)
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture"
+            result = runner.run_child([
+                sys.executable, "-c",
+                "import sys; output=sys.stdout.buffer; output.write(b'FIRST_MARKER'); "
+                "chunk=b'x'*(1024*1024); "
+                "[output.write(chunk) for _ in range(384)]; output.write(b'LAST_MARKER')",
+            ], env=os.environ | {"AGENTS_LIVE_CAPTURE_PREFIX": str(capture)}, timeout=90)
+            self.assertEqual(result.stdout.encode(), capture.with_suffix(".stdout").read_bytes())
+            self.assertEqual(b"", capture.with_suffix(".stderr").read_bytes())
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(result.timed_out)
+        self.assertTrue(result.output_limited)
+        self.assertEqual(runner.diagnostic_limit, len(result.stdout.encode()))
+        self.assertEqual(384 * 1024 * 1024 + len(b"FIRST_MARKERLAST_MARKER"), result.stdout_bytes)
+        self.assertTrue(result.stdout.startswith("FIRST_MARKER"))
+        self.assertEqual("\n", result.stdout[runner.diagnostic_limit // 2])
+        self.assertTrue(result.stdout.endswith("LAST_MARKER"))
+        self.assertLess(time.monotonic() - started, 100)
 
     def test_child_capture_failure_is_explicit_and_orphaned_pipes_are_closed(self) -> None:
         runner = LocalChildRunner()
@@ -4485,6 +4518,521 @@ class TestTranscriptAcceptance(TempRepository):
 
 
 class TestAgentPipeline(TempRepository):
+    def test_claude_completion_cap_is_an_explicit_failure(self) -> None:
+        self.skill("claude-cap", ['agents-live.selector: "claude"',
+                                 'agents-live.mode: "pipeline"'])
+        runner = LocalChildRunner()
+        runner.completion_limit = 1024
+        runner.diagnostic_limit = 8192
+        class EnvelopeRunner:
+            def run_child(inner, argv, **kwargs):
+                if "--version" in argv:
+                    return ChildResult(tuple(argv), 0, "2.1.263", "")
+                return runner.run_child([sys.executable, "-c",
+                    "import json; print(json.dumps({'result':'x'*4096,'usage':{'input_tokens':42}}))"], **kwargs)
+        result = dispatch(Firing("claude-cap", str(self.root), "manual"), runner=EnvelopeRunner())
+        self.assertFalse(result.ok)
+        self.assertEqual("completion_output_limit", result.category)
+        self.assertIn("usage is unavailable", result.message)
+        envelope = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertEqual("limited", envelope["completion_retention"])
+        self.assertEqual(1024, envelope["completion_limit"])
+        self.assertEqual("complete", envelope["diagnostic_retention"])
+        self.assertLessEqual(len(envelope["stdout"].encode()), 8192)
+
+    def test_large_claude_envelope_retains_usage_separately_from_diagnostics(self) -> None:
+        self.skill("large-claude", [
+            'agents-live.selector: "claude"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"',
+            'agents-live.output-max-bytes: "128"',
+        ], body='Do work.\n\n```put /output/result\n{"ok":true}\n```')
+        runner = LocalChildRunner()
+        runner.diagnostic_limit = 4096
+        class EnvelopeRunner:
+            def run_child(inner, argv, **kwargs):
+                if "--version" in argv:
+                    return ChildResult(tuple(argv), 0, "2.1.263", "")
+                return runner.run_child([sys.executable, "-c",
+                    "import json; print(json.dumps({'result':'x'*(17*1024*1024),"
+                    "'usage':{'input_tokens':42,'output_tokens':7},'total_cost_usd':0.25,"
+                    "'session_id':'retained-session'}))"], **kwargs)
+        result = dispatch(Firing("large-claude", str(self.root), "manual"), runner=EnvelopeRunner())
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"ok": True}, result.structured)
+        self.assertEqual("42", dict(result.usage).get("input_tokens"))
+        self.assertEqual("7", dict(result.usage).get("output_tokens"))
+        self.assertEqual("0.25", dict(result.usage).get("list_cost_usd"))
+        envelope = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertEqual("retained-session", envelope["provider_transcript"])
+        self.assertLessEqual(len(envelope["stdout"].encode()), 4096)
+        self.assertGreater(envelope["stdout_bytes"], 16 * 1024 * 1024)
+
+    def test_authenticated_queued_put_keeps_origin_attempt(self) -> None:
+        import httpx
+        from mcp.server.fastmcp import FastMCP
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        entered, release = threading.Event(), threading.Event()
+        original = FastMCP.call_tool
+        async def queued(server, name, *args, **kwargs):
+            if name == "put":
+                entered.set()
+                if not await asyncio.to_thread(release.wait, 5):
+                    raise RuntimeError("queued request release missing")
+            return await original(server, name, *args, **kwargs)
+        async def exercise(session):
+            session.begin_attempt(1)
+            token = session.provider_endpoint.token
+            async with httpx.AsyncClient() as client:
+                pending = asyncio.create_task(client.post(session.endpoint.url,
+                    headers={"Authorization": "Bearer " + token,
+                             "Accept": "application/json, text/event-stream"},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "put", "arguments": {"path": "/output/result", "value": "old"}}}))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                session.begin_attempt(2)
+                release.set()
+                response = await pending
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual("attempt expired", response.json()["result"]["structuredContent"]["error"])
+                self.assertEqual((False, None), session.snapshot("/output/result"))
+        with mock.patch.object(FastMCP, "call_tool", queued), pipeline_runtime(self.root / "queued.jsonl") as session:
+            try:
+                asyncio.run(exercise(session))
+            finally:
+                release.set()
+        rejected = [record for record in obs.load([self.root / "queued.jsonl"])
+                    if record.get("error") == "attempt expired"]
+        self.assertEqual(1, len(rejected))
+        self.assertEqual("/output/result", rejected[0]["path"])
+
+    def test_old_provider_credentials_cannot_write_after_retry(self) -> None:
+        import httpx
+        from mcp.client.session import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        self.skill("late-credentials", [
+            'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"',
+        ])
+        credentials = []
+        async def put(environment):
+            async with streamablehttp_client(environment["PIPELINE_MCP_URL"], headers={"Authorization": "Bearer " + environment["PIPELINE_MCP_TOKEN"]}) as (read, write, _):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    return await client.call_tool("put", {"path": "/output/result", "value": "stale"})
+        def child(argv, **kwargs):
+            credentials.append(kwargs["env"])
+            if len(credentials) == 1:
+                return ChildResult(tuple(argv), 0, '{"text":"partial"}', "", True)
+            with self.assertRaises(ExceptionGroup) as raised:
+                asyncio.run(put(credentials[0]))
+            failures = list(raised.exception.exceptions)
+            while failures:
+                failure = failures.pop()
+                if isinstance(failure, ExceptionGroup):
+                    failures.extend(failure.exceptions)
+                else:
+                    self.assertIsInstance(failure, httpx.HTTPStatusError)
+                    self.assertEqual(401, failure.response.status_code)
+            return ChildResult(tuple(argv), 0, '{"text":"done"}', "")
+        result = dispatch(Firing("late-credentials", str(self.root), "manual"), runner=mock.Mock(run_child=child))
+        self.assertTrue(result.ok, result)
+        self.assertEqual(2, len(credentials))
+        self.assertNotEqual(credentials[0]["PIPELINE_MCP_TOKEN"], credentials[1]["PIPELINE_MCP_TOKEN"])
+        self.assertIsNone(result.structured)
+
+    def test_timeout_closes_pending_validator_before_post_snapshot(self) -> None:
+        from mcp.client.session import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+        from jsonschema import Draft202012Validator
+
+        directory = self.skill("pending-final", [
+            'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"',
+            'agents-live.post-processor: "post.py"',
+            'agents-live.post-on-failure: "true"', 'agents-live.timeout-retries: "0"',
+        ], body='Do work.\n\n```put /output/result/$schema\n{"type":"object"}\n```')
+        (directory / "post.py").write_text("pass\n", encoding="utf-8")
+        entered, release = threading.Event(), threading.Event()
+        original = Draft202012Validator.iter_errors
+        responses = []
+        workers = []
+        errors = []
+        sessions = []
+        original_persist = dispatch_module._write_transcript
+        def persist(*args, **kwargs):
+            if kwargs.get("finalized", True):
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+            return original_persist(*args, **kwargs)
+        original_resource = dispatch_module._resource
+        @contextlib.contextmanager
+        def resource(*args, **kwargs):
+            with original_resource(*args, **kwargs) as value:
+                sessions.append(value[1])
+                yield value
+        def validate(validator, value, *args, **kwargs):
+            if value == {"late": True}:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("validator release missing")
+            return original(validator, value, *args, **kwargs)
+        async def put(environment):
+            async with streamablehttp_client(environment["PIPELINE_MCP_URL"], headers={"Authorization": "Bearer " + environment["PIPELINE_MCP_TOKEN"]}) as (read, write, _):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    responses.append((await client.call_tool("put", {"path": "/output/result", "value": {"late": True}})).structuredContent)
+        def child(argv, **kwargs):
+            if str(argv[-1]).endswith("post.py"):
+                self.assertEqual("absent", kwargs["env"]["AGENTS_LIVE_RESULT_STATUS"])
+                release.set()
+                workers[0].join(5)
+                self.assertFalse(workers[0].is_alive())
+                return ChildResult(tuple(argv), 0, "", "")
+            def request():
+                try:
+                    asyncio.run(put(kwargs["env"]))
+                except Exception as exc:
+                    errors.append(exc)
+            worker = threading.Thread(target=request)
+            workers.append(worker)
+            worker.start()
+            self.assertTrue(entered.wait(3))
+            return ChildResult(tuple(argv), 0, '{"text":"partial"}', "", True)
+        with mock.patch.object(Draft202012Validator, "iter_errors", validate), mock.patch.object(dispatch_module, "_resource", resource), mock.patch.object(dispatch_module, "_write_transcript", side_effect=persist):
+            try:
+                result = dispatch(Firing("pending-final", str(self.root), "manual"), runner=mock.Mock(run_child=child))
+            finally:
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+        self.assertEqual("timeout", result.category)
+        self.assertEqual(1, len(responses) + len(errors))
+        if responses:
+            self.assertFalse(responses[0]["ok"], responses)
+        self.assertEqual((False, None), sessions[0].snapshot("/output/result"))
+        self.assertIsNone(result.structured)
+
+    def test_transcript_persistence_consumes_child_launch_budget(self) -> None:
+        original = dispatch_module._write_transcript
+        for persistence_s in (3, 11):
+            with self.subTest(persistence_s=persistence_s):
+                name = f"persist-budget-{persistence_s}"
+                self.skill(name, ['agents-live.selector: "fake"',
+                                 'agents-live.timeout: "10"'])
+                elapsed = [0.0]
+                budgets = []
+                def persist(*args, **kwargs):
+                    if not kwargs.get("finalized", True):
+                        elapsed[0] += persistence_s
+                    return original(*args, **kwargs)
+                def child(argv, **kwargs):
+                    budgets.append(kwargs["timeout"])
+                    return ChildResult(tuple(argv), 0, '{"text":"done"}', "")
+                with mock.patch.object(dispatch_module.time, "monotonic", side_effect=lambda: elapsed[0]), mock.patch.object(dispatch_module, "_write_transcript", side_effect=persist):
+                    result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=child))
+                self.assertEqual([7.0] if persistence_s == 3 else [], budgets)
+                self.assertEqual(persistence_s == 3, result.ok)
+                if persistence_s == 11:
+                    self.assertEqual("execution_budget_exhausted", result.category)
+                    transcript = paths.repo_state_dir(self.root) / "runs" / name / f"{result.run_id}-agent-1.json"
+                    self.assertTrue(json.loads(transcript.read_text(encoding="utf-8"))["finalized"])
+
+    def test_post_timeout_caps_failures_but_not_success(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                name = "post-cap-failed" if failed else "post-cap-success"
+                directory = self.skill(name, [
+                    'agents-live.selector: "fake"', 'agents-live.timeout: "100"',
+                    'agents-live.overall-timeout: "200"', 'agents-live.post-timeout: "3"',
+                    'agents-live.post-on-failure: "true"', 'agents-live.post-processor: "post.py"',
+                    'agents-live.timeout-retries: "0"', 'agents-live.empty-retries: "0"',
+                ])
+                (directory / "post.py").write_text("pass\n", encoding="utf-8")
+                post_timeouts = []
+                def child(argv, **kwargs):
+                    if str(argv[-1]).endswith("post.py"):
+                        post_timeouts.append(kwargs["timeout"])
+                        return ChildResult(tuple(argv), 0, "done", "")
+                    return ChildResult(tuple(argv), 1 if failed else 0,
+                                       json.dumps({"text": '{"ok":true}'}), "")
+                class FixedClock:
+                    # (now + 100) - now rounds above 100 at this value, as seen on Windows CI.
+                    def __getattr__(self, name):
+                        return getattr(time, name)
+                    def monotonic(self):
+                        return 4009.95194508998
+                with mock.patch("agents_live.dispatch.time", FixedClock()):
+                    result = dispatch(Firing(name, str(self.root), "manual"), runner=mock.Mock(run_child=child))
+                self.assertEqual(not failed, result.ok, result)
+                self.assertEqual(1, len(post_timeouts))
+                self.assertGreater(post_timeouts[0], 2 if failed else 90)
+                self.assertLessEqual(post_timeouts[0], 3 if failed else 100)
+
+    def test_pipeline_discards_empty_attempt_scratch_after_success_failure_and_retry(self) -> None:
+        for ending in ("success", "failure", "retry"):
+            with self.subTest(ending=ending):
+                name = f"empty-scratch-{ending}"
+                self.skill(name, ['agents-live.selector: "fake"', 'agents-live.mode: "pipeline"'])
+                children = [ChildResult(("fake",), 0, '{"text":"done"}', "")]
+                if ending == "failure":
+                    children = [ChildResult(("fake",), 1, "", "failed")]
+                elif ending == "retry":
+                    children.insert(0, ChildResult(("fake",), 0, '{"text":"partial"}', "", True))
+                runner = RecordingRunner(children)
+                result = dispatch(Firing(name, str(self.root), "manual"), runner=runner)
+                self.assertEqual(ending != "failure", result.ok, result)
+                self.assertEqual(2 if ending == "retry" else 1, len(runner.argv))
+                self.assertFalse((paths.repo_state_dir(self.root) / "runs" / name / result.run_id).exists())
+
+    def test_invalid_cli_timeout_has_no_dispatch_side_effects(self) -> None:
+        self.skill("invalid-timeout", ['agents-live.selector: "fake"',
+                                       'agents-live.timeout: "10"'])
+        for supplied in ("0", "-1", "11"):
+            with (
+                self.subTest(timeout=supplied),
+                mock.patch.dict(os.environ),
+                mock.patch.object(dispatch_module.handoff, "gate") as gate,
+                mock.patch.object(dispatch_module._RunLock, "acquire") as lock,
+                mock.patch.object(dispatch_module, "claim_budget") as budget,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(2, cli_main(["--json", "run", "invalid-timeout", "--timeout", supplied]))
+                self.assertEqual("usage_error", json.loads(output.getvalue())["error"]["code"])
+                gate.assert_not_called()
+                lock.assert_not_called()
+                budget.assert_not_called()
+        self.assertFalse(obs.load(obs.files(paths.repo_state_dir(self.root) / "logs")))
+
+    def test_invalid_firing_timeout_does_not_claim_budget(self) -> None:
+        self.skill("invalid-firing-timeout", ['agents-live.selector: "fake"',
+                                            'agents-live.overall-timeout: "10"'])
+        for supplied in (0, -1, 11, True):
+            with self.subTest(timeout=supplied), mock.patch.object(dispatch_module, "claim_budget") as budget:
+                with self.assertRaisesRegex(ValueError, "must be positive and cannot raise"):
+                    dispatch(Firing("invalid-firing-timeout", str(self.root), "manual", timeout=supplied))
+                budget.assert_not_called()
+
+    def test_real_timeout_retry_cannot_reuse_first_attempt_result(self) -> None:
+        for publish_again in (False, True):
+            name = "real-retry-new" if publish_again else "real-retry-absent"
+            self.skill(name, [
+                'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+                'agents-live.result-path: "/output/result"',
+                'agents-live.timeout: "5"', 'agents-live.overall-timeout: "15"',
+            ], body='Do work.\n\n```put /input\n{"prepared":true}\n```')
+            attempts = []
+            class RealRunner:
+                def run_child(inner, argv, **kwargs):
+                    attempts.append(kwargs["timeout"])
+                    attempt = len(attempts)
+                    code = (
+                        "import asyncio,json,os,time\n"
+                        "from mcp.client.session import ClientSession\n"
+                        "from mcp.client.streamable_http import streamablehttp_client\n"
+                        "async def main():\n"
+                        " async with streamablehttp_client(os.environ['PIPELINE_MCP_URL'],headers={'Authorization':'Bearer '+os.environ['PIPELINE_MCP_TOKEN']}) as (r,w,_):\n"
+                        "  async with ClientSession(r,w) as session:\n"
+                        "   await session.initialize()\n"
+                        "   result=await session.call_tool('get',{'path':'/output/result'})\n"
+                        "   assert result.structuredContent['ok'] is False\n"
+                        "   prepared=await session.call_tool('get',{'path':'/input'})\n"
+                        "   assert prepared.structuredContent['value']=={'prepared':True}\n"
+                        "   frozen=await session.call_tool('put',{'path':'/input','value':None})\n"
+                        "   assert frozen.structuredContent['ok'] is False\n"
+                        + (f"   await session.call_tool('put',{{'path':'/output/result','value':{{'attempt':{attempt}}}}})\n" if attempt == 1 or publish_again else "")
+                        + "asyncio.run(main())\n"
+                        + ("time.sleep(60)\n" if attempt == 1 else "print(json.dumps({'text':'done'}))\n")
+                    )
+                    return LocalChildRunner().run_child([sys.executable, "-c", code], **kwargs)
+            result = dispatch(Firing(name, str(self.root), "manual"), runner=RealRunner())
+            self.assertTrue(result.ok, result)
+            self.assertEqual(2, len(attempts))
+            self.assertEqual({"attempt": 2} if publish_again else None, result.structured)
+            first = Path(result.transcript.replace("-agent-2.json", "-agent-1.json"))
+            envelope = json.loads(first.read_text(encoding="utf-8"))
+            self.assertTrue(envelope["timed_out"])
+            self.assertEqual({"attempt": 1}, envelope["pipeline_result"]["value"])
+
+    def test_expired_inflight_put_does_not_enter_retry_store(self) -> None:
+        from mcp.client.session import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+        from jsonschema import Draft202012Validator
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        entered, release = threading.Event(), threading.Event()
+        original = Draft202012Validator.iter_errors
+        def validate(validator, value, *args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("fixture release missing")
+            return original(validator, value, *args, **kwargs)
+
+        async def exercise(session):
+            async with streamablehttp_client(session.endpoint.url, headers={"Authorization": "Bearer " + session.endpoint.token}) as (read, write, _):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    pending = asyncio.create_task(client.call_tool("put", {"path": "/output/result", "value": {"attempt": 1}}))
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                    session.begin_attempt(2)
+                    release.set()
+                    response = await pending
+                    self.assertEqual("attempt expired", response.structuredContent["error"])
+                    self.assertEqual((False, None), session.snapshot("/output/result"))
+        with pipeline_runtime(self.root / "late-put.jsonl", seed_puts=[("/output/result/$schema", {"type": "object"})]) as session:
+            session.begin_attempt(1)
+            with mock.patch.object(Draft202012Validator, "iter_errors", validate):
+                try:
+                    asyncio.run(exercise(session))
+                finally:
+                    release.set()
+
+    def test_large_pipeline_telemetry_retains_usage_without_rejecting_result(self) -> None:
+        self.skill("large-telemetry", [
+            'agents-live.selector: "copilot"', 'agents-live.mode: "pipeline"',
+            'agents-live.result-path: "/output/result"',
+            'agents-live.output-max-bytes: "128"',
+        ], body='Do work.\n\n```put /output/result\n{"ok":true}\n```')
+        final = "\n".join(json.dumps(event) for event in [
+            {"type": "session.task_complete", "data": {"summary": "done"}},
+            {"type": "session.usage_checkpoint", "data": {"totalNanoAiu": 1000000000}},
+        ])
+        runner = LocalChildRunner()
+        runner.diagnostic_limit = 4096
+        class TelemetryRunner:
+            def run_child(inner, argv, **kwargs):
+                return runner.run_child([sys.executable, "-c",
+                    "import sys; sys.stdout.write('x'*(17*1024*1024)+'\\n'); "
+                    f"print({final!r})"], **kwargs)
+        result = dispatch(Firing("large-telemetry", str(self.root), "manual"), runner=TelemetryRunner())
+        self.assertTrue(result.ok, result)
+        self.assertEqual({"ok": True}, result.structured)
+        self.assertEqual("0.01", dict(result.usage)["list_cost_usd"])
+        envelope = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertEqual("limited", envelope["diagnostic_retention"])
+        self.assertGreater(envelope["stdout_bytes"], 16 * 1024 * 1024)
+        self.assertLessEqual(len(envelope["stdout"].encode()), 4096)
+        self.assertEqual({"ok": True}, envelope["pipeline_result"]["value"])
+        from agents_live.obs import transcript as transcript_command
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, transcript_command.main([result.run_id, "--format", "json"]))
+        item = json.loads(output.getvalue())["transcripts"][0]
+        self.assertEqual("prefix_tail", item["diagnostic_strategy"])
+        self.assertEqual(envelope["stdout_bytes"], item["stdout_bytes"])
+        self.assertEqual(4096, item["diagnostic_limit"])
+        self.assertEqual({"ok": True}, item["pipeline_result"]["value"])
+
+    def test_lowered_deadline_kills_real_child_without_retry(self) -> None:
+        self.skill("short-real", [
+            'agents-live.selector: "fake"', 'agents-live.timeout: "30"',
+        ])
+        calls = []
+        class RealRunner:
+            def run_child(inner, argv, **kwargs):
+                calls.append(kwargs["timeout"])
+                return LocalChildRunner().run_child(
+                    [sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+        started = time.monotonic()
+        result = dispatch(Firing("short-real", str(self.root), "manual", timeout=1, no_retry=True), runner=RealRunner())
+        self.assertFalse(result.ok)
+        self.assertEqual("timeout", result.category)
+        self.assertEqual(1, len(calls))
+        self.assertLessEqual(calls[0], 1)
+        self.assertLess(time.monotonic() - started, 20)
+        envelope = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+        self.assertTrue(envelope["timed_out"])
+
+    def test_lowered_deadline_and_no_retry_cross_cli_boundary(self) -> None:
+        self.skill("lowered", [
+            'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+            'agents-live.timeout: "10"', 'agents-live.overall-timeout: "20"',
+        ])
+        original_resource = dispatch_module._resource
+        deadlines = []
+        budgets = []
+        @contextlib.contextmanager
+        def resource(*args, **kwargs):
+            with original_resource(*args, **kwargs) as value:
+                deadlines.append(value[1])
+                yield value
+
+        def child(argv, **kwargs):
+            budgets.append(kwargs["timeout"])
+            present, deadline = deadlines[0].snapshot("/run/deadline")
+            self.assertTrue(present)
+            self.assertEqual(deadline, kwargs["env"]["AGENTS_LIVE_DEADLINE"])
+            self.assertLessEqual((datetime.fromisoformat(deadline) - datetime.now(timezone.utc)).total_seconds(), 5)
+            return ChildResult(tuple(argv), 0, '{"text":"partial"}', "", True)
+
+        with mock.patch.dict(os.environ), mock.patch.object(dispatch_module, "_resource", resource), mock.patch.object(
+                runtime.current().child_runner, "run_child", side_effect=child), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(1, cli_main(["run", "lowered", "--timeout", "5", "--no-retry"]))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(2, cli_main(["--json", "run", "lowered", "--timeout", "21"]))
+        self.assertEqual(1, len(budgets))
+        self.assertGreater(budgets[0], 0)
+        self.assertLessEqual(budgets[0], 5)
+
+    def test_partial_postprocessor_observes_outcome_and_missing_result(self) -> None:
+        for ending in ("timeout", "error", "success"):
+            directory = self.skill("partial-" + ending, [
+                'agents-live.selector: "fake"', 'agents-live.mode: "pipeline"',
+                'agents-live.result-path: "/output/result"',
+                'agents-live.timeout-retries: "0"', 'agents-live.empty-retries: "0"',
+                'agents-live.post-on-failure: "true"',
+                'agents-live.timeout: "5"', 'agents-live.overall-timeout: "15"',
+                'agents-live.post-processor: "post.py"',
+            ], version="2")
+            (directory / "post.py").write_text(
+                "import asyncio,json,os,sys\n"
+                "from mcp.client.session import ClientSession\n"
+                "from mcp.client.streamable_http import streamablehttp_client\n"
+                "async def main():\n"
+                " async with streamablehttp_client(os.environ['PIPELINE_MCP_URL'],headers={'Authorization':'Bearer '+os.environ['PIPELINE_MCP_TOKEN']}) as (r,w,_):\n"
+                "  async with ClientSession(r,w) as session:\n"
+                "   await session.initialize()\n"
+                "   items=[(await session.call_tool('get',{'path':f'/output/items/{index}'})).structuredContent for index in range(5)]\n"
+                "   with open(os.environ['AGENTS_LIVE_OUTPUT'],'w') as output: output.write(json.dumps({'items':items,'outcome':os.environ['AGENTS_LIVE_AGENT_OUTCOME'],'result':os.environ['AGENTS_LIVE_RESULT_STATUS'],'stdin':sys.stdin.read(),'deadline':os.environ['AGENTS_LIVE_DEADLINE']}))\n"
+                "asyncio.run(main())\n", encoding="utf-8")
+            def child(argv, **kwargs):
+                if str(argv[-1]).endswith("post.py"):
+                    return LocalChildRunner().run_child(argv, **kwargs)
+                code = (
+                    "import asyncio,json,os,time,sys\n"
+                    "from mcp.client.session import ClientSession\n"
+                    "from mcp.client.streamable_http import streamablehttp_client\n"
+                    "async def main():\n"
+                    " async with streamablehttp_client(os.environ['PIPELINE_MCP_URL'],headers={'Authorization':'Bearer '+os.environ['PIPELINE_MCP_TOKEN']}) as (r,w,_):\n"
+                    "  async with ClientSession(r,w) as session:\n"
+                    "   await session.initialize()\n"
+                    "   for index in range(2):\n"
+                    "    result=await session.call_tool('put',{'path':f'/output/items/{index}','value':index})\n"
+                    "    assert result.structuredContent['ok'] is True\n"
+                    "asyncio.run(main())\n"
+                    + ("time.sleep(60)\n" if ending == "timeout" else
+                       "sys.exit(1)\n" if ending == "error" else "print(json.dumps({'text':'done'}))\n")
+                )
+                return LocalChildRunner().run_child([sys.executable, "-c", code], **kwargs)
+
+            result = dispatch(Firing("partial-" + ending, str(self.root), "manual"),
+                              runner=mock.Mock(run_child=child))
+            transcript = json.loads(Path(result.transcript).read_text(encoding="utf-8"))
+            self.assertIn("postprocessor_input", transcript)
+            records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+            terminal = next(record for record in records if record["run_id"] == result.run_id)
+            self.assertIsNotNone(terminal["post_duration_s"])
+            self.assertEqual(ending == "success", result.ok)
+            receipt = json.loads((Path(result.transcript).parent / result.run_id / "post-output").read_text())
+            self.assertEqual(ending, receipt["outcome"])
+            self.assertEqual("absent", receipt["result"])
+            self.assertEqual("", receipt["stdin"])
+            self.assertEqual([True, True, False, False, False], [item["ok"] for item in receipt["items"]])
+
     def test_retry_isolates_partial_results_and_preserves_prepared_inputs(self) -> None:
         original_resource = dispatch_module._resource
         for publish_again in (False, True):
@@ -4508,7 +5056,7 @@ class TestAgentPipeline(TempRepository):
                 self.assertEqual((True, {"prepared": True}), session.snapshot("/input"))
                 self.assertEqual((False, None), session.snapshot("/output/result"))
                 if len(calls) == 1 or publish_again:
-                    session._mcp.seed([("/output/result", {"attempt": len(calls)})])
+                    session.seed([("/output/result", {"attempt": len(calls)})])
                 return ChildResult(tuple(argv), 0, '{"text":"done"}', "", len(calls) == 1)
 
             with mock.patch.object(dispatch_module, "_resource", resource):
@@ -5070,6 +5618,43 @@ class TestAgentPipeline(TempRepository):
         self.assertEqual(
             "pipeline-stdio-bridge",
             response["result"].get("serverInfo", {}).get("name"))
+
+    def test_pipeline_bridge_request_timeout_allows_retry_and_final_put(self) -> None:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from agents_live.pipeline.runtime import pipeline_runtime
+
+        async def exercise(environment):
+            bridge = Path(dispatch_module.__file__).parent / "pipeline" / "stdio_bridge.py"
+            code = (
+                "import asyncio,runpy; "
+                f"scope=runpy.run_path({str(bridge)!r}); "
+                "scope['_run'].__globals__['_REQUEST_TIMEOUT_SECONDS']=0.05; "
+                "asyncio.run(scope['_run']())")
+            parameters = StdioServerParameters(command=sys.executable, args=["-c", code], env=dict(environment))
+            async with stdio_client(parameters) as (read, write):
+                async with ClientSession(read, write) as client:
+                    await client.initialize()
+                    first = await client.call_tool("put", {"path": "/output/first", "value": 1})
+                    self.assertTrue(first.isError)
+                    await asyncio.sleep(0.3)
+                    retry = await client.call_tool("put", {"path": "/output/first", "value": 2})
+                    final = await client.call_tool("put", {"path": "/output/result", "value": {"done": True}})
+                    self.assertFalse(retry.isError)
+                    self.assertFalse(final.isError)
+
+        with pipeline_runtime(self.root / "pipeline.jsonl") as environment:
+            original_log = environment._mcp._log_event
+            delayed = False
+            def log_event(**fields):
+                nonlocal delayed
+                if fields.get("op") == "put" and not delayed:
+                    delayed = True
+                    time.sleep(0.2)
+                original_log(**fields)
+            with mock.patch.object(environment._mcp, "_log_event", side_effect=log_event):
+                asyncio.run(exercise(os.environ | environment))
+            self.assertEqual((True, {"done": True}), environment.snapshot("/output/result"))
 
     def test_pipeline_post_processor_reads_the_resource_not_agent_stdout(self) -> None:
         directory = self.skill("pipeline", [
@@ -5932,11 +6517,15 @@ class TestProviderVersionGate(unittest.TestCase):
 
     def test_version_probe_uses_the_agent_timeout_budget(self) -> None:
         runner = mock.Mock()
-        runner.run_child.return_value = ChildResult(
-            ("claude", "--version"), 0, "2.1.263 (Claude Code)", "")
+        elapsed = [10.0]
+        def child(argv, **kwargs):
+            if "--version" in argv:
+                elapsed[0] += 2
+            return ChildResult(tuple(argv), 0, "2.1.263 (Claude Code)", "")
+        runner.run_child.side_effect = child
         launch = agent.Launch(("claude", "-p"), timeout=5, provider="claude")
         with (
-            mock.patch.object(dispatch_module.time, "monotonic", side_effect=[10, 12]),
+            mock.patch.object(dispatch_module.time, "monotonic", side_effect=lambda: elapsed[0]),
             mock.patch.object(agent, "interpret", return_value=agent.StepResult(
                 agent.Step.AGENT, True)),
         ):

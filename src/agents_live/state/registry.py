@@ -178,6 +178,14 @@ def _add(value: str) -> Path:
     return Path(root)
 
 
+def require_registered(value: str | Path) -> None:
+    path = str(Path(value).expanduser().resolve())
+    if path not in load()["repos"].values():
+        raise ValueError(
+            f"repository not registered; run `agents-live repos add {path}` "
+            "before using --dry-run")
+
+
 def ensure_registered(value: str | Path) -> bool:
     """Register *value* once; return True when the registry changed."""
     path = str(Path(value).expanduser().resolve())
