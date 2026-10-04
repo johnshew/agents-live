@@ -35,6 +35,10 @@ history is retained in the source repository.
   Maintenance waits up to 60 seconds, records the observed holder, and defers
   once with a 30-second retry on expiry without replacing the health beacon.
   Collection and retention no longer hold the launch gate.
+- fix: exclude scheduled and manual agent runs from watcher inventory. (#538)
+  Local deployment and uninstall check the watcher command role before using
+  agent metadata. Real watcher identity, legacy arguments and launcher/child
+  deduplication remain supported; active-work and ownership guards are unchanged.
 - fix: prevent lifecycle dry-run previews from registering repositories. (#550)
   Unregistered targets fail before project plugins load and leave registry
   bytes and registration events unchanged. Cross-repository previews check the
@@ -68,8 +72,8 @@ history is retained in the source repository.
 - chore: route outstanding runtime fixes through the new 6.9.4 development cycle.
   Published cycles retain approvals and historical attempts without advertising
   another RC. Reports separate partial 6.9.3 delivery from planned 6.9.4 work.
-  Consumed RC1 retains its source and artifact identity; #556 joins the planned
-  scope and the next unused candidate is 6.9.4rc2.
+  Consumed RC1 retains its source and artifact identity; #556 and #538 join the
+  planned scope and the next unused candidate is 6.9.4rc2.
 
 ## 6.9.3 - 2026-10-04
 
