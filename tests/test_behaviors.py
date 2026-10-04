@@ -4643,7 +4643,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             manifest = root / ".github" / "release-cycles.toml"
             manifest.write_text('schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "main"\n')
             (root / "tools").mkdir()
-            for name in ("release.py", "candidate-operational.py"):
+            for name in ("release.py", "release-report.py", "candidate-operational.py"):
                 shutil.copy2(REPOSITORY / "tools" / name, root / "tools" / name)
 
             def git(*arguments):
@@ -4661,8 +4661,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             (root / ".git" / "info" / "exclude").write_text("dist/\n")
 
             def run(command, **_kwargs):
-                if command[0] == "functional-check":
-                    self.assertEqual("rc", scope["ACTIVE_ATTEMPT"]["kind"])
+                if command in script["_gate_commands"]() and "--build-artifacts" not in command:
+                    if "tools/pre-release-audit.py" not in command:
+                        self.assertEqual("rc", scope["ACTIVE_ATTEMPT"]["kind"])
                 elif "--hello-world" in command:
                     self.assertEqual("rc", scope["ACTIVE_ATTEMPT"]["kind"])
                     wheel = Path(command[command.index("--hello-world") + 1])
@@ -4690,9 +4691,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(scope, {
                 "ROOT": root, "PYPROJECT": project, "VERSION_FILES": (package, version_file),
                 "CHANGELOG": changelog, "RELEASE_FILES": (project, package, version_file, changelog),
-                "_git": git, "_run": run, "_gate_commands": lambda: [
-                    ["functional-check"],
-                    ["build", "--build-artifacts", str(scope["ROOT"])]],
+                "_git": git, "_run": run,
                 "_installed_version": lambda: "1.2.2",
                 "_installed_all_json": lambda _command: {"ok": True},
             }):
@@ -4765,6 +4764,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         git("commit", "-m", "approve accepted source")
                         source = git("rev-parse", "HEAD")
                         decision = script["_approved_rc"](record)
+                        for key, value in (("attempt", "1.2.3rc1"), ("commit", "f" * 40),
+                                           ("wheel_sha256", "f" * 64), ("decided_on", None)):
+                            approval = {**decision, key: value}
+                            if value is None:
+                                del approval[key]
+                            with self.subTest(approval=key), mock.patch.dict(scope, {
+                                "_cycle_configuration": lambda target=None: {"approval": approval},
+                            }), self.assertRaises(script["ReleaseError"]):
+                                script["_approved_rc"](record)
                         script["_write_once"](cycle_directory / identifier / "approval.json", decision)
                     else:
                         local_runtime = mock.Mock(side_effect=AssertionError(
@@ -4827,6 +4835,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 rows = {row["attempt"]: row["state"] for row in script["cycle_status"]()}
                 self.assertEqual({"1.2.3rc1": "rejected", "1.2.3rc2": "accepted",
                                   "1.2.3-final-1": "rejected", "1.2.3-final-2": "finalized"}, rows)
+                report = runpy.run_path(str(root / "tools" / "release-report.py"))
+                reported = {row["attempt"]: row["state"] for row in
+                            report["_local_attempts"](script["_cycle_configuration"]("1.2.3"))}
+                self.assertEqual(rows, reported)
+                self.assertNotEqual("invalid-evidence", reported["1.2.3-final-2"])
                 final_paths[1].write_bytes(b"tampered")
                 rows = {row["attempt"]: row["state"] for row in script["cycle_status"]()}
                 self.assertEqual("invalid-evidence", rows["1.2.3-final-2"])
@@ -4980,6 +4993,232 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         prepare(rc="1.2.3rc2")
                     self.assertFalse(any(command[:2] == ["git", "worktree"] for command in commands))
 
+    def test_release_report_retained_final_is_approved(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        report = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
+        scope = script["cycle_status"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "cycle"
+            source = "a" * 40
+            cycle = {"version": "1.2.3", "approval": {
+                "decision": "approved", "attempt": "1.2.3rc1", "commit": source,
+                "decided_on": "2026-09-14",
+            }}
+
+            def git(*arguments):
+                if arguments[0] == "merge-base":
+                    return source
+                if arguments[0] == "show":
+                    return ('[cycles."1.2.3".approval]\ndecision = "approved"\n'
+                            f'commit = "{source}"\ndecided_on = "2026-09-14"\n')
+                return ""
+
+            with mock.patch.dict(scope, {
+                "ROOT": root, "_cycle_directory": lambda target: directory, "_git": git,
+                "_evidence_identity": lambda: {},
+            }), mock.patch.object(report["runpy"], "run_path", return_value=script):
+                for identifier, kind in (("1.2.3rc1", "rc"), ("1.2.3-final-1", "final")):
+                    version = identifier if kind == "rc" else "1.2.3"
+                    record = {"schema": 1, "id": identifier, "kind": kind,
+                              "target": "1.2.3", "version": version, "source_commit": source,
+                              "branch": f"release/v{identifier}-candidate"}
+                    artifacts = directory / identifier / "artifacts"
+                    artifacts.mkdir(parents=True)
+                    preparation = {"schema": script["PREPARATION_SCHEMA"], "prepared": True,
+                                   "attempt": identifier, "version": version,
+                                   "source_commit": source, "base_commit": source,
+                                   "commit": "b" * 40, "tag_object": None, "tag": f"v{version}",
+                                   "checkout": str(root), "gates": script["_attempt_gate_commands"](record),
+                                   "installers": []}
+                    for key, filename in (("wheel", f"agents_live-{version}-py3-none-any.whl"),
+                                          ("sdist", f"agents_live-{version}.tar.gz"),
+                                          (None, "install.ps1"), (None, "install.sh")):
+                        artifact = artifacts / filename
+                        artifact.write_bytes(identifier.encode())
+                        digest = script["_sha256"](artifact)
+                        if key:
+                            preparation[key] = str(artifact)
+                            preparation[f"{key}_sha256"] = digest
+                        else:
+                            preparation["installers"].append({"path": str(artifact), "sha256": digest})
+                    if kind == "rc":
+                        cycle["approval"]["wheel_sha256"] = preparation["wheel_sha256"]
+                    else:
+                        record.update(accepted_rc="1.2.3rc1", rc_approval_sha256=script["_sha256"](
+                            directory / "1.2.3rc1" / "approval.json"))
+                    script["_write_once"](directory / identifier / "attempt.json", record)
+                    script["_write_once"](directory / identifier / "commit.json", {"commit": "b" * 40})
+                    script["_write_once"](directory / identifier / "preparation.json", preparation)
+                    if kind == "rc":
+                        with mock.patch.dict(scope, {"_cycle_configuration": lambda target=None: cycle}):
+                            approval = cycle["approval"]
+                            for key, value in (("attempt", "1.2.3rc2"), ("commit", "f" * 40),
+                                               ("wheel_sha256", "f" * 64), ("decided_on", None)):
+                                invalid = {**approval, key: value}
+                                if value is None:
+                                    del invalid[key]
+                                cycle["approval"] = invalid
+                                with self.subTest(approval=key), self.assertRaises(script["ReleaseError"]):
+                                    script["_approved_rc"](record)
+                            cycle["approval"] = approval
+                            script["_write_once"](directory / identifier / "approval.json",
+                                                  script["_approved_rc"](record))
+                rows = {row["attempt"]: row["state"] for row in report["_local_attempts"](cycle)}
+                self.assertEqual({"1.2.3rc1": "prepared", "1.2.3-final-1": "approved"}, rows)
+
+    def test_failed_final_source_check_does_not_seal_approval(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = script["prepare_cycle"]
+        scope = prepare.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "cycle"
+            record = {"id": "1.2.3rc1", "kind": "rc", "target": "1.2.3",
+                      "source_commit": "a" * 40}
+            approval_path = directory / record["id"] / "approval.json"
+            decision = {"decision": "approved", "decided_on": "2026-09-14"}
+            changed = "src/agents_live/dispatch.py"
+            commands = []
+
+            def git(*args):
+                if args[0] == "status":
+                    return ""
+                if args[0] == "branch":
+                    return "main"
+                if args[0] == "rev-parse":
+                    return "b" * 40
+                if args[0] == "merge-base":
+                    return "a" * 40
+                if args[0] == "diff":
+                    return changed
+                if args[0] == "show":
+                    return ('[cycles."1.2.3".approval]\ndecision = "approved"\n'
+                            'commit = "' + "a" * 40 + '"\ndecided_on = "2026-09-14"\n')
+                return ""
+
+            write_once = scope["_write_once"]
+
+            def write(path, payload):
+                if path == approval_path:
+                    self.assertTrue((directory / "allocation.lock").is_dir())
+                write_once(path, payload)
+
+            with mock.patch.dict(scope, {
+                "ROOT": root, "ACTIVE_ATTEMPT": None, "_require_tools": lambda: None,
+                "_cycle_configuration": lambda target=None: {"branch": "main", "version": "1.2.3"},
+                "_cycle_directory": lambda target: directory, "_git": git,
+                "_load_attempt": lambda identifier: record, "_approved_rc": lambda record: decision,
+                "_write_once": write, "_run": lambda command, **kwargs: commands.append(command),
+            }):
+                with self.assertRaisesRegex(script["ReleaseError"], "accept a new RC"):
+                    prepare(from_rc=record["id"])
+                self.assertFalse(approval_path.exists())
+                self.assertFalse((directory / "allocation.lock").exists())
+                decision["decided_on"] = "2026-09-15"
+                changed = "docs/release-requirements.md"
+                lock = directory / "allocation.lock"
+                lock.mkdir(parents=True)
+                try:
+                    with self.assertRaisesRegex(script["ReleaseError"], "another allocation"):
+                        prepare(from_rc=record["id"])
+                    self.assertFalse(approval_path.exists())
+                finally:
+                    lock.rmdir()
+                prepare(from_rc=record["id"])
+                self.assertEqual(decision, json.loads(approval_path.read_text()))
+                self.assertFalse((directory / "allocation.lock").exists())
+
+    def test_release_acceptance_cli_rejects_plugin_repo_and_final_attempt(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        main = script["main"]
+        scope = main.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            operations = mock.Mock(side_effect=AssertionError("acceptance must not execute"))
+            record = {"id": "1.2.3-final-1", "target": "1.2.3", "kind": "final"}
+            with mock.patch.dict(scope, {
+                "ROOT": root, "_cycle_directory": lambda target: root,
+                "_load_attempt": lambda identifier: record, "_git": lambda *args: "",
+                "_attempt_checkout": lambda record: contextlib.nullcontext(),
+                "accept_isolated": operations, "accept_candidate": operations,
+            }):
+                error = io.StringIO()
+                with mock.patch.object(sys, "argv", [
+                    "release.py", "--accept-candidate", "--yes", "--agency-plugin", str(root),
+                    "--repo", str(root), "--agent", "hello", "--cost-agent", "hello",
+                ]), contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+                    main()
+                self.assertEqual(2, raised.exception.code)
+                self.assertIn("--agency-plugin applies only to isolated acceptance", error.getvalue())
+                error = io.StringIO()
+                with mock.patch.object(sys, "argv", [
+                    "release.py", "--accept-candidate", "--yes", "--attempt", record["id"],
+                ]), contextlib.redirect_stderr(error):
+                    self.assertEqual(1, main())
+                self.assertIn("final attempts rely on developer RC approval", error.getvalue())
+                self.assertFalse((root / "mutation.lock").exists())
+                operations.assert_not_called()
+
+    def test_final_gates_audit_exports_without_functional_retesting(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        prepare = script["prepare_attempt"]
+        scope = prepare.__globals__
+        audit = ["uv", "run", "--script", "tools/pre-release-audit.py"]
+        build = ["uv", "run", "--script", "tools/release.py", "--build-artifacts"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "attempt"
+            artifacts = directory / "artifacts"
+            directory.mkdir()
+            (directory / "commit.json").write_text(json.dumps({"commit": "b" * 40}))
+            wheel = artifacts / "agents_live-1.2.3-py3-none-any.whl"
+            identity = {"version": "1.2.3", "wheel_sha256": "a" * 64}
+            record = {"id": "1.2.3-final-1", "kind": "final", "version": "1.2.3"}
+            commands = []
+            fail_audit = True
+            preserved = mock.Mock(return_value=wheel)
+            sealed = mock.Mock()
+
+            def run(command):
+                commands.append(command)
+                if command == audit:
+                    if fail_audit:
+                        raise subprocess.CalledProcessError(1, command)
+                elif command == build:
+                    artifacts.mkdir()
+                    wheel.write_bytes(b"retained stable bytes")
+                else:
+                    self.fail(f"final preparation executed a functional gate: {command}")
+
+            with mock.patch.dict(scope, {
+                "ROOT": root, "ACTIVE_ATTEMPT": record, "_attempt_path": lambda: directory,
+                "_preparation_path": lambda version: directory / "preparation.json",
+                "_check_attempt_checkout": lambda: None, "_candidate_wheel": lambda version: wheel,
+                "_artifact_store_dir": lambda version: artifacts, "_run": run,
+                "_preserve_release_artifacts": preserved,
+                "_release_identity": lambda version, wheel: identity, "_write_preparation": sealed,
+            }):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    prepare()
+                self.assertEqual([audit], commands)
+                self.assertFalse((directory / "build.json").exists())
+                preserved.assert_not_called()
+                sealed.assert_not_called()
+                fail_audit = False
+                commands.clear()
+                prepare()
+                self.assertEqual([audit, build], commands)
+                preserved.assert_called_once()
+                sealed.assert_called_once_with("1.2.3", wheel, readiness_recovery=None)
+                sealed.reset_mock()
+                commands.clear()
+                prepare()
+                self.assertEqual([audit], commands)
+                self.assertEqual(b"retained stable bytes", wheel.read_bytes())
+                preserved.assert_called_once()
+                sealed.assert_called_once()
+
     def test_final_source_requires_exact_approval_and_unchanged_runtime(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = script["_check_final_source"]
@@ -5006,9 +5245,18 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         replacement if args[0] == "show" and args[1].startswith("b" * 40) else git(*args))}):
                     with self.assertRaises(script["ReleaseError"]):
                         check("a" * 40, "b" * 40)
-            changed += "\nsrc/agents_live/__init__.py"
-            with self.assertRaises(script["ReleaseError"]):
-                check("a" * 40, "b" * 40)
+            for path in (".agents/development.md", ".agents/cdl-glp/glp.md", "CLAUDE.md"):
+                changed = ".github/release-cycles.toml\n" + path
+                with self.subTest(documentation=path):
+                    check("a" * 40, "b" * 40)
+            for path, category in (("src/agents_live/__init__.py", "runtime"),
+                                   ("src/agents_live/dispatch.py", "runtime"),
+                                   (".agents/hooks/trigger.py", "collateral"),
+                                   (".github/workflows/publish.yml", "collateral")):
+                changed = ".github/release-cycles.toml\n" + path
+                with self.subTest(path=path), self.assertRaisesRegex(
+                        script["ReleaseError"], category + ": " + re.escape(path)):
+                    check("a" * 40, "b" * 40)
 
     def test_legacy_tag_migration_preserves_object_and_refuses_remote_tags(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -5190,6 +5438,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertEqual({"6.9.2", "6.9.3"}, set(routing["cycles"]))
             self.assertEqual("6.9.2rc5", routing["cycles"]["6.9.2"]["selected_rc"])
             self.assertIn("6.9.3rc1", markdown)
+            self.assertIn("Final preparation runs export audit and build checks, not functional retesting.", markdown)
+            self.assertIn("Publication audits tagged source and uploads retained bytes without rebuilding.", markdown)
             self.assertIn("#533", markdown)
             self.assertNotIn("bake", markdown.lower())
             self.assertTrue(routing["next_actions"])
@@ -5455,6 +5705,35 @@ class TestCrossModuleAgreements(unittest.TestCase):
         self.assertNotIn("tests/test_", publish)
         self.assertNotIn("workflows/test.yml", publish)
         self.assertNotIn("--accept-candidate", publish)
+
+    def test_publish_audits_tagged_source_before_resolving_identity(self) -> None:
+        import yaml
+
+        jobs = yaml.safe_load(self._workflow_text("publish.yml"))["jobs"]
+        resolve = jobs["resolve"]
+        steps = resolve["steps"]
+        checkout = next(index for index, step in enumerate(steps)
+                        if step.get("uses") == "actions/checkout@v7")
+        setup = next(index for index, step in enumerate(steps)
+                     if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+        audits = [(index, step) for index, step in enumerate(steps)
+                  if "tools/pre-release-audit.py" in step.get("run", "")]
+        self.assertEqual(1, len(audits))
+        audit, step = audits[0]
+        self.assertEqual("uv run --script tools/pre-release-audit.py", step["run"])
+        self.assertNotIn("if", step)
+        self.assertFalse(step.get("continue-on-error", False))
+        verify = next(index for index, step in enumerate(steps)
+                      if "--verify-publication " in step.get("run", ""))
+        target = next(index for index, step in enumerate(steps) if step.get("id") == "target")
+        self.assertLess(checkout, setup)
+        self.assertLess(setup, audit)
+        self.assertLess(audit, verify)
+        self.assertLess(verify, target)
+        self.assertEqual(
+            "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}",
+            steps[checkout]["with"]["ref"])
+        self.assertEqual("resolve", jobs["publish"]["needs"])
 
     def test_ci_avoids_duplicate_main_runs_and_keeps_merge_queue_checks(
             self) -> None:

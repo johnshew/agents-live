@@ -30,6 +30,8 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.0.1
+      - name: Audit release exports
+        run: uv run --script tools/pre-release-audit.py
       - name: Verify stable release identity
         run: uv run --script tools/release.py --verify-publication "$TAG"
         env:

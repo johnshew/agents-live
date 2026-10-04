@@ -192,7 +192,9 @@ Record explicit publication approval in `[cycles."<target>".approval]`, binding
 `decision = "approved"`, the RC `attempt`, full source `commit`, `wheel_sha256`,
 and `decided_on = "YYYY-MM-DD"`. Developer acceptance of the exact deployed RC
 authorizes publication without rebuilding RC bytes or functional retesting.
-Prepare stable version metadata once, then finalize and publish retained files.
+Prepare stable version metadata once with the export/privacy audit and build,
+then finalize and publish retained files. The publishing workflow audits the
+tagged source without rebuilding artifacts or running functional tests.
 No stable acceptance receipt, runtime activation, provider probe, or CI test
 matrix is required. Later runtime changes require a new RC and user feedback.
 See [release-requirements.md](docs/release-requirements.md) for this contract.
