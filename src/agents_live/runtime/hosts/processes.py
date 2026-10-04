@@ -157,6 +157,7 @@ class LocalProcesses:
 
 class LocalChildRunner:
     diagnostic_limit = 64 * 1024 * 1024
+    completion_limit = 64 * 1024 * 1024
 
     def run_child(
         self,
@@ -195,6 +196,11 @@ class LocalChildRunner:
         capture_failed = threading.Event()
         capture_errors = []
         buffers = [bytearray(), bytearray()]
+        byte_counts = [0, 0]
+        completion_limit = (min(self.completion_limit, 64 * 1024 * 1024)
+                    if (env or {}).get("AGENTS_LIVE_CAPTURE_COMPLETION") == "1" else 0)
+        completion_buffer = bytearray()
+        completion_limited = threading.Event()
         process = subprocess.Popen(
             argv, cwd=cwd, env=env,
             stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
@@ -206,21 +212,46 @@ class LocalChildRunner:
 
         capture_prefix = (env or {}).get("AGENTS_LIVE_CAPTURE_PREFIX")
 
-        def collect(stream, buffer, suffix):
+        def collect(stream, buffer, suffix, index):
             snapshot = None
+            prefix_size = self.diagnostic_limit // 2
+            tail_size = self.diagnostic_limit - prefix_size - 1
+            tail = None
             try:
                 if capture_prefix:
                     descriptor = os.open(capture_prefix + suffix, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     snapshot = os.fdopen(descriptor, "wb")
                 while chunk := stream.read1(65536):
-                    remaining = self.diagnostic_limit - len(buffer)
-                    buffer.extend(chunk[:remaining])
-                    if snapshot is not None:
-                        snapshot.write(chunk[:remaining])
-                        snapshot.flush()
-                    if len(chunk) > remaining:
+                    byte_counts[index] += len(chunk)
+                    if index == 0 and completion_limit and not completion_limited.is_set():
+                        if len(completion_buffer) + len(chunk) <= completion_limit:
+                            completion_buffer.extend(chunk)
+                        else:
+                            completion_buffer.clear()
+                            completion_limited.set()
+                    if tail is None and len(buffer) + len(chunk) <= self.diagnostic_limit:
+                        buffer.extend(chunk)
+                        if snapshot is not None:
+                            snapshot.write(chunk)
+                            snapshot.flush()
+                        continue
+                    if tail is None:
+                        buffer.extend(chunk)
+                        tail = buffer[prefix_size:]
+                        del buffer[prefix_size:]
                         limited.set()
-                        return
+                    else:
+                        tail.extend(chunk)
+                    # Front deletion only advances the bytearray start, so the tail stays linear.
+                    del tail[:max(0, len(tail) - tail_size)]
+                if tail is not None:
+                    buffer.extend(b"\n")
+                    buffer.extend(tail)
+                if snapshot is not None and tail is not None:
+                    snapshot.seek(0)
+                    snapshot.write(buffer)
+                    snapshot.truncate()
+                    snapshot.flush()
             except OSError as exc:
                 capture_errors.append(exc)
                 capture_failed.set()
@@ -238,9 +269,11 @@ class LocalChildRunner:
             finally:
                 process.stdin.close()
 
-        workers = [threading.Thread(target=collect, args=(stream, buffer, suffix), daemon=True)
-               for stream, buffer, suffix in zip((process.stdout, process.stderr), buffers,
-                                 (".stdout", ".stderr"))]
+        workers = [
+            threading.Thread(target=collect, args=(stream, buffer, suffix, index), daemon=True)
+            for index, (stream, buffer, suffix) in enumerate(zip(
+                (process.stdout, process.stderr), buffers, (".stdout", ".stderr")))
+        ]
         if input_text is not None:
             workers.append(threading.Thread(target=feed, daemon=True))
         for worker in workers:
@@ -251,7 +284,7 @@ class LocalChildRunner:
         try:
             while process.poll() is None or any(worker.is_alive() for worker in workers):
                 timed_out = timeout is not None and time.monotonic() - started >= timeout
-                if timed_out or limited.is_set() or capture_failed.is_set():
+                if timed_out or capture_failed.is_set():
                     cleanup_started = time.monotonic()
                     terminate_child()
                     process.wait(timeout=5)
@@ -262,7 +295,7 @@ class LocalChildRunner:
                     if any(worker.is_alive() for worker in workers):
                         raise RuntimeError("child stream cleanup did not complete")
                     break
-                limited.wait(0.02)
+                capture_failed.wait(0.02)
         finally:
             terminate_child()
             if process.poll() is None:
@@ -272,7 +305,9 @@ class LocalChildRunner:
         return ChildResult(
             tuple(argv), process.returncode,
             _text(bytes(buffers[0])), _text(bytes(buffers[1])), timed_out,
-            limited.is_set(), cleanup_s,
+            limited.is_set(), cleanup_s, *byte_counts, self.diagnostic_limit,
+            _text(bytes(completion_buffer)) if completion_limit and not completion_limited.is_set() else None,
+            completion_limited.is_set(), completion_limit,
         )
 
     def _run_pty(

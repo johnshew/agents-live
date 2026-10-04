@@ -125,6 +125,15 @@ make only the `pipeline` server and Copilot's inert `task_complete` control
 available to the model; project, built-in, shell, and write tools remain
 unavailable.
 
+Retries share one overall deadline, preserving immutable prepared inputs but
+resetting mutable attempt output. Expired in-flight puts cannot enter the next
+attempt. Per-run timeout overrides only lower the budget; `/run/deadline` and
+processor environment expose its absolute deadline. Opt-in failure postprocessing
+reserves a bounded allowance inside that budget and sees the final attempt's
+partial store and explicit outcome/result-presence markers. Diagnostic retention
+is bounded separately from completed values; pipeline telemetry overflow retains
+prefix/tail evidence rather than rejecting an independently bounded result.
+
 ## State and observability
 
 Repository registration says where to collect. Machine-local started state says

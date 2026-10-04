@@ -65,6 +65,7 @@ import secrets
 import socket
 import threading
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,7 @@ _DEFAULT_HOST = "127.0.0.1"
 _RESERVED_KEYS: frozenset[str] = frozenset({"schema"})
 
 _SCHEMA_SUFFIX = "/$schema"
+_REQUEST_ATTEMPT: ContextVar[int | None] = ContextVar("pipeline_request_attempt", default=None)
 
 
 def _utc_now() -> str:
@@ -147,6 +149,9 @@ class PipelineMcp:
         # referenced schema document) would let the agent validate its
         # output against a schema of its own choosing (PKG-001).
         self._frozen: set[str] = set()
+        self._attempt = 0
+        self._provider_token: str | None = None
+        self._provider_writes_open = False
         self._puts = 0
         self._gets = 0
         self._thread: threading.Thread | None = None
@@ -179,15 +184,31 @@ class PipelineMcp:
         with self._lock:
             return path in self._store, self._store.get(path)
 
-    def begin_attempt(self, attempt: int) -> None:
+    def begin_attempt(self, attempt: int) -> str:
         import copy
 
         with self._lock:
+            self._attempt = attempt
+            self._provider_token = secrets.token_urlsafe(32)
+            self._provider_writes_open = True
             if attempt == 1:
                 self._prepared_inputs = copy.deepcopy(self._store)
             self._store = copy.deepcopy(self._prepared_inputs)
             self._frozen = set(self._prepared_inputs)
         self._log_event(op="attempt", path="/", ok=True)
+        return self._provider_token
+
+    def close_attempt(self) -> None:
+        with self._lock:
+            self._provider_writes_open = False
+
+    def authenticate(self, token: str) -> tuple[bool, int | None]:
+        with self._lock:
+            if secrets.compare_digest(token, self._token):
+                return True, None
+            if self._provider_token and secrets.compare_digest(token, self._provider_token):
+                return self._provider_writes_open, self._attempt
+            return False, None
 
     def seed(self, items: list[tuple[str, Any]]) -> None:
         """Pre-populate the store with ``(path, value)`` pairs from a
@@ -402,6 +423,13 @@ class PipelineMcp:
             ),
         )
         def put(path: str, value: Any) -> dict[str, Any]:
+            request_attempt = _REQUEST_ATTEMPT.get()
+            with self._lock:
+                attempt = self._attempt if request_attempt is None else request_attempt
+                if request_attempt is not None and (
+                        attempt != self._attempt or not self._provider_writes_open):
+                    self._log_event(op="put", path=str(path), ok=False, error="attempt expired", attempt=attempt)
+                    return {"ok": False, "path": path, "error": "attempt expired"}
             normalized, err, reserved_key = _classify_path(path)
             if normalized is None:
                 self._log_event(op="put", path=str(path), ok=False, error=err)
@@ -446,6 +474,9 @@ class PipelineMcp:
                         return {"ok": False, "path": normalized, "error": meta_err}
                     schema_kind = "direct"
                 with self._lock:
+                    if attempt != self._attempt or (
+                            request_attempt is not None and not self._provider_writes_open):
+                        return {"ok": False, "path": normalized, "error": "attempt expired"}
                     self._store[normalized] = value
                     self._puts += 1
                 self._log_event(op="put", path=normalized, schema_kind=schema_kind, ok=True)
@@ -496,6 +527,10 @@ class PipelineMcp:
                     }
 
             with self._lock:
+                if attempt != self._attempt or (
+                    request_attempt is not None and not self._provider_writes_open):
+                    self._log_event(op="put", path=normalized, ok=False, error="attempt expired", attempt=attempt)
+                    return {"ok": False, "path": normalized, "error": "attempt expired"}
                 self._store[normalized] = value
                 self._puts += 1
             self._log_event(op="put", path=normalized, value=value, ok=True)
@@ -549,7 +584,7 @@ class PipelineMcp:
         fastmcp = self._build_app()
         app = fastmcp.streamable_http_app()
         if self._require_token:
-            app = _BearerTokenMiddleware(app, self._token)
+            app = _BearerTokenMiddleware(app, self)
 
         # Silence uvicorn's per-request access log -- we already JSONL-log
         # every tool call ourselves, and uvicorn noise pollutes agent logs.
@@ -593,6 +628,7 @@ class PipelineMcp:
             "log_schema": 5,
             "event_id": uuid.uuid4().hex,
             "component": "pipeline-mcp",
+            "attempt": self._attempt,
             **({"agent_name": self._agent_log.stem} if self._agent_log else {}),
             **({"run_id": self._run_id} if self._run_id else {}),
             **fields,
@@ -628,11 +664,11 @@ class _BearerTokenMiddleware:
     timing oracles even on a localhost endpoint.
     """
 
-    def __init__(self, app: Any, token: str) -> None:
-        if not token or len(token) < 8:
+    def __init__(self, app: Any, pipeline: PipelineMcp) -> None:
+        if not pipeline.token or len(pipeline.token) < 8:
             raise ValueError("pipeline-mcp bearer token must be at least 8 chars")
         self._app = app
-        self._token = token
+        self._pipeline = pipeline
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -641,8 +677,9 @@ class _BearerTokenMiddleware:
         headers = dict(scope.get("headers") or [])
         auth = headers.get(b"authorization", b"").decode("latin-1", errors="replace")
         ok = False
+        attempt = None
         if auth.lower().startswith("bearer "):
-            ok = secrets.compare_digest(auth[7:], self._token)
+            ok, attempt = self._pipeline.authenticate(auth[7:])
         if not ok:
             await send({
                 "type": "http.response.start",
@@ -657,7 +694,11 @@ class _BearerTokenMiddleware:
                 "body": b'{"error":"unauthorized"}',
             })
             return
-        await self._app(scope, receive, send)
+        identity = _REQUEST_ATTEMPT.set(attempt)
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            _REQUEST_ATTEMPT.reset(identity)
 
 
 

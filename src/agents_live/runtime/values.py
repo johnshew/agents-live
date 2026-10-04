@@ -78,6 +78,12 @@ class ChildResult:
     timed_out: bool = False
     output_limited: bool = False
     cleanup_s: float = 0.0
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    diagnostic_limit: int = 0
+    completion_stdout: str | None = None
+    completion_limited: bool = False
+    completion_limit: int = 0
 
 
 @dataclass(frozen=True)

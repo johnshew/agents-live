@@ -75,7 +75,17 @@ agents-live run link-check
 agents-live run link-check --changed-files '["docs/index.md"]'
 agents-live run link-check -p "Focus on the authentication pages"
 agents-live run link-check -o dry-run -o account=team-inbox
+agents-live run link-check --timeout 300 --no-retry
 ```
+
+`--timeout SECONDS` lowers the definition's overall execution budget, never
+raises it. Zero, negative and above-budget values are usage errors rejected
+before dispatch claims budget or records a run. All steps, provider probes and
+retries share that budget.
+`--no-retry` disables both timeout and empty-completion retries for diagnostics.
+The absolute deadline is exposed to processors as `AGENTS_LIVE_DEADLINE` and
+to pipeline agents at read-only `/run/deadline`. Cleanup has its own bounded,
+reported duration and can finish after the execution deadline.
 
 `-p/--prompt` and `--prompt-file` add instructions for this run only, without
 editing the definition. `--prompt-file -` reads them from stdin, and the two

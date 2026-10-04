@@ -258,6 +258,10 @@ def _normalize(record: dict[str, object]) -> tuple[dict[str, object], str | None
         "finalized": envelope.get("finalized", True),
         "usage": envelope.get("usage", record.get("usage", {})),
         "diagnostic_retention": envelope.get("diagnostic_retention", "unknown"),
+        "diagnostic_strategy": envelope.get("diagnostic_strategy", "unknown"),
+        "diagnostic_limit": envelope.get("diagnostic_limit"),
+        "stdout_bytes": envelope.get("stdout_bytes"),
+        "stderr_bytes": envelope.get("stderr_bytes"),
         "timestamp": envelope.get("timestamp", base["timestamp"]),
     })
     if structured is not None:
