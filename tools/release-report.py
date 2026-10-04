@@ -149,14 +149,15 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
         if not published:
             if final:
                 state = f"final {final['state']}"
-                operation = {"reserved": "prepare-attempt", "prepared": "accept-candidate",
-                             "accepted": "finalize", "finalized": "publish"}.get(final["state"])
-                action = (f"Continue {final['attempt']}: {operation}; publish only accepted packages."
+                operation = {"reserved": "prepare-attempt", "prepared": "finalize",
+                             "approved": "finalize", "accepted": "finalize",
+                             "finalized": "publish"}.get(final["state"])
+                action = (f"Continue {final['attempt']}: {operation}; retain exact RC approval without functional retesting."
                           if operation else f"Resolve {final['attempt']} evidence before publication.")
             elif selected:
                 state = f"RC {selected_attempt['state']}" if selected_attempt else "RC evidence missing"
-                action = (f"Prepare final {version} from accepted {selected}."
-                          if selected_attempt and selected_attempt["state"] == "accepted" and approval_valid
+                action = (f"Prepare final {version} from developer-approved {selected} without functional retesting."
+                          if selected_attempt and selected_attempt["state"] in {"prepared", "accepted"} and approval_valid
                           else f"Obtain exact-source publication approval for {selected}."
                           if selected_attempt and selected_attempt["state"] == "accepted"
                           else f"Complete exact-package acceptance of selected {selected} for {version}.")
