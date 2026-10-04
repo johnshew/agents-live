@@ -57,11 +57,22 @@ There is no active bake branch, bake worktree, or bake-to-main promotion step.
 Historical bake refs and records do not route development. Immutable numbered
 attempt worktrees are retained release evidence, not another development channel.
 
-Publication approval records `decision = "approved"`, the exact full source
-`commit`, and `decided_on = "YYYY-MM-DD"`. A different runtime commit requires
+Publication approval records `decision = "approved"`, the RC `attempt`, exact
+full source `commit`, `wheel_sha256`, and `decided_on = "YYYY-MM-DD"`.
+A different runtime commit requires
 renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
+
+The default development cycle is 6.9.4 with next identity `6.9.4rc1`. Its seven
+planned issues remain planned until delivery and acceptance evidence exists.
+The 2026-10-04 user-directed reassignment of #530/#531 from 6.9.3 does not rewrite
+that published cycle's retained attempts, deployment history or approval.
+Published 6.9.2 and 6.9.3 have no next RC. Keep #530/#531 partial in 6.9.3,
+not also deferred there; their outstanding work is planned in 6.9.4.
+Do not stamp or consume RC1 merely by configuring its scope. The additive #540
+and #542 controls merit a semantic-version review without automatically changing
+the requested 6.9.4 target.
 
 Use the primary checkout only when clean and already on the intended branch;
 otherwise use an isolated worktree. Verify ancestry before committing or pushing.
@@ -101,7 +112,9 @@ uv run --script tools/local-deploy.py --repo <live-repository> --rc <configured-
 
 Activation, state preservation, dashboard/watcher restoration and rollback are
 official parts of the RC loop. Source changes require another RC number; never
-overwrite consumed package identities. Final preparation runs identity,
+overwrite consumed package identities. Developer approval of the exact RC
+authorizes stable packaging, finalization and publication without stable
+operational acceptance or functional retesting. Final preparation runs identity,
 provenance, export audit, and build checks only; it does not repeat functional
 verification or require stable operational acceptance. Use
 [release.md](release.md) for those operations and [testing.md](testing.md) for

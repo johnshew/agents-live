@@ -1,13 +1,12 @@
 schema = 2
 development_branch = "main"
-default_cycle = "6.9.3"
+default_cycle = "6.9.4"
 
 [cycles."6.9.2"]
 branch = "release/6.9.2"
 source_ref = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
 selected_rc = "6.9.2rc5"
-next_rc = "6.9.2rc7"
-recommendation = "Publish the developer-accepted RC5 runtime source without additional functional testing. Later runtime changes belong to 6.9.3."
+recommendation = "6.9.2 is published from developer-approved RC5. Preserve its immutable artifacts, historical attempts and approval; later runtime changes belong to subsequent development."
 
 [cycles."6.9.2".approval]
 decision = "approved"
@@ -78,7 +77,6 @@ evidence = "Retained attempt includes #528. Not selected for 6.9.2; carry the fi
 branch = "release/6.9.3"
 source_ref = "19623ae75e5f6491835f0d552781998975766cf6"
 selected_rc = "6.9.3rc1"
-next_rc = "6.9.3rc2"
 recommendation = "6.9.3 is published from developer-approved RC1. Preserve its immutable artifacts and approval; later runtime fixes and process changes belong to subsequent development."
 
 [cycles."6.9.3".deployment]
@@ -97,7 +95,7 @@ decided_on = "2026-10-04"
 [cycles."6.9.3".issues]
 delivered = [528, 532]
 partial = [530, 531]
-deferred = [547, 540, 531, 542, 549, 530, 550, 538, 539]
+deferred = [547, 540, 542, 549, 550, 538, 539]
 
 [cycles."6.9.3".decisions]
 "530" = "Initial diagnostic/result separation is in RC1; developer assigned remaining work to 6.9.4 on 2026-10-04."
@@ -109,3 +107,20 @@ deferred = [547, 540, 531, 542, 549, 530, 550, 538, 539]
 "542" = "Developer assigned configurable timeout/deadline work to 6.9.4 on 2026-10-04."
 "549" = "Developer assigned maintenance-contention correction to 6.9.4 on 2026-10-04."
 "550" = "Developer assigned dry-run registration correction to 6.9.4 on 2026-10-04."
+
+[cycles."6.9.4"]
+branch = "main"
+next_rc = "6.9.4rc1"
+recommendation = "Implement and source-test the seven planned fixes before preparing RC1. Source tests are not provider, native scheduler, artifact or installed acceptance. No candidate identity is consumed by this configuration."
+
+[cycles."6.9.4".approval]
+decision = "testing"
+
+[cycles."6.9.4".issues]
+planned = [547, 540, 531, 542, 549, 530, 550]
+
+[cycles."6.9.4".decisions]
+"530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
+"531" = "Developer assigned outstanding retry/budget/isolation work from 6.9.3 on 2026-10-04; historical timing excess is not explained by this change."
+"540" = "Developer requested additive opt-in failure postprocessing in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
+"542" = "Developer requested additive lower-only timeout and deadline visibility in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
