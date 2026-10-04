@@ -105,10 +105,13 @@ Retained RC6 does not supersede RC5's selection. Preserve all historical package
 receipts and refs, including the rejected unpublished stable-tag conflict.
 
 Record explicit publication approval in `[cycles."<target>".approval]`, binding
-`decision = "approved"`, a full source `commit`, and `decided_on = "YYYY-MM-DD"`.
-Accept the exact RC, prepare final stable bytes from that source, and independently
-accept those bytes before finalizing and publishing. Later runtime fixes require
-a new RC. Never infer approval from a build, activation, or issue closure.
+`decision = "approved"`, the RC `attempt`, full source `commit`, `wheel_sha256`,
+and `decided_on = "YYYY-MM-DD"`. Developer acceptance of the exact deployed RC
+authorizes publication without rebuilding RC bytes or functional retesting.
+Prepare stable version metadata once, then finalize and publish retained files.
+No stable acceptance receipt, runtime activation, provider probe, or CI test
+matrix is required. Later runtime changes require a new RC and user feedback.
+See [release-requirements.md](docs/release-requirements.md) for this contract.
 Do not prepare or publish an already published version again; report GitHub,
 PyPI and package-proxy availability separately. See
 [development-release-process.md](docs/development-release-process.md) for the

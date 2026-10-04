@@ -7,12 +7,22 @@ ms.topic: concept
 
 # Development and release process
 
+## Current Release Contract
+
+Functional testing and user feedback belong to the RC process. Once the user
+approves an exact RC, publish its runtime without rebuilding RC bytes or
+functional retesting. Stable-version packaging may change only version and
+release metadata. Build those distributions once and upload the retained files.
+Identity, provenance, hashes, tags, permissions, and public availability remain
+checked. No stable acceptance, runtime activation, provider probe, or test-matrix
+rerun is required. This supersedes older independent-final-validation guidance.
+See [release-requirements.md](release-requirements.md).
+
 ## Decision
 
 Use one release cycle per intended stable version:
 
-**Choose a target -> build and activate numbered RCs -> accept one -> validate
-the final package -> approve and publish.**
+**Choose a target -> build and evaluate an RC -> user approves -> publish.**
 
 For example: `6.9.3rc1`, `6.9.3rc2`, `6.9.3rc3`, then `6.9.3`.
 Release candidates are ordinary PEP 440 prerelease packages, not a separate
@@ -161,8 +171,8 @@ editing consumer repositories or publishing unrelated work.
    accepted risks and publication decision. Fix or explicitly defer relevant
    known issues; unrelated backlog does not automatically block publication.
 2. Prepare the final version from that source, permitting reviewed metadata
-   changes such as version and release notes. Independently validate the final
-   package, including required Windows/Linux and installed checks.
+  changes such as version and release notes. Verify package identity and hashes,
+  without repeating functional checks completed during RC evaluation.
 3. Finalize the stable tag only after acceptance. Preserve any earlier rejected
    unpublished tag through the explicit recovery procedure; never rewrite a
    published tag or replace uploaded packages.

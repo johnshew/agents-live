@@ -10,6 +10,7 @@ import argparse
 import base64
 import contextlib
 import errno
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -808,17 +810,143 @@ def _dashboard_actions(
             dashboard_pid=dashboard_pid)
 
 
+def _hello_world_provider(
+    python: Path, repo: Path, environment: dict[str, str], agency_plugin: Path | None,
+) -> str:
+    if agency_plugin is None:
+        return "copilot"
+    source = agency_plugin.resolve(strict=True)
+    destination = repo / "acceptance_plugin"
+    if source.is_dir():
+        shutil.copytree(source, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    else:
+        destination = destination.with_suffix(".py")
+        shutil.copy2(source, destination)
+    (repo / ".agents-live.toml").write_text(
+        '[plugins.acceptance]\npath = ' + json.dumps(destination.name) + '\n',
+        encoding="utf-8")
+    completed = subprocess.run(
+        [str(python), "-c",
+         "import json,sys; from pathlib import Path; from agents_live import plugins; "
+         "from agents_live.agent import providers; "
+         "loaded=plugins.load([Path(sys.argv[1])]); "
+         "errors=[item.detail for item in loaded if not item.ok]; "
+         "print(json.dumps({'errors':errors,'providers':providers.names()}))",
+         str(repo)], cwd=repo, env=environment, capture_output=True, text=True, check=True)
+    availability = json.loads(completed.stdout)
+    if availability["errors"]:
+        raise OperationalError("agency plugin failed to load: " + "; ".join(availability["errors"]))
+    if "agency-copilot" not in availability["providers"]:
+        raise OperationalError("supplied agency plugin does not provide agency-copilot")
+    return "agency-copilot"
+
+
+def hello_world_acceptance(wheel: Path, agency_plugin: Path | None = None) -> dict:
+    wheel = wheel.resolve(strict=True)
+    match = re.fullmatch(r"agents_live-([^-]+)-py3-none-any\.whl", wheel.name)
+    if match is None:
+        raise OperationalError("hello-world acceptance requires an Agents Live wheel")
+    with wheel.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    with tempfile.TemporaryDirectory(prefix="agents-live-hello-") as temporary:
+        directory = Path(temporary)
+        repo = directory / "repository"
+        repo.mkdir()
+        environment = os.environ.copy()
+        environment.update({
+            "AGENTS_LIVE_REPO": str(repo),
+            "AGENTS_LIVE_INSTALL_ROOT": str(directory / "installation"),
+            "XDG_STATE_HOME": str(directory / "state"),
+            "XDG_DATA_HOME": str(directory / "data"),
+            "XDG_CONFIG_HOME": str(directory / "config"),
+        })
+        runtime = directory / "runtime"
+        for command in (["uv", "venv", str(runtime)],
+                        ["uv", "pip", "install", "--python", str(runtime), str(wheel)]):
+            subprocess.run(command, env=environment, check=True,
+                           capture_output=True, text=True)
+        cli = runtime / ("Scripts/agents-live.exe" if os.name == "nt" else "bin/agents-live")
+        python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        provider = _hello_world_provider(python, repo, environment, agency_plugin)
+        selector = "agency-copilot/gpt-5.6-luna:low" if provider == "agency-copilot" else "copilot"
+        print(f"+ hello-world acceptance: selector {selector}", flush=True)
+        for name in ("hello-world",):
+            skill = repo / "Agents" / name / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                f'---\nname: {name}\ndescription: Isolated release cost probe.\n'
+                'metadata:\n  agents-live.schema-version: "1"\n'
+                f'  agents-live.selector: "{selector}"\n'
+                '  agents-live.mode: "plan"\n'
+                '  agents-live.timeout: "120"\n'
+                '  agents-live.mcps: "[]"\n'
+                '  agents-live.allow-tools: "[]"\n'
+                '---\nReply with exactly: Hello world\nDo not call tools.\n',
+                encoding="utf-8")
+        previous = os.environ.copy()
+        try:
+            os.environ.update(environment)
+            version = _run(cli, repo, "--version").stdout.strip()
+            if not version.startswith(f"agents-live {match.group(1)} ") \
+                    and version != f"agents-live {match.group(1)}":
+                raise OperationalError("temporary runtime has the wrong version")
+            rows = _json(cli, repo, "status").get("agents", [])
+            identifiers = {row["name"]: row["identifier"] for row in rows}
+            results = []
+            for name in ("hello-world",):
+                identifier = identifiers[name]
+                print(f"+ hello-world acceptance: running {name}", flush=True)
+                run = _json(cli, repo, "run", "--name", identifier)
+                run_id = _successful_run_id(run, identifier)
+                if str(run.get("text", "")).strip() != "Hello world":
+                    raise OperationalError("Copilot did not return the expected hello-world response")
+                logs = _json(cli, repo, "logs", "--all", "--sql",
+                             f"select * from log where run_id = '{run_id}' and phase = 'done'")
+                records = logs.get("records", [])
+                if len(records) != 1 or records[0].get("agent_name") != identifier \
+                        or records[0].get("status") != "ok":
+                    raise OperationalError("hello-world terminal event does not match the run")
+                cost = _usage_map(records[0].get("usage")).get("list_cost_usd")
+                if isinstance(cost, bool) or cost is None:
+                    raise OperationalError("Copilot did not report list_cost_usd")
+                cost = float(cost)
+                if not math.isfinite(cost) or cost <= 0:
+                    raise OperationalError("Copilot reported invalid or nonpositive cost")
+                results.append({"agent": name, "run_id": run_id, "list_cost_usd": cost})
+            return {"ok": True, "mode": "isolated-copilot", "provider": provider,
+                    "selector": selector,
+                    "version": match.group(1),
+                    "wheel_sha256": digest, "runs": results}
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cli", type=Path, required=True)
-    parser.add_argument("--repo", type=Path, required=True)
-    parser.add_argument("--agent", required=True)
-    parser.add_argument("--cost-agent", required=True)
+    parser.add_argument("--hello-world", type=Path, metavar="WHEEL")
+    parser.add_argument("--agency-plugin", type=Path,
+                        help="Available agency plugin source to copy into the isolated probe")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--cli", type=Path)
+    parser.add_argument("--repo", type=Path)
+    parser.add_argument("--agent")
+    parser.add_argument("--cost-agent")
     parser.add_argument(
         "--preflight", action="store_true",
         help="Validate browser, dashboard, and selected agents without mutation",
     )
     args = parser.parse_args()
+    if args.hello_world:
+        if any((args.cli, args.repo, args.agent, args.cost_agent, args.preflight)):
+            parser.error("--hello-world cannot use live-repository arguments")
+        result = hello_world_acceptance(args.hello_world, args.agency_plugin)
+        if args.output:
+            args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(result))
+        return 0
+    if not all((args.cli, args.repo, args.agent, args.cost_agent)) or args.output or args.agency_plugin:
+        parser.error("live acceptance requires --cli, --repo, --agent, and --cost-agent")
     cli = args.cli.resolve()
     repo = args.repo.resolve()
     if args.preflight:
