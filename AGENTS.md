@@ -12,6 +12,84 @@ standard Claude Code and GitHub Copilot agent definitions. Start with
 [README.md](README.md) for what the tool does; this file covers how to
 work on it.
 
+## Continuous Development and Learning
+
+CDL and GLP are active by default unless the user explicitly pauses or disables
+them. At task start, read and FOLLOW both [CDL](.agents/cdl-glp/cdl.md) and
+[GLP](.agents/cdl-glp/glp.md), together with the
+[project adaptation](.agents/cdl-glp/README.md). These are operating instructions,
+not optional reference links or background automation.
+
+Assess every steering input before acting: acknowledge its classification, new
+goals (or none), current goals, continuation conditions and workstream states.
+Preserve compatible unfinished goals and explicit sequencing dependencies. A
+question or status request does not pause work. Continue authorized, unblocked
+work until acceptance, an explicit pause/stop, or a genuine boundary prevents it.
+
+After steering and completion summaries, show a scoped single-line checklist for
+goals/workstreams, steering, repository protocol and GLP, followed by a brief
+workstream/phase/verified-delta/next-action update. Refresh it at meaningful phase,
+checkpoint, blocker and resumption changes; do not repeat unchanged ceremony.
+Use ASCII `[x]` and `[ ]` instead of the portable contract's Unicode symbols.
+Check only verified obligations and name pending or not-needed dispositions.
+
+Before reporting completion, run session analysis and the GLP learning pass,
+apply any necessary authorized durable updates and independently read them back.
+Record supported `no_change` when appropriate; account for formal consolidation
+separately. Before stopping, put the answer first, then account for every goal and
+workstream, outstanding checks, learning, publication and open decisions in the
+final visible message after the last tool call. Explain why stopping covers all
+open work; continue if an authorized, unblocked action remains.
+
+Delegate substantive work when allowed and supported, within the current user's
+scope, tool restrictions and project policies. Give delegates bounded ownership
+and require compact evidence reports; the supervisor verifies acceptance. If
+delegation is unavailable or prohibited, proceed directly within authority.
+
+### Local Policy and Overrides
+
+This policy overrides the portable contracts' tracked-log, checkpoint-all-edits
+and publication defaults. Existing project safety, validation and release rules
+prevail; CDL/GLP add no write, integration, release or deployment authority.
+
+- **Session records:** create one UUID-named, UTC-timestamped Markdown log in
+  gitignored `logs/cdl/`; reuse it across turns/resumption and append verified
+  snapshots, outcomes and GLP dispositions. Logs remain local-only: never track,
+  commit, push or publish them, including receipt-only checkpoints. Do not copy
+  raw operational logs into docs, issues, PRs or memory. Publish only sanitized
+  instruction/GLP changes under explicit authority. Preserve pre-adoption records
+  already tracked on main as historical evidence; do not modify or add tracked
+  session logs under this policy.
+- **Knowledge:** domain facts, decisions and continuing project work belong in
+  existing `docs/` records and GitHub issues under their current ownership rules.
+  Method lessons append to their owning existing `.agents/` guide or root
+  instructions using GLP's update format. Existing learning records remain
+  evidence; do not migrate, erase or duplicate them on adoption. Formal
+  consolidation is a separately scoped per-document phase with an explicit
+  applied/unconsolidated, pending, blocked or supported no-change disposition.
+- **Evidence and privacy:** cite relative document/section links, contract
+  versions, compared revisions or hashes, source/observation dates and exact
+  check results; label user direction, observation, inference and uncertainty.
+  Sanitize durable records and external writes for the export/privacy boundary:
+  no personal repository/account/machine names, source paths, secrets, raw logs
+  or private source policies. Preserve required evidence in its approved home,
+  not by importing private source material into this tree.
+- **Validation:** use the existing development/testing and release gates for the
+  touched boundary; do not weaken required gates or invent extra broad gates for
+  routine prose. Documentation-only adoption uses the export/link audit and
+  `git diff --check`; it does not claim source, artifact, installed-runtime or
+  fresh-client behavioral acceptance. Reuse unchanged passing evidence under
+  [.agents/testing.md](.agents/testing.md).
+- **Authority and concurrency:** do not infer commit, push, PR, merge, deployment,
+  runtime, schedule or hook permission from CDL/GLP activation. An explicit user
+  request to open a PR authorizes committing the current branch's scoped changes,
+  pushing that branch and opening the requested PR, unless a current restriction
+  forbids those actions; it does not authorize merge or deployment. Future requests
+  still need applicable project authority. Preserve concurrent work, review diffs
+  and index scope, and stage explicit authorized paths only. Never automatically
+  publish another writer's edits or sweep a worktree's uncommitted changes into a
+  checkpoint. Retain an uncommitted worktree when the user requires that handoff.
+
 ## Load before acting
 
 | When you are... | Read first |
