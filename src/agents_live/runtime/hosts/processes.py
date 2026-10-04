@@ -43,15 +43,16 @@ def watchers_on_host(
     found: list[tuple[int, str, str | None]] = []
     for pid, command in system.process_command_lines():
         args = system.split_command_line(command)
-        if not any(
-            "activate.py" in argument or Path(argument).stem == "agents-live"
-            for argument in args
-        ):
+        command_index = next((
+            index for index, argument in enumerate(args)
+            if "activate.py" in argument or Path(argument).stem == "agents-live"
+        ), None)
+        if command_index is None:
             continue
         if under is not None and not any(
             within(argument, under) for argument in args):
             continue
-        name = _watcher_name(args)
+        name = _watcher_name(args[command_index + 1:])
         if not name:
             continue
         project = next(
@@ -69,17 +70,23 @@ def watchers_on_host(
 def _watcher_name(args: Sequence[str]) -> str | None:
     from .. import artifacts
 
+    route: list[str] = []
+    tokens = iter(args)
+    for token in tokens:
+        if token == "--":
+            break
+        if token in {"--repo", "--metadata"}:
+            next(tokens, None)
+        elif token != "--json":
+            route.append(token)
+    if route[:2] == ["internal", "watch-loop"]:
+        route = route[1:]
+    if not route or route[0] not in {"watch-loop", "--watch-loop"}:
+        return None
     metadata = artifacts.from_argv(args)
     if metadata is not None and metadata.target.startswith("agent:"):
         return metadata.target.removeprefix("agent:") or None
-    return next(
-            (
-                second
-                for first, second in zip(args, args[1:])
-                if first in ("watch-loop", "--watch-loop")
-            ),
-            None,
-        )
+    return route[1] if len(route) > 1 else None
 
 
 class LocalProcesses:

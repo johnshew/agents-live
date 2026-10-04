@@ -1921,6 +1921,170 @@ class TestPendingUpgradeIdentity(TempRepository):
         self.assertIsNone(hostruntime.process_start_time(999_999_999))
 
 
+class TestWatcherInventory(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.environment = self.root / "installation"
+        self.cli = self.environment / "Scripts" / "agents-live.exe"
+
+    def metadata(self, name: str, origin: str | None = None) -> str:
+        return artifacts.encode(artifacts.InvocationMetadata(
+            "0123456789abcdef01234567", f"repo:{self.root}",
+            f"agent:{name}", origin))
+
+    def command(
+        self, *arguments: str, child: bool = False,
+        launcher: Path | None = None,
+    ) -> str:
+        argv = [str(launcher or self.cli), "--repo", str(self.root), *arguments]
+        if child:
+            argv.insert(0, str(self.environment / "Scripts" / "python.exe"))
+        return subprocess.list2cmdline(argv) if os.name == "nt" else " ".join(argv)
+
+    def inventory(
+        self, rows: list[tuple[int, str]],
+    ) -> list[tuple[int, str, str | None]]:
+        with mock.patch.object(hostruntime, "process_command_lines", return_value=rows):
+            return uninstall.watchers_on_host(under=self.environment)
+
+    def test_scheduled_runs_with_metadata_are_not_watchers(self) -> None:
+        for origin in ("clock", "boot"):
+            with self.subTest(origin=origin):
+                arguments = ("run", "--metadata", self.metadata("scheduled", origin),
+                             "--name", "scheduled", "--quiet")
+                self.assertEqual([], self.inventory([
+                    (101, self.command(*arguments)),
+                    (102, self.command(*arguments, child=True)),
+                ]))
+
+    def test_manual_runs_with_metadata_are_not_watchers(self) -> None:
+        for name in ("manual", "watch-loop"):
+            with self.subTest(name=name):
+                arguments = ("run", name, "--metadata", self.metadata(name))
+                self.assertEqual([], self.inventory([
+                    (101, self.command(*arguments)),
+                    (102, self.command(*arguments, child=True)),
+                ]))
+
+    def test_other_roles_and_watcher_argument_values_are_not_watchers(self) -> None:
+        for arguments in (
+            ("internal", "maintain"),
+            ("internal", "liveness"),
+            ("dashboard",),
+            ("status", "watch-loop"),
+            ("run", "sample", "--", "internal", "watch-loop", "sample"),
+            ("run", "sample", "--watch-loop", "sample"),
+        ):
+            for metadata in ((), ("--metadata", self.metadata("sample"))):
+                with self.subTest(role=arguments[0], marked=bool(metadata)):
+                    self.assertEqual([], self.inventory([(
+                        101, self.command(*metadata, *arguments),
+                    )]))
+
+    def test_real_watchers_take_identity_from_metadata(self) -> None:
+        metadata = self.metadata("canonical-watcher")
+        for arguments in (
+            ("--metadata", metadata, "internal", "watch-loop", "positional"),
+            ("internal", "--metadata", metadata, "watch-loop", "positional"),
+            ("internal", "watch-loop", "--metadata", metadata, "positional"),
+            ("--json", "internal", "watch-loop", "positional", "--metadata", metadata),
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    [(101, "canonical-watcher", str(self.root))],
+                    self.inventory([(101, self.command(*arguments))]))
+
+    def test_legacy_watcher_arguments_remain_inventory_evidence(self) -> None:
+        for launcher, arguments in (
+            (self.cli, ("watch-loop", "legacy")),
+            (self.cli, ("--watch-loop", "legacy")),
+            (self.cli, ("internal", "watch-loop", "legacy")),
+            (self.environment / "activate.py", ("--watch-loop", "legacy")),
+            (self.environment / "activate.py", ("watch-loop", "legacy")),
+        ):
+            with self.subTest(launcher=launcher.name, arguments=arguments):
+                self.assertEqual(
+                    [(101, "legacy", str(self.root))],
+                    self.inventory([(101, self.command(*arguments, launcher=launcher))]))
+
+    def test_watcher_launcher_and_child_deduplicate_without_scheduled_work(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        arguments = ("internal", "watch-loop", "--metadata",
+                     self.metadata("watcher"), "watcher")
+        found = self.inventory([
+            (101, self.command(*arguments)),
+            (102, self.command(*arguments, child=True)),
+            (103, self.command(
+                "run", "--metadata", self.metadata("scheduled", "clock"),
+                "--name", "scheduled", "--quiet")),
+        ])
+        self.assertEqual(
+            ((str(self.root), "watcher"),), script["_logical_watchers"](found))
+        self.assertEqual([101, 102], [pid for pid, _name, _project in found])
+
+    def test_uninstall_stops_only_owned_watchers_and_reports_survivors(self) -> None:
+        arguments = ("internal", "watch-loop", "--metadata",
+                     self.metadata("watcher"), "watcher")
+        rows = [
+            (101, self.command(*arguments)),
+            (102, self.command(*arguments, child=True)),
+            (103, self.command(
+                "run", "--metadata", self.metadata("scheduled", "clock"),
+                "--name", "scheduled", "--quiet")),
+            (104, self.command("run", "manual", "--metadata", self.metadata("manual"))),
+            (105, self.command(
+                *arguments, launcher=self.root / "other" / "agents-live.exe")),
+        ]
+        with (
+            mock.patch.object(hostruntime, "process_command_lines", return_value=rows),
+            mock.patch.object(hostruntime, "terminate") as terminate,
+            mock.patch.object(hostruntime, "is_alive", side_effect=lambda pid: pid == 102),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            survivors = uninstall._stop_own_watchers(self.environment)
+        self.assertEqual([
+            mock.call(101, grace_s=uninstall._WATCHER_GRACE_S),
+            mock.call(102, grace_s=uninstall._WATCHER_GRACE_S),
+        ], terminate.call_args_list)
+        self.assertEqual([(102, "watcher", str(self.root))], survivors)
+
+    def test_nonwatcher_inventory_exclusion_does_not_allow_active_work(self) -> None:
+        for arguments in (
+            ("run", "scheduled", "--metadata", self.metadata("scheduled", "clock")),
+            ("run", "manual", "--metadata", self.metadata("manual")),
+            ("internal", "maintain", "--metadata", self.metadata("maintenance")),
+        ):
+            with self.subTest(arguments=arguments):
+                command = self.command(*arguments, launcher=(
+                    self.environment / "versions" / "1.2.3" / "Scripts" / "agents-live.exe"))
+                with mock.patch.object(hostruntime, "process_command_lines", return_value=[
+                    (os.getpid(), "synthetic validation process"),
+                    (101, command),
+                ]):
+                    self.assertEqual([], uninstall.watchers_on_host(under=self.environment))
+                    with self.assertRaisesRegex(
+                            deploy.generation.GenerationError, "runtime process 101"):
+                        install_generation._require_idle(self.environment)
+
+    def test_active_run_lock_still_refuses_after_inventory_exclusion(self) -> None:
+        command = self.command(
+            "run", "--metadata", self.metadata("scheduled", "clock"),
+            "--name", "scheduled", "--quiet")
+        lock = paths.repo_state_dir(self.root) / "locks" / "scheduled.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text(json.dumps({"pid": 101}), encoding="ascii")
+        with (
+            mock.patch.object(hostruntime, "process_command_lines", return_value=[
+                (os.getpid(), "synthetic validation process"), (101, command),
+            ]),
+            mock.patch.object(install_generation, "pid_exists", return_value=True),
+        ):
+            self.assertEqual([], uninstall.watchers_on_host(under=self.environment))
+            with self.assertRaisesRegex(
+                    deploy.generation.GenerationError, "agent work is running"):
+                install_generation._require_idle(self.environment)
+
+
 class TestWindowsDetachedProcess(unittest.TestCase):
     """Detached watchers outlive maintenance without opening a terminal."""
 
