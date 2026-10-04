@@ -11,6 +11,10 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep dashboard repository changes and refreshes responsive on slow hosts.
+  Plugin validation and inventory scans run outside the websocket loop, so
+  registration and refresh no longer force reconnects or lose settings rows.
+  Readiness isolates installation state and verifies slow-plugin continuity.
 - fix: reuse identical source plugins across registered repositories. (#556)
   Same-name, byte-identical declarations share one imported module without
   upgrade preflight errors or registration warnings. Conflicting plugin or
@@ -72,8 +76,8 @@ history is retained in the source repository.
 - chore: route outstanding runtime fixes through the new 6.9.4 development cycle.
   Published cycles retain approvals and historical attempts without advertising
   another RC. Reports separate partial 6.9.3 delivery from planned 6.9.4 work.
-  Consumed RC1 retains its source and artifact identity; #556 and #538 join the
-  planned scope and the next unused candidate is 6.9.4rc2.
+  Consumed RC1 and readiness-failed RC2 retain their source and artifact
+  identities; #556 and #538 remain in scope and changed source uses 6.9.4rc3.
 
 ## 6.9.3 - 2026-10-04
 
