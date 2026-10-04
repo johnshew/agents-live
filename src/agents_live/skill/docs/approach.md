@@ -68,6 +68,14 @@ process supervisors decode the same envelope, so native artifacts remain
 self-describing without a second registry. Version 1 marker decoding lives only
 under `legacy/` and exists to replace old artifacts during convergence.
 
+Host watcher inventory checks the `internal watch-loop` command role before
+using metadata for agent identity; legacy `watch-loop` and `--watch-loop`
+routes remain recognizable. Scheduled and manual runs are not watchers, even
+with agent metadata. Physical launcher and child rows remain available for
+cleanup, while deployment deduplicates them by repository and agent. Excluding
+ordinary work from watcher inventory does not bypass activation's active-work
+or ownership checks.
+
 Every non-preview maintenance pass records correlated start and terminal admin
 events. The terminal event includes its source, subscription ID when scheduled,
 exit code, convergence counts, watcher and schedule counts, smoketest verdict,
