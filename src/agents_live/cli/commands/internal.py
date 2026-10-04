@@ -8,9 +8,10 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Callable
+from time import sleep as _retry_sleep
 from typing import Any
 
 from ... import __version__, agent, deploy, obs, paths, runtime
@@ -18,14 +19,16 @@ from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...obs import retention
 from ...runtime import handoff
-from ...runtime.hosts import filesystem as watchsource
 from ...runtime.grammars import parse_watch
+from ...runtime.hosts import filesystem as watchsource
 from ...runtime.watchloop import run as run_watchloop
 from ...state import registry as repos
 from .. import lifecycle
 
 
 _AGENT_FAILURE_THRESHOLD = 3
+_MAINTENANCE_GATE_WAIT_SECONDS = 60.0
+_MAINTENANCE_RETRY_DELAY_SECONDS = 30.0
 
 
 def main(
@@ -65,6 +68,7 @@ def _maintain(
     if dry_run:
         return _maintain_once(dry_run=True)
     fields = {
+        "correlation_id": uuid.uuid4().hex,
         "source": "scheduler" if metadata is not None else "cli",
         "subscription_id": metadata.id if metadata is not None else "",
         "scope": metadata.scope if metadata is not None else "",
@@ -84,7 +88,26 @@ def _maintain(
             smoketest="unknown",
             message="maintenance did not complete",
         )
-        code = _maintain_once(dry_run=False, outcome=end)
+        code = 0
+        for attempt in range(2):
+            try:
+                code = _maintain_once(dry_run=False, outcome=end,
+                                      run_id=fields["correlation_id"])
+                break
+            except lifecycle.hostruntime.LockBusy as exc:
+                end.update(getattr(exc, "observation", {}))
+                end.update(status="deferred", health=_health_beacon().get("status", "unknown"),
+                           message="maintenance deferred by launch gate contention",
+                           retry_count=attempt, retry_wait_s=_MAINTENANCE_RETRY_DELAY_SECONDS)
+                if attempt == 0:
+                    adminlog.record("maintenance_deferred", **fields, **end)
+                    _retry_sleep(_MAINTENANCE_RETRY_DELAY_SECONDS)
+                    end["retry_count"] = 1
+                else:
+                    end["exit_code"] = 0
+                    return 0
+        if end.get("status") == "deferred":
+            end["status"] = "ok"
         end["exit_code"] = code
         if code != 0:
             end.update(
@@ -95,10 +118,17 @@ def _maintain(
         return code
 
 
-def _maintain_once(*, dry_run: bool, outcome: dict | None = None) -> int:
+def _maintain_once(*, dry_run: bool, outcome: dict | None = None,
+                   run_id: str = "") -> int:
     outcome = outcome if outcome is not None else {}
     try:
-        result = lifecycle.converge(dry_run=dry_run)
+        if dry_run:
+            result = lifecycle.converge(dry_run=True)
+        else:
+            with handoff.gate(timeout=_MAINTENANCE_GATE_WAIT_SECONDS,
+                              operation="maintenance", run_id=run_id) as observation:
+                outcome.update(observation)
+                result = lifecycle._converge(dry_run=False)
         collected = lifecycle.collect(persist=False)
     except lifecycle.CollectionUnavailable as exc:
         outcome["message"] = str(exc)

@@ -135,7 +135,8 @@ def _dispatch(
     instant = now or datetime.now().astimezone()
     timeout = _CLOCK_ACTIVATION_WAIT_SECONDS if firing.origin == "clock" else 0
     try:
-        with handoff.gate(timeout=timeout):
+        with handoff.gate(timeout=timeout, operation="dispatch", run_id=run_id,
+                  agent=firing.agent_id, repository=firing.root):
             if firing.origin != "manual":
                 try:
                     if not state.is_started(root, firing.agent_id):

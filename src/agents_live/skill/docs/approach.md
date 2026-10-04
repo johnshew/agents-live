@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-09-15
+ms.date: 2026-10-04
 ms.topic: concept-article
 ---
 
@@ -40,6 +40,15 @@ then reload started state and the definition under the gate before claiming the
 per-agent run lock. A wait that expires records a failed run with category
 `runtime_activation_timeout`; it is not a successful or skipped firing. Manual
 and watcher launches retain their immediate activation-exclusion behavior.
+
+Maintenance also waits up to 60 seconds for the launch gate. A wait records the
+observed holder's operation, run, agent, repository and elapsed wait in queryable
+admin attributes. Expiry records one `maintenance_deferred` event, keeps the
+previous health beacon, waits 30 seconds and attempts acquisition once more.
+A second expiry remains deferred, not a maintenance error or a retry storm.
+The gate covers lifecycle convergence only; collection, retention and health
+reporting afterward do not block agent launches.
+This policy does not explain historical firings without their original evidence.
 
 Automatic maintenance is the sole writer of the host-local health record.
 `doctor --quick` treats a record as healthy only when it is both fresh and

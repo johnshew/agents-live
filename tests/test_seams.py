@@ -1594,7 +1594,7 @@ class TestRuntimeCore(unittest.TestCase):
                 "0123456789abcdef01234567", "runtime:test", "runtime")
             with (
                 mock.patch.object(
-                    internal.lifecycle, "converge", return_value=result),
+                    internal.lifecycle, "_converge", return_value=result),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1652,7 +1652,7 @@ class TestRuntimeCore(unittest.TestCase):
                 log = Path(temporary) / "admin.log"
                 with (
                     mock.patch.object(
-                        internal.lifecycle, "converge", return_value=result),
+                        internal.lifecycle, "_converge", return_value=result),
                     mock.patch.object(
                         internal.lifecycle, "collect",
                         side_effect=(collected if isinstance(
@@ -1710,6 +1710,8 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.patch.object(
                     internal.lifecycle, "converge", converge_maintenance),
                 mock.patch.object(
+                    internal.lifecycle, "_converge", converge_maintenance),
+                mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
                     internal.paths, "health_beacon_path", return_value=beacon),
@@ -1745,7 +1747,7 @@ class TestRuntimeCore(unittest.TestCase):
             converge_maintenance.return_value = result
             with (
                 mock.patch.object(
-                    internal.lifecycle, "converge", converge_maintenance),
+                    internal.lifecycle, "_converge", converge_maintenance),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1813,7 +1815,7 @@ class TestRuntimeCore(unittest.TestCase):
             result = mock.Mock(failed=(), health=Health(True, "not-required"))
             collected = mock.Mock(subscriptions=subscriptions)
             with (
-                mock.patch.object(internal.lifecycle, "converge", return_value=result),
+                mock.patch.object(internal.lifecycle, "_converge", return_value=result),
                 mock.patch.object(internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
                     internal.paths, "health_beacon_path", return_value=beacon),

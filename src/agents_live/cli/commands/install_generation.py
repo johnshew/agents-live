@@ -136,7 +136,7 @@ def activate_generation(
     try:
         with handoff.operation():
             try:
-                with handoff.gate(), contextlib.ExitStack() as stopping:
+                with handoff.gate(operation="activation"), contextlib.ExitStack() as stopping:
                     installed = deploy.generation.load(generation.name, root=install_root)
                     if installed != generation:
                         raise deploy.generation.GenerationError(
@@ -166,7 +166,7 @@ def activate_generation(
             except Exception as exc:
                 if disturbed:
                     try:
-                        with handoff.gate(), handoff.pause_watchers():
+                        with handoff.gate(operation="activation"), handoff.pause_watchers():
                             current, _, _ = deploy.pointer.status(
                                 deploy.layout.current_path(install_root))
                             if registered and current is not None and (
