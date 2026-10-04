@@ -274,11 +274,30 @@ tool's version, state, watcher, event-order, and health validation, require the
 installed `direct_url.json` to name the immutable wheel, and restore dashboard
 API rows. A Git-local receipt records the verified deployment identity.
 
+Apply this dashboard lifecycle to every local install, upgrade, and explicit
+version activation, including numbered RCs. The installation request authorizes
+temporarily stopping pre-existing Agents Live dashboards without another approval.
+Before stopping anything, capture `agents-live dashboard list --json` and retain
+each dashboard's repository, port, and modes, including aggregate and development
+mode. Use `agents-live dashboard stop --port <port>` and verify process exit.
+For an independently started foreground dashboard, first positively identify its
+process and launch settings; stop it gracefully, never by guessing from its port.
+
+After activation and any RC diagnostics finish, relaunch the saved dashboards
+through the selected runtime in persistent/async terminals with their original
+settings. Verify `/api/agents` and repository scope for each restored dashboard.
+Do not start a dashboard that was not running before the install. Keep the
+snapshot until restoration is verified. Use failure cleanup to restore the
+original dashboards through the recovered runtime as well; report rather than
+hide an installation or restoration failure. Do not stop agent schedules or
+watchers merely to stop a dashboard. Publication itself does not activate a
+runtime or require these diagnostics.
+
 This fast path does not run agents, spend provider credits, click mutating UI
 actions, or authorize publication. Run focused source tests before deployment.
-Prepared releases still require the complete preparation gates and
-`tools/release.py --accept-candidate`; their release receipts and resumable
-acceptance checkpoints remain authoritative.
+RC preparation and evaluation own functional checks. Exact developer RC approval
+authorizes stable packaging and publication without independent final functional
+acceptance; retained preparation and approval receipts remain authoritative.
 
 ### Local numbered RCs
 
@@ -294,14 +313,16 @@ versions remain installed side by side; `current` selects the RC. No GitHub tag,
 release, or PyPI upload is created. Use `versions list` to inspect retained
 versions and `versions activate <version>` to deliberately select a previous version.
 
-Per-RC source identity, wheel, preparation evidence, and deployment receipt live
-under the common Git directory's `agents-live-local-deploy/candidates/<version>`.
+Numbered source identity, wheels and preparation evidence live under the common
+Git directory's `agents-live-release/cycle-<target>/<attempt>/`; retained attempt
+worktrees live beside those records under `worktrees/`. Deployment receipts are
+separate observations, not publication approval.
 A retry uses the same wheel even after readiness fails. Changed source must use
 the next RC; changed retained bytes fail closed. An interrupted lock or wheel
 without its identity receipt requires inspection, not deletion or rebuilding
 under the same version. Local deployment is not provider-backed acceptance or
-approval of final stable bytes. Stable preparation and publication remain
-blocked on #511.
+approval of final stable bytes. Follow [release.md](release.md) for exact RC
+approval, stable preparation and retained-artifact publication.
 
 ### Recover obsolete provider diagnostics
 

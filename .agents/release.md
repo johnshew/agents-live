@@ -49,6 +49,12 @@ metadata, preserves `Unreleased` for RCs, builds once, and runs the source and
 packaged gates. No tag is created. Run subsequent commands from the printed
 retained worktree, using its script, not a different checkout's version.
 
+These are immutable numbered-attempt snapshots, not bake worktrees. Develop
+on `main` through short-lived reviewed changes; do not create a bake branch or
+an additional promotion stage. Clean up merged development worktrees after
+preserving useful changes. Keep numbered-attempt worktrees, artifacts and
+receipts because supported retry and recovery commands still use them.
+
 ```bash
 uv run --script tools/release.py --accept-candidate --attempt <rc> --yes
 ```
@@ -341,7 +347,7 @@ prepare a different version from clean, synchronized `main`.
 The local candidate commit and artifacts are not public yet.
 Install that exact wheel into the user-level tool through the supported local
 artifact upgrade path, restore a healthy representative repository with at
-least one started watcher, then run the mandatory acceptance command:
+least one started watcher, then run the optional consumer diagnostic command:
 
 ```bash
 agents-live upgrade --from <receipt-bound-wheel-path-printed-by-prepare>
@@ -359,6 +365,15 @@ in the selected representative repository, and requires:
 - unchanged started and loadable state across all registered repositories;
 - healthy all-repository `doctor` results before and after;
 - restoration of every started watcher.
+
+Before local installation or consumer diagnostic preflight, snapshot and
+temporarily stop pre-existing dashboards using the authorized restoration
+procedure in [testing.md](testing.md). Preserve each repository, port and mode;
+restore only previously running dashboards through the selected runtime after
+activation and cleanup, including failed attempts or rollback. Verify their APIs.
+A running dashboard is not a reason to ask the developer to stop it or skip
+the requested installation. These operations belong to RC evaluation, not
+stable publication.
 
 Acceptance preflights the selected agents, absence of a managed dashboard, and
 a real headless browser launch before replacement. Every watcher counted in the

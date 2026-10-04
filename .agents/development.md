@@ -100,6 +100,13 @@ reports any package and skill payload version mismatch.
   `src/agents_live/skill/docs/overview.md`.
 - Minimal diffs; match the style of the surrounding code and docs.
 
+## Subagent models and effort
+
+Follow [subagent-models.md](subagent-models.md) when selecting development and
+review models. Disclose unavailable model or effort controls rather than
+silently substituting. Small trivial edits and short reads may stay with the
+supervisor under CDL.
+
 ## Commit hygiene
 
 Refresh `origin` at meaningful checkpoints: before branching, after a long

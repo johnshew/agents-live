@@ -94,6 +94,7 @@ prevail; CDL/GLP add no write, integration, release or deployment authority.
 
 | When you are... | Read first |
 |---|---|
+| Selecting a subagent model | [.agents/subagent-models.md](.agents/subagent-models.md) |
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
 | Understanding the development and release state machine | [docs/development-release-process.md](docs/development-release-process.md) |
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
@@ -163,6 +164,10 @@ Read `.github/release-cycles.toml` and the generated report. Develop on `main`
 unless the selected cycle explicitly needs a stabilization branch. Test numbered
 RCs within each release cycle. A branch or passing PR does not establish
 acceptance or publication.
+There is no bake branch, bake worktree, or bake-to-main promotion stage.
+Short-lived development worktrees are cleaned up after integration. Retained
+numbered-attempt worktrees under the common Git directory are immutable release
+evidence, not development or bake worktrees; preserve them with their receipts.
 The report must show all active cycles, open work, retained candidate attempts,
 the selected local runtime, and independent publication evidence.
 
@@ -243,8 +248,18 @@ a new agent receives the same answer from either entry point.
   it in a persistent/async terminal, prove readiness through `/api/agents` or
   the packaged dashboard-readiness gate, and do not wait for the server process
   to exit. `dashboard list` reports managed dashboards only; an independently
-  started foreground dashboard can be healthy without appearing there. Stop
-  only a dashboard process this task deliberately started.
+  started foreground dashboard can be healthy without appearing there. Outside
+  local installation work, stop only a dashboard this task deliberately started.
+- **Restore dashboards across local installs and activation.** Local install,
+  upgrade, and version activation authorize temporarily stopping pre-existing
+  Agents Live dashboards without asking again. Record each running dashboard's
+  repository, port, and modes before stopping it through the public CLI; verify
+  it has exited before replacement. After activation and any RC diagnostics,
+  restart only the dashboards that were previously running through the selected
+  runtime, preserving their settings, and verify `/api/agents`. On failure,
+  restore them through the recovered runtime and report any restoration failure.
+  Identify independently started foreground dashboards explicitly; never stop an
+  unrelated process merely because it holds a port. See `.agents/testing.md`.
 - **Never `git checkout`, `git reset`, or `git stash` tracked
   files.** Other agents run concurrently in this checkout and may
   have uncommitted work; re-edit the file instead.
