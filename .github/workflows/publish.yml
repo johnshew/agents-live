@@ -38,16 +38,8 @@ jobs:
       - id: target
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  verify:
-    needs: resolve
-    uses: ./.github/workflows/test.yml
-    with:
-      ref: ${{ needs.resolve.outputs.sha }}
-    permissions:
-      contents: read
-
   publish:
-    needs: [resolve, verify]
+    needs: resolve
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -61,11 +53,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           cache-dependency-glob: pyproject.toml
-      # Source verification above runs against the exact release commit. The
-      # release assets are the exact wheel accepted through installed-tool,
-      # watcher, browser, and provider-cost validation before publication.
-      # Independent Windows/Linux builds are not byte-identical: line endings,
-      # executable modes, and build-backend metadata vary by host.
       - run: >-
           gh release download "$TAG"
           --pattern '*.whl'

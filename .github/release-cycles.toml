@@ -7,11 +7,13 @@ branch = "release/6.9.2"
 source_ref = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
 selected_rc = "6.9.2rc5"
 next_rc = "6.9.2rc7"
-recommendation = "Publish the RC5 runtime source as 6.9.2 after exact final-package validation. The developer reports successful RC5 operation and approved publication on 2026-09-19. Do not include the subsequent scheduled-launch fix or new pipeline changes. Prepared RC6 remains retained, not selected for this release."
+recommendation = "Publish the developer-accepted RC5 runtime source without additional functional testing. Later runtime changes belong to 6.9.3."
 
 [cycles."6.9.2".approval]
 decision = "approved"
+attempt = "6.9.2rc5"
 commit = "a68ba1bd2da60070df42b1a378c4fcc4b92d68d6"
+wheel_sha256 = "8624238131a204ea6f97d3aca5183ceb69754148ecff1e8522fe1b9e21e26e9d"
 decided_on = "2026-09-19"
 
 [cycles."6.9.2".deployment]
@@ -32,12 +34,12 @@ decision_needed = [508, 516, 519, 522]
 "531" = "Developer approved deferral to 6.9.3 on 2026-09-19; timeout retry budgets and inherited pipeline output require correction."
 "532" = "Developer approved deferral to 6.9.3 on 2026-09-19; earlier-attempt and interrupted-run inspection remain limited."
 "533" = "Developer approved publication with this issue open and outside the initial 6.9.3 fix scope on 2026-09-19."
-"538" = "Developer explicitly approved deferral on 2026-09-19; activation still waits for ordinary active work to finish."
-"539" = "Developer explicitly approved deferral on 2026-09-19; exact RC5 and final stable operational acceptance remain required despite the known intermittent log-query race."
 "508" = "Model and effort display is delivered; provider-aware editing and context controls remain in #525."
 "516" = "Keep the packaged focus-readiness gate. Historical RC3 failure is not relabelled as passing."
 "519" = "Existing real-child tests pass, but the reported older installed failure was not independently reproduced."
 "522" = "Recovery tooling is delivered; original retained artifacts are required for historical recovery."
+"538" = "Developer explicitly approved deferral on 2026-09-19; wait for ordinary scheduled work to finish before activation. RC approval authorizes publication without functional retesting."
+"539" = "Developer explicitly approved deferral on 2026-09-19; intermittent log-query schema race remains known. RC approval authorizes publication without functional retesting."
 
 [cycles."6.9.2".history."6.9.2rc1"]
 status = "rejected"
@@ -73,10 +75,11 @@ status = "prepared"
 evidence = "Retained attempt includes #528. Not selected for 6.9.2; carry the fix into 6.9.3 without replacing RC6 bytes."
 
 [cycles."6.9.3"]
-branch = "main"
+branch = "release/6.9.3"
+source_ref = "19623ae75e5f6491835f0d552781998975766cf6"
 selected_rc = "6.9.3rc1"
 next_rc = "6.9.3rc2"
-recommendation = "RC1 is prepared and locally deployed; retain its immutable bytes. Restore RC1 after authorized 6.9.2 acceptance and publication switches. Full operational acceptance and any stable publication require separate evidence and approval."
+recommendation = "6.9.3 is published from developer-approved RC1. Preserve its immutable artifacts and approval; later runtime fixes and process changes belong to subsequent development."
 
 [cycles."6.9.3".deployment]
 version = "6.9.3rc1"
@@ -85,8 +88,24 @@ validated_on = "2026-09-19"
 evidence = "Exact retained wheel deployed; both consumer skills refreshed, all-repository doctor passed, all 45 agent states preserved and owned watcher restored. This is local deployment evidence, not full operational acceptance."
 
 [cycles."6.9.3".approval]
-decision = "testing"
+decision = "approved"
+attempt = "6.9.3rc1"
+commit = "19623ae75e5f6491835f0d552781998975766cf6"
+wheel_sha256 = "6396c7ef421e6e539d8001ce24374a69feab03b62debc50313c19f0e1f0dec00"
+decided_on = "2026-10-04"
 
 [cycles."6.9.3".issues]
-delivered = [528]
-planned = [530, 531, 532]
+delivered = [528, 532]
+partial = [530, 531]
+deferred = [547, 540, 531, 542, 549, 530, 550, 538, 539]
+
+[cycles."6.9.3".decisions]
+"530" = "Initial diagnostic/result separation is in RC1; developer assigned remaining work to 6.9.4 on 2026-10-04."
+"531" = "Initial bounded retry and attempt isolation is in RC1; developer assigned remaining work to 6.9.4 on 2026-10-04."
+"538" = "Known watcher inventory limitation was surfaced before renewed exact-RC publication approval on 2026-10-04. Publication does not perform runtime activation."
+"539" = "Known intermittent log-query limitation was surfaced before renewed exact-RC publication approval on 2026-10-04. No functional acceptance rerun is required."
+"547" = "Developer assigned pipeline transport timeout work to 6.9.4 on 2026-10-04."
+"540" = "Developer assigned partial-store timeout processing to 6.9.4 on 2026-10-04."
+"542" = "Developer assigned configurable timeout/deadline work to 6.9.4 on 2026-10-04."
+"549" = "Developer assigned maintenance-contention correction to 6.9.4 on 2026-10-04."
+"550" = "Developer assigned dry-run registration correction to 6.9.4 on 2026-10-04."

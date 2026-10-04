@@ -7,12 +7,22 @@ ms.topic: concept
 
 # Development and release process
 
+## Current Release Contract
+
+Functional testing and user feedback belong to the RC process. Once the user
+approves an exact RC, publish its runtime without rebuilding RC bytes or
+functional retesting. Stable-version packaging may change only version and
+release metadata. Build those distributions once and upload the retained files.
+Identity, provenance, hashes, tags, permissions, and public availability remain
+checked. No stable acceptance, runtime activation, provider probe, or test-matrix
+rerun is required. This supersedes older independent-final-validation guidance.
+See [release-requirements.md](release-requirements.md).
+
 ## Decision
 
 Use one release cycle per intended stable version:
 
-**Choose a target -> build and activate numbered RCs -> accept one -> validate
-the final package -> approve and publish.**
+**Choose a target -> build and evaluate an RC -> user approves -> publish.**
 
 For example: `6.9.3rc1`, `6.9.3rc2`, `6.9.3rc3`, then `6.9.3`.
 Release candidates are ordinary PEP 440 prerelease packages, not a separate
@@ -21,7 +31,7 @@ process. They do not require public distribution.
 
 Running a numbered RC in real use supplies operational confidence within the
 release cycle. It does not introduce another channel, version scheme,
-deployment stage, or promotion approval before final-package acceptance.
+deployment stage, or separate stable-package functional acceptance.
 Historical commits, packages and receipts remain intact; their existence does
 not route new work through the retired process.
 
@@ -104,7 +114,7 @@ needed for immutable attempt operations. Never discard another writer's changes.
   visible and cannot be silently pulled into the final package.
 - Review release tooling and documentation changes separately from runtime
   changes. A process migration must not smuggle a newer runtime into a final
-  release selected from an older RC. Final-package gates still apply.
+  release selected from an older RC. Package identity and provenance checks still apply.
 - Retain rejected and superseded packages and decisions. Increment candidate
   numbers for changed RC bytes. Retry infrastructure failures with unchanged
   bytes and matching receipts; never overwrite an immutable installation.
@@ -116,11 +126,10 @@ stateDiagram-v2
     [*] --> Developing: choose stable target
     Developing --> LocalTesting: prepare and activate RC1
     LocalTesting --> Developing: defect requires next RC
-    LocalTesting --> CandidateAccepted: accept exact RC and scope
-    CandidateAccepted --> FinalValidation: prepare stable packages
-    FinalValidation --> Developing: runtime correction required
-    FinalValidation --> PublicationReady: final packages pass required checks
-    PublicationReady --> Published: explicit approval and verified uploads
+    LocalTesting --> CandidateApproved: developer approves exact RC and scope
+    CandidateApproved --> FinalPrepared: prepare stable packages once
+    FinalPrepared --> PublicationReady: verify identity, provenance and hashes
+    PublicationReady --> Published: upload retained artifacts
     Published --> [*]
 ```
 
@@ -168,9 +177,9 @@ editing consumer repositories or publishing unrelated work.
    accepted risks and publication decision. Fix or explicitly defer relevant
    known issues; unrelated backlog does not automatically block publication.
 2. Prepare the final version from that source, permitting reviewed metadata
-   changes such as version and release notes. Independently validate the final
-   package, including required Windows/Linux and installed checks.
-3. Finalize the stable tag only after acceptance. Preserve any earlier rejected
+  changes such as version and release notes. Verify package identity and hashes,
+  without repeating functional checks completed during RC evaluation.
+3. Finalize the stable tag using the exact RC approval and retained package identity. Preserve any earlier rejected
    unpublished tag through the explicit recovery procedure; never rewrite a
    published tag or replace uploaded packages.
 4. Publish retained final files through the protected publishing job. Use

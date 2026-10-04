@@ -5,6 +5,12 @@ description: Concurrent release targets, exact candidate evidence, and all in-fl
 
 # Release cycle reporting
 
+Developer approval of the exact deployed RC is the publication decision.
+Reports must recommend stable packaging, finalization, and publication using
+that approval, not additional functional testing or stable acceptance.
+Retained artifact identity, provenance, hashes, tags, and upload availability
+remain verified. See [release-requirements.md](../docs/release-requirements.md).
+
 Choose a stable target, prepare and activate numbered local RCs, then accept and
 publish the selected final packages. These steps form one release cycle. The
 canonical business requirements and industry evidence are in
