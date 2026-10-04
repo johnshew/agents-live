@@ -2704,6 +2704,55 @@ class TestDashboardHealthPolicy(unittest.TestCase):
 
 
 class TestDashboardActionCancellation(unittest.IsolatedAsyncioTestCase):
+    async def test_repository_registration_keeps_the_event_loop_responsive(self) -> None:
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.app.post.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with isolated_host() as (root, _host), mock.patch.dict(
+                sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module("agents_live.cli.scripts.dashboard")
+            dashboard = importlib.reload(dashboard)
+            other = root / "slow-repository"
+            (other / "Agents").mkdir(parents=True)
+            (other / ".agents-live.toml").write_text(
+                '[plugins.slow-readiness]\npath = "plugin.py"\n',
+                encoding="utf-8")
+            (other / "plugin.py").write_text(
+                "import sys\nimport time\ntime.sleep(0.3)\n"
+                "def registry_file_exists(*, root=None): return True\n"
+                "def load_owners(*, root=None, rate_limit_secs=60): return {}\n"
+                "def set_owner(name, owner, *, root=None): pass\n"
+                "def remove_owner(name, *, root=None): pass\n"
+                "OWNERSHIP_REGISTRY = sys.modules[__name__]\n",
+                encoding="utf-8")
+            heartbeat = asyncio.Event()
+
+            async def tick() -> None:
+                await asyncio.sleep(0.01)
+                heartbeat.set()
+
+            with (
+                mock.patch.object(plugins, "_sources", {}),
+                mock.patch.object(ownership, "_backend_cache", None),
+                mock.patch.object(ownership, "_backend_resolved", False),
+                mock.patch.object(dashboard.ng_run, "io_bound",
+                                  side_effect=asyncio.to_thread),
+            ):
+                task = asyncio.create_task(tick())
+                try:
+                    result = await dashboard.api_repository_mutation(
+                        {"action": "add", "path": str(other)})
+                    self.assertTrue(
+                        heartbeat.is_set(),
+                        "repository registration blocked dashboard heartbeats")
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(0, result["repository"]["agent_count"])
+                    self.assertEqual(
+                        {"slow-repository": str(other)}, repos.load()["repos"])
+                finally:
+                    await task
+
     async def test_running_duplicate_action_is_coalesced(self) -> None:
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
@@ -9695,6 +9744,23 @@ class TestCrossModuleAgreements(unittest.TestCase):
             "--viewport requires the layout or continuity scenario",
             invalid.stderr,
         )
+
+    def test_dashboard_readiness_isolates_inherited_installation_and_registry(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        with isolated_host() as (root, _host):
+            with mock.patch.dict(os.environ, {
+                    "AGENTS_LIVE_INSTALL_ROOT": str(root / "unrelated-install"),
+                    "XDG_CONFIG_HOME": str(root / "unrelated-config"),
+                    "AGENTS_LIVE_REPO": str(root / "unrelated-repository")}):
+                readiness["_fixture"](root)
+                environment = readiness["_environment"](root)
+                with mock.patch.dict(os.environ, environment):
+                    self.assertEqual(
+                        root / "installation", deploy.layout.installation_root())
+                    self.assertEqual(
+                        {"readiness": str(root)}, repos.load()["repos"])
+                    self.assertEqual(root, paths.resolve_root())
 
     def test_dashboard_readiness_accepts_a_slow_healthy_api(self) -> None:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

@@ -64,15 +64,21 @@ renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
 
-The default development cycle is 6.9.4 with next identity `6.9.4rc2`. RC1 was
+The default development cycle is 6.9.4 with next identity `6.9.4rc3`. RC1 was
 prepared and consumed from `cd0be2e` on 2026-10-04; preserve its candidate commit,
-immutable artifacts and retained receipts. The eight planned issues include
-#556 and remain planned until delivery and acceptance evidence exists.
+immutable artifacts and retained receipts. RC2 was allocated and consumed from
+`243ec7e` on the same date, but preparation failed at packaged dashboard
+repositories readiness and it was not accepted. Preserve its attempt, commit,
+build records and immutable artifacts independently. The nine planned issues
+include #556 and #538 and remain planned until delivery and acceptance evidence
+exists.
 The 2026-10-04 user-directed reassignment of #530/#531 from 6.9.3 does not rewrite
 that published cycle's retained attempts, deployment history or approval.
 Published 6.9.2 and 6.9.3 have no next RC. Keep #530/#531 partial in 6.9.3,
 not also deferred there; their outstanding work is planned in 6.9.4.
-Do not reuse consumed RC1 or stamp RC2 merely by configuring its scope. The
+Do not reuse consumed RC1 or RC2 or stamp RC3 merely by configuring its scope.
+Fix and validate the dashboard responsiveness follow-up to #556 before
+preparing changed source as RC3. The
 additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
 
