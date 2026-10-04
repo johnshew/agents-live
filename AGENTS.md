@@ -192,6 +192,9 @@ assignment, not delivery or candidate acceptance. Preserve 6.9.3 publication
 and retained evidence independently; #533 remains outside the requested scope.
 Published cycles have no next RC; #530/#531 remain partial in 6.9.3, with their
 outstanding work planned only in 6.9.4.
+`6.9.4rc1` was prepared and consumed from `cd0be2e` on 2026-10-04.
+Preserve its immutable candidate evidence; #556 joins the planned 6.9.4 scope,
+and changed source must use the next identity, `6.9.4rc2`.
 Retained RC6 does not supersede RC5's selection. Preserve all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
 

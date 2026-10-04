@@ -110,17 +110,28 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 
 [cycles."6.9.4"]
 branch = "main"
-next_rc = "6.9.4rc1"
-recommendation = "Implement and source-test the seven planned fixes before preparing RC1. Source tests are not provider, native scheduler, artifact or installed acceptance. No candidate identity is consumed by this configuration."
+next_rc = "6.9.4rc2"
+recommendation = "Preserve consumed RC1 and its immutable artifacts. Implement and source-test #556 with the planned 6.9.4 work before preparing RC2. Source tests are not provider, native scheduler, artifact or installed acceptance; this configuration does not prepare another candidate."
 
 [cycles."6.9.4".approval]
 decision = "testing"
 
 [cycles."6.9.4".issues]
-planned = [547, 540, 531, 542, 549, 530, 550]
+planned = [547, 540, 531, 542, 549, 530, 550, 556]
 
 [cycles."6.9.4".decisions]
 "530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
 "531" = "Developer assigned outstanding retry/budget/isolation work from 6.9.3 on 2026-10-04; historical timing excess is not explained by this change."
 "540" = "Developer requested additive opt-in failure postprocessing in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
 "542" = "Developer requested additive lower-only timeout and deadline visibility in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
+"556" = "Developer assigned cross-repository source-plugin deduplication, conflict origins and watcher-baseline diagnostics to the next 6.9.4 candidate on 2026-10-04. RC1 is consumed; changed source must use RC2."
+
+[cycles."6.9.4".history."6.9.4rc1"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.4rc1"
+commit = "bcf9a2d20363892d4a68bddfd76485aba49bf9f9"
+source_commit = "cd0be2e5f9ea52c297becc4264bf267f2096e55a"
+wheel_sha256 = "3b178a9824cd562b416d56bae208d1e01d6453472e3e6b726e7b4342a609a06a"
+sdist_sha256 = "3cbfaf5cdc619f05bc89f513542464526aa8f74e2318f1240495870072e82158"
+evidence = "Prepared and consumed on 2026-10-04 from main; preparation and build receipts bind the source, candidate commit and immutable artifact hashes. Preserve retained RC1 evidence independently. Changed plugin-loading source requires RC2; this history is not publication approval."
