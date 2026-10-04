@@ -7430,6 +7430,56 @@ class TestDashboardRepositorySurface(TempRepository):
         self.assertEqual({}, repos.load()["repos"])
         self.assertTrue(other.is_dir(), "unregistering must not delete files")
 
+    def test_dashboard_refresh_keeps_the_event_loop_responsive(self) -> None:
+        dashboard = self._dashboard_module()
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        dashboard.repository_settings_panel.refresh = mock.Mock()
+        dashboard.host_service_panel.refresh = mock.Mock()
+        dashboard.ui.timer.reset_mock()
+        dashboard._build_operational_page()
+        initial = next(
+            call.args[1] for call in dashboard.ui.timer.call_args_list
+            if call.args and call.args[0] == 0.1)
+        collect = dashboard.agent_view.repository_agents
+
+        def slow_collection(*args, **kwargs):
+            time.sleep(0.3)
+            return collect(*args, **kwargs)
+
+        async def exercise() -> None:
+            saved = asyncio.get_running_loop().create_future()
+            saved.set_result({})
+            with mock.patch.object(
+                    dashboard.ui, "run_javascript", return_value=saved):
+                await initial()
+            heartbeat = asyncio.Event()
+
+            async def tick() -> None:
+                await asyncio.sleep(0.01)
+                heartbeat.set()
+
+            with mock.patch.object(
+                    dashboard.agent_view, "repository_agents",
+                    side_effect=slow_collection):
+                task = asyncio.create_task(tick())
+                try:
+                    pending = dashboard._refresh_views()
+                    if asyncio.iscoroutine(pending):
+                        await pending
+                    self.assertTrue(
+                        heartbeat.is_set(),
+                        "inventory refresh blocked dashboard heartbeats")
+                finally:
+                    await task
+            rows = dashboard.repository_settings_panel.refresh.call_args.args[0]
+            self.assertEqual(1, rows[0]["agent_count"])
+            self.assertEqual(self.root.name, rows[0]["name"])
+
+        with mock.patch.object(
+                dashboard.ng_run, "io_bound", side_effect=asyncio.to_thread):
+            asyncio.run(exercise())
+
     def test_dashboard_repository_rows_distinguish_discovery_failure(self) -> None:
         dashboard = self._dashboard_module()
         missing = self.root / "missing"
@@ -7694,7 +7744,9 @@ class TestDashboardRepositorySurface(TempRepository):
                 if call.args and call.args[0] == 0.1)
             with (
                 mock.patch.object(dashboard.ng_run, "io_bound",
-                                  new=mock.AsyncMock(side_effect=lambda function: function())),
+                                  new=mock.AsyncMock(
+                                      side_effect=lambda function, *args, **kwargs:
+                                      function(*args, **kwargs))),
             ):
                 async def restore() -> None:
                     future = asyncio.get_running_loop().create_future()
@@ -7705,9 +7757,17 @@ class TestDashboardRepositorySurface(TempRepository):
             periodic = next(
                 call.args[1] for call in dashboard.ui.timer.call_args_list
                 if call.args and call.args[0] == 600.0)
-            periodic()
-            periodic()
-            dashboard._refresh_views()
+            async def refresh() -> None:
+                self.assertIsNone(periodic())
+                await periodic()
+                await dashboard._refresh_views()
+
+            with mock.patch.object(
+                    dashboard.ng_run, "io_bound",
+                    new=mock.AsyncMock(
+                        side_effect=lambda function, *args, **kwargs:
+                        function(*args, **kwargs))):
+                asyncio.run(refresh())
 
             async def complete_action() -> None:
                 request = dashboard._ActionRequest(
@@ -7720,7 +7780,10 @@ class TestDashboardRepositorySurface(TempRepository):
                 with (
                     mock.patch.object(
                         dashboard.ng_run, "io_bound",
-                        new=mock.AsyncMock(return_value=(0, "", ""))),
+                        new=mock.AsyncMock(
+                            side_effect=lambda function, *args, **kwargs:
+                            (0, "", "") if function is dashboard._run_script
+                            else function(*args, **kwargs))),
                     mock.patch.object(dashboard, "_log_action"),
                 ):
                     self.assertEqual(0, await dashboard._execute_action(request))

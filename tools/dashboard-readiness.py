@@ -25,9 +25,9 @@ repository-qualified Run action, and ``--dev`` owns reload-worker startup.
     uv run --script tools/dashboard-readiness.py --editable \
         --scenario continuity --viewport desktop                 # focused UX
 
-The fixture is a temporary directory with its own state, data, and config
-homes, so the gate never reads the developer's registry or touches a real
-project.
+The fixture is a temporary directory with its own state, data, config, and
+installation homes, so the gate never reads the developer's registry or
+selected installation, or touches a real project.
 """
 from __future__ import annotations
 
@@ -232,6 +232,7 @@ def _environment(directory: Path) -> dict[str, str]:
         "XDG_STATE_HOME": str(directory / "state"),
         "XDG_DATA_HOME": str(directory / "data"),
         "XDG_CONFIG_HOME": str(directory / "config"),
+        "AGENTS_LIVE_INSTALL_ROOT": str(directory / "installation"),
     })
     return environment
 
@@ -664,9 +665,19 @@ def _assert_operational_viewport(
 
             empty = directory / "empty-repository"
             (empty / "Agents").mkdir(parents=True, exist_ok=True)
+            (empty / "slow_ownership.py").write_text(
+                "import time\ntime.sleep(4)\n" + OWNERSHIP_PLUGIN,
+                encoding="utf-8")
+            (empty / ".agents-live.toml").write_text(
+                '[plugins.slow-readiness]\npath = "slow_ownership.py"\n',
+                encoding="utf-8")
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
-            page.evaluate("window.__repositoryMutationAcceptance = 'retained'")
+            page.evaluate("""() => {
+                window.__repositoryMutationAcceptance = 'retained';
+                window.__repositoryDisconnects = [];
+                socket.on('disconnect', reason => window.__repositoryDisconnects.push(reason));
+            }""")
             scope = page.get_by_label("Repository scope")
             scope.click()
             page.get_by_role("option", name=repository_name, exact=True).click()
@@ -707,6 +718,9 @@ def _assert_operational_viewport(
                 "state were not deleted.", exact=False).wait_for()
             if page.evaluate("window.__repositoryMutationAcceptance") != "retained":
                 raise ReadinessError(f"{mode}: unregister reloaded the page")
+            if page.evaluate("window.__repositoryDisconnects"):
+                raise ReadinessError(
+                    f"{mode}: repository mutation lost its websocket connection")
             page.get_by_role("button", name="Close-settings").click()
             scope.click()
             if page.get_by_role(

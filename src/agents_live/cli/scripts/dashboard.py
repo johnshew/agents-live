@@ -135,6 +135,7 @@ _SCAN_CACHE: tuple[
 ] | None = None
 _PAGE_REFRESHES: dict[str, object] = {}
 _PAGE_LOGS: dict[str, object] = {}
+_REPOSITORY_MUTATION_LOCK = asyncio.Lock()
 
 
 def _client_key() -> str | None:
@@ -834,7 +835,7 @@ async def _execute_action(request: _ActionRequest) -> int:
     if log is not None:
         for line in out.splitlines():
             _safe_ui(log.push, f"    {line}")
-    _safe_ui(_refresh_views, source="action completion")
+    await _refresh_views(source="action completion")
     return code
 
 
@@ -861,7 +862,7 @@ async def _process_action_queue() -> None:
                     _push_log(
                         f"failed: {request.description} "
                         f"(exit {code}, {elapsed:.1f}s): {exc}")
-                    _safe_ui(_refresh_views, source="action completion")
+                    await _refresh_views(source="action completion")
                 if not request.future.done():
                     request.future.set_result(code)
             else:
@@ -1705,8 +1706,15 @@ def open_host_logs() -> None:
 
 
 @ui.refreshable
-def host_service_panel() -> None:
-    service = host_service_status()
+def host_service_panel(service: dict | None = None) -> None:
+    service = host_service_status() if service is None else service
+
+    async def refresh_status() -> None:
+        observed = await ng_run.io_bound(host_service_status)
+        if observed is None:
+            raise asyncio.CancelledError
+        _safe_ui(host_service_panel.refresh, observed)
+
     color = {
         "healthy": "text-green-600",
         "running": "text-blue-500",
@@ -1738,7 +1746,7 @@ def host_service_panel() -> None:
                     "dense unelevated no-caps")
                 ui.button("Repair schedule", on_click=repair_maintenance).props(
                     "dense unelevated no-caps")
-                ui.button("Refresh status", on_click=host_service_panel.refresh).props(
+                ui.button("Refresh status", on_click=refresh_status).props(
                     "dense flat no-caps")
 
 
@@ -1751,16 +1759,21 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
     rows = repository_rows() if rows is None else rows
     new_path = {"value": ""}
 
-    def announce(result: dict) -> None:
+    async def mutate(payload: dict) -> None:
+        result = await _mutate_repository(payload, page_state=current_state)
         if result.get("ok"):
             _safe_ui(ui.notify, result["message"], type="positive",
                      multi_line=True)
         else:
             _safe_ui(ui.notify, result.get("error", "registry update failed"),
                      type="negative", multi_line=True)
-        refresh_views()
+        await refresh_views()
 
     def confirm_unregister(row: dict) -> None:
+        async def unregister() -> None:
+            confirmation.close()
+            await mutate({"action": "remove", "repo": row["name"]})
+
         with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
             ui.label(f"Unregister {row['name']}?").classes(
                 "text-base font-medium")
@@ -1775,12 +1788,7 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                 ui.button(
                     "Unregister",
                     icon="link_off",
-                    on_click=lambda: (
-                        confirmation.close(),
-                        announce(_repository_mutation(
-                            {"action": "remove", "repo": row["name"]},
-                            page_state=current_state)),
-                    ),
+                    on_click=unregister,
                 ).props("color=negative unelevated no-caps autofocus")
         confirmation.open()
 
@@ -1804,17 +1812,12 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
             ).props("dense outlined clearable").classes("grow")
             ui.button(
                 "Register",
-                on_click=lambda: announce(
-                    _repository_mutation(
-                        {"action": "add", "path": new_path["value"]},
-                        page_state=current_state)),
+                on_click=lambda: mutate(
+                    {"action": "add", "path": new_path["value"]}),
             ).props("dense color=primary unelevated no-caps")
             ui.button(
                 "Clear default",
-                on_click=lambda: announce(
-                    _repository_mutation(
-                        {"action": "clear-default"},
-                        page_state=current_state)),
+                on_click=lambda: mutate({"action": "clear-default"}),
             ).props("dense unelevated no-caps")
         for row in rows:
             with ui.element("section").classes("repository-setting-row w-full"):
@@ -1843,10 +1846,8 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                     ui.button(
                         "Set default",
                         icon="home",
-                        on_click=lambda name=row["name"]: announce(
-                            _repository_mutation(
-                                {"action": "set-default", "repo": name},
-                                page_state=current_state)),
+                        on_click=lambda name=row["name"]: mutate(
+                            {"action": "set-default", "repo": name}),
                     ).props("dense flat no-caps").set_enabled(
                         row["available"] and not row["default"])
                     ui.button(
@@ -1856,26 +1857,24 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                     ).props("dense flat no-caps color=negative")
 
 
-def _refresh_views(*, source: str = "manual refresh") -> None:
+async def _refresh_views(*, source: str = "manual refresh") -> None:
     client_key = _client_key()
     aggregate_refresh = (
         _PAGE_REFRESHES.get(client_key) if client_key is not None else None)
     if aggregate_refresh is not None:
-        with hostruntime.enumeration_pass():
-            _safe_ui(aggregate_refresh, source=source)
-            _safe_ui(host_service_panel.refresh)
+        await aggregate_refresh(source=source)
 
 
 def _timer_after_first_interval(interval: float, callback) -> None:
     """Register a client timer now without invoking its callback yet."""
     first_tick = True
 
-    def invoke() -> None:
+    def invoke():
         nonlocal first_tick
         if first_tick:
             first_tick = False
             return
-        callback()
+        return callback()
 
     ui.timer(interval, invoke)
 
@@ -1930,7 +1929,16 @@ def api_repositories() -> dict:
 
 @app.post("/api/repositories")
 async def api_repository_mutation(payload: dict) -> dict:
-    return _repository_mutation(payload)
+    return await _mutate_repository(payload)
+
+
+async def _mutate_repository(payload: dict, *, page_state: dict | None = None) -> dict:
+    async with _REPOSITORY_MUTATION_LOCK:
+        result = await ng_run.io_bound(
+            _repository_mutation, payload, page_state=page_state)
+        if result is None:
+            raise asyncio.CancelledError
+        return result
 
 
 def _repository_mutation(payload: dict, *, page_state: dict | None = None) -> dict:
@@ -2330,6 +2338,7 @@ def api_all_repos() -> dict:
 def _build_operational_page(page_state: dict | None = None) -> None:
     """Build the sole dashboard page over one all-repositories snapshot."""
     page_state = _new_page_state() if page_state is None else page_state
+    page_client = ui.context.client
     ui.dark_mode().auto()
     state_settings = page_state["all_repos"]
     filters = page_state["filters"]
@@ -2339,6 +2348,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         "scope": state_settings["repo"], "errors": {}, "activity": {},
     }
     loading = True
+    refresh_lock = asyncio.Lock()
     repo_names = _registered_repository_names()
     ui.add_css(
         ".q-table tbody tr{transition:background-color .08s}"
@@ -2684,44 +2694,67 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             f"Refresh failed; showing the last coherent snapshot. {refresh_error}"
             if refresh_error else health["tip"])
 
-    def rebuild(*, announce: bool = True,
-            source: str = "manual refresh", collected: dict | None = None) -> None:
+    def collect_snapshot(previous: dict, settings: dict) -> tuple[dict, dict]:
+        with hostruntime.enumeration_pass():
+            if settings.get("repo") not in ["All", *_registered_repository_names()]:
+                settings["repo"] = "All"
+            return (
+                operational_snapshot(previous, settings=settings),
+                host_service_status(),
+            )
+
+    async def rebuild(*, announce: bool = True,
+            source: str = "manual refresh",
+            collected: tuple[dict, dict] | None = None) -> None:
         nonlocal snapshot, loading
         if loading and collected is None:
             return
-        try:
-            repo_names = _registered_repository_names()
-            if state_settings.get("repo") not in ["All", *repo_names]:
-                state_settings["repo"] = "All"
-            refreshed = (collected if collected is not None else
-                         operational_snapshot(snapshot, settings=state_settings))
-        except (OSError, ValueError, agent.DefinitionError,
-                state.StartedStateUnavailable) as exc:
-            snapshot = {**snapshot, "refresh_error": str(exc)}
-            update_labels(snapshot)
-            if announce:
-                _push_log(
-                    f"{source} failed; showing the last coherent snapshot: {exc}")
-            return
-        snapshot = refreshed
-        loading = False
-        for key, field in (("state", "state"), ("owner", "owner"), ("runtime", "agent")):
-            options = sorted(({row[field] for row in snapshot["rows"]} | {filters[key]}) - {"All"})
-            filter_controls[key].set_options(["All", *options], value=filters[key])
-        repo_select.options = ["All", *repo_names]
-        repo_select.value = state_settings["repo"]
-        repo_select.update()
-        page_state["last_refresh"] = datetime.now(timezone.utc)
-        update_labels(snapshot)
-        render_inventory(snapshot)
-        _safe_ui(
-            repository_settings_panel.refresh,
-            _repository_rows_from_groups(snapshot["repository_groups"]),
-            page_state=page_state,
-            refresh=lambda: rebuild(),
-        )
-        if announce:
-            _push_log(_operational_summary(snapshot, source=source))
+        async with refresh_lock:
+            try:
+                observed = collected
+                if observed is None:
+                    observed = await ng_run.io_bound(
+                        collect_snapshot, copy.deepcopy(snapshot),
+                        copy.deepcopy(state_settings))
+                if observed is None:
+                    raise asyncio.CancelledError
+                refreshed, service = observed
+                repo_names = [group["name"]
+                              for group in refreshed["repository_groups"]]
+                if state_settings.get("repo") not in ["All", *repo_names]:
+                    state_settings["repo"] = "All"
+                if refreshed["scope"] != state_settings["repo"]:
+                    return
+            except (OSError, ValueError, agent.DefinitionError,
+                    state.StartedStateUnavailable) as exc:
+                with page_client:
+                    snapshot = {**snapshot, "refresh_error": str(exc)}
+                    update_labels(snapshot)
+                    if announce:
+                        _push_log(
+                            f"{source} failed; showing the last coherent snapshot: {exc}")
+                return
+            with page_client:
+                snapshot = refreshed
+                loading = False
+                for key, field in (("state", "state"), ("owner", "owner"), ("runtime", "agent")):
+                    options = sorted(({row[field] for row in snapshot["rows"]} | {filters[key]}) - {"All"})
+                    filter_controls[key].set_options(["All", *options], value=filters[key])
+                repo_select.options = ["All", *repo_names]
+                repo_select.value = state_settings["repo"]
+                repo_select.update()
+                page_state["last_refresh"] = datetime.now(timezone.utc)
+                update_labels(snapshot)
+                render_inventory(snapshot)
+                _safe_ui(host_service_panel.refresh, service)
+                _safe_ui(
+                    repository_settings_panel.refresh,
+                    _repository_rows_from_groups(snapshot["repository_groups"]),
+                    page_state=page_state,
+                    refresh=lambda: rebuild(),
+                )
+                if announce:
+                    _push_log(_operational_summary(snapshot, source=source))
 
     client_key = _client_key()
     if client_key is not None:
@@ -2734,11 +2767,11 @@ def _build_operational_page(page_state: dict | None = None) -> None:
 
         ui.context.client.on_delete(release_page)
 
-    def select_repo(event) -> None:
+    async def select_repo(event) -> None:
         if state_settings["repo"] == event.value:
             return
         state_settings["repo"] = event.value
-        rebuild()
+        await rebuild()
 
     def set_filter(key: str, value) -> None:
         if key == "name":
@@ -2888,12 +2921,12 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             search_input.value = filters["name"]
             if saved.get("settingsOpen"):
                 settings_dialog.open()
-        def collect_initial() -> dict:
-            with hostruntime.enumeration_pass():
-                return operational_snapshot(settings=copy.deepcopy(state_settings))
-
         try:
-            collected = await ng_run.io_bound(collect_initial)
+            collected = await ng_run.io_bound(
+                collect_snapshot, copy.deepcopy(snapshot),
+                copy.deepcopy(state_settings))
+            if collected is None:
+                raise asyncio.CancelledError
         except Exception as exc:
             loading = False
             empty_inventory.text = f"Could not load agents: {exc}"
@@ -2901,7 +2934,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         finally:
             refresh_button.enable()
             repo_select.enable()
-        rebuild(announce=False, collected=collected)
+        await rebuild(announce=False, collected=collected)
         continuity_ready = True
         persist_view()
         _safe_ui(ui.run_javascript, "window.agentsLiveContinuity.restore()")

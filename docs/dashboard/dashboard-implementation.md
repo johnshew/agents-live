@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-09-25
+ms.date: 2026-10-04
 ms.topic: concept
 ---
 
@@ -47,6 +47,12 @@ The page renders a loading shell before collecting inventory and history in
 a worker thread. Restoring saved preferences does not run a second initial
 scan. Scope and refresh controls wait for that first scan; failure exposes
 the error and enables a retry. NiceGUI announces the startup URL once.
+Subsequent manual, scope, periodic, and action-completion scans also run in
+workers, with serialized refreshes per page. Repository registration, plugin
+validation, and other settings mutations leave the websocket loop responsive;
+rendering resumes in the owning page context even if its initiating control
+was replaced during collection. The readiness fixture isolates the selected
+installation as well as the registry and exercises a slow source plugin.
 Foreground Ctrl+C requests cooperative server shutdown. Readiness verifies
 quiet exit and port closure through both the CLI and the direct server with
 an active browser, using an isolated hidden console on Windows.
