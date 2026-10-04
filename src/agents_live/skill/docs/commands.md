@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-09-19
+ms.date: 2026-10-04
 ms.topic: reference
 ---
 
@@ -148,8 +148,13 @@ agents-live start link-check --transfer-here
 agents-live start link-check --transfer-to hostname/runtime/uuid
 ```
 
-Dry-run previews the same diff without writing started state, triggers, or
-processes.
+Dry-run previews the same diff without writing started state, triggers,
+processes, or the repository registry. Both `start --dry-run` and `stop --dry-run`
+require the resolved target repository to be registered, not the caller's
+current directory when the agent resolves elsewhere. For an unregistered
+target, register it explicitly with
+`agents-live repos add PATH` before previewing. No repo-register event is emitted
+by the refusal.
 
 `--transfer-here` claims an agent for this runtime and starts it here.
 `--transfer-to` assigns it to another runtime, named by the full identity

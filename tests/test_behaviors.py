@@ -2627,6 +2627,38 @@ class TestDashboardProcessIdentity(unittest.TestCase):
 class TestOwnershipMovesInBothDirections(TempRepository):
     """An agent can be claimed here or assigned to another runtime."""
 
+    def test_unregistered_lifecycle_dry_run_is_read_only(self) -> None:
+        from agents_live.cli.main import main
+        from agents_live.state import registry
+        from tests.host_safety import isolated_host
+
+        self.skill("preview", ['agents-live.selector: "fake"'])
+        sentinel = self.root / "plugin-imported"
+        (self.root / "preview_plugin.py").write_text(
+            "from pathlib import Path\n"
+            "Path(__file__).with_name('plugin-imported').touch()\n",
+            encoding="utf-8")
+        (self.root / ".agents-live.toml").write_text(
+            '[plugins.preview]\npath = "preview_plugin.py"\n', encoding="utf-8")
+        with isolated_host():
+            registry._write({"repos": {}, "default_repo": None})
+            before = registry.config_path().read_bytes()
+            for command, selection in (
+                ("start", ["preview"]),
+                ("stop", ["preview"]),
+                ("start", ["--all"]),
+            ):
+                with self.subTest(command=command, selection=selection):
+                    output = io.StringIO()
+                    with contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
+                        code = main(["--repo", str(self.root), command, *selection, "--dry-run"])
+                    self.assertEqual(1, code)
+                    self.assertIn("repos add", output.getvalue())
+                    self.assertFalse(sentinel.exists(), output.getvalue())
+                    self.assertEqual(before, registry.config_path().read_bytes())
+                    records = obs.load(obs.files(paths.host_logs_dir()))
+                    self.assertFalse(any(record.get("operation") == "repo-register" for record in records))
+
     def _spec(self, *, enabled: bool = True):
         if enabled:
             (self.root / ".agents-live.toml").write_text(
@@ -9698,6 +9730,30 @@ class TestCrossRepositoryResolution(TempRepository):
         self.assertEqual(1, code)
         self.assertIn("definition not found: absent", error.getvalue())
         converge.assert_not_called()
+
+    def test_lifecycle_dry_run_resolves_registered_target_from_unregistered_cwd(self) -> None:
+        from agents_live.cli.main import main
+
+        (self.root / ".agents-live.toml").write_text("", encoding="utf-8")
+        notes = self.repository("notes")
+        self.definition(notes, "remote-work")
+        before = repos.config_path().read_bytes()
+        registrations = [record for record in obs.load(obs.files(paths.host_logs_dir()))
+                 if record.get("operation") == "repo-register"]
+        with isolated_host(self.root), self.unpinned(), mock.patch.object(Path, "cwd", return_value=self.root):
+            self.assertNotIn(str(self.root), repos.load()["repos"].values())
+            for command in ("start", "stop"):
+                for selection in (["remote-work", "--dry-run"], ["--name=remote-work", "-n"]):
+                    with (
+                        self.subTest(command=command, selection=selection),
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        paths.clear_cache()
+                        self.assertEqual(0, main([command, *selection]))
+                    self.assertEqual(before, repos.config_path().read_bytes())
+            self.assertEqual(registrations, [record for record in obs.load(obs.files(paths.host_logs_dir()))
+                                            if record.get("operation") == "repo-register"])
 
     def test_a_missing_name_reports_where_it_looked(self) -> None:
         notes = self.repository("notes")

@@ -459,6 +459,33 @@ def main(argv: list[str] | None = None) -> int:
 
     rest = _apply_name_sugar(command.name_sugar, rest)
 
+    if command.name in {"start", "stop"} and any(
+            flag in rest for flag in ("--dry-run", "-n")):
+        from .. import agent
+        from ..state import registry
+        from . import resolve
+        try:
+            target = state.resolve_root()
+            if "--all" not in rest and not resolve.repository_pinned():
+                name = next((token.split("=", 1)[1] for token in rest
+                             if token.startswith("--name=")), None)
+                if name is None and "--name" in rest:
+                    name = rest[rest.index("--name") + 1]
+                if name is not None:
+                    if command.name == "stop":
+                        from .commands.stop import _select
+                        target, _ = _select(name, target)
+                    else:
+                        target = resolve.resolve(name, root=target, action="start").root
+            registry.require_registered(target)
+        except ValueError as exc:
+            _emit_failure("repository_not_registered", cmd, str(exc),
+                          json_mode=json_mode)
+            return 1
+        except (agent.DefinitionError, state.StartedStateUnavailable) as exc:
+            _emit_failure("agent_invalid", cmd, str(exc), json_mode=json_mode)
+            return 1
+
     _load_declared_plugins()
 
     if command.dispatch == "subprocess":

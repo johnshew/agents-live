@@ -5,6 +5,7 @@ import argparse
 import sys
 
 from ... import agent, paths, state
+from ...state import registry as repos
 from .. import lifecycle, resolve
 
 
@@ -16,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     root = paths.resolve_root()
     try:
         root, identifier = _select(args.name, root)
+        if args.dry_run:
+            repos.require_registered(root)
         if not resolve.repository_pinned():
             warning = resolve.collision_warning(args.name, root=root)
             if warning:
