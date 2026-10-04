@@ -111,13 +111,13 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 [cycles."6.9.4"]
 branch = "main"
 next_rc = "6.9.4rc2"
-recommendation = "Preserve consumed RC1 and its immutable artifacts. Implement and source-test #556 with the planned 6.9.4 work before preparing RC2. Source tests are not provider, native scheduler, artifact or installed acceptance; this configuration does not prepare another candidate."
+recommendation = "Preserve consumed RC1 and its immutable artifacts. Implement and source-test #556 and #538 with the planned 6.9.4 work before preparing RC2. Source tests are not provider, native scheduler, artifact or installed acceptance; this configuration does not prepare another candidate."
 
 [cycles."6.9.4".approval]
 decision = "testing"
 
 [cycles."6.9.4".issues]
-planned = [547, 540, 531, 542, 549, 530, 550, 556]
+planned = [547, 540, 531, 542, 549, 530, 550, 556, 538]
 
 [cycles."6.9.4".decisions]
 "530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
@@ -125,6 +125,7 @@ planned = [547, 540, 531, 542, 549, 530, 550, 556]
 "540" = "Developer requested additive opt-in failure postprocessing in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
 "542" = "Developer requested additive lower-only timeout and deadline visibility in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
 "556" = "Developer assigned cross-repository source-plugin deduplication, conflict origins and watcher-baseline diagnostics to the next 6.9.4 candidate on 2026-10-04. RC1 is consumed; changed source must use RC2."
+"538" = "Developer added role-aware watcher inventory to RC2 on 2026-10-04 after scheduled work blocked an RC1 activation attempt; #539 waits for a new observation."
 
 [cycles."6.9.4".history."6.9.4rc1"]
 status = "prepared"
