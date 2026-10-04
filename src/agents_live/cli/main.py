@@ -126,14 +126,13 @@ def _consume_project_argument(command: Cmd, argv: list[str]) -> tuple[str | None
     return None, argv
 
 
-def _load_declared_plugins() -> None:
+def _load_declared_plugins() -> tuple[str, ...]:
     """Attach every registered repository's declared plugins to the seams.
 
     After argument validation and before dispatch, so a broken plugin
-    cannot take down `--help` or a usage error. Failures are recorded by
-    the loader and reported by `doctor`; a provider that never registered
-    surfaces at selection time as an unknown provider, which names the
-    agent the operator asked for.
+    cannot take down `--help` or a usage error. Ordinary failures are
+    reported by `doctor` or provider selection. Conflicting declarations
+    must refuse execution rather than use whichever provider loaded first.
     """
     from .. import plugins
     from ..state import registry as repos
@@ -149,8 +148,10 @@ def _load_declared_plugins() -> None:
         # An unreadable registry is the registry check's problem to
         # report; it must not stop the command that would report it.
         pass
-    if roots:
-        plugins.load(list(dict.fromkeys(roots)))
+    return tuple(
+        f"plugin {item.plugin.name!r}: {item.detail}"
+        for item in plugins.load(list(dict.fromkeys(roots)))
+        if item.conflict)
 
 
 def _finish(code: int, command: Cmd | None, rest: list[str],
@@ -486,7 +487,13 @@ def main(argv: list[str] | None = None) -> int:
             _emit_failure("agent_invalid", cmd, str(exc), json_mode=json_mode)
             return 1
 
-    _load_declared_plugins()
+    plugin_conflicts = _load_declared_plugins()
+    if plugin_conflicts and command.name not in {
+            "doctor", "repos", "upgrade", "init"}:
+        _emit_failure(
+            "plugin_conflict", cmd, "; ".join(plugin_conflicts),
+            json_mode=json_mode)
+        return 1
 
     if command.dispatch == "subprocess":
         active = command

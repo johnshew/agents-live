@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-09-19
+ms.date: 2026-10-04
 ms.topic: overview
 ---
 
@@ -167,7 +167,12 @@ The installation root is a local version store: complete PEP 440 versions are
 retained side by side and `current` selects one. Numbered release candidates
 therefore coexist on the same release line. Source plugins remain in their
 declaring repositories and load directly into the selected runtime; they are
-not installed into a generation. When a generation is selected, its own command
+not installed into a generation. Across registered repositories, declarations
+with the same plugin name and byte-identical source share one imported module.
+Different sources using that name, or distinct providers claiming the same
+provider name, fail with the conflicting repositories and plugin files named.
+`doctor --all-repos` reports each declaration's health.
+When a generation is selected, its own command
 converges native triggers and still-started watchers; work already running may
 finish on the immutable version where it began. Use `agents-live versions list` to inspect the store,
 `versions activate VERSION` to roll back, `versions remove VERSION` to

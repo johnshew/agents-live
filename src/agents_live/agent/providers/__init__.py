@@ -40,6 +40,11 @@ class Provider(Protocol):
 
 
 _providers: dict[str, Provider] = {}
+_sources: dict[str, tuple[Provider, str]] = {}
+
+
+class ProviderConflictError(ValueError):
+    """Distinct provider objects claim the same process-global name."""
 
 #: Retained so a 5.x plugin's entry point group can still be named in a
 #: diagnostic. Discovery no longer reads it: plugins are loaded from
@@ -51,7 +56,7 @@ CONTRACT_METHODS = (
     "validate", "artifacts", "prepare", "parse", "failure", "transcript")
 
 
-def register(provider: Provider) -> None:
+def register(provider: Provider, *, source: str | None = None) -> None:
     if not getattr(provider, "name", ""):
         raise ValueError("provider name must not be empty")
     capabilities = getattr(provider, "capabilities", None)
@@ -81,8 +86,17 @@ def register(provider: Provider) -> None:
                 f"contract: {method} is missing or not callable")
     previous = _providers.get(provider.name)
     if previous is not None and previous is not provider:
-        raise ValueError(f"provider '{provider.name}' is already registered")
+        recorded = _sources.get(provider.name)
+        previous_source = (
+            recorded[1] if recorded is not None and recorded[0] is previous
+            else "a built-in or directly registered provider")
+        raise ProviderConflictError(
+            f"provider '{provider.name}' is already registered by "
+            f"{previous_source}; conflicting registration from "
+            f"{source or 'a directly registered provider'}")
     _providers[provider.name] = provider
+    if source is not None:
+        _sources[provider.name] = (provider, source)
 
 
 def get(name: str) -> Provider:
@@ -114,6 +128,7 @@ __all__ = [
     "ENTRY_POINT_GROUP",
     "Provider",
     "ProviderBase",
+    "ProviderConflictError",
     "get",
     "names",
     "register",

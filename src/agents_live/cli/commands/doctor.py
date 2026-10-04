@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ... import agent, deploy, paths, runtime, state
+from ... import agent, deploy, paths, plugins, runtime, state
 from ...agent import providers
 from ...agent.values import ProviderCli
 from ...runtime.hosts import system as hostruntime
@@ -63,6 +63,14 @@ def main(argv: list[str] | None = None) -> int:
                     if Path(value).resolve() == selected_root
                 ), selected_root.name)
                 repository_items = [(selected_name, str(selected_root))]
+        checks.extend({
+            "check": f"plugin {item.plugin.name} ({item.plugin.root.name})",
+            "ok": item.ok,
+            "detail": item.detail,
+        } for item in plugins.load([
+            Path(value).resolve() for _name, value in repository_items
+            if os.path.isdir(value)
+        ]))
         checked_roots: list[Path] = []
         for name, value in repository_items:
             root = state.resolve_root(value) if os.path.isdir(value) else None
