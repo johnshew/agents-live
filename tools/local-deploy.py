@@ -776,9 +776,20 @@ def deploy(
     environment = _installed_cli().parent.parent
     local_watchers = _logical_watchers(
         watchers_on_host(under=environment))
-    if not set(local_watchers) <= set(all_watchers):
+    extra_watchers = sorted(set(local_watchers) - set(all_watchers))
+    missing_watchers = sorted(set(all_watchers) - set(local_watchers))
+    if extra_watchers:
+        extra = [
+            {"repository": repository, "identifier": identifier}
+            for repository, identifier in extra_watchers
+        ]
+        missing = [
+            {"repository": repository, "identifier": identifier}
+            for repository, identifier in missing_watchers
+        ]
         raise LocalDeployError(
-            "running local watchers are outside the all-repository baseline")
+            "running local watchers are outside the all-repository baseline: "
+            f"extra={extra!r}; missing={missing!r}")
     dashboards = _running_dashboards()
     stopped: list[Dashboard] = []
     try:

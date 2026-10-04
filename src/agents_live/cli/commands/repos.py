@@ -18,7 +18,9 @@ def _converge_registered(root: Path) -> None:
     now is whether what it declares can actually load.
     """
     try:
-        for problem in plugins.validation_errors([root]):
+        roots = [root, *(Path(value) for _alias, value, error
+                         in registry.entries() if not error)]
+        for problem in plugins.validation_errors(list(dict.fromkeys(roots))):
             print(
                 f"warning: {problem}; "
                 "run `agents-live doctor` for details",

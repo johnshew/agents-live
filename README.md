@@ -150,6 +150,11 @@ agents-live upgrade
 agents-live uninstall
 ```
 
+Source plugins load directly from their declaring repositories. Identical
+same-name copies across registered repositories share one imported module;
+conflicting plugin or provider names report the repositories and plugin files.
+Use `agents-live doctor --all-repos` to inspect each declaration's health.
+
 See the [command reference](src/agents_live/skill/docs/commands.md) for pinning,
 rolling back, or removing installed versions. The [diagnostics
 guide](src/agents_live/skill/docs/diagnostics.md) covers installation conflicts,

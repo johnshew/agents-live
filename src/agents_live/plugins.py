@@ -51,6 +51,10 @@ class PluginError(RuntimeError):
     """A plugin declaration cannot be safely resolved or loaded."""
 
 
+class PluginConflictError(PluginError):
+    """Repositories declare incompatible process-global plugins."""
+
+
 @dataclass(frozen=True)
 class Plugin:
     """One declaration, resolved against the repository that made it."""
@@ -80,6 +84,10 @@ class Loaded:
     plugin: Plugin
     ok: bool
     detail: str
+    conflict: bool = False
+
+
+_sources: dict[str, dict[tuple[bool, str], list[Plugin]]] = {}
 
 
 def declared(root: Path, *, require_exists: bool = True) -> dict[str, Plugin]:
@@ -95,12 +103,7 @@ def declared(root: Path, *, require_exists: bool = True) -> dict[str, Plugin]:
 
 def union(roots: list[Path], *, require_exists: bool = True
           ) -> dict[str, Plugin]:
-    """Combine declarations across repositories; first declaration wins.
-
-    Two repositories naming the same plugin is not worth refusing over:
-    each loads under its own module key, and the seam registry rejects a
-    genuine duplicate registration itself.
-    """
+    """Combine declarations across repositories; loading checks conflicts."""
     result: dict[str, Plugin] = {}
     for root in roots:
         for name, plugin in declared(
@@ -109,15 +112,24 @@ def union(roots: list[Path], *, require_exists: bool = True
     return result
 
 
-def _digest(path: Path) -> str:
-    """SHA-256 of a file, or of a directory's sorted relative contents."""
+def _digest(path: Path, *, framed: bool = False) -> str:
+    """Hash source without bytecode; frame identity, retain checksum format."""
     if path.is_file():
         return hashlib.sha256(path.read_bytes()).hexdigest()
     running = hashlib.sha256()
     for item in sorted(item for item in path.rglob("*") if item.is_file()):
-        running.update(
-            str(item.relative_to(path)).replace("\\", "/").encode("utf-8"))
-        running.update(item.read_bytes())
+        if ("__pycache__" in item.relative_to(path).parts
+                or item.suffix in {".pyc", ".pyo"}):
+            continue
+        relative = str(item.relative_to(path)).replace("\\", "/").encode("utf-8")
+        content = item.read_bytes()
+        if framed:
+            running.update(len(relative).to_bytes(8, "big"))
+            running.update(relative)
+            running.update(hashlib.sha256(content).digest())
+        else:
+            running.update(relative)
+            running.update(content)
     return running.hexdigest()
 
 
@@ -207,10 +219,19 @@ def _import(plugin: Plugin):
     return module
 
 
-def _attach(module) -> str:
+def _origin(plugins: list[Plugin]) -> str:
+    return "; ".join(sorted({
+        f"plugin {plugin.name!r} in repository '{plugin.root}', "
+        f"file '{plugin.entry_file}'"
+        for plugin in plugins
+    }))
+
+
+def _attach(module, *, source: str) -> str:
     """Hand a loaded module's exposed objects to the seams they name."""
     attached = []
     errors = []
+    conflict = False
     providers = None
     for attribute in PROVIDER_ATTRS:
         if hasattr(module, attribute):
@@ -221,9 +242,11 @@ def _attach(module) -> str:
             providers if isinstance(providers, (list, tuple)) else [providers])
         for candidate in candidates:
             try:
-                provider_plugins.register(candidate)
+                provider_plugins.register(candidate, source=source)
                 attached.append(f"provider {candidate.name}")
             except Exception as exc:
+                conflict |= isinstance(
+                    exc, provider_plugins.ProviderConflictError)
                 errors.append(f"provider {getattr(candidate, 'name', '?')}: {exc}")
     registry = getattr(module, OWNERSHIP_ATTR, None)
     if registry is not None:
@@ -236,7 +259,7 @@ def _attach(module) -> str:
         detail = "; ".join(errors)
         if attached:
             detail += f"; attached: {', '.join(attached)}"
-        raise PluginError(detail)
+        raise (PluginConflictError if conflict else PluginError)(detail)
     if not attached:
         raise PluginError(
             f"exposes none of {', '.join((*PROVIDER_ATTRS, OWNERSHIP_ATTR))}")
@@ -246,8 +269,10 @@ def _attach(module) -> str:
 def load(roots: list[Path]) -> tuple[Loaded, ...]:
     """Load every declared plugin, recording failures rather than raising.
 
-    Idempotent: a module already in ``sys.modules`` under its namespaced
-    key is reused, and the seam registries accept the same object twice.
+    Same-name, byte-identical sources share the first module, including
+    across separate calls. Each declaration still gets its own health result.
+    Conflicting sources are rejected before import; provider conflicts retain
+    both registration origins.
     Repositories are resolved independently so one malformed declaration
     cannot hide healthy plugins from another repository.
     """
@@ -261,6 +286,7 @@ def load(roots: list[Path]) -> tuple[Loaded, ...]:
             results.append(Loaded(
                 Plugin("<declarations>", Path(), None, root),
                 False, str(exc)))
+    pending: dict[str, list[Plugin]] = {}
     for plugin in declarations:
         if not plugin.entry_file.is_file():
             results.append(Loaded(
@@ -278,11 +304,37 @@ def load(roots: list[Path]) -> tuple[Loaded, ...]:
                 "provide"))
             continue
         try:
-            detail = _attach(_import(plugin))
-        except Exception as exc:
-            results.append(Loaded(plugin, False, f"{type(exc).__name__}: {exc}"))
+            identity = (plugin.path.is_dir(),
+                        _digest(plugin.path, framed=True))
+        except OSError as exc:
+            results.append(Loaded(
+                plugin, False, f"cannot hash {plugin.path}: {exc}"))
             continue
-        results.append(Loaded(plugin, True, detail))
+        sources = _sources.setdefault(plugin.name, {})
+        copies = sources.setdefault(identity, [])
+        if plugin not in copies:
+            copies.append(plugin)
+        pending.setdefault(plugin.name, []).append(plugin)
+    for name, requested in pending.items():
+        sources = _sources[name]
+        if len(sources) > 1:
+            origins = [plugin for copies in sources.values() for plugin in copies]
+            detail = (
+                f"plugin {name!r} has different source content: "
+                f"{_origin(origins)}")
+            results.extend(Loaded(plugin, False, detail, conflict=True)
+                           for plugin in requested)
+            continue
+        copies = next(iter(sources.values()))
+        try:
+            detail = _attach(_import(copies[0]), source=_origin(copies))
+        except Exception as exc:
+            results.extend(Loaded(
+                plugin, False, f"{type(exc).__name__}: {exc}",
+                conflict=isinstance(exc, PluginConflictError))
+                for plugin in requested)
+            continue
+        results.extend(Loaded(plugin, True, detail) for plugin in requested)
     return tuple(results)
 
 

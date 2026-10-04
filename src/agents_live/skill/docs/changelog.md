@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: reuse identical source plugins across registered repositories. (#556)
+  Same-name, byte-identical declarations share one imported module without
+  upgrade preflight errors or registration warnings. Conflicting plugin or
+  provider names identify the repositories and source files; doctor reports
+  each declaration's health and execution refuses ambiguous registrations.
+- fix: identify extra and missing watchers when local deployment refuses a baseline.
+  Diagnostics name each watcher's repository and identifier without changing
+  the existing refusal condition.
 - fix: keep oversized pipeline telemetry from rejecting a valid bounded result. (#530)
   Diagnostic streams drain into bounded prefix/tail capture with original byte
   counts. Complete Claude envelopes retain available usage separately; oversized
@@ -60,6 +68,8 @@ history is retained in the source repository.
 - chore: route outstanding runtime fixes through the new 6.9.4 development cycle.
   Published cycles retain approvals and historical attempts without advertising
   another RC. Reports separate partial 6.9.3 delivery from planned 6.9.4 work.
+  Consumed RC1 retains its source and artifact identity; #556 joins the planned
+  scope and the next unused candidate is 6.9.4rc2.
 
 ## 6.9.3 - 2026-10-04
 

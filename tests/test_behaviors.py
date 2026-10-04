@@ -660,6 +660,12 @@ class TestHostMaintenanceEntries(TempRepository):
 class TestPluginDeclarations(unittest.TestCase):
     """Declared source plugins load directly into the extension seams."""
 
+    def setUp(self) -> None:
+        self.enterContext(mock.patch.object(plugins, "_sources", {}, create=True))
+        self.enterContext(mock.patch.dict(providers._providers))
+        self.enterContext(mock.patch.object(
+            providers, "_sources", {}, create=True))
+
     def _project(self, directory: Path, source: Path, *,
                  sha256: str | None = None, name: str = "example-plugin") -> Path:
         digest = f'sha256 = "{sha256}"\n' if sha256 else ""
@@ -752,7 +758,7 @@ class TestPluginDeclarations(unittest.TestCase):
         self.assertTrue(errors)
         self.assertTrue(any("sha256" in item for item in errors))
 
-    def test_same_named_plugins_load_from_each_repository_namespace(self) -> None:
+    def test_different_named_plugins_load_from_each_repository_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, \
                 tempfile.TemporaryDirectory() as second_dir:
             first = Path(first_dir).resolve()
@@ -766,9 +772,9 @@ class TestPluginDeclarations(unittest.TestCase):
                 "PROVIDER = type('Provider', (), {'name': 'second'})()\n",
                 encoding="utf-8")
             self._project(first, first_source)
-            self._project(second, second_source)
+            self._project(second, second_source, name="second-plugin")
             first_plugin = plugins.declared(first)["example-plugin"]
-            second_plugin = plugins.declared(second)["example-plugin"]
+            second_plugin = plugins.declared(second)["second-plugin"]
             with mock.patch.object(providers, "register") as register:
                 loaded = plugins.load([first, second])
         self.assertNotEqual(first_plugin.module_name, second_plugin.module_name)
@@ -776,6 +782,209 @@ class TestPluginDeclarations(unittest.TestCase):
         self.assertEqual(
             ["first", "second"],
             [call.args[0].name for call in register.call_args_list])
+
+    def _provider_project(self, root: Path, *, name: str = "example-plugin",
+                          extra: str = "", package: bool = False) -> Path:
+        directory = root / "Agents" / "plugins"
+        directory.mkdir(parents=True)
+        source = directory / "shared.py"
+        if package:
+            source = directory / "shared"
+            source.mkdir()
+            (source / "values.py").write_text(
+                "NAME = 'shared-provider'\n", encoding="utf-8")
+            entry = source / "__init__.py"
+            header = "from .values import NAME\n"
+        else:
+            entry = source
+            header = "NAME = 'shared-provider'\n"
+        entry.write_text(
+            header +
+            "from pathlib import Path\n"
+            "from agents_live.agent import ProviderCapabilities, ProviderCli\n"
+            "from agents_live.agent.providers import ProviderBase\n"
+            "class Shared(ProviderBase):\n"
+            "    name = NAME\n"
+            "    cli = ProviderCli()\n"
+            "    capabilities = ProviderCapabilities(frozenset({'plan'}))\n"
+            "    def prepare(self, spec, request): raise AssertionError\n"
+            "    def parse(self, raw): raise AssertionError\n"
+            "PROVIDER = Shared()\n"
+            f"marker = Path(__file__).parents[{3 if package else 2}] / 'imports.txt'\n"
+            "with marker.open('a', encoding='utf-8') as stream:\n"
+            "    stream.write('imported\\n')\n" + extra,
+            encoding="utf-8")
+        self._project(root, source, name=name)
+        return source
+
+    def test_identical_source_copies_load_once_across_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            self._provider_project(first)
+            self._provider_project(second)
+            loaded = plugins.load([first, second])
+            self.assertEqual([True, True], [item.ok for item in loaded],
+                             [item.detail for item in loaded])
+            self.assertEqual((), plugins.validation_errors([first, second]))
+            self.assertEqual((), upgrade._compatibility_errors(
+                [first, second], [], source=None))
+            self.assertEqual("imported\n", (first / "imports.txt").read_text())
+            self.assertFalse((second / "imports.txt").exists())
+            self.assertEqual("shared-provider", providers.get("shared-provider").name)
+
+    def test_identical_copies_reuse_a_prior_single_repository_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            self._provider_project(first)
+            self._provider_project(second)
+            self.assertTrue(plugins.load([first])[0].ok)
+            self.assertEqual((), plugins.validation_errors([second]))
+            self.assertEqual("imported\n", (first / "imports.txt").read_text())
+            self.assertFalse((second / "imports.txt").exists())
+
+    def test_different_same_named_sources_report_all_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            first_source = self._provider_project(first)
+            second_source = self._provider_project(second, extra="VALUE = 2\n")
+            errors = plugins.validation_errors([first, second])
+            self.assertTrue(errors)
+            for error in errors:
+                for path in (first, second, first_source, second_source):
+                    self.assertIn(str(path), error)
+                self.assertIn("different source content", error)
+            self.assertFalse((first / "imports.txt").exists())
+            self.assertFalse((second / "imports.txt").exists())
+
+    def test_different_source_is_rejected_after_a_prior_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            first_source = self._provider_project(first)
+            second_source = self._provider_project(second, extra="VALUE = 2\n")
+            self.assertTrue(plugins.load([first])[0].ok)
+            errors = plugins.validation_errors([second])
+            self.assertTrue(errors)
+            for path in (first_source, second_source):
+                self.assertIn(str(path), errors[0])
+            self.assertIn("different source content", errors[0])
+            self.assertTrue(plugins.validation_errors([first]))
+
+    def test_different_plugins_with_same_provider_report_all_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            first_source = self._provider_project(first)
+            second_source = self._provider_project(
+                second, name="other-plugin", extra="VALUE = 2\n")
+            errors = plugins.validation_errors([first, second])
+            self.assertTrue(errors)
+            self.assertIn("shared-provider", errors[0])
+            for path in (first, second, first_source, second_source):
+                self.assertIn(str(path), errors[0])
+
+    def test_identical_packages_ignore_generated_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            self._provider_project(first, package=True)
+            self._provider_project(second, package=True)
+            self.assertTrue(plugins.load([first])[0].ok)
+            self.assertEqual((), plugins.validation_errors([first, second]))
+            self.assertEqual("imported\n", (first / "imports.txt").read_text())
+            self.assertFalse((second / "imports.txt").exists())
+
+    def test_identical_pinned_packages_remain_valid_after_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            first, second = base / "first", base / "second"
+            first_source = self._provider_project(first, package=True)
+            second_source = self._provider_project(second, package=True)
+            digest = hashlib.sha256()
+            for item in sorted(first_source.rglob("*.py")):
+                digest.update(item.relative_to(first_source).as_posix().encode())
+                digest.update(item.read_bytes())
+            for root, source in ((first, first_source), (second, second_source)):
+                self._project(root, source, sha256=digest.hexdigest())
+            self.assertTrue(plugins.load([first])[0].ok)
+            self.assertEqual((), plugins.validation_errors([first, second]))
+            self.assertEqual("imported\n", (first / "imports.txt").read_text())
+            self.assertFalse((second / "imports.txt").exists())
+
+    def test_repos_add_identical_plugin_does_not_warn(self) -> None:
+        from agents_live.cli.commands import repos as command
+
+        with isolated_host() as (root, _host):
+            first, second = root / "first", root / "second"
+            self._provider_project(first)
+            self._provider_project(second)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(0, command.main(["add", str(first)]))
+                self.assertEqual(0, command.main(["add", str(second)]))
+            self.assertEqual("", stderr.getvalue())
+
+    def test_doctor_reports_identical_plugins_healthy(self) -> None:
+        cli = importlib.import_module("agents_live.cli.main")
+
+        with isolated_host() as (root, _host):
+            first, second = root / "first", root / "second"
+            self._provider_project(first)
+            self._provider_project(second)
+            repos._add(str(first))
+            repos._add(str(second))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                cli.main(["doctor", "--all-repos", "--json"])
+            payload = json.loads(stdout.getvalue())
+            checks = [item for item in payload["checks"]
+                      if item["check"].startswith("plugin ")]
+            self.assertEqual(2, len(checks))
+            self.assertTrue(all(item["ok"] for item in checks), checks)
+
+    def test_doctor_reports_both_conflicting_sources(self) -> None:
+        cli = importlib.import_module("agents_live.cli.main")
+
+        with isolated_host() as (root, _host):
+            first, second = root / "first", root / "second"
+            first_source = self._provider_project(first)
+            second_source = self._provider_project(second, extra="VALUE = 2\n")
+            repos._add(str(first))
+            repos._add(str(second))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(1, cli.main(["doctor", "--all-repos", "--json"]))
+            checks = [item for item in json.loads(stdout.getvalue())["checks"]
+                      if item["check"].startswith("plugin ")]
+            self.assertEqual(2, len(checks))
+            for check in checks:
+                self.assertFalse(check["ok"])
+                for path in (first_source, second_source):
+                    self.assertIn(str(path), check["detail"])
+
+    def test_run_and_start_refuse_conflicting_registered_plugins(self) -> None:
+        cli = importlib.import_module("agents_live.cli.main")
+
+        with isolated_host() as (root, _host):
+            first, second = root / "first", root / "second"
+            first_source = self._provider_project(first)
+            second_source = self._provider_project(second, extra="VALUE = 2\n")
+            repos._add(str(first))
+            repos._add(str(second))
+            for command in ("run", "start"):
+                with self.subTest(command=command):
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        code = cli.main([
+                            "--repo", str(first), command, "sample", "--json"])
+                    self.assertEqual(1, code)
+                    error = json.loads(stdout.getvalue())["error"]
+                    self.assertEqual("plugin_conflict", error["code"])
+                    for path in (first_source, second_source):
+                        self.assertIn(str(path), error["detail"])
 
     def test_missing_source_is_a_load_failure_not_a_cli_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

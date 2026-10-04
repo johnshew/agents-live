@@ -80,7 +80,7 @@ from agents_live.runtime.hosts import windows_watch as winwatch
 from agents_live.runtime.hosts import filesystem as watchsource
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tests.host_safety import allow_native_runtime, native_guard
+from tests.host_safety import allow_native_runtime, isolated_host, native_guard
 
 
 # The repository registry lives under the data home, not the state home, so
@@ -99,17 +99,21 @@ _ISOLATED_HOMES = {
 # arrange their own root still override this one.
 _INSTALL_ROOT: tempfile.TemporaryDirectory | None = None
 _PREVIOUS_INSTALL_ROOT: str | None = None
+_PREVIOUS_CONFIG_HOME: str | None = None
 
 
 def setUpModule() -> None:
     guard = native_guard()
     guard.__enter__()
     unittest.addModuleCleanup(guard.__exit__, None, None, None)
-    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT
+    global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT, _PREVIOUS_CONFIG_HOME
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
+    _PREVIOUS_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME")
     _INSTALL_ROOT = tempfile.TemporaryDirectory()
     os.environ[deploy.layout.ENV_INSTALL_ROOT] = str(
         Path(_INSTALL_ROOT.name) / "install")
+    os.environ["XDG_CONFIG_HOME"] = str(
+        Path(_INSTALL_ROOT.name) / "config")
 
 
 def tearDownModule() -> None:
@@ -117,6 +121,10 @@ def tearDownModule() -> None:
         os.environ.pop(deploy.layout.ENV_INSTALL_ROOT, None)
     else:
         os.environ[deploy.layout.ENV_INSTALL_ROOT] = _PREVIOUS_INSTALL_ROOT
+    if _PREVIOUS_CONFIG_HOME is None:
+        os.environ.pop("XDG_CONFIG_HOME", None)
+    else:
+        os.environ["XDG_CONFIG_HOME"] = _PREVIOUS_CONFIG_HOME
     if _INSTALL_ROOT is not None:
         _INSTALL_ROOT.cleanup()
 
@@ -1287,6 +1295,82 @@ class TestReleaseTool(unittest.TestCase):
         self.assertIn(f"irm {root_url}/install.ps1 | iex", notes)
         self.assertNotIn("install.sh 6.8.0", notes)
         self.assertNotIn("install.ps1 6.8.0", notes)
+
+    def test_local_deploy_diagnostic_identifies_watcher_baseline_differences(
+            self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        local_deploy = runpy.run_path(str(root / "tools" / "local-deploy.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary).resolve()
+            repository = temporary_root / "target-repository"
+            repository.mkdir()
+            baseline_repo = temporary_root / "registered-repo"
+            extra_repo = temporary_root / "extra-repo"
+            status = {
+                "agents": [
+                    {
+                        "repository": str(baseline_repo),
+                        "identifier": "present-watcher",
+                        "state": "started",
+                        "loadable": True,
+                        "execution": {"watch": True},
+                        "ownership_available": True,
+                        "is_owner": True,
+                    },
+                    {
+                        "repository": str(baseline_repo),
+                        "identifier": "missing-watcher",
+                        "state": "started",
+                        "loadable": True,
+                        "execution": {"watch": True},
+                        "ownership_available": True,
+                        "is_owner": True,
+                    },
+                ],
+            }
+            release = local_deploy["RELEASE"].copy()
+            release["_installed_version"] = lambda: "6.9.3"
+            release["_installed_all_json"] = lambda command: (
+                status if command == "status" else {"ok": True})
+            watchers = [
+                (103, "unregistered-z", str(extra_repo)),
+                (101, "present-watcher", str(baseline_repo)),
+                (102, "unregistered-a", str(extra_repo)),
+            ]
+            operational_boundaries = {
+                "_synchronize": lambda: "a" * 40,
+                "_release_configuration": lambda: ("main", "6.9.4"),
+                "_requested_rc": lambda *_args, **_kwargs: "6.9.4rc1",
+                "_prepare_candidate": lambda *_args: (
+                    temporary_root / "candidate.whl", "digest"),
+                "_require_unchanged_checkout": lambda _commit: None,
+                "_installed_cli": lambda: (
+                    temporary_root / "runtime" / "Scripts" / "agents-live.exe"),
+                "watchers_on_host": lambda **_kwargs: watchers,
+                "RELEASE": release,
+            }
+            with (
+                mock.patch.dict(
+                    local_deploy["deploy"].__globals__,
+                    operational_boundaries,
+                ),
+                self.assertRaises(local_deploy["LocalDeployError"]) as raised,
+            ):
+                local_deploy["deploy"](repository, rc="6.9.4rc1")
+
+            message = str(raised.exception)
+            self.assertIn(
+                f"extra=[{{'repository': {str(extra_repo)!r}, "
+                "'identifier': 'unregistered-a'}, "
+                f"{{'repository': {str(extra_repo)!r}, "
+                "'identifier': 'unregistered-z'}]",
+                message,
+            )
+            self.assertIn(
+                f"missing=[{{'repository': {str(baseline_repo)!r}, "
+                "'identifier': 'missing-watcher'}]",
+                message,
+            )
 
 
 class TestRuntimeCore(unittest.TestCase):
@@ -8416,6 +8500,12 @@ class TestWindowsTaskScheduling(unittest.TestCase):
 
 
 class TestArchitectureFitness(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(isolated_host())
+        self.enterContext(mock.patch.object(plugins, "_sources", {}))
+        self.enterContext(mock.patch.dict(providers._providers))
+        self.enterContext(mock.patch.object(providers, "_sources", {}))
+
     def test_branch_work_guidance_preserves_checkout_isolation(self) -> None:
         repository = Path(__file__).parents[1]
         guidance = {
