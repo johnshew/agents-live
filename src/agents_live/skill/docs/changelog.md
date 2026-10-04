@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.3 - 2026-10-04
+
 - fix: separate provider diagnostic volume from completion and pipeline-result limits.
   Valid small results no longer fail because the provider emits a large event
   stream. Diagnostic capture is independently bounded and reports incomplete
