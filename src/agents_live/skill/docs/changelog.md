@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-04
+ms.date: 2026-10-05
 ms.topic: reference
 ---
 
@@ -16,6 +16,11 @@ history is retained in the source repository.
   so candidate loader fixes can unblock upgrades. Candidate rejection messages
   are preserved; failed, timed-out or malformed probes refuse selection without
   weakening existing state checks or activation rollback.
+- fix: retry transient Windows skill payload replacement failures safely. (#561)
+  Directory swaps share a bounded backoff budget and restore the previous
+  complete payload on promotion failure, with staging cleanup. Persistent
+  errors name the affected path and likely open handle or active agent run,
+  and recommend waiting for active runs to finish before retrying.
 - fix: keep dashboard repository changes and refreshes responsive on slow hosts.
   Plugin validation and inventory scans run outside the websocket loop, so
   registration and refresh no longer force reconnects or lose settings rows.
@@ -290,11 +295,9 @@ history is retained in the source repository.
   upgrade preflight still report every failed component. Provider wrappers
   must implement the complete contract explicitly; registration never infers
   delegate methods that could bypass the wrapper's own restrictions.
-=======
 - docs: simplify curl-based install commands.
   The README, packaged guidance, installer bootstrap, and generated release
   notes now use the conventional `curl -fsSL` form.
->>>>>>> 70d81f2 (docs: simplify curl install commands)
 - fix: enable workspace-confined Codex writes on native Windows.
   Codex selects its supported unelevated Windows sandbox and receives the
   repository root explicitly, allowing in-workspace changes while writes
