@@ -11,6 +11,11 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: check wheel-upgrade plugin compatibility with the candidate runtime. (#560)
+  Source plugins are checked in the exact wheel environment before selection,
+  so candidate loader fixes can unblock upgrades. Candidate rejection messages
+  are preserved; failed, timed-out or malformed probes refuse selection without
+  weakening existing state checks or activation rollback.
 - fix: keep dashboard repository changes and refreshes responsive on slow hosts.
   Plugin validation and inventory scans run outside the websocket loop, so
   registration and refresh no longer force reconnects or lose settings rows.
