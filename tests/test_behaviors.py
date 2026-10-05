@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import unittest
+import venv
 import warnings
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -3937,6 +3938,203 @@ class TestClockActivationHandoff(TempRepository):
                 code, _output, error = task_scheduler._run([
                     "/Delete", "/TN", task_path, "/F"])
                 self.assertEqual(0, code, error)
+
+
+class TestCandidateUpgradePreflight(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root, _host = self.enterContext(isolated_host())
+        self.enterContext(mock.patch.object(plugins, "_sources", {}))
+        self.project = self.root / "project"
+        self.project.mkdir()
+        (self.project / ".agents-live.toml").write_text(
+            "[plugins.example]\npath = 'plugin.py'\n", encoding="utf-8")
+        (self.project / "plugin.py").write_text(
+            "CANDIDATE_EXPORT = True\n", encoding="utf-8")
+        self.wheel = self.root / "agents_live-9.7.6-py3-none-any.whl"
+        with zipfile.ZipFile(self.wheel, "w") as archive:
+            archive.writestr(
+                "agents_live-9.7.6.dist-info/METADATA",
+                "Name: agents-live\nVersion: 9.7.6\n")
+        self.loader = (
+            "from pathlib import Path\n"
+            "import json, runpy, tomllib\n"
+            "def compatibility_errors(roots, *, runtime_requirement):\n"
+            "    errors = []\n"
+            "    for root in roots:\n"
+            "        config = tomllib.loads((root / '.agents-live.toml').read_text())\n"
+            "        source = root / config['plugins']['example']['path']\n"
+            "        exports = runpy.run_path(str(source))\n"
+            "        (root / 'candidate-probe.json').write_text(json.dumps({\n"
+            "            'requirement': runtime_requirement, 'root': str(root)}))\n"
+            "        print('candidate plugin import diagnostic')\n"
+            "        if not exports.get('CANDIDATE_EXPORT'):\n"
+            "            errors.append(\"plugin 'example': candidate rejects declaration\")\n"
+            "    return errors\n"
+        )
+        self.enterContext(mock.patch.object(
+            upgrade, "_targets", return_value=([("project", self.project)], [])))
+        self.enterContext(mock.patch.object(repos, "entries", return_value=[]))
+        self.installation = deploy.ownership.Installation(
+            deploy.ownership.SELF, self.root / "running-python",
+            self.root / "installation", "9.7.5", "9.7.5",
+            deploy.pointer.ACTIVE, False, "temporary installation")
+        self.describe = self.enterContext(mock.patch.object(
+            deploy.ownership, "describe",
+            return_value=self.installation))
+        self.install = self.enterContext(mock.patch.object(
+            install_generation, "install", side_effect=self._stage))
+        self.enterContext(mock.patch.object(install_generation, "validate"))
+        self.activate = self.enterContext(mock.patch.object(
+            install_generation, "activate_generation"))
+        self.enterContext(mock.patch.object(
+            upgrade, "_refresh_with_installed_cli", return_value=0))
+
+    def _stage(self, version, *, source, provenance):
+        def populate(target):
+            venv.EnvBuilder(with_pip=False).create(target)
+            library = (target / "Lib" / "site-packages" if os.name == "nt"
+                       else target / "lib" /
+                       f"python{sys.version_info.major}.{sys.version_info.minor}" /
+                       "site-packages")
+            package = library / "agents_live"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "plugins.py").write_text(self.loader, encoding="utf-8")
+
+        return deploy.generation.build(
+            version, populate=populate, validate=lambda _target: None,
+            provenance=provenance)
+
+    def _upgrade(self, *, source=True):
+        stderr = io.StringIO()
+        arguments = ["agents-live upgrade", "--runtime-only"]
+        if source:
+            arguments.extend(["--from", str(self.wheel)])
+        with (
+            mock.patch.object(sys, "argv", arguments),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = upgrade.main()
+        return result, stderr.getvalue()
+
+    def test_candidate_accepts_declaration_rejected_by_running_loader(self):
+        self.assertIn("exposes none of", plugins.compatibility_errors(
+            [self.project], runtime_requirement=str(self.wheel))[0])
+        result, error = self._upgrade()
+        self.assertEqual(0, result, error)
+        self.install.assert_called_once()
+        self.activate.assert_called_once()
+        observation = json.loads(
+            (self.project / "candidate-probe.json").read_text())
+        self.assertEqual(str(self.wheel), observation["requirement"])
+        self.assertEqual(str(self.project), observation["root"])
+
+    def test_candidate_rejection_reports_its_own_message_before_selection(self):
+        (self.project / "plugin.py").write_text(
+            "CANDIDATE_EXPORT = False\n", encoding="utf-8")
+        result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("plugin 'example': candidate rejects declaration", error)
+        self.assertNotIn("exposes none of", error)
+        self.activate.assert_not_called()
+
+    def test_candidate_checks_registered_projects_beyond_selected_repo(self):
+        other = self.root / "other"
+        other.mkdir()
+        (other / ".agents-live.toml").write_text(
+            "[plugins.example]\npath = 'plugin.py'\n", encoding="utf-8")
+        (other / "plugin.py").write_text(
+            "CANDIDATE_EXPORT = False\n", encoding="utf-8")
+        with mock.patch.object(repos, "entries", return_value=[
+                ("selected", str(self.project), None),
+                ("other", str(other), None)]):
+            result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("candidate rejects declaration", error)
+        self.assertTrue((other / "candidate-probe.json").is_file())
+        self.activate.assert_not_called()
+
+    def test_candidate_probe_cannot_start_fails_explicitly_before_selection(self):
+        with mock.patch.object(
+                install_generation, "_interpreter",
+                return_value=self.root / "missing-python"):
+            result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("candidate plugin compatibility probe could not run", error)
+        self.activate.assert_not_called()
+
+    def test_candidate_probe_failure_and_invalid_output_fail_closed(self):
+        for loader, detail in (
+            ("raise RuntimeError('candidate import failed')\n",
+             "candidate import failed"),
+            ("def compatibility_errors(*args, **kwargs): return {'ok': True}\n",
+             "invalid response"),
+        ):
+            with self.subTest(detail=detail):
+                self.loader = loader
+                self.wheel = self.root / (
+                    f"agents_live-9.7.{7 if detail == 'invalid response' else 6}"
+                    "-py3-none-any.whl")
+                version = "9.7.7" if detail == "invalid response" else "9.7.6"
+                with zipfile.ZipFile(self.wheel, "w") as archive:
+                    archive.writestr(
+                        f"agents_live-{version}.dist-info/METADATA",
+                        f"Name: agents-live\nVersion: {version}\n")
+                result, error = self._upgrade()
+                self.assertEqual(1, result)
+                self.assertIn(detail, error)
+                self.activate.assert_not_called()
+
+    def test_candidate_probe_timeout_blocks_selection(self):
+        self.loader = (
+            "import time\n"
+            "def compatibility_errors(*args, **kwargs):\n"
+            "    time.sleep(60)\n"
+            "    return []\n")
+        with mock.patch.object(upgrade, "PLUGIN_PROBE_TIMEOUT", 0.2):
+            result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("candidate plugin compatibility probe timed out", error)
+        self.activate.assert_not_called()
+
+    def test_candidate_keeps_registry_and_retired_definition_checks(self):
+        agents = self.project / "Agents"
+        agents.mkdir()
+        (agents / "legacy.md").write_text(
+            "---\nname: legacy\ndescription: Legacy definition.\n"
+            "runtime: claude\nschedule: '0 8 * * *'\n---\nbody\n",
+            encoding="utf-8")
+        missing = self.root / "unavailable"
+        with mock.patch.object(
+                upgrade, "_targets", return_value=(
+                    [("project", self.project), ("missing", missing)],
+                    ["invalid registry entry"])):
+            result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("retired 5.x fields", error)
+        self.assertIn("registered repository is unavailable", error)
+        self.assertIn("invalid registry entry", error)
+        self.install.assert_not_called()
+        self.activate.assert_not_called()
+
+    def test_candidate_cannot_stage_from_an_unmanaged_installation(self):
+        from dataclasses import replace
+
+        self.describe.return_value = replace(
+            self.installation, owner=deploy.ownership.UNMANAGED)
+        result, error = self._upgrade()
+        self.assertEqual(1, result)
+        self.assertIn("unsupported_installation", error)
+        self.install.assert_not_called()
+        self.activate.assert_not_called()
+
+    def test_same_runtime_keeps_running_loader_preflight(self):
+        result, error = self._upgrade(source=False)
+        self.assertEqual(1, result)
+        self.assertIn("exposes none of", error)
+        self.install.assert_not_called()
+        self.activate.assert_not_called()
 
 
 class TestInstallationGenerations(unittest.TestCase):

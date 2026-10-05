@@ -45,6 +45,12 @@ checks pass, then install the next exact wheel. Release preparation evidence is
 retained separately from the runtime version store. Ordinary upgrades continue
 to resolve stable releases, not RCs.
 
+`upgrade --from <wheel>` builds or verifies the wheel's immutable environment
+before selection and checks registered source plugins with that environment's
+interpreter. Candidate plugin errors are reported unchanged; a probe that cannot
+start, times out after 60 seconds, or returns an invalid response blocks selection.
+Upgrades without `--from` keep the running runtime's plugin check.
+
 Activation through `versions activate`, `install-release --activate`, or
 `upgrade` preserves started intent across registered repositories. It refuses
 while agent work is running: wait for that work to finish, then retry. It does
