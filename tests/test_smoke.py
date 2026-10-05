@@ -346,5 +346,240 @@ with native_guard():
         self.assertEqual("transcript.log", records[0]["transcript"])
 
 
+class TestSkillPayloadReplacement(SmokeRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.source = self.root / "payload-source"
+        self.source.mkdir()
+        (self.source / "SKILL.md").write_text("new skill\n", encoding="utf-8")
+        (self.source / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+        for directory in ("docs", "templates"):
+            (self.source / directory).mkdir()
+            (self.source / directory / "example.md").write_text(
+                f"new {directory}\n", encoding="utf-8")
+        self.enterContext(mock.patch.object(
+            init, "_skill_source", return_value=self.source))
+        self.installed = self.root / ".claude" / "skills" / "agents-live"
+
+    @staticmethod
+    def snapshot(directory: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(directory)): path.read_bytes()
+            for path in directory.rglob("*") if path.is_file()
+        }
+
+    @staticmethod
+    def windows_error(code: int) -> PermissionError:
+        error = PermissionError("injected Windows access/sharing violation")
+        error.winerror = code
+        return error
+
+    def previous_payload(self) -> dict[str, bytes]:
+        if self.installed.exists():
+            init.install_skill(self.root)
+        else:
+            self.assertEqual("installed", init.install_skill(self.root))
+        (self.installed / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        (self.installed / "docs" / "example.md").write_text(
+            "old docs\n", encoding="utf-8")
+        (self.installed / "custom.txt").write_text("keep me\n", encoding="utf-8")
+        return self.snapshot(self.installed)
+
+    def test_transient_windows_replace_errors_retry_then_succeed(self) -> None:
+        real_rename = Path.rename
+        for code in (5, 32, 33):
+            for phase in ("backup", "promotion"):
+                with self.subTest(winerror=code, phase=phase):
+                    original = self.previous_payload()
+                    attempts = 0
+
+                    def rename(path: Path, target: Path) -> Path:
+                        nonlocal attempts
+                        replacing = (
+                            path == self.installed if phase == "backup"
+                            else path.name.startswith(".agents-live-staging-"))
+                        if replacing:
+                            attempts += 1
+                            if attempts <= 3:
+                                raise self.windows_error(code)
+                        return real_rename(path, target)
+
+                    with (
+                        mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+                        mock.patch("time.sleep") as sleep,
+                    ):
+                        self.assertEqual("refreshed", init.install_skill(self.root))
+                    self.assertEqual(4, attempts)
+                    self.assertEqual([0.1, 0.2, 0.4], [
+                        call.args[0] for call in sleep.call_args_list])
+                    expected = self.snapshot(self.source)
+                    expected.update({
+                        name: original[name] for name in (".gitignore", "custom.txt")
+                    })
+                    self.assertEqual(expected, self.snapshot(self.installed))
+                    self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+    def test_persistent_windows_replace_failure_restores_complete_payload(self) -> None:
+        real_rename = Path.rename
+        for code in (5, 32, 33):
+            for phase in ("backup", "promotion"):
+                with self.subTest(winerror=code, phase=phase):
+                    original = self.previous_payload()
+                    attempts = 0
+
+                    def rename(path: Path, target: Path) -> Path:
+                        nonlocal attempts
+                        replacing = (
+                            path == self.installed if phase == "backup"
+                            else path.name.startswith(".agents-live-staging-"))
+                        if replacing:
+                            attempts += 1
+                            raise self.windows_error(code)
+                        return real_rename(path, target)
+
+                    with (
+                        mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+                        mock.patch("time.sleep") as sleep,
+                    ):
+                        with self.assertRaises(PermissionError) as raised:
+                            init.install_skill(self.root)
+                    message = str(raised.exception)
+                    self.assertIn(str(self.installed), message)
+                    self.assertIn("open handle", message)
+                    self.assertIn("active agent run", message)
+                    self.assertIn("wait for active runs to finish", message)
+                    self.assertEqual(6, attempts)
+                    delays = [call.args[0] for call in sleep.call_args_list]
+                    self.assertEqual([0.1, 0.2, 0.4, 0.8, 1.0], delays)
+                    self.assertLessEqual(sum(delays), 3.0)
+                    self.assertEqual(original, self.snapshot(self.installed))
+                    self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+    def test_failed_first_install_leaves_no_partial_payload_or_staging(self) -> None:
+        real_rename = Path.rename
+
+        def rename(path: Path, target: Path) -> Path:
+            if path.name.startswith(".agents-live-staging-"):
+                raise self.windows_error(5)
+            return real_rename(path, target)
+
+        with (
+            mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+            mock.patch("time.sleep"),
+        ):
+            with self.assertRaisesRegex(PermissionError, "wait for active runs to finish"):
+                init.install_skill(self.root)
+        self.assertFalse(self.installed.exists())
+        self.assertEqual([], list(self.installed.parent.iterdir()))
+
+    def test_backup_and_promotion_share_one_bounded_retry_budget(self) -> None:
+        original = self.previous_payload()
+        real_rename = Path.rename
+        backups = promotions = 0
+
+        def rename(path: Path, target: Path) -> Path:
+            nonlocal backups, promotions
+            if path == self.installed:
+                backups += 1
+                if backups <= 3:
+                    raise self.windows_error(5)
+            if path.name.startswith(".agents-live-staging-"):
+                promotions += 1
+                raise self.windows_error(32)
+            return real_rename(path, target)
+
+        with (
+            mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+            mock.patch("time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(PermissionError, "wait for active runs to finish"):
+                init.install_skill(self.root)
+        self.assertEqual(4, backups)
+        self.assertEqual(3, promotions)
+        self.assertEqual(2.5, sum(call.args[0] for call in sleep.call_args_list))
+        self.assertEqual(original, self.snapshot(self.installed))
+        self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+    def test_rollback_retries_transient_windows_errors(self) -> None:
+        original = self.previous_payload()
+        real_rename = Path.rename
+        restores = 0
+
+        def rename(path: Path, target: Path) -> Path:
+            nonlocal restores
+            if path.name.startswith(".agents-live-staging-"):
+                raise self.windows_error(32)
+            if path.name.startswith(".agents-live-backup-"):
+                restores += 1
+                if restores == 1:
+                    raise self.windows_error(5)
+            return real_rename(path, target)
+
+        with (
+            mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+            mock.patch("time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(PermissionError, "open handle"):
+                init.install_skill(self.root)
+        self.assertEqual(2, restores)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 3.0)
+        self.assertEqual(original, self.snapshot(self.installed))
+        self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+    def test_transient_windows_staging_cleanup_preserves_replace_error(self) -> None:
+        original = self.previous_payload()
+        real_rename = Path.rename
+        real_remove = init.shutil.rmtree
+        error = PermissionError("injected non-Windows promotion failure")
+        removals = 0
+
+        def rename(path: Path, target: Path) -> Path:
+            if path.name.startswith(".agents-live-staging-"):
+                raise error
+            return real_rename(path, target)
+
+        def remove(path: Path, *args, **kwargs) -> None:
+            nonlocal removals
+            if path.name.startswith(".agents-live-staging-"):
+                removals += 1
+                if removals == 1:
+                    raise self.windows_error(32)
+            real_remove(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+            mock.patch.object(init.shutil, "rmtree", side_effect=remove),
+            mock.patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(PermissionError) as raised:
+                init.install_skill(self.root)
+        self.assertIs(error, raised.exception)
+        self.assertEqual(2, removals)
+        self.assertEqual([mock.call(0.1)], sleep.call_args_list)
+        self.assertEqual(original, self.snapshot(self.installed))
+        self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+    def test_non_windows_permission_failure_is_not_retried(self) -> None:
+        original = self.previous_payload()
+        real_rename = Path.rename
+        error = PermissionError("injected non-Windows permission failure")
+
+        def rename(path: Path, target: Path) -> Path:
+            if path.name.startswith(".agents-live-staging-"):
+                raise error
+            return real_rename(path, target)
+
+        with (
+            mock.patch.object(Path, "rename", autospec=True, side_effect=rename),
+            mock.patch("time.sleep") as sleep,
+        ):
+            with self.assertRaises(PermissionError) as raised:
+                init.install_skill(self.root)
+        self.assertIs(error, raised.exception)
+        sleep.assert_not_called()
+        self.assertEqual(original, self.snapshot(self.installed))
+        self.assertEqual([self.installed], list(self.installed.parent.iterdir()))
+
+
 if __name__ == "__main__":
     unittest.main()
