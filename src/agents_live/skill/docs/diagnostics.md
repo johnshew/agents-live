@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-09-19
+ms.date: 2026-10-05
 ms.topic: troubleshooting
 ---
 
@@ -179,6 +179,22 @@ still tested independently of Microsoft infrastructure.
 active one, then switches the stable `current` link. Running watchers do not
 block activation; they finish work on their immutable generation and restart
 from `current` at the next idle version check.
+
+Activation checks for active agent runs and runtime maintenance before any
+project skill payload refresh. If it reports that a runtime process is still
+running, wait for it to finish and retry; do not terminate ordinary agent work
+to force an upgrade.
+
+On Windows, refreshing `.claude/skills/agents-live` retries transient access
+denied and sharing violations with increasing delays, sharing at most 2.5 seconds
+of backoff across the two directory renames. The complete payload is staged
+before replacement; a failed promotion restores the previous payload and removes
+staging. Restoration and cleanup have separate bounded retry budgets.
+If replacement still fails, the error names the affected path and explains that
+an open handle or active agent run may be blocking it. Wait for active runs to
+finish, close applications holding the path open, then retry. This diagnosis is
+a likely cause, not proof of a particular process holding a file. Recovery or
+cleanup failures are reported rather than silently ignored.
 
 Use `agents-live versions list` to compare installed and active versions.
 If activation selected an unsuitable release, run `agents-live generations

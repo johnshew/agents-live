@@ -35,7 +35,9 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from ... import paths, plugins, preflight
@@ -55,6 +57,7 @@ _DOTFILE_HEADER = (
 # surface, the skill is the thin layer that drives it.
 _SKILL_PAYLOAD = (".gitignore", "SKILL.md", "VERSION", "docs", "templates")
 _SKILL_IGNORE = "*\n!.gitignore\n"
+_PAYLOAD_RETRY_DELAYS = (0.1, 0.2, 0.4, 0.8, 1.0)
 
 
 def initialize(root: Path) -> bool:
@@ -109,18 +112,41 @@ def _copy_payload(source: Path, dest: Path) -> None:
             shutil.copy2(payload, dest / item)
 
 
+def _retry_payload_change(
+    operation: Callable[[], object], path: Path, retries: Iterator[float],
+) -> None:
+    while True:
+        try:
+            operation()
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33):
+                raise
+            delay = next(retries, None)
+            if delay is None:
+                raise PermissionError(
+                    f"could not update skill payload at {path}: {exc}; an open "
+                    "handle or an active agent run may be blocking replacement; "
+                    "wait for active runs to finish, close applications using "
+                    "this path, then retry") from exc
+            time.sleep(delay)
+
+
 def _install_payload(source: Path, dest: Path) -> None:
     """Stage the payload beside *dest*, then swap it in.
 
     The full copy happens in a staging directory first, so a mid-copy
     failure (disk full, Ctrl-C) never destroys an existing install. The
     existing directory is retained as a backup until the complete staged
-    payload has been promoted, then restored if promotion fails.
+    payload has been promoted, then restored if promotion fails. Windows
+    access/sharing violations share a 2.5-second backoff budget for the swap;
+    rollback and cleanup each have their own bounded recovery budget.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(
         dir=dest.parent, prefix=".agents-live-staging-"))
     backup = dest.with_name(f".{dest.name}-backup-{uuid.uuid4().hex}")
+    retries = iter(_PAYLOAD_RETRY_DELAYS)
     try:
         _copy_payload(source, staging)
         if dest.is_dir():
@@ -133,18 +159,20 @@ def _install_payload(source: Path, dest: Path) -> None:
                 else:
                     shutil.copy2(existing, target, follow_symlinks=False)
         if dest.exists():
-            dest.rename(backup)
-        try:
-            staging.rename(dest)
-        except BaseException:
-            if backup.exists() and not dest.exists():
-                backup.rename(dest)
-            raise
-        shutil.rmtree(backup, ignore_errors=True)
+            _retry_payload_change(lambda: dest.rename(backup), dest, retries)
+        _retry_payload_change(lambda: staging.rename(dest), dest, retries)
+        if backup.exists():
+            _retry_payload_change(
+                lambda: shutil.rmtree(backup), backup, iter(_PAYLOAD_RETRY_DELAYS))
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
-        if backup.exists() and not dest.exists():
-            backup.rename(dest)
+        try:
+            if backup.exists() and not dest.exists():
+                _retry_payload_change(
+                    lambda: backup.rename(dest), dest, iter(_PAYLOAD_RETRY_DELAYS))
+        finally:
+            if staging.exists():
+                _retry_payload_change(
+                    lambda: shutil.rmtree(staging), staging, iter(_PAYLOAD_RETRY_DELAYS))
 
 
 def install_skill(root: Path) -> str | None:
