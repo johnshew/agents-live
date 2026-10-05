@@ -353,12 +353,7 @@ def validation_errors(roots: list[Path]) -> tuple[str, ...]:
 
 def compatibility_errors(roots: list[Path], *, runtime_requirement: str
                          ) -> tuple[str, ...]:
-    """Declared plugins that cannot load under this runtime.
-
-    Source plugins load in this interpreter, so the candidate runtime is
-    the one already running and there is nothing to probe in a
-    subprocess.
-    """
+    """Declared plugins that cannot load in the interpreter running this check."""
     return validation_errors(roots)
 
 

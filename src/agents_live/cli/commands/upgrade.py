@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from ...runtime.spawn import cli_executable_path
 from ...state import registry as repos
 from .. import lifecycle
 from . import init, install_generation, install_release
+
+PLUGIN_PROBE_TIMEOUT = 60
 
 
 def _targets() -> tuple[list[tuple[str, Path]], list[str]]:
@@ -88,6 +91,36 @@ def _wheel_identity(wheel: Path) -> tuple[str, str]:
     return version, digest
 
 
+def _prepare_generation(
+    source: Path, *, candidate: bool = False,
+) -> deploy.generation.Generation:
+    """Build or verify the exact wheel environment without selecting it."""
+    if not source.is_file() or source.suffix.lower() != ".whl":
+        raise ValueError(
+            "a self-managed `upgrade --from` requires a built wheel; run "
+            "`uv build --wheel` and pass the resulting .whl")
+    version, digest = _wheel_identity(source)
+    if candidate and ".dev" in version:
+        raise ValueError("a development wheel cannot be installed as a release candidate")
+    provenance = deploy.generation.Provenance(
+        "local-artifact", source.name, digest)
+    try:
+        built = deploy.generation.load(version)
+    except deploy.generation.GenerationError:
+        target = deploy.layout.generation_dir(version)
+        if target.exists() or target.is_symlink():
+            raise
+        built = install_generation.install(
+            version, source=source, provenance=provenance)
+    else:
+        if built.provenance != provenance:
+            raise deploy.generation.GenerationError(
+                f"generation {version} is already installed from different "
+                "artifact bytes and will not be overwritten")
+        install_generation.validate(built)
+    return built
+
+
 def _upgrade_self_managed(
     source: Path | None,
     *, candidate: bool = False,
@@ -104,38 +137,61 @@ def _upgrade_self_managed(
         )
         return 1
     try:
-        version, digest = _wheel_identity(source)
-        if candidate and ".dev" in version:
-            raise ValueError("a development wheel cannot be installed as a release candidate")
-        provenance = deploy.generation.Provenance(
-            "local-artifact", source.name, digest)
-        try:
-            built = deploy.generation.load(version)
-        except deploy.generation.GenerationError:
-            target = deploy.layout.generation_dir(version)
-            if target.exists() or target.is_symlink():
-                raise
-            built = install_generation.install(
-                version, source=source, provenance=provenance)
-        else:
-            if built.provenance != provenance:
-                raise deploy.generation.GenerationError(
-                    f"generation {version} is already installed from different "
-                    "artifact bytes and will not be overwritten")
-            install_generation.validate(built)
+        built = _prepare_generation(source, candidate=candidate)
         install_generation.activate_generation(built)
         if candidate:
-            deploy.generation.classify(version, "candidate")
+            deploy.generation.classify(built.name, "candidate")
         deploy.ownership.write_record(deploy.ownership.SELF)
     except (OSError, ValueError, deploy.generation.GenerationError) as exc:
         preflight.emit_failure("upgrade", str(exc))
         return 1
-    print(f"Activated self-managed generation {version} from {source}")
+    print(f"Activated self-managed generation {built.name} from {source}")
     return 0
 
 
+def _candidate_plugin_errors(
+    roots: list[Path], source: Path, *, candidate: bool,
+) -> tuple[str, ...]:
+    probe = (
+        "import contextlib,json,sys\n"
+        "from pathlib import Path\n"
+        "with contextlib.redirect_stdout(sys.stderr):\n"
+        "    from agents_live import plugins\n"
+        "    errors = plugins.compatibility_errors(\n"
+        "        [Path(root) for root in sys.argv[2:]],\n"
+        "        runtime_requirement=sys.argv[1])\n"
+        "print(json.dumps(errors))\n"
+    )
+    try:
+        built = _prepare_generation(source, candidate=candidate)
+        completed = subprocess.run(
+            [str(install_generation._interpreter(built.path)), "-I", "-c",
+             probe, str(source), *(str(root) for root in roots)],
+            cwd=built.path, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False,
+            timeout=PLUGIN_PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return (f"candidate plugin compatibility probe timed out after "
+                f"{PLUGIN_PROBE_TIMEOUT} seconds",)
+    except (OSError, ValueError, deploy.generation.GenerationError) as exc:
+        return (f"candidate plugin compatibility probe could not run: {exc}",)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        return (f"candidate plugin compatibility probe failed "
+                f"(exit {completed.returncode}): {detail}",)
+    try:
+        errors = json.loads(completed.stdout)
+    except ValueError:
+        errors = None
+    if not isinstance(errors, list) or not all(
+            isinstance(error, str) and error for error in errors):
+        return ("candidate plugin compatibility probe returned an invalid response",)
+    return tuple(errors)
+
+
 def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
-                          source: Path | None
+                          source: Path | None, candidate: bool = False,
                           ) -> tuple[str, ...]:
     """Unsafe registered state that must be resolved before replacement."""
     errors = [f"registered repository is unavailable: {item}"
@@ -156,10 +212,12 @@ def _compatibility_errors(roots: list[Path], registry_errors: list[str], *,
             for item in discovery.broken
             if "retired 5.x fields:" in item.message
         )
-    runtime_requirement = (str(source) if source is not None
-                           else f"agents-live>={__version__}")
-    errors.extend(plugins.compatibility_errors(
-        readable, runtime_requirement=runtime_requirement))
+    if source is None:
+        errors.extend(plugins.compatibility_errors(
+            readable, runtime_requirement=f"agents-live>={__version__}"))
+    elif not errors:
+        errors.extend(_candidate_plugin_errors(
+            readable, source, candidate=candidate))
     return tuple(dict.fromkeys(errors))
 
 
@@ -268,8 +326,17 @@ def main() -> int:
         return 1
 
     if not args.skills_only:
+        if source is not None and not installation.self_managed:
+            preflight.emit_failure(
+                "upgrade",
+                "upgrade requires a self-managed installation; install the "
+                "current release with the official bootstrap, then run the "
+                "stable agents-live command",
+                code="unsupported_installation",
+            )
+            return 1
         compatibility_errors = _compatibility_errors(
-            target_roots, errors, source=source)
+            target_roots, errors, source=source, candidate=args.candidate)
         if compatibility_errors:
             for error in compatibility_errors:
                 preflight.emit_failure("upgrade", error,
