@@ -110,14 +110,14 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 
 [cycles."6.9.4"]
 branch = "main"
-next_rc = "6.9.4rc3"
-recommendation = "Preserve consumed RC1 and RC2 and their immutable artifacts. RC2 preparation from 243ec7e failed at packaged dashboard readiness and was not accepted. Fix and validate dashboard responsiveness following #556 before preparing changed source as RC3, retaining the merged #556 and #538 work. Source tests are not provider, native scheduler, artifact or installed acceptance; this configuration does not prepare another candidate."
+next_rc = "6.9.4rc4"
+recommendation = "Preserve consumed RC1, RC2 and RC3 and their immutable artifacts. RC2 preparation failed at packaged dashboard readiness; RC3 was prepared, passed isolated acceptance and was locally activated, but is not publication-approved. Fix and validate #560 candidate-runtime plugin preflight and #561 Windows skill replacement before preparing changed source as RC4, retaining the merged #556, #538 and dashboard responsiveness work. Source tests are not provider, native scheduler, artifact or installed acceptance; this configuration does not prepare another candidate."
 
 [cycles."6.9.4".approval]
 decision = "testing"
 
 [cycles."6.9.4".issues]
-planned = [547, 540, 531, 542, 549, 530, 550, 556, 538]
+planned = [547, 540, 531, 542, 549, 530, 550, 556, 538, 560, 561]
 
 [cycles."6.9.4".decisions]
 "530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
@@ -126,6 +126,8 @@ planned = [547, 540, 531, 542, 549, 530, 550, 556, 538]
 "542" = "Developer requested additive lower-only timeout and deadline visibility in the 6.9.4 scope. Assess the semantic-version caveat at release review; do not change the requested target automatically."
 "556" = "Developer assigned cross-repository source-plugin deduplication, conflict origins and watcher-baseline diagnostics to RC2 on 2026-10-04. RC2 preparation failed at dashboard readiness; changed source including the responsiveness follow-up must use RC3."
 "538" = "Developer added role-aware watcher inventory to RC2 on 2026-10-04 after scheduled work blocked an RC1 activation attempt; #539 waits for a new observation."
+"560" = "Developer added candidate-runtime plugin preflight to RC4 on 2026-10-04 after RC3 activation exposed the running loader rejecting plugins the candidate accepts."
+"561" = "Developer added transient Windows skill-replacement retry to RC4 on 2026-10-04 after RC3 activation exposed an access-denied payload refresh."
 
 [cycles."6.9.4".history."6.9.4rc1"]
 status = "prepared"
@@ -146,3 +148,13 @@ source_commit = "243ec7ea0c1853709dee067af5857b4eaf2f09bd"
 wheel_sha256 = "fc14dfcb3650272b5e787551fe7ad6008cbc21dc371af54747825c7c65eeb5ea"
 sdist_sha256 = "4239e921477f6d7744643ac8302d231bf15210d6e5d9ce2fda7bb392c05280b3"
 evidence = "Allocated and consumed on 2026-10-04. Preparation failed at packaged dashboard repositories readiness after startup and desktop, wide, and mobile layouts passed; the settings row timed out. Retained attempt, commit, build records and immutable artifacts remain preserved; no preparation or acceptance receipt exists. RC2 was not accepted. Changed source must use RC3."
+
+[cycles."6.9.4".history."6.9.4rc3"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.4rc3"
+commit = "8bc4204c84d06fdd0fde18cf7e05f8a8c1d696bd"
+source_commit = "8cda1019e9c5e100a75f78baefae730e1bfe6abd"
+wheel_sha256 = "2acc6c1e3722caf84e24e7ebcf0116d6c747fb270a959acf4ac78a88f76361a1"
+sdist_sha256 = "8a36a114213e6945662eaab2d6a7e40192b4f502ed56cf2ba7a612f835c702a5"
+evidence = "Prepared and consumed on 2026-10-04 from main; preparation and build receipts bind the source, candidate commit and immutable artifact hashes. Passed isolated candidate acceptance and was locally activated; activation exposed #560 and #561, assigned by the developer to RC4. Preserve retained RC3 evidence independently. This history is not publication approval; changed source must use RC4."
