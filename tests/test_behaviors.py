@@ -10283,9 +10283,13 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with mock.patch.dict(os.environ, {
                     "AGENTS_LIVE_INSTALL_ROOT": str(root / "unrelated-install"),
                     "XDG_CONFIG_HOME": str(root / "unrelated-config"),
-                    "AGENTS_LIVE_REPO": str(root / "unrelated-repository")}):
+                    "AGENTS_LIVE_REPO": str(root / "unrelated-repository"),
+                    "PYTHONUTF8": "0",
+                    "PYTHONIOENCODING": "cp1252"}):
                 readiness["_fixture"](root)
                 environment = readiness["_environment"](root)
+                self.assertEqual("1", environment["PYTHONUTF8"])
+                self.assertEqual("utf-8", environment["PYTHONIOENCODING"])
                 with mock.patch.dict(os.environ, environment):
                     self.assertEqual(
                         root / "installation", deploy.layout.installation_root())
@@ -10341,6 +10345,73 @@ class TestCrossModuleAgreements(unittest.TestCase):
             worker.join(timeout=5)
             process.stdin.close()
             process.stdout.close()
+
+    def test_dashboard_readiness_does_not_block_a_noisy_server(self) -> None:
+        readiness = runpy.run_path(
+            str(REPOSITORY / "tools" / "dashboard-readiness.py"))
+        child = """
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+assert sys.flags.utf8_mode == 1
+assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
+for _ in range(2048):
+    print("dashboard diagnostic " + "x" * 128, flush=True)
+sys.stdout.buffer.write(b"\\xe9\\n")
+sys.stdout.buffer.flush()
+if sys.argv[1] == "fail":
+    print("noisy-server-failure", flush=True)
+    sys.exit(23)
+payload = json.dumps({"agents": [{
+    "name": "readiness-agent", "state": "started",
+    "can_pause": True, "can_activate": False,
+    "watcher_liveness": "missing", "unhealthy": True,
+    "health": "Failing: newest run; Watcher missing",
+    "action_reasons": "Start: Already active; Claim: unavailable",
+}]}).encode()
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(payload)
+    def log_message(self, *args):
+        pass
+port = int(sys.argv[sys.argv.index("--port") + 1])
+try:
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+except KeyboardInterrupt:
+    pass
+"""
+        # This startup-only journey needs no browser; keep the exception
+        # import available without adding Playwright to the source suite.
+        browser_errors = mock.Mock(TimeoutError=TimeoutError)
+        check = readiness["_check"]
+        with isolated_host() as (root, _host), \
+                mock.patch.dict(sys.modules, {
+                    "playwright": mock.Mock(),
+                    "playwright.sync_api": browser_errors,
+                }), \
+                mock.patch.dict(check.__globals__, {
+                    "READY_TIMEOUT_S": 5.0,
+                    "POLL_INTERVAL_S": 0.05,
+                }):
+            for outcome in ("serve", "fail"):
+                with self.subTest(outcome=outcome):
+                    arguments = dict(
+                        launcher=[sys.executable, "-u", "-c", child, outcome],
+                        directory=root,
+                        environment=readiness["_environment"](root),
+                        dev=False, source=True, direct=False,
+                        scenarios=("startup",), viewport_names=(),
+                    )
+                    if outcome == "fail":
+                        with self.assertRaisesRegex(
+                                readiness["ReadinessError"],
+                                "noisy-server-failure"):
+                            check(**arguments)
+                    else:
+                        check(**arguments)
 
     def test_dashboard_readiness_waits_for_new_action_completion(self) -> None:
         readiness = runpy.run_path(
