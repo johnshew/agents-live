@@ -31,6 +31,59 @@ still requires the issue dispositions, retained RC evidence, and developer
 approval of that exact RC. No functional verification is required from RC
 promotion through publication.
 
+<!-- glp-update:v1 id=18a71247-6a91-49f6-87cd-8ca4f6ad4c0d -->
+<a id="glp-18a71247-6a91-49f6-87cd-8ca4f6ad4c0d"></a>
+### GLP Update: Activation runs under the previously installed runtime's rules
+
+- Update-ID: 18a71247-6a91-49f6-87cd-8ca4f6ad4c0d
+- Recorded-UTC: 2026-10-08T23:35:44Z
+- Kind: lesson
+- Topics: local deployment, activation, installed runtime, in-flight runs
+- Workstream: 6.9.4rc5/rc6 release operations
+- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 3733230
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+`tools/local-deploy.py` performs `upgrade --from <wheel>` through the currently
+installed CLI. Activation-time behavior changes, such as #574 stopping
+activation from waiting on in-flight agent runs, therefore take effect only
+for the activation after the fixed RC is installed. The first activation out
+of an older RC remains gated by the older code: on 2026-10-08, 6.9.4rc4
+refused 6.9.4rc6 activation with "agent work is running (process N)". Plan
+bootstrap activation for a moment without in-flight runs; a background retry
+when no `run` or `internal maintain` process exists is acceptable. Do not
+block the session waiting for work to drain or bypass `local-deploy`.
+
+RC5 was consumed and accepted in isolation but never activated: `doctor
+--all-repos` failed on a stale registry entry, then the older activation code
+refused while runs were in flight. The stale entry was removed with
+`agents-live repos remove`. See #572, #574 and the [release-cycle
+history](../.github/release-cycles.toml).
+
+#### Evidence
+- Observed 2026-10-08: RC4 refused RC6 activation while an agent run was
+  active; RC5 acceptance and activation history is recorded in the
+  [release-cycle manifest](../.github/release-cycles.toml).
+- Issues #572 and #574 track the deployment-input and in-flight activation
+  behavior, respectively.
+
+#### Previous Knowledge
+The local numbered RC workflow above describes activation through the installed
+upgrade command but does not distinguish which installed runtime governs the
+bootstrap activation.
+
+#### Verification and Limits
+RC5's isolation acceptance and failed activation path were observed. The RC6
+bootstrap activation outcome is pending at the time of writing.
+
+#### Follow-up
+Consolidate into the local numbered RC guidance after RC6 bootstrap activation
+is verified.
+<!-- /glp-update:v1 id=18a71247-6a91-49f6-87cd-8ca4f6ad4c0d -->
+
 ### Numbered attempt commands
 
 Numbered acceptance uses an isolated temporary repository and the exact wheel.
