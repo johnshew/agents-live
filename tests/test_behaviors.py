@@ -6550,6 +6550,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertNotIn("bake", markdown.lower())
             self.assertTrue(routing["next_actions"])
             self.assertTrue(all(action in markdown for action in routing["next_actions"]))
+            self.assertIn(
+                "Resolve remaining planned 6.9.3 work according to the configured "
+                "recommendation, then prepare 6.9.3rc1 under release authority.",
+                routing["next_actions"][-1],
+            )
 
     def _workflow_text(self, name: str) -> str:
         return (REPOSITORY / ".github" / "workflows" / name).read_text(

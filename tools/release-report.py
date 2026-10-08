@@ -163,8 +163,11 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
                           if selected_attempt and selected_attempt["state"] == "accepted"
                           else f"Complete exact-package acceptance of selected {selected} for {version}.")
             else:
-                action = (f"Finish planned {version} work and source validation, then prepare {cycle['next_rc']} "
-                          "under release authority. Artifact and operational acceptance remain independent.")
+                action = (
+                    f"Resolve remaining planned {version} work according to the configured "
+                    f"recommendation, then prepare {cycle['next_rc']} under release authority. "
+                    "Artifact and operational acceptance remain independent."
+                )
             actions.append(action)
             summary_actions[version] = action
         rows = []

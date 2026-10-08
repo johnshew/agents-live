@@ -49,9 +49,10 @@ decision = "testing"
 
 Develop on `main` by default. Configure a stabilization branch only when an
 older source must remain separate from next-version development. Every cycle
-keeps its own scope, selected RC, source identity, historical attempts, deployment
-observations and explicit issue decisions. An older selected RC is not superseded
-merely because newer source or a higher RC number exists.
+keeps its own scope, selected RC, candidate under evaluation when applicable,
+source identity, historical attempts, deployment observations and explicit issue
+decisions. An older selected RC is not superseded merely because newer source or
+a higher RC number exists.
 
 There is no active bake branch, bake worktree, or bake-to-main promotion step.
 Historical bake refs and records do not route development. Immutable numbered
@@ -64,7 +65,7 @@ renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
 
-The default development cycle is 6.9.4 with next identity `6.9.4rc5`. RC1 was
+The default development cycle is 6.9.4 with next identity `6.9.4rc6`. RC1 was
 prepared and consumed from `cd0be2e` on 2026-10-04; preserve its candidate commit,
 immutable artifacts and retained receipts. RC2 was allocated and consumed from
 `243ec7e` on the same date, but preparation failed at packaged dashboard
@@ -75,20 +76,39 @@ but is not publication-approved. Its retained source and artifact identities
 remain recorded independently. RC4 was prepared and consumed from `dccdc4b` on
 2026-10-05, passed isolated acceptance and is selected locally on the candidate
 channel, but is not publication-approved. Its retained source and artifact
-identities remain recorded independently. The twelve planned issues include
-#556, #538, #560, #561 and #565 and remain planned until delivery and acceptance
-evidence exists.
+identities remain recorded independently. The planned issue list includes #556,
+#538, #560, #561, #565, #572 and #574; issue closure and candidate delivery are
+reported separately.
 The 2026-10-04 user-directed reassignment of #530/#531 from 6.9.3 does not rewrite
 that published cycle's retained attempts, deployment history or approval.
 Published 6.9.2 and 6.9.3 have no next RC. Keep #530/#531 partial in 6.9.3,
 not also deferred there; their outstanding work is planned in 6.9.4.
-Do not reuse consumed RC1, RC2, RC3 or RC4 or stamp RC5 merely by
-configuring its scope.
-The developer assigned #565 to RC5 on 2026-10-08 for the main lock fix only after
-observing a maintenance run on RC4 hold the runtime launch gate for about 19
-minutes and miss scheduled launches. Task Scheduler query batching is a separate
-deferred follow-up tracked by #566. Changed source must use RC5, retaining the
-merged #556, #538, #560 and #561 work and the dashboard responsiveness follow-up.
+Do not reuse consumed RC1 through RC5. The developer assigned #565 to RC5 on
+2026-10-08 for the main lock fix only after observing a maintenance run on RC4
+hold the runtime launch gate for about 19 minutes and miss scheduled launches.
+Task Scheduler query batching is a separate deferred follow-up tracked by #566.
+RC5 was allocated and consumed from main with the #565 fix. Initial preparation
+and a retry failed packaged dashboard readiness because the validator did not
+drain the dashboard child's output pipe, blocking logging; the failure
+reproduced at RC4 source and was not a product regression. PR #571 corrected
+the validator, and requalification reused all four artifacts byte-exact,
+passed all gates and passed isolated candidate acceptance. The first local
+deployment was refused by the overly restrictive requalification allowlist,
+which excludes instruction-only changes from PR #570 since RC5 source. The
+orchestrator's tooling-only #572 correction merged in PR #573. A requalified
+deployment then passed the package-input check, but activation was refused
+while scheduled agent runs were in progress because activation refuses while
+any run is active. The orchestrator removed a stale
+repository registration for a missing folder to clear the candidate doctor
+check. RC5 passed isolated acceptance but was never locally activated and is
+superseded by RC6. On 2026-10-08, the developer directed that activation must
+not wait for agent runs already in progress; the orchestrator filed #574 for
+this package-changing product fix. Prepare RC6 from main after #574 merges,
+carrying #565, the #571 readiness-validator correction, #572 and #574. Issue
+#572 is tooling-only and does not change package bytes. Do not reuse consumed
+RC1 through RC5. Retain the merged #556, #538, #560 and #561 work and the
+dashboard responsiveness follow-up. Issues #565, #572 and #574 remain planned;
+#566 and #567 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
 
