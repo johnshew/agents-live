@@ -28,6 +28,9 @@ repository-qualified Run action, and ``--dev`` owns reload-worker startup.
 The fixture is a temporary directory with its own state, data, config, and
 installation homes, so the gate never reads the developer's registry or
 selected installation, or touches a real project.
+Server output is captured to a temporary file, not an undrained pipe:
+diagnostics must not block the server while the browser exercises reloads.
+Failure reports and interrupt-shutdown checks still inspect the captured output.
 """
 from __future__ import annotations
 
@@ -233,6 +236,8 @@ def _environment(directory: Path) -> dict[str, str]:
         "XDG_DATA_HOME": str(directory / "data"),
         "XDG_CONFIG_HOME": str(directory / "config"),
         "AGENTS_LIVE_INSTALL_ROOT": str(directory / "installation"),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
     })
     return environment
 
@@ -307,21 +312,25 @@ def _await_rows(process: subprocess.Popen, port: int, mode: str) -> dict:
         f"{_output(process)}")
 
 
-def _output(process: subprocess.Popen) -> str:
+def _output(process: subprocess.Popen, capture=None) -> str:
     """What the dashboard said, bounded, so a failure is diagnosable.
 
     A gate that reports only an exit status sends the reader back to
     reproduce it by hand, which on a CI host is the one thing they
     cannot do.
     """
-    if process.stdout is None:
-        return "  (no output captured)"
     if process.poll() is None:
         return "  (dashboard still running; output follows after termination)"
-    try:
-        text, _stderr = process.communicate(timeout=SHUTDOWN_GRACE_S)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return "  (output unavailable)"
+    if capture is not None:
+        capture.seek(0)
+        text = capture.read()
+    else:
+        if process.stdout is None:
+            return "  (no output captured)"
+        try:
+            text, _stderr = process.communicate(timeout=SHUTDOWN_GRACE_S)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return "  (output unavailable)"
     lines = (text or "").splitlines()[-40:]
     return "\n".join(f"  | {line}" for line in lines) or "  (no output)"
 
@@ -1046,7 +1055,8 @@ def _terminate(process: subprocess.Popen) -> None:
             process.wait(timeout=SHUTDOWN_GRACE_S)
 
 
-def _assert_interrupt_shutdown(process: subprocess.Popen, port: int, mode: str) -> None:
+def _assert_interrupt_shutdown(process: subprocess.Popen, port: int, mode: str,
+                               capture=None) -> None:
     if os.name == "nt":
         interrupt = """
 import ctypes
@@ -1070,6 +1080,9 @@ if not kernel.GenerateConsoleCtrlEvent(0, 0):
         output, _ = process.communicate(timeout=SHUTDOWN_GRACE_S)
     except subprocess.TimeoutExpired as exc:
         raise ReadinessError(f"{mode}: Ctrl+C did not stop the dashboard tree") from exc
+    if capture is not None:
+        capture.seek(0)
+        output = capture.read()
     if any(marker in output for marker in ("Traceback", "CancelledError", "KeyboardInterrupt")):
         raise ReadinessError(f"{mode}: Ctrl+C produced shutdown errors:\n{output}")
     with socket.socket() as probe:
@@ -1088,6 +1101,8 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         mode += " direct server"
     if all_repos:
         mode += " all-repositories"
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     port = _free_port()
     argv = [*launcher, *([] if direct else ["--repo", str(directory), "dashboard"]),
             "--port", str(port)]
@@ -1102,12 +1117,19 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         startup.wShowWindow = subprocess.SW_HIDE
         options = {"creationflags": subprocess.CREATE_NEW_CONSOLE, "startupinfo": startup}
     _say(f"{mode}: starting on port {port}")
-    process = subprocess.Popen(
-        argv, cwd=directory, env=environment,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        **options)
+    # An undrained PIPE can block the server's event loop while it logs,
+    # turning a healthy dashboard into a browser readiness timeout.
+    capture = tempfile.TemporaryFile(
+        mode="w+", encoding="utf-8", errors="replace", dir=directory)
+    try:
+        process = subprocess.Popen(
+            argv, cwd=directory, env=environment,
+            stdout=capture, stderr=subprocess.STDOUT, text=True,
+            **options)
+    except BaseException:
+        capture.close()
+        raise
     check_started = time.perf_counter()
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     try:
         started = time.perf_counter()
@@ -1153,21 +1175,22 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
                         page = browser.new_page()
                         page.goto(f"http://127.0.0.1:{port}/", wait_until="domcontentloaded")
                         page.locator(".dashboard-body").wait_for(state="visible")
-                        _assert_interrupt_shutdown(process, port, mode)
+                        _assert_interrupt_shutdown(process, port, mode, capture)
                     finally:
                         browser.close()
             else:
-                _assert_interrupt_shutdown(process, port, mode)
+                _assert_interrupt_shutdown(process, port, mode, capture)
         _say(f"{mode}: completed in {time.perf_counter() - check_started:.1f}s")
     except (ReadinessError, PlaywrightTimeoutError) as exc:
         _terminate(process)
-        output = _output(process)
+        output = _output(process, capture)
         if output:
             raise ReadinessError(
                 f"{exc}\ndashboard output:\n{output[-4000:]}") from exc
         raise
     finally:
         _terminate(process)
+        capture.close()
 
 
 def _direct_launcher(python: list[str], directory: Path) -> list[str]:

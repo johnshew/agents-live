@@ -11,6 +11,7 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep dashboard readiness from blocking a noisy server on undrained output.
 - fix: keep slow maintenance planning outside the runtime launch gate. (#565)
   Inventory, rendering and drift detection no longer exclude agent launches.
   Maintenance revalidates a persisted commit epoch and intent tokens before
