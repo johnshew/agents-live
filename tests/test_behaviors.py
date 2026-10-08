@@ -8561,7 +8561,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
         deploy_candidate = script["deploy"]
         scope = deploy_candidate.__globals__
-        for scenario in ("success", "changed-source", "missing-readiness", "unhealthy", "postcheck"):
+        for scenario in (
+            "success", "instruction-only", "changed-source", "changed-readme",
+            "changed-license", "changed-installer", "changed-changelog",
+            "missing-readiness", "unhealthy", "postcheck",
+        ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve()
                 wheel = root / "agents_live-1.2.3rc4-py3-none-any.whl"
@@ -8625,7 +8629,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     "_requested_rc": lambda version, _target, **_options: version,
                     "_preparation_directory": lambda _version: root,
                     "_git": lambda *args: "a" * 40 if args[0] == "merge-base" else (
-                        "src/changed.py" if scenario == "changed-source" else ""),
+                        {
+                            "instruction-only": "AGENTS.md\n.agents/testing.md\n"
+                                                ".github/release-cycles.toml\ntools/release-report.py",
+                            "changed-source": "src/changed.py",
+                            "changed-readme": "README.md",
+                            "changed-license": "LICENSE",
+                            "changed-installer": "install.sh",
+                            "changed-changelog": "src/agents_live/skill/docs/changelog.md",
+                        }.get(scenario, "")),
                     "_prepared_artifact": lambda *_args: None if scenario == "missing-readiness" else (wheel, digest),
                     "_require_unchanged_checkout": lambda _commit: None,
                     "_installed_run": installed,
@@ -8643,7 +8655,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     "_installed_all_json": lambda _command: status,
                     "_started_watchers": lambda _payload: (),
                 }):
-                    if scenario == "success":
+                    if scenario in ("success", "instruction-only"):
                         receipt = deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
                         payload = json.loads(receipt.read_text(encoding="utf-8"))
                         self.assertTrue(payload["deployed"])
@@ -8653,8 +8665,16 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         self.assertEqual("1.2.3rc4", selected[0])
                         self.assertEqual({8231: "1.2.3rc4"}, dashboard_versions)
                     else:
-                        with self.assertRaises(script["LocalDeployError"]):
+                        with self.assertRaises(script["LocalDeployError"]) as refused:
                             deploy_candidate(root, rc="1.2.3rc4", recover_provider_readiness=True)
+                        if scenario.startswith("changed-"):
+                            self.assertIn({
+                                "changed-source": "src/changed.py",
+                                "changed-readme": "README.md",
+                                "changed-license": "LICENSE",
+                                "changed-installer": "install.sh",
+                                "changed-changelog": "src/agents_live/skill/docs/changelog.md",
+                            }[scenario], str(refused.exception))
                         self.assertFalse((root / "receipt.json").exists())
                         self.assertEqual("1.2.2", selected[0])
                         self.assertEqual(b"previous payload", payload_file.read_bytes())
@@ -8845,7 +8865,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             changed = "tools/dashboard-readiness.py"
 
             def git(*args):
-                return args[1] if args[0] == "merge-base" else changed
+                if args[0] == "merge-base":
+                    return source if args[1] == "c" * 40 else args[1]
+                return changed
 
             with mock.patch.dict(scope, {
                 "_synchronize": lambda: tool,
@@ -8859,15 +8881,37 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_load_attempt": lambda _version: {"source_commit": source},
                 "_retained_preparation": lambda _record: preparation,
             }):
-                with self.assertRaisesRegex(script["LocalDeployError"], "preflight boundary"):
-                    deploy(root, rc="1.2.3rc1", requalified=True)
-                unchanged.assert_called_once_with(tool)
-                unchanged.reset_mock()
-                for changed in ("src/agents_live/dispatch.py", "install.ps1", "pyproject.toml"):
-                    with self.subTest(path=changed), self.assertRaisesRegex(
-                            script["LocalDeployError"], "package inputs changed"):
+                for changed in (
+                    "tools/dashboard-readiness.py",
+                    "AGENTS.md\n.agents/testing.md\n.agents/development.md\n"
+                    ".github/release-cycles.toml\ntools/release-report.py\n"
+                    "docs/testing-methodology.md\ntests/test_behaviors.py",
+                    "src/agents_live/skill/docs/changelog.md",
+                ):
+                    with self.subTest(paths=changed), self.assertRaisesRegex(
+                            script["LocalDeployError"], "preflight boundary"):
                         deploy(root, rc="1.2.3rc1", requalified=True)
+                    unchanged.assert_called_once_with(tool)
+                    unchanged.reset_mock()
+                for changed in (
+                    "src/agents_live/dispatch.py", "install.ps1", "install.sh",
+                    "pyproject.toml", "README.md", "LICENSE", ".gitignore",
+                    "src/agents_live/skill/docs/commands.md",
+                    "AGENTS.md\nsrc/agents_live/dispatch.py\ninstall.sh",
+                ):
+                    with self.subTest(path=changed):
+                        with self.assertRaisesRegex(
+                                script["LocalDeployError"], "package inputs changed") as refused:
+                            deploy(root, rc="1.2.3rc1", requalified=True)
+                        message = str(refused.exception)
+                        for path in changed.splitlines():
+                            if path != "AGENTS.md":
+                                self.assertIn(path, message)
+                        self.assertNotIn("AGENTS.md", message)
                 changed = "tools/dashboard-readiness.py"
+                preparation["readiness_recovery"]["tool_commit"] = "c" * 40
+                with self.assertRaisesRegex(script["LocalDeployError"], "reviewed readiness"):
+                    deploy(root, rc="1.2.3rc1", requalified=True)
                 preparation.pop("readiness_recovery")
                 with self.assertRaisesRegex(script["LocalDeployError"], "reviewed readiness"):
                     deploy(root, rc="1.2.3rc1", requalified=True)
@@ -8875,6 +8919,53 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     deploy(root, rc="1.2.3rc1", requalified=True, recover_provider_readiness=True)
                 unchanged.assert_not_called()
                 dashboards.assert_not_called()
+
+    def test_requalified_deploy_rejects_package_file_moved_to_tooling(self) -> None:
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        deploy = script["deploy"]
+        scope = deploy.__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", str(root), *arguments], check=True,
+                    capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "-q")
+            source_file = root / "src" / "agents_live" / "foo.py"
+            source_file.parent.mkdir(parents=True)
+            source_file.write_text('print("candidate payload")\n', encoding="utf-8")
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-qm", "candidate")
+            source = git("rev-parse", "HEAD")
+            tool_file = root / "tools" / "foo.py"
+            tool_file.parent.mkdir()
+            source_file.rename(tool_file)
+            git("add", "-A")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                "commit", "-qm", "move package file to tooling")
+            tool = git("rev-parse", "HEAD")
+            preparation = mock.Mock(side_effect=AssertionError("input drift bypassed"))
+            upgrade = mock.Mock()
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_synchronize": lambda: tool,
+                "_release_configuration": lambda: ("main", "1.2.3"),
+                "_requested_rc": lambda version, target, **options: version,
+                "_upgrade": upgrade,
+            }), mock.patch.dict(scope["RELEASE"], {
+                "_installed_version": lambda: "1.2.2",
+                "_load_attempt": lambda _version: {"source_commit": source},
+                "_retained_preparation": preparation,
+            }):
+                with self.assertRaisesRegex(
+                        script["LocalDeployError"], r"src/agents_live/foo\.py"):
+                    deploy(root, rc="1.2.3rc1", requalified=True)
+            preparation.assert_not_called()
+            upgrade.assert_not_called()
 
     def test_local_deploy_postcheck_uses_release_contract_helpers(self) -> None:
         script = runpy.run_path(

@@ -137,9 +137,20 @@ commit and hash, reruns all gates in the exact candidate checkout and reuses the
 four recorded build artifacts without rebuilding. The preparation receipt names
 the actual validator command. A missing build or changed artifact is refused;
 an existing preparation is validated, not replaced. Deployment requires validator
-ancestry and permits only the named release tools, release guide, changelog,
-tests and design documentation to differ from the retained source. It does not
-bypass provider health. Use the corrected tooling for subsequent explicit
+ancestry and refuses changes to package inputs: `src/` (except the skill
+changelog), `pyproject.toml`, `README.md`, `LICENSE`, `.gitignore`, `install.ps1`
+and `install.sh`. Refusals name the changed input paths. Renames are checked as
+removal and addition, so moving package code into tooling is still refused.
+The Hatch wheel uses
+`src/agents_live`, with README and license metadata from `pyproject.toml`;
+`.gitignore` can change Hatch's file selection. Repository instructions,
+release-cycle configuration, tools, tests and design documentation may differ.
+Hatch's default sdist also includes this collateral, but requalification reuses
+all four retained artifacts byte-for-byte, not a new sdist built from the tooling
+checkout. This is a candidate package-staleness check, not an assertion that
+every retained sdist file matches current tooling. Provider-readiness recovery
+shares the input check without the changelog exception. Neither path bypasses
+artifact or provider-health checks. Use the corrected tooling for subsequent explicit
 `--attempt` acceptance, finalization and publication; it selects and verifies
 the retained checkout before acting. Operational acceptance remains separate.
 
