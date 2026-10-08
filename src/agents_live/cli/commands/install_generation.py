@@ -4,17 +4,15 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from ... import deploy, paths, runtime
+from ... import deploy, runtime
 from ...runtime import handoff
 from ...runtime.hosts import system as hostruntime
-from ...runtime.hosts.processes import pid_exists
 from ...runtime.spawn import find_uv
 from ...state import registry as repos
 from .. import lifecycle
@@ -133,6 +131,7 @@ def activate_generation(
     install_root = root or deploy.layout.installation_root()
     previous = None
     disturbed = False
+    draining_watchers: set[int] = set()
     try:
         with handoff.operation():
             try:
@@ -158,8 +157,9 @@ def activate_generation(
                         lifecycle.collect()
                         disturbed = True
                         stopping.enter_context(handoff.pause_watchers())
-                        _stop_runtime(install_root)
-                    _require_idle(install_root, watchers=True)
+                        draining_watchers = _stop_runtime(install_root)
+                    _require_idle(
+                        install_root, watchers=True, draining_watchers=draining_watchers)
                     disturbed = True
                     deploy.generation.activate(generation, root=install_root)
                 _maintain(generation)
@@ -202,39 +202,37 @@ def _maintain(generation: deploy.generation.Generation) -> None:
     )
 
 
-def _stop_runtime(root: Path) -> None:
+def _stop_runtime(root: Path) -> set[int]:
     host = runtime.current()
     for trigger in host.trigger_store.list():
         host.trigger_store.remove(trigger.key)
     _require_idle(root)
+    draining = handoff.running_watchers(host.supervisor.owned(role="watcher"))
+
+    def idle_watchers():
+        return [
+            process for process in host.supervisor.owned(role="watcher")
+            if process.pid not in draining
+        ]
+
     deadline = time.monotonic() + WATCHER_GRACE_SECONDS
-    while host.supervisor.owned(role="watcher") and time.monotonic() < deadline:
+    while idle_watchers() and time.monotonic() < deadline:
         time.sleep(0.1)
-    for process in host.supervisor.owned(role="watcher"):
+    for process in idle_watchers():
         host.supervisor.terminate(process)
         if host.supervisor.alive(process):
             raise deploy.generation.GenerationError(
                 f"watcher {process.pid} did not stop; activation refused")
-    if host.supervisor.owned(role="watcher"):
+    if idle_watchers():
         raise deploy.generation.GenerationError(
             "watchers are still running; activation refused")
-    _require_idle(root, watchers=True)
+    _require_idle(root, watchers=True, draining_watchers=draining)
+    return draining
 
 
-def _require_idle(root: Path, *, watchers: bool = False) -> None:
-    for lock in (paths.state_home() / "repos").glob("*/locks/*.lock"):
-        try:
-            document = json.loads(lock.read_text(encoding="ascii"))
-            pid = int(document["pid"])
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            raise deploy.generation.GenerationError(
-                f"cannot verify running work from {lock}; activation refused") from exc
-        if pid > 0 and pid_exists(pid):
-            raise deploy.generation.GenerationError(
-                f"agent work is running (process {pid}); wait for it to finish "
-                "and retry activation")
+def _require_idle(root: Path, *, watchers: bool = False,
+                  draining_watchers: set[int] | None = None) -> None:
+    """Exclude runtime mutations, not work protected by per-agent run locks."""
     processes = hostruntime.process_command_lines()
     if not any(pid == os.getpid() for pid, _command in processes):
         raise deploy.generation.GenerationError(
@@ -245,7 +243,22 @@ def _require_idle(root: Path, *, watchers: bool = False) -> None:
         argv = hostruntime.split_command_line(command)
         if not any(deploy.layout.generation_of(argument, root) for argument in argv[:2]):
             continue
-        if "run" in argv or "maintain" in argv or (watchers and "watch-loop" in argv):
+        arguments = iter(argv[1:])
+        route = []
+        for argument in arguments:
+            if argument in {"--repo", "--metadata", "-m"}:
+                next(arguments, None)
+            elif argument in {"--json", "-I", "-P", "-s", "-u"}:
+                continue
+            elif Path(argument).stem in {"agents-live", "al"}:
+                continue
+            else:
+                route = [argument, *arguments]
+                break
+        watcher = (route[:2] == ["internal", "watch-loop"]
+                   or route[:1] in [["watch-loop"], ["--watch-loop"]])
+        if route[:2] == ["internal", "maintain"] or (
+                watchers and watcher and pid not in (draining_watchers or ())):
             raise deploy.generation.GenerationError(
                 f"runtime process {pid} is still running; wait for it to finish "
                 "and retry activation")

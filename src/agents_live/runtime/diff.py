@@ -1,7 +1,7 @@
 """Pure desired-versus-actual runtime diff."""
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from .values import InstalledTrigger, Operation, ProcessRef, RenderedSubscription
 
@@ -13,6 +13,9 @@ def diff(
     protected_scopes: Collection[str] = (),
     protected_targets: Collection[str] = (),
     protected_process_keys: Collection[str] = (),
+    *,
+    preferred_generation: str = "",
+    process_parents: Mapping[int, int] | None = None,
 ) -> tuple[Operation, ...]:
     """Operations that make the host match ``desired``.
 
@@ -23,7 +26,24 @@ def diff(
     """
     wanted = {item.key: item for item in desired}
     installed = {item.key: item for item in actual}
-    watchers = {item.key: item for item in processes if item.role == "watcher" and item.key}
+    candidates = {
+        item.pid: item for item in processes if item.role == "watcher" and item.key
+    }
+    parents = process_parents or {}
+    ancestors: set[int] = set()
+    # A console launcher and its Python child represent one watch loop.
+    for process in candidates.values():
+        parent = parents.get(process.pid, 0)
+        visited = {process.pid}
+        while parent > 0 and parent not in visited:
+            visited.add(parent)
+            if parent in candidates and candidates[parent].key == process.key:
+                ancestors.add(parent)
+            parent = parents.get(parent, 0)
+    watchers: dict[str, list[ProcessRef]] = {}
+    for pid, process in candidates.items():
+        if pid not in ancestors:
+            watchers.setdefault(process.key, []).append(process)
     protected_keys = set(protected_process_keys) | {
         key for key, item in installed.items()
         if item.scope in protected_scopes
@@ -42,7 +62,15 @@ def diff(
             operations.append(Operation("install-trigger", key, "trigger is missing", rendered=target))
         if target.kind != "watch":
             continue
-        process = watchers.get(key)
+        owners = watchers.get(key, [])
+        process = min(owners, key=lambda item: (
+            not (preferred_generation and item.generation == preferred_generation),
+            item.fingerprint != target.fingerprint, item.created_at, item.pid,
+        ), default=None)
+        for extra in owners:
+            if extra != process:
+                operations.append(Operation(
+                    "stop-watcher", key, "duplicate watcher", process=extra))
         if process is not None and process.fingerprint != target.fingerprint:
             operations.append(Operation(
                 "stop-watcher", key, "watch expression changed", process=process))
@@ -51,6 +79,7 @@ def diff(
             operations.append(Operation("start-watcher", key, "watcher is not alive", rendered=target))
 
     for key in sorted(watchers.keys() - wanted.keys() - protected_keys):
-        operations.append(Operation(
-            "stop-watcher", key, "watcher is not desired", process=watchers[key]))
+        operations.extend(Operation(
+            "stop-watcher", key, "watcher is not desired", process=process)
+            for process in watchers[key])
     return tuple(operations)

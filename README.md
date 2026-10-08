@@ -150,6 +150,15 @@ agents-live upgrade
 agents-live uninstall
 ```
 
+Activation does not wait for in-flight agent runs. They finish on their original
+immutable version while new launches use the selected version; shared per-agent
+locks prevent overlap. Version removal and collection preserve versions still in
+use. Runtime maintenance and conflicting mutations can still refuse activation.
+Watcher-triggered runs also finish unharmed: busy watcher trees are preserved,
+and replacement of their subscription is deferred until completion and handoff.
+Convergence rechecks ownership before spawning and removes idle duplicate watcher
+trees, preferring the selected generation.
+
 Source plugins load directly from their declaring repositories. Identical
 same-name copies across registered repositories share one imported module;
 conflicting plugin or provider names report the repositories and plugin files.

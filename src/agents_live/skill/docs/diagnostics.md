@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-10-05
+ms.date: 2026-10-08
 ms.topic: troubleshooting
 ---
 
@@ -176,14 +176,19 @@ still tested independently of Microsoft infrastructure.
 ### Diagnose a generation upgrade
 
 `agents-live upgrade` builds and validates a complete generation beside the
-active one, then switches the stable `current` link. Running watchers do not
-block activation; they finish work on their immutable generation and restart
-from `current` at the next idle version check.
+active one, then switches the stable `current` link. Activation withdraws
+triggers and retires idle owned watchers before switching. A watcher tree with
+a live run lock is left to finish and record its current fire, then retire or
+hand off through the stable launcher. Replacement for that subscription is
+deferred until completion; maintenance restores missing still-started watchers.
 
-Activation checks for active agent runs and runtime maintenance before any
-project skill payload refresh. If it reports that a runtime process is still
-running, wait for it to finish and retry; do not terminate ordinary agent work
-to force an upgrade.
+Activation permits in-flight `run` processes to finish on their original
+generation without waiting. Their shared per-agent locks prevent the selected
+runtime from launching overlapping work. Active runtime maintenance or a held
+launch gate can still refuse activation: retry after the mutation completes.
+Do not terminate ordinary agent work to force an upgrade. `versions remove`
+and `versions collect` preserve any generation still used by a process and
+refuse deletion when host process inventory cannot be verified.
 
 On Windows, refreshing `.claude/skills/agents-live` retries transient access
 denied and sharing violations with increasing delays, sharing at most 2.5 seconds

@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-10-04
+ms.date: 2026-10-08
 ms.topic: reference
 ---
 
@@ -52,19 +52,34 @@ start, times out after 60 seconds, or returns an invalid response blocks selecti
 Upgrades without `--from` keep the running runtime's plugin check.
 
 Activation through `versions activate`, `install-release --activate`, or
-`upgrade` preserves started intent across registered repositories. It refuses
-while agent work is running: wait for that work to finish, then retry. It does
-not interrupt in-flight agent work. Unreadable run state or unavailable
-repositories also block activation.
+`upgrade` preserves started intent across registered repositories. In-flight
+`run` processes do not block activation or lose their repository locks; they
+finish on their original immutable generation. New launches use the selected
+generation and skip an agent still locked by an old run. Active runtime
+maintenance, a held launch gate, unavailable process inventory or unavailable
+repositories still block activation.
 
-Once idle, activation withdraws triggers, gives watchers five seconds to exit,
-terminates remaining owned watchers, and verifies they stopped before changing
-the selected version. New dispatches and convergence are gated during that
+Under the launch gate, activation withdraws triggers, gives idle watchers five
+seconds to exit, terminates remaining idle owned watchers, and verifies they
+stopped before changing the selected version. Watchers whose pid or descendants
+hold a live run lock are preserved without waiting for the run to finish.
+Unverifiable lock ownership or ancestry conservatively preserves watcher trees.
+New dispatches and convergence are gated during that
 window. Maintenance under the selected version reinstalls schedules and
 restarts watchers from the unchanged started intent. A failure attempts to
 restore the previous selection and its automation; a failed restoration is
 reported explicitly. Activation does not promise to release files held by
 unrelated applications or by the activating CLI itself.
+Busy watchers finish and record their current fire before checking pause and
+the selected generation. If activation has completed, the old watcher hands off
+to the selected runtime; if still paused, it exits and maintenance restores it.
+Replacement of that subscription is deferred while its run is active, avoiding
+an additional watcher alongside the draining one. Scheduled and manual
+launches can use the selected runtime immediately, subject to per-agent locks.
+
+Generation removal and collection independently check running processes before
+deletion, preserving in-use versions even when the rollback retention count is
+zero. Unavailable process inventory refuses deletion rather than assuming idle.
 
 ### `run`
 

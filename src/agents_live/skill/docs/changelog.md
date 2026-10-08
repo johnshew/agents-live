@@ -11,6 +11,14 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: activate new versions without waiting for in-flight agent runs. (#574)
+  Old runs keep their immutable generation and shared per-agent locks.
+  Busy watcher trees also finish their in-process dispatch before retirement
+  and handoff; idle watchers still stop before activation.
+  Watcher handoff and convergence recheck ownership before spawning, and
+  maintenance repairs duplicate watchers without terminating active runs.
+  Maintenance and mutation gates still exclude activation; removal and collection
+  protect generations used by live processes and refuse unverifiable inventory.
 - fix: allow instruction-only changes when deploying a requalified retained candidate. (#572)
   Package, metadata and installer changes still require a new RC, with offending
   paths named in both requalification and provider-readiness recovery refusals.

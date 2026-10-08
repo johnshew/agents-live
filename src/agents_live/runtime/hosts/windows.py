@@ -26,7 +26,7 @@ from ..values import (
     Subscription,
 )
 from .posix import _address
-from .processes import LocalChildRunner
+from .processes import LocalChildRunner, process_generation
 from . import task_scheduler as wintasks
 from . import windows_watch as winwatch
 
@@ -133,7 +133,7 @@ class WindowsProcesses:
         )
         return ProcessRef(
             process.pid, time.time(), Path(argv[0]).name,
-            role, key, fingerprint)
+            role, key, fingerprint, generation=process_generation(argv))
 
     def alive(self, ref: ProcessRef) -> bool:
         if ref.role == "upgrade":
@@ -184,6 +184,7 @@ class WindowsProcesses:
                 markers["role"],
                 markers["key"],
                 markers["fingerprint"],
+                generation=process_generation(argv),
             ))
         return found
 

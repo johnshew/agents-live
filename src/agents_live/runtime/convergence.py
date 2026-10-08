@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from threading import RLock
 
 from .diff import diff
+from . import handoff
 from .protocols import HostAdapter
 from .values import Converged, Health, InstalledTrigger, Operation, ProcessRef, Subscription
 
@@ -48,15 +49,27 @@ def plan(
     protected_process_keys: Collection[str] = (),
     _host: HostAdapter | None = None,
 ) -> Plan:
+    from ..deploy import pointer
+    from .hosts import system
+
     host = _host or current()
     rendered = tuple(host.render(item) for item in subscriptions)
+    processes = tuple(host.supervisor.owned(role="watcher") if watchers is None else watchers)
+    keys = [item.key for item in processes if item.key]
+    parents = system.process_parent_ids() if len(set(keys)) != len(keys) else {}
+    try:
+        preferred_generation = pointer.read().generation
+    except (pointer.PointerError, OSError):
+        preferred_generation = ""
     return Plan(host, tuple(diff(
         rendered,
         host.trigger_store.list() if installed is None else installed,
-        host.supervisor.owned(role="watcher") if watchers is None else watchers,
+        processes,
         protected_scopes,
         protected_targets,
         protected_process_keys,
+        preferred_generation=preferred_generation,
+        process_parents=parents,
     )))
 
 
@@ -76,7 +89,7 @@ def _prepare(host: HostAdapter) -> Converged | None:
 
 
 def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
-    """Apply prepared operations without inventory, rendering, diff or health."""
+    """Apply under the caller's gate, rechecking ownership before each spawn."""
     host = prepared.host
     with _lock:
         failure = _prepare(host) if prepare else None
@@ -84,6 +97,10 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
             return failure
         done: list[Operation] = []
         failed: list[tuple[Operation, str]] = []
+        running = handoff.running_watchers(tuple(
+            operation.process for operation in prepared.operations
+            if operation.kind == "stop-watcher" and operation.process is not None))
+        deferred: set[str] = set()
         for operation in prepared.operations:
             try:
                 if operation.kind == "install-trigger":
@@ -93,6 +110,11 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                     host.trigger_store.remove(operation.key)
                 elif operation.kind == "start-watcher":
                     assert operation.rendered is not None
+                    if operation.key in deferred:
+                        continue
+                    if any(item.key == operation.key
+                           for item in host.supervisor.owned(role="watcher")):
+                        continue
                     host.supervisor.spawn_detached(
                         operation.rendered.watcher_argv,
                         role="watcher",
@@ -101,6 +123,9 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                     )
                 elif operation.kind == "stop-watcher":
                     assert operation.process is not None
+                    if operation.process.pid in running:
+                        deferred.add(operation.key)
+                        continue
                     host.supervisor.terminate(operation.process)
                 else:
                     raise ValueError(f"unknown convergence operation: {operation.kind}")
