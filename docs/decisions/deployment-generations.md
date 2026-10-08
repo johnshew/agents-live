@@ -177,6 +177,14 @@ native triggers and still-started watchers to its implementation. New
 dispatches resolve through `current`; an in-flight dispatch, watcher, or
 dashboard may finish from the immutable generation where it began.
 
+Watcher reconciliation treats a marked launcher and its same-key descendants
+as one tree, retaining interpreter-generation evidence from its members.
+Replacement and duplicate cleanup stop the outermost same-key process so the
+launcher cannot outlive a stopped child and suppress the replacement. Active
+runs protect the entire tree. Deferred stops and starts, and starts made
+unnecessary by an existing owner, are recorded explicitly; a stale owner still
+alive after termination is a convergence failure rather than a silent success.
+
 The hidden installation commands implement this installation and switching
 protocol for bootstrap and upgrade. Public `versions activate` and
 `versions remove` use the same ownership and liveness checks without adding a

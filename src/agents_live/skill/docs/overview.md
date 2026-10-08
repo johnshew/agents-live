@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-10-04
+ms.date: 2026-10-08
 ms.topic: overview
 ---
 
@@ -174,7 +174,16 @@ provider name, fail with the conflicting repositories and plugin files named.
 `doctor --all-repos` reports each declaration's health.
 When a generation is selected, its own command
 converges native triggers and still-started watchers; work already running may
-finish on the immutable version where it began. Use `agents-live versions list` to inspect the store,
+finish on the immutable version where it began.
+Activation does not wait for in-flight agent runs. They finish on their original
+immutable version while new launches use the selected version; shared per-agent
+locks prevent overlap. Version removal and collection preserve versions still in
+use. Runtime maintenance and conflicting mutations can still refuse activation.
+Watcher-triggered runs also finish unharmed: busy watcher trees are preserved,
+and replacement of their subscription is deferred until completion and handoff.
+Convergence rechecks ownership before spawning and removes idle duplicate watcher
+trees, preferring the selected generation.
+Use `agents-live versions list` to inspect the store,
 `versions activate VERSION` to roll back, `versions remove VERSION` to
 discard an inactive candidate, and `versions collect` to retain the active
 version plus one rollback while removing older unheld versions.

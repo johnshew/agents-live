@@ -8,6 +8,7 @@ the deployment layer about a package manager.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import uuid
 from collections.abc import Callable
@@ -280,8 +281,32 @@ def clear_activation(*, root: Path | None = None) -> None:
     hostruntime.remove_directory_link(layout.current_path(install_root))
 
 
+def _process_holders(root: Path) -> dict[str, tuple[str, ...]]:
+    """Inventory running generations, refusing deletion without host evidence."""
+    try:
+        processes = hostruntime.process_command_lines()
+    except OSError as exc:
+        raise GenerationError(
+            "cannot verify host process inventory; generation removal refused") from exc
+    if not any(pid == os.getpid() for pid, _command in processes):
+        raise GenerationError(
+            "cannot verify host process inventory; generation removal refused")
+    found: dict[str, list[str]] = {}
+    for pid, command in processes:
+        for argument in hostruntime.split_command_line(command):
+            name = layout.generation_of(argument, root)
+            if name is not None:
+                found.setdefault(name, []).append(f"process {pid}")
+                break
+    return {name: tuple(users) for name, users in found.items()}
+
+
 def _remove_locked(name: str, *, root: Path) -> None:
     target = load(name, root=root).path
+    held = _process_holders(root).get(name, ())
+    if held:
+        raise GenerationError(
+            f"generation {name} is in use by {', '.join(held)}")
     retired = target.with_name(f".{target.name}.collecting-{uuid.uuid4().hex}")
     target.rename(retired)
     shutil.rmtree(retired)
@@ -321,7 +346,6 @@ def collect(*, root: Path | None = None,
     if retain < 0:
         raise GenerationError("retained generation count cannot be negative")
     install_root = root or layout.installation_root()
-    holding = held or {}
     try:
         with hostruntime.exclusive_lock(
                 layout.deployment_lock_path(install_root), blocking=False):
@@ -329,6 +353,9 @@ def collect(*, root: Path | None = None,
                 layout.current_path(install_root))
             if state not in (pointer.ACTIVE, pointer.MISSING):
                 raise GenerationError(f"collection refused because {detail}")
+            holding = _process_holders(install_root)
+            for name, users in (held or {}).items():
+                holding[name] = holding.get(name, ()) + users
             names = layout.installed_generations(install_root)
             ordered = tuple(sorted(
                 names,

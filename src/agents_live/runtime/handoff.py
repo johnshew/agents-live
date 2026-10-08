@@ -5,12 +5,14 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from time import monotonic, sleep
 
 from .. import paths
 from .hosts import system
 from .hosts.processes import pid_exists
+from .values import ProcessRef
 
 
 @contextmanager
@@ -74,6 +76,41 @@ def gate(*, timeout: float = 0, operation: str = "convergence",
 
 def operation():
     return system.exclusive_lock(paths.state_home() / "activation-operation.lock")
+
+
+def running_watchers(watchers: Sequence[ProcessRef]) -> set[int]:
+    """Protect watcher trees with active runs, including old-generation owners."""
+    candidates = {watcher.pid for watcher in watchers}
+    if not candidates:
+        return set()
+    owners = set()
+    try:
+        for lock in (paths.state_home() / "repos").glob("*/locks/*.lock"):
+            try:
+                document = json.loads(lock.read_text(encoding="ascii"))
+                pid = int(document["pid"])
+            except FileNotFoundError:
+                continue
+            if pid > 0 and pid_exists(pid):
+                owners.add(pid)
+    except (OSError, ValueError, TypeError, KeyError):
+        # Unknown lock ownership is not permission to kill a watcher tree.
+        return candidates
+    protected = candidates & owners
+    if not owners or protected == candidates:
+        return protected
+    try:
+        parents = system.process_parent_ids()
+    except OSError:
+        return candidates
+    for owner in owners:
+        visited = set()
+        while owner > 0 and owner not in visited:
+            visited.add(owner)
+            if owner in candidates:
+                protected.add(owner)
+            owner = parents.get(owner, 0)
+    return protected
 
 
 def commit_epoch() -> int:

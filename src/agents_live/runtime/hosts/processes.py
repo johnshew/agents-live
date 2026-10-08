@@ -36,6 +36,13 @@ def within(candidate: str, root: Path | str) -> bool:
     return bool(candidate) and Path(root) in Path(candidate).parents
 
 
+def process_generation(argv: Sequence[str]) -> str:
+    from ...deploy.layout import generation_of
+
+    return next((generation for argument in argv[:2]
+                 if (generation := generation_of(argument))), "")
+
+
 def watchers_on_host(
     *, under: Path | None = None,
 ) -> list[tuple[int, str, str | None]]:
@@ -114,6 +121,7 @@ class LocalProcesses:
             role,
             key,
             fingerprint,
+            generation=process_generation(argv),
         )
 
     def alive(self, ref: ProcessRef) -> bool:
@@ -158,6 +166,7 @@ class LocalProcesses:
                 parsed["role"],
                 parsed["key"],
                 parsed["fingerprint"],
+                generation=process_generation(argv),
             ))
         return found
 

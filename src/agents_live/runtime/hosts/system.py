@@ -1234,6 +1234,27 @@ else:
 # Spawning
 # ---------------------------------------------------------------------------
 
+def process_parent_ids() -> dict[int, int]:
+    """Snapshot parent relationships before retiring an owned watcher tree."""
+    if _IS_WINDOWS:
+        pairs = _process_table()
+    else:
+        try:
+            completed = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="], capture_output=True, **CHILD_TEXT,
+                check=True)
+            pairs = [
+                (int(pid), int(parent))
+                for line in completed.stdout.splitlines()
+                for pid, parent in [line.split()]
+            ]
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            raise OSError("cannot verify host process ancestry") from exc
+    if not any(pid == os.getpid() for pid, _parent in pairs):
+        raise OSError("cannot verify host process ancestry")
+    return dict(pairs)
+
+
 def supervise_child(process: subprocess.Popen) -> Callable[[], None]:
     """Own descendants until cleanup; Windows callers must launch suspended."""
     if not _IS_WINDOWS:

@@ -26,13 +26,44 @@ adapter with a staged, verified Windows-side liveness task.
 One `converge(desired)` operation renders the complete subscription set,
 compares it with structured owned artifacts and watcher process markers, and
 repairs drift. `health()` is the read-side operation. Version activation
-temporarily withdraws triggers and stops watchers before selecting a runtime;
+temporarily withdraws triggers and stops idle watchers before selecting a runtime;
 the selected runtime then uses normal convergence to restore started intent.
 An interprocess launch gate coordinates activation, lifecycle convergence, and
-dispatch lock acquisition without serializing running agents. Activation refuses
-active or unverifiable run locks, preserves started state, and attempts rollback
-when the selected runtime cannot converge. Idle watchers receive a cooperative
-stop signal before bounded host termination is used.
+dispatch lock acquisition without serializing running agents. Dispatch releases
+the gate after claiming its per-agent lock, before executing agent work.
+Activation does not wait for in-flight `run` processes or their locks: each
+continues with its own interpreter and immutable generation while the selected
+runtime handles new launches. Active maintenance and a held mutation gate still
+refuse activation. Started state and existing run locks, records and retention
+markers are unchanged; the new runtime skips the same agent until its old run
+releases the shared repository lock. Removal and collection inventory processes
+under the deployment lock and recheck immediately before deleting each generation,
+refusing when process inventory is unavailable. An in-use old generation is
+retained even after another activation or rollback. Activation attempts rollback
+when the selected runtime cannot converge, restoring triggers and watchers through
+the previous runtime. Idle watchers receive a cooperative stop signal before
+bounded host termination is used. A watcher whose process tree owns a live run
+lock is never terminated or waited on for run completion. Its subscription's
+replacement is deferred rather than starting a second watch loop. After the fire
+returns and records its outcome, the old watcher checks pause and the active
+generation: it exits while paused, or hands off to the selected runtime when
+superseded. Maintenance restores missing watchers and defers any stop/replacement
+operation whose watcher tree still owns a run. This also supports older watchers
+that know only the shared pause signal and generation pointer.
+
+Watcher handoff waits at most 60 seconds to acquire the launch gate and checks whether
+another live watcher owns the subscription before spawning. Convergence repeats
+that ownership check under its gate immediately before each watcher start, since
+a prepared plan can outlive an old watcher's final fire. Reconciliation retains
+all logical watcher trees per key instead of overwriting duplicate inventory,
+prefers the selected generation, and stops idle extras. A native console launcher
+and its Python child represent one tree, not two subscriptions. Busy duplicate
+trees remain protected until their runs finish.
+
+Older watchers still execute their own handoff function. The stable `current`
+launcher resolves to the newly selected generation, so the child loads new code,
+but this does not retrofit the new gate into an old parent. Duplicate reconciliation
+therefore also repairs races caused by legacy handoff code.
 
 Clock firings wait up to 60 seconds for the launch gate instead of dropping due
 work during maintenance. They retain their arrival time for schedule matching,
@@ -88,8 +119,8 @@ using metadata for agent identity; legacy `watch-loop` and `--watch-loop`
 routes remain recognizable. Scheduled and manual runs are not watchers, even
 with agent metadata. Physical launcher and child rows remain available for
 cleanup, while deployment deduplicates them by repository and agent. Excluding
-ordinary work from watcher inventory does not bypass activation's active-work
-or ownership checks.
+ordinary work from watcher inventory does not bypass activation's maintenance,
+watcher-retirement or ownership checks.
 
 Every non-preview maintenance pass records correlated start and terminal admin
 events. The terminal event includes its source, subscription ID when scheduled,

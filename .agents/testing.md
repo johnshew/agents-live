@@ -609,3 +609,90 @@ uv tool install --force agents-live
 Then compare bare `agents-live` with the explicit editable-source command. The
 two should report different versions whenever the checkout is ahead of the
 latest PyPI release.
+
+<!-- glp-update:v1 id=e8d943e1-f4f1-4de2-8eab-0be145b5ba39 -->
+<a id="glp-e8d943e1-f4f1-4de2-8eab-0be145b5ba39"></a>
+### GLP Update: Trace in-flight work to its owning process before changing shutdown
+
+- Update-ID: e8d943e1-f4f1-4de2-8eab-0be145b5ba39
+- Recorded-UTC: 2026-10-08
+- Kind: correction
+- Topics: activation, watcher-lifetime, process-tree, regression-testing
+- Workstream: activation with in-flight runs (#574)
+- Target: What deserves a test; compared b500b73
+- Source-Session: #574 source review, 2026-10-08 (harness history)
+- Evidence-Basis: observed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Before relaxing a shutdown refusal, trace every launch origin through dispatch
+and identify the process that owns its run lock. Test both standalone work and
+work executing inside a resident process, including launcher/child ancestry.
+Removing a command-line `run` exclusion does not prove that watcher termination
+leaves agent work alive.
+
+#### Evidence
+Independent review of b500b73 found that watch fires call dispatch in-process.
+RC4 source dccdc4b checks pause and generation replacement only between fires.
+The busy-watcher preservation and deferred-replacement regressions failed before
+the correction. The executing watcher regression then verified completion
+recording, no subsequent old-loop poll, and handoff after pause had cleared.
+
+#### Previous Knowledge
+This guide required real side-effect boundaries and eventual recovery, but the
+activation checks exercised standalone runs rather than watcher-owned dispatch.
+
+#### Verification and Limits
+Source fixtures simulate process ownership and run an actual watch loop with a
+fake provider. They do not establish installed-runtime or native-provider acceptance.
+
+#### Follow-up
+Consolidate this method correction into the testing policy during a separately
+authorized consolidation pass.
+<!-- /glp-update:v1 id=e8d943e1-f4f1-4de2-8eab-0be145b5ba39 -->
+
+<!-- glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
+<a id="glp-35c61767-9990-4e35-bb6a-467a56ff8633"></a>
+### GLP Update: Exercise competing owners at the plan-to-spawn boundary
+
+- Update-ID: 35c61767-9990-4e35-bb6a-467a56ff8633
+- Recorded-UTC: 2026-10-08T22:38:04Z
+- Kind: addition
+- Topics: watcher-handoff, convergence, races, process-inventory
+- Workstream: activation with in-flight runs (#574)
+- Target: What deserves a test; compared 3ff94e3
+- Source-Session: #574 independent re-review, 2026-10-08 (harness history)
+- Evidence-Basis: observed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Test a second actor acquiring ownership after planning but before a mutation.
+Verify the gate around both launch paths, fresh ownership checks, and eventual
+repair of duplicates created by older code. Distinguish logical watch loops from
+launcher/child process rows and use interpreter generation identity when shared
+stable-launcher fingerprints cannot distinguish old and selected runtimes.
+
+#### Evidence
+Re-review of 3ff94e3 identified an ungated old-watcher handoff competing with
+prepared maintenance. RC4 source dccdc4b spawns through the stable launcher from
+its own old handoff function. Negative executing probes failed without gate and
+owner checks, duplicate cleanup, selected-target capture, or generation preference.
+The native-inventory fixture retains one selected-generation launcher/child tree,
+preserves a busy old tree, and retires it after its lock clears.
+
+#### Previous Knowledge
+The preceding process-ownership correction covered resident work and safe
+shutdown but did not exercise competing replacement actors between plan and
+commit or distinguish duplicate loops from rows belonging to one native tree.
+
+#### Verification and Limits
+The fixtures execute watch-loop retirement, maintenance commit, and native
+command-line projection through an isolated host. Final positive source gates
+follow this append; no installed-runtime or native-provider acceptance is claimed.
+
+#### Follow-up
+Fold this addition and the preceding correction into the testing policy during a
+separately authorized consolidation pass.
+<!-- /glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->

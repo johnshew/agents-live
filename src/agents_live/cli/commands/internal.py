@@ -30,6 +30,7 @@ _AGENT_FAILURE_THRESHOLD = 3
 _MAINTENANCE_GATE_WAIT_SECONDS = 60.0
 _MAINTENANCE_RETRY_DELAY_SECONDS = 30.0
 _MAINTENANCE_PLAN_ATTEMPTS = 3
+_WATCHER_HANDOFF_GATE_WAIT_SECONDS = 60.0
 
 
 def main(
@@ -521,30 +522,49 @@ def _restart_watcher(
     metadata: runtime.artifacts.InvocationMetadata | None,
 ) -> None:
     """Start the replacement after the old change source has stopped."""
-    executable = shutil.which("agents-live") or sys.argv[0]
-    runtime.current().supervisor.spawn_detached(
-        [
-            executable,
-            "--repo",
-            str(root),
-            "internal",
-            "watch-loop",
-            *(
-                ("--metadata", runtime.artifacts.encode(metadata))
-                if metadata is not None else ()
+    with handoff.gate(timeout=_WATCHER_HANDOFF_GATE_WAIT_SECONDS,
+                      operation="watcher-handoff", repository=str(root)):
+        host = runtime.current()
+        key = metadata.id if metadata is not None else ""
+        owners = [
+            item for item in host.supervisor.owned(role="watcher")
+            if key and item.key == key and item.pid != os.getpid()
+        ]
+        if owners:
+            from ...runtime.hosts import system
+
+            parents = system.process_parent_ids()
+            retiring = {os.getpid()}
+            parent = parents.get(os.getpid(), 0)
+            while parent > 0 and parent not in retiring:
+                retiring.add(parent)
+                parent = parents.get(parent, 0)
+            if any(item.pid not in retiring for item in owners):
+                return
+        executable = str(Path(shutil.which("agents-live") or sys.argv[0]).resolve())
+        host.supervisor.spawn_detached(
+            [
+                executable,
+                "--repo",
+                str(root),
+                "internal",
+                "watch-loop",
+                *(
+                    ("--metadata", runtime.artifacts.encode(metadata))
+                    if metadata is not None else ()
+                ),
+                args.name,
+                "--watch-expression",
+                expression,
+            ],
+            role="watcher",
+            key=key,
+            fingerprint=(
+                runtime.artifacts.PREFIX + metadata.id
+                if metadata is not None else ""
             ),
-            args.name,
-            "--watch-expression",
-            expression,
-        ],
-        role="watcher",
-        key=metadata.id if metadata is not None else "",
-        fingerprint=(
-            runtime.artifacts.PREFIX + metadata.id
-            if metadata is not None else ""
-        ),
-        cwd=str(root),
-    )
+            cwd=str(root),
+        )
 
 
 def _roots(root: Path, includes: tuple[str, ...]) -> tuple[Path, ...]:

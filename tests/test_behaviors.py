@@ -10,6 +10,7 @@ calls, so a later refactor can move the code without deleting the check.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import hashlib
@@ -2053,10 +2054,8 @@ class TestWatcherInventory(TempRepository):
         ], terminate.call_args_list)
         self.assertEqual([(102, "watcher", str(self.root))], survivors)
 
-    def test_nonwatcher_inventory_exclusion_does_not_allow_active_work(self) -> None:
+    def test_nonwatcher_inventory_exclusion_still_refuses_maintenance(self) -> None:
         for arguments in (
-            ("run", "scheduled", "--metadata", self.metadata("scheduled", "clock")),
-            ("run", "manual", "--metadata", self.metadata("manual")),
             ("internal", "maintain", "--metadata", self.metadata("maintenance")),
         ):
             with self.subTest(arguments=arguments):
@@ -2071,7 +2070,7 @@ class TestWatcherInventory(TempRepository):
                             deploy.generation.GenerationError, "runtime process 101"):
                         install_generation._require_idle(self.environment)
 
-    def test_active_run_lock_still_refuses_after_inventory_exclusion(self) -> None:
+    def test_active_run_lock_does_not_block_activation_after_inventory_exclusion(self) -> None:
         command = self.command(
             "run", "--metadata", self.metadata("scheduled", "clock"),
             "--name", "scheduled", "--quiet")
@@ -2082,12 +2081,9 @@ class TestWatcherInventory(TempRepository):
             mock.patch.object(hostruntime, "process_command_lines", return_value=[
                 (os.getpid(), "synthetic validation process"), (101, command),
             ]),
-            mock.patch.object(install_generation, "pid_exists", return_value=True),
         ):
             self.assertEqual([], uninstall.watchers_on_host(under=self.environment))
-            with self.assertRaisesRegex(
-                    deploy.generation.GenerationError, "agent work is running"):
-                install_generation._require_idle(self.environment)
+            install_generation._require_idle(self.environment)
 
 
 class TestWindowsDetachedProcess(unittest.TestCase):
@@ -3487,36 +3483,114 @@ class TestActivationHandoff(TempRepository):
             self.assertEqual(0, generations.main(["activate", self.new.name]))
         self.assert_restored(self.new.name)
 
-    def test_active_work_refuses_before_withdrawing_any_trigger(self) -> None:
+    def test_live_old_generation_run_survives_activation_without_overlap(self) -> None:
         from agents_live.dispatch import _RunLock
 
-        lock = _RunLock(self.root, next(iter(self.intent[self.root])))
+        identifier = next(iter(self.intent[self.root]))
+        lock = _RunLock(self.root, identifier)
         self.assertTrue(lock.acquire())
+        document = lock.path.read_bytes()
+        command = subprocess.list2cmdline([
+            str(install_generation.executable(self.old)),
+            "--repo", str(self.root), "run", identifier, "-p", "maintain",
+        ])
         try:
-            with self.assertRaisesRegex(deploy.generation.GenerationError, "work is running"):
+            with (
+                mock.patch.object(hostruntime, "process_command_lines", return_value=[
+                    (os.getpid(), "synthetic activation process"), (4242, command),
+                ]),
+                mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+            ):
                 install_generation.activate_generation(self.new)
-            self.assert_restored(self.old.name)
+                self.assert_restored(self.new.name)
+                outcome = dispatch(Firing(identifier, str(self.root), "manual"))
+            self.assertEqual("already-running", outcome.message)
+            self.assertEqual(document, lock.path.read_bytes())
+            self.assertEqual(self.old, deploy.generation.load(self.old.name))
         finally:
             lock.release()
 
-    def test_unreadable_run_lock_refuses_without_mutation(self) -> None:
-        lock = paths.repo_state_dir(self.root) / "locks" / "unknown.lock"
+    def test_unreadable_run_lock_does_not_block_activation_or_allow_overlap(self) -> None:
+        identifier = next(iter(self.intent[self.root]))
+        lock = paths.repo_state_dir(self.root) / "locks" / f"{identifier}.lock"
         lock.parent.mkdir(parents=True)
         lock.write_text("{", encoding="ascii")
-        with self.assertRaisesRegex(deploy.generation.GenerationError, "cannot verify"):
+        with mock.patch.object(install_generation, "_run", side_effect=self.maintain):
             install_generation.activate_generation(self.new)
-        self.assert_restored(self.old.name)
+        self.assert_restored(self.new.name)
+        self.assertEqual("{", lock.read_text(encoding="ascii"))
+        outcome = dispatch(Firing(identifier, str(self.root), "manual"))
+        self.assertEqual("already-running", outcome.message)
+
+    def test_old_generation_maintenance_refuses_before_withdrawing_triggers(self) -> None:
+        for prefix in (
+            [str(install_generation.executable(self.old))],
+            [str(install_generation._interpreter(self.old.path)),
+             "-I", "-P", "-m", "agents_live.cli"],
+        ):
+            command = subprocess.list2cmdline([
+                *prefix, "--repo", str(self.root), "internal", "maintain",
+            ])
+            with self.subTest(prefix=prefix), mock.patch.object(
+                    hostruntime, "process_command_lines", return_value=[
+                        (os.getpid(), "synthetic activation process"), (4242, command),
+                    ]):
+                with self.assertRaisesRegex(deploy.generation.GenerationError, "runtime process 4242"):
+                    install_generation.activate_generation(self.new)
+            self.assert_restored(self.old.name)
+
+    def test_dispatch_releases_launch_gate_before_work_and_records_completion_after_activation(self) -> None:
+        from agents_live.runtime import handoff
+
+        identifier = next(iter(self.intent[self.root]))
+        bundle = self.projects[0] / "Agents" / "watcher-0" / "SKILL.md"
+        bundle.write_text(bundle.read_text(encoding="utf-8").replace(
+            'agents-live.selector: "copilot"', 'agents-live.selector: "fake/echo"'),
+            encoding="utf-8")
+        runner = mock.Mock()
+
+        def running(*args, **kwargs):
+            with handoff.gate(operation="probe"):
+                pass
+            install_generation.activate_generation(self.new)
+            self.assert_restored(self.new.name)
+            duplicate = dispatch(Firing(identifier, str(self.root), "manual"))
+            self.assertEqual("already-running", duplicate.message)
+            return ChildResult(("fake",), 0, '{"text":"done"}', "")
+
+        runner.run_child.side_effect = running
+        with mock.patch.object(install_generation, "_run", side_effect=self.maintain):
+            outcome = dispatch(Firing(identifier, str(self.root), "manual"), runner=runner)
+        self.assertTrue(outcome.ok, outcome)
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        self.assertTrue(any(
+            record.get("run_id") == outcome.run_id
+            and record.get("phase") == "done" and record.get("status") == "ok"
+            for record in records))
+        runner.run_child.side_effect = None
+        runner.run_child.return_value = ChildResult(("fake",), 0, '{"text":"next"}', "")
+        self.assertTrue(dispatch(
+            Firing(identifier, str(self.root), "manual"), runner=runner).ok)
 
     def test_convergence_failure_restores_previous_selection_and_intent(self) -> None:
+        from agents_live.dispatch import _RunLock
+
         def maintain(command, **kwargs):
             if command[0] == str(install_generation.executable(self.new)):
                 raise deploy.generation.GenerationError("new maintenance failed")
             return self.maintain(command, **kwargs)
 
-        with mock.patch.object(install_generation, "_run", side_effect=maintain):
-            with self.assertRaisesRegex(deploy.generation.GenerationError, "new maintenance failed"):
-                install_generation.activate_generation(self.new)
-        self.assert_restored(self.old.name)
+        lock = _RunLock(self.root, next(iter(self.intent[self.root])))
+        self.assertTrue(lock.acquire())
+        document = lock.path.read_bytes()
+        try:
+            with mock.patch.object(install_generation, "_run", side_effect=maintain):
+                with self.assertRaisesRegex(deploy.generation.GenerationError, "new maintenance failed"):
+                    install_generation.activate_generation(self.new)
+            self.assert_restored(self.old.name)
+            self.assertEqual(document, lock.path.read_bytes())
+        finally:
+            lock.release()
 
     def test_trigger_removal_failure_restores_previous_runtime(self) -> None:
         from agents_live.runtime import handoff
@@ -3591,7 +3665,434 @@ class TestActivationHandoff(TempRepository):
                 install_generation.activate_generation(self.new)
         self.assert_restored(self.old.name)
 
-    def test_late_old_runtime_job_prevents_pointer_switch(self) -> None:
+    def test_activation_preserves_busy_watcher_tree_and_stops_idle_watchers(self) -> None:
+        from agents_live.runtime import handoff
+
+        for descendant in (False, True):
+            with self.subTest(descendant=descendant):
+                deploy.generation.activate(self.old)
+                busy, idle = self.host.supervisor.owned("watcher")
+                owner = busy.pid + 10000 if descendant else busy.pid
+                lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_text(json.dumps({"pid": owner}), encoding="ascii")
+                stop = self.host.supervisor.terminate
+
+                def stopping(process):
+                    if process == idle:
+                        lock.unlink()
+                    stop(process)
+
+                def inventory():
+                    return [
+                        (os.getpid(), "synthetic activation process"),
+                        *((process.pid, subprocess.list2cmdline([
+                            str(install_generation.executable(self.old)),
+                            "--repo", str(self.root), "internal", "watch-loop", "sample",
+                        ])) for process in self.host.supervisor.owned("watcher")),
+                    ]
+
+                with (
+                    mock.patch.object(handoff, "pid_exists", return_value=True),
+                    mock.patch.object(hostruntime, "process_command_lines",
+                                      side_effect=inventory),
+                    mock.patch.object(hostruntime, "process_parent_ids",
+                                      return_value={owner: busy.pid}),
+                    mock.patch.object(self.host.supervisor, "terminate",
+                                      side_effect=stopping) as terminate,
+                    mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+                ):
+                    install_generation.activate_generation(self.new)
+                self.assert_restored(self.new.name)
+                self.assertNotIn(mock.call(busy), terminate.call_args_list)
+                self.assertIn(mock.call(idle), terminate.call_args_list)
+                self.assertIn(busy, self.host.supervisor.owned("watcher"))
+                lock.unlink(missing_ok=True)
+
+    def test_busy_watcher_is_preserved_when_activation_rolls_back(self) -> None:
+        from agents_live.runtime import handoff
+
+        busy = self.host.supervisor.owned("watcher")[0]
+        lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": busy.pid}), encoding="ascii")
+
+        def maintain(command, **kwargs):
+            self.maintain(command, **kwargs)
+            if command[0] == str(install_generation.executable(self.new)):
+                raise deploy.generation.GenerationError("partial maintenance")
+
+        with (
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(self.host.supervisor, "terminate",
+                              wraps=self.host.supervisor.terminate) as terminate,
+            mock.patch.object(install_generation, "_run", side_effect=maintain),
+        ):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "partial maintenance"):
+                install_generation.activate_generation(self.new)
+        self.assertNotIn(mock.call(busy), terminate.call_args_list)
+        self.assertIn(busy, self.host.supervisor.owned("watcher"))
+        self.assertTrue(lock.exists())
+        self.assert_restored(self.old.name)
+
+    def test_convergence_defers_busy_watcher_replacement_until_run_finishes(self) -> None:
+        from agents_live.runtime import handoff
+
+        busy = self.host.supervisor.owned("watcher")[0]
+        stale = replace(busy, fingerprint="old-generation")
+        self.host.supervisor.processes[busy.key] = stale
+        lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": stale.pid}), encoding="ascii")
+        with (
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(self.host.supervisor, "terminate",
+                              wraps=self.host.supervisor.terminate) as terminate,
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+        ):
+            self.assertFalse(lifecycle.converge().failed)
+            terminate.assert_not_called()
+            spawn.assert_not_called()
+            self.assertIn(stale, self.host.supervisor.owned("watcher"))
+            lock.unlink()
+            self.assertFalse(lifecycle.converge().failed)
+            terminate.assert_called_once_with(stale)
+            spawn.assert_called_once()
+        self.assertNotIn(stale, self.host.supervisor.owned("watcher"))
+        self.assert_restored(self.old.name)
+
+    def test_busy_watcher_finishes_records_then_hands_off_after_pause_is_cleared(self) -> None:
+        identifier = next(iter(self.intent[self.root]))
+        bundle = self.root / "Agents" / "watcher-0" / "SKILL.md"
+        bundle.write_text(bundle.read_text(encoding="utf-8").replace(
+            'agents-live.selector: "copilot"', 'agents-live.selector: "fake/echo"'),
+            encoding="utf-8")
+        watcher = self.host.supervisor.owned("watcher")[0]
+        busy = replace(watcher, pid=os.getpid())
+        self.host.supervisor.processes[busy.key] = busy
+        source = mock.Mock()
+        changed = self.root / "src" / "changed.txt"
+        changed.parent.mkdir()
+        polls = []
+
+        def poll(_timeout):
+            polls.append(True)
+            if len(polls) == 1:
+                return [str(changed)]
+            if len(polls) == 2:
+                time.sleep(1.05)
+                return []
+            self.fail("the old watcher polled again instead of retiring")
+
+        source.poll.side_effect = poll
+
+        def running(*args, **kwargs):
+            install_generation.activate_generation(self.new)
+            self.assertIn(busy, self.host.supervisor.owned("watcher"))
+            duplicate = dispatch(Firing(identifier, str(self.root), "watch"))
+            self.assertEqual("already-running", duplicate.message)
+            return ChildResult(("fake",), 0, '{"text":"done"}', "")
+
+        self.host.child_runner.run_child = mock.Mock(side_effect=running)
+        metadata = artifacts.InvocationMetadata(
+            busy.key, f"repo:{self.root}", f"agent:{identifier}")
+        with (
+            mock.patch.object(self.host, "change_source", return_value=source),
+            mock.patch.object(internal, "_runtime_is_current",
+                              side_effect=lambda: deploy.pointer.read().generation == self.old.name),
+            mock.patch.object(internal.shutil, "which",
+                              return_value=str(install_generation.executable(self.new))),
+            mock.patch.object(self.host.supervisor, "terminate",
+                              wraps=self.host.supervisor.terminate) as terminate,
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+            mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+        ):
+            self.assertEqual(0, internal._watch(
+                argparse.Namespace(name=identifier, watch_expression=None), metadata))
+        self.assertNotIn(mock.call(busy), terminate.call_args_list)
+        source.stop.assert_called_once()
+        self.assertEqual(2, len(polls))
+        replacement = spawn.call_args_list[-1].args[0]
+        self.assertEqual(str(install_generation.executable(self.new)), replacement[0])
+        self.assertNotIn(busy, self.host.supervisor.owned("watcher"))
+        records = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        self.assertTrue(any(
+            record.get("phase") == "done" and record.get("status") == "ok"
+            for record in records))
+        self.assert_restored(self.new.name)
+
+    def test_watcher_handoff_obeys_launch_gate_before_spawning(self) -> None:
+        from agents_live.runtime import handoff
+        from agents_live.runtime.watchloop import run as run_watchloop
+
+        watcher = self.host.supervisor.owned("watcher")[0]
+        self.host.supervisor.processes.pop(watcher.key)
+        metadata = artifacts.InvocationMetadata(
+            watcher.key, f"repo:{self.root}", "agent:watcher-0")
+        source = mock.Mock()
+
+        def retire():
+            internal._restart_watcher(
+                argparse.Namespace(name="watcher-0"), self.root, "src/**", metadata)
+
+        with (
+            mock.patch.object(internal, "_WATCHER_HANDOFF_GATE_WAIT_SECONDS", 0,
+                              create=True),
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+        ):
+            with handoff.gate(operation="maintenance"):
+                with self.assertRaises(hostruntime.LockBusy):
+                    run_watchloop(
+                        source, runtime.parse_watch("src/**"), root=self.root,
+                        fire=lambda _: self.fail("retired watcher fired"),
+                        should_continue=lambda: False, on_retire=retire)
+            spawn.assert_not_called()
+
+            original_spawn = self.host.supervisor.spawn_detached
+
+            def gated_spawn(*args, **kwargs):
+                with self.assertRaises(hostruntime.LockBusy), handoff.gate():
+                    pass
+                return original_spawn(*args, **kwargs)
+
+            with mock.patch.object(self.host.supervisor, "spawn_detached",
+                                   side_effect=gated_spawn):
+                run_watchloop(
+                    source, runtime.parse_watch("src/**"), root=self.root,
+                    fire=lambda _: self.fail("retired watcher fired"),
+                    should_continue=lambda: False, on_retire=retire)
+            self.assertEqual(1, spawn.call_count)
+        self.assertEqual(2, source.stop.call_count)
+
+    def test_watcher_handoff_keeps_an_existing_subscription_owner(self) -> None:
+        from agents_live.runtime.watchloop import run as run_watchloop
+
+        watcher = self.host.supervisor.owned("watcher")[0]
+        metadata = artifacts.InvocationMetadata(
+            watcher.key, f"repo:{self.root}", "agent:watcher-0")
+        source = mock.Mock()
+        with (
+            mock.patch.object(hostruntime, "process_parent_ids", return_value={}),
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+        ):
+            run_watchloop(
+                source, runtime.parse_watch("src/**"), root=self.root,
+                fire=lambda _: self.fail("retired watcher fired"),
+                should_continue=lambda: False,
+                on_retire=lambda: internal._restart_watcher(
+                    argparse.Namespace(name="watcher-0"), self.root, "src/**", metadata))
+        spawn.assert_not_called()
+        source.stop.assert_called_once()
+        self.assertIn(watcher, self.host.supervisor.owned("watcher"))
+
+    def test_maintenance_rechecks_a_handoff_owner_after_planning(self) -> None:
+        from agents_live.runtime import handoff
+
+        watcher = self.host.supervisor.owned("watcher")[0]
+        self.host.supervisor.processes.pop(watcher.key)
+        prepared = lifecycle.plan_maintenance()
+        self.assertIn(watcher.key, [
+            op.key for op in prepared.runtime_plan.operations
+            if op.kind == "start-watcher"])
+        replacement = replace(watcher, pid=watcher.pid + 10000)
+        self.host.supervisor.processes[watcher.key] = replacement
+        owned = self.host.supervisor.owned
+        checks = []
+
+        def gated_inventory(*args, **kwargs):
+            with self.assertRaises(hostruntime.LockBusy), handoff.gate():
+                pass
+            checks.append(True)
+            return owned(*args, **kwargs)
+
+        with (
+            mock.patch.object(self.host.supervisor, "owned",
+                              side_effect=gated_inventory),
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+            handoff.gate(operation="maintenance"),
+        ):
+            result = lifecycle.commit_maintenance(prepared)
+        self.assertFalse(result.failed)
+        self.assertIn("start not needed: watcher is already alive", [
+            op.detail for op in result.done
+            if op.kind == "start-watcher" and op.key == watcher.key])
+        self.assertTrue(checks)
+        spawn.assert_not_called()
+        self.assertIn(replacement, self.host.supervisor.owned("watcher"))
+
+    def test_watcher_handoff_ignores_its_retiring_launcher_ancestor(self) -> None:
+        from agents_live.runtime.watchloop import run as run_watchloop
+
+        watcher = self.host.supervisor.owned("watcher")[0]
+        parent = replace(watcher, pid=88888)
+        self.host.supervisor.processes[watcher.key] = parent
+        metadata = artifacts.InvocationMetadata(
+            watcher.key, f"repo:{self.root}", "agent:watcher-0")
+        deploy.generation.activate(self.new)
+        with (
+            mock.patch.object(hostruntime, "process_parent_ids",
+                              return_value={os.getpid(): parent.pid}),
+            mock.patch.object(internal.shutil, "which",
+                              return_value=str(deploy.layout.command_path())),
+            mock.patch.object(self.host.supervisor, "spawn_detached",
+                              wraps=self.host.supervisor.spawn_detached) as spawn,
+        ):
+            run_watchloop(
+                mock.Mock(), runtime.parse_watch("src/**"), root=self.root,
+                fire=lambda _: self.fail("retired watcher fired"),
+                should_continue=lambda: False,
+                on_retire=lambda: internal._restart_watcher(
+                    argparse.Namespace(name="watcher-0"), self.root, "src/**", metadata))
+        spawn.assert_called_once()
+        self.assertEqual(str(install_generation.executable(self.new)),
+                         spawn.call_args.args[0][0])
+
+    def test_maintenance_removes_duplicate_watcher_trees_preferring_selected_generation(self) -> None:
+        from agents_live.runtime import convergence, handoff
+
+        subscription = next(
+            item for item in lifecycle.plan_maintenance().collected.subscriptions
+            if item.kind == "watch")
+        deploy.generation.activate(self.new)
+        self.host.supervisor = WindowsProcesses()
+        with mock.patch.object(windowshost, "cli_executable_path",
+                               return_value=deploy.layout.command_path()):
+            rendered = windowshost.WindowsHost().render(subscription)
+        self.host.render = lambda _: rendered
+        rows = {}
+
+        def add(pid, generation, python=False):
+            command = list(rendered.watcher_argv)
+            if python:
+                command.insert(0, str(install_generation._interpreter(generation.path)))
+            rows[pid] = subprocess.list2cmdline(command)
+
+        # Stable-launcher fingerprints match; only interpreter generation differs.
+        add(19700, self.new)
+        add(19701, self.new, python=True)
+        add(19720, self.new)
+        add(19721, self.new, python=True)
+        add(19610, self.old)
+        add(19611, self.old, python=True)
+        lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": 19611}), encoding="ascii")
+
+        def stop(pid):
+            rows.pop(pid)
+            rows.pop(pid + 1, None)  # Terminating the root also stops its child.
+
+        with (
+            mock.patch.object(hostruntime, "process_command_lines",
+                              side_effect=lambda: list(rows.items())),
+            mock.patch.object(hostruntime, "process_start_time",
+                              side_effect=lambda pid: 1 if pid < 19700 else 2),
+            mock.patch.object(hostruntime, "process_parent_ids",
+                              return_value={19701: 19700, 19611: 19610, 19721: 19720}),
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(hostruntime, "terminate", side_effect=stop) as terminate,
+        ):
+            with handoff.gate():
+                self.assertFalse(convergence.converge(
+                    (subscription,), _host=self.host).failed)
+            terminate.assert_called_once_with(19720)
+            lock.unlink()
+            with handoff.gate():
+                self.assertFalse(convergence.converge(
+                    (subscription,), _host=self.host).failed)
+            self.assertEqual([mock.call(19720), mock.call(19610)],
+                             terminate.call_args_list)
+            self.assertEqual({19700, 19701}, set(rows))
+            with handoff.gate():
+                self.assertFalse(convergence.converge(
+                    (subscription,), _host=self.host).done)
+
+    def test_changed_watcher_replaces_entire_launcher_tree_without_stopping_busy_run(self) -> None:
+        from agents_live.runtime import convergence, handoff
+
+        subscription = next(
+            item for item in lifecycle.plan_maintenance().collected.subscriptions
+            if item.kind == "watch")
+        self.host.supervisor = WindowsProcesses()
+        with mock.patch.object(windowshost, "cli_executable_path",
+                               return_value=install_generation.executable(self.old)):
+            old = windowshost.WindowsHost().render(subscription)
+        with mock.patch.object(windowshost, "cli_executable_path",
+                               return_value=install_generation.executable(self.new)):
+            desired = windowshost.WindowsHost().render(
+                replace(subscription, trigger="docs/**"))
+        self.host.render = lambda _: desired
+        rows = {
+            19700: subprocess.list2cmdline(old.watcher_argv),
+            19701: subprocess.list2cmdline((
+                str(install_generation._interpreter(self.old.path)),
+                *old.watcher_argv)),
+        }
+        lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": 19701}), encoding="ascii")
+
+        def stop(pid):
+            rows.pop(pid)
+            if pid == 19700:
+                rows.pop(19701, None)
+            # Stopping the child does not immediately retire its launcher.
+
+        def spawn(argv, **kwargs):
+            rows[19800] = subprocess.list2cmdline(argv)
+            return mock.Mock(pid=19800)
+
+        with (
+            mock.patch.object(hostruntime, "process_command_lines",
+                              side_effect=lambda: list(rows.items())),
+            mock.patch.object(hostruntime, "process_start_time", return_value=1),
+            mock.patch.object(hostruntime, "process_parent_ids",
+                              return_value={19701: 19700}),
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(hostruntime, "terminate", side_effect=stop) as terminate,
+            mock.patch.object(hostruntime, "spawn_detached", side_effect=spawn) as start,
+        ):
+            with handoff.gate():
+                busy = convergence.converge((subscription,), _host=self.host)
+            self.assertFalse(busy.failed)
+            self.assertIn("start deferred: watcher has an active run",
+                          [operation.detail for operation in busy.done])
+            terminate.assert_not_called()
+            start.assert_not_called()
+            self.assertEqual({19700, 19701}, set(rows))
+            lock.unlink()
+            with handoff.gate():
+                result = convergence.converge((subscription,), _host=self.host)
+            self.assertFalse(result.failed)
+            terminate.assert_called_once_with(19700)
+            start.assert_called_once()
+            self.assertEqual({19800}, set(rows))
+            self.assertEqual(["stop-watcher", "start-watcher"],
+                             [operation.kind for operation in result.done])
+
+    def test_lingering_stale_watcher_reports_replacement_failure(self) -> None:
+        watcher = self.host.supervisor.owned("watcher")[0]
+        stale = replace(watcher, fingerprint="stale")
+        self.host.supervisor.processes[watcher.key] = stale
+        with (
+            mock.patch.object(self.host.supervisor, "terminate") as terminate,
+            mock.patch.object(self.host.supervisor, "spawn_detached") as spawn,
+        ):
+            result = lifecycle.converge()
+        terminate.assert_called_once_with(stale)
+        spawn.assert_not_called()
+        self.assertIn(
+            ("start-watcher", "replacement deferred: stale watcher is still alive"),
+            [(operation.kind, error) for operation, error in result.failed])
+        self.assertFalse(result.health.healthy)
+        self.assertIn(stale, self.host.supervisor.owned("watcher"))
+
+    def test_old_run_lock_acquired_during_withdrawal_does_not_prevent_switch(self) -> None:
         from agents_live.dispatch import _RunLock
 
         lock = _RunLock(self.root, next(iter(self.intent[self.root])))
@@ -3606,9 +4107,9 @@ class TestActivationHandoff(TempRepository):
                 mock.patch.object(self.host.trigger_store, "remove", side_effect=remove_and_launch),
                 mock.patch.object(install_generation, "_run", side_effect=self.maintain),
             ):
-                with self.assertRaisesRegex(deploy.generation.GenerationError, "work is running"):
-                    install_generation.activate_generation(self.new)
-            self.assert_restored(self.old.name)
+                install_generation.activate_generation(self.new)
+            self.assert_restored(self.new.name)
+            self.assertTrue(lock.path.exists())
         finally:
             lock.release()
 
@@ -3642,6 +4143,14 @@ class TestActivationHandoff(TempRepository):
             self.assertEqual("runtime-activation", outcome.message)
             with self.assertRaises(lifecycle.CollectionUnavailable):
                 lifecycle.converge()
+        self.assert_restored(self.old.name)
+
+    def test_mutation_holding_launch_gate_refuses_activation_without_mutation(self) -> None:
+        from agents_live.runtime import handoff
+
+        with handoff.gate(operation="convergence"):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "launch gate wait expired"):
+                install_generation.activate_generation(self.new)
         self.assert_restored(self.old.name)
 
 
@@ -5407,6 +5916,59 @@ class TestInstallationGenerations(unittest.TestCase):
 
         deploy.generation.remove("6.5.0")
         self.assertEqual(("6.6.0",), deploy.layout.installed_generations())
+
+    def test_generation_pruning_discovers_live_runs_without_caller_hints(self) -> None:
+        for name in ("6.3.0", "6.4.0", "6.5.0", "6.6.0"):
+            self._activate_generation(name)
+        command = subprocess.list2cmdline([
+            str(deploy.layout.generation_dir("6.3.0") / "bin" / "python"),
+            "-m", "agents_live.cli", "run", "sample",
+        ])
+        with mock.patch.object(hostruntime, "process_command_lines", return_value=[
+            (os.getpid(), "synthetic collector process"), (4242, command),
+        ]):
+            self.assertEqual(("6.4.0",), deploy.generation.collect())
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "process 4242"):
+                deploy.generation.remove("6.3.0")
+            self.assertEqual(
+                ("6.3.0", "6.5.0", "6.6.0"), deploy.layout.installed_generations())
+        with mock.patch.object(hostruntime, "process_command_lines", return_value=[
+            (os.getpid(), "synthetic collector process"),
+        ]):
+            deploy.generation.remove("6.3.0")
+        self.assertEqual(("6.5.0", "6.6.0"), deploy.layout.installed_generations())
+
+    def test_generation_pruning_fails_closed_when_process_inventory_is_unavailable(self) -> None:
+        self._activate_generation("6.5.0")
+        self._activate_generation("6.6.0")
+        for inventory in ([], OSError("inventory unavailable")):
+            with self.subTest(inventory=inventory):
+                patch = (mock.patch.object(hostruntime, "process_command_lines",
+                                           side_effect=inventory)
+                         if isinstance(inventory, OSError) else
+                         mock.patch.object(hostruntime, "process_command_lines",
+                                           return_value=inventory))
+                with patch:
+                    with self.assertRaisesRegex(deploy.generation.GenerationError, "process inventory"):
+                        deploy.generation.remove("6.5.0")
+                    with self.assertRaisesRegex(deploy.generation.GenerationError, "process inventory"):
+                        deploy.generation.collect(retain=0)
+                self.assertEqual(("6.5.0", "6.6.0"), deploy.layout.installed_generations())
+
+    def test_generation_collection_rechecks_processes_before_removing_each_version(self) -> None:
+        self._activate_generation("6.5.0")
+        self._activate_generation("6.6.0")
+        collector = (os.getpid(), "synthetic collector process")
+        command = subprocess.list2cmdline([
+            str(deploy.layout.generation_dir("6.5.0") / "bin" / "python"),
+            "-m", "agents_live.cli", "run", "sample",
+        ])
+        with mock.patch.object(hostruntime, "process_command_lines", side_effect=[
+            [collector], [collector, (4242, command)],
+        ]):
+            with self.assertRaisesRegex(deploy.generation.GenerationError, "process 4242"):
+                deploy.generation.collect(retain=0)
+        self.assertEqual(("6.5.0", "6.6.0"), deploy.layout.installed_generations())
 
     def test_every_way_a_deployment_can_stop_half_way_has_an_answer(
             self) -> None:

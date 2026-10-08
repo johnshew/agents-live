@@ -60,6 +60,7 @@ class ProcessRef:
     role: str
     key: str = ""
     fingerprint: str = ""
+    generation: str = ""
 
     def __post_init__(self) -> None:
         if self.pid <= 0:

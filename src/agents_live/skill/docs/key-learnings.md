@@ -1,7 +1,7 @@
 ---
 title: Runtime and provider learnings
 description: Constraints established while extracting the 6.0 seams
-ms.date: 2026-09-19
+ms.date: 2026-10-08
 ms.topic: concept-article
 ---
 
@@ -46,6 +46,65 @@ Run locks are per agent, not per trigger, so a clock and watcher firing cannot
 overlap. Dead lock owners are recoverable. The dispatch budget is atomically
 updated under an inter-process lock and deliberately fails open if its own
 state is unavailable.
+
+## Activate without draining agent runs
+
+An agent run is not a runtime mutation. The launch gate protects definition
+loading and per-agent lock acquisition, then releases before pre/provider/post
+work begins. Activation must not infer a conflicting mutation from a live run
+lock or a generation-local `run` command. Maintenance and convergence can mutate
+automation, so their gate exclusion and maintenance-process refusal remain.
+
+Watcher fires are in-process dispatches, not separate `run` commands. Their run
+lock belongs to the watcher pid; on hosts with launcher/child rows, protect its
+ancestors as well. Removing a blanket run-lock refusal without changing watcher
+termination would kill pre/provider/post work and lose its completion record.
+Preserve a busy watcher tree for the entire activation, even if its lock clears
+before selection. Convergence must also defer stop/replacement for a busy tree.
+
+Observed on 2026-10-08 at RC4 source `dccdc4b`: `internal._watch_fire` calls
+dispatch synchronously; `watchloop.run` checks `should_continue` between fires.
+`internal._watch` first checks the shared pause signal, then
+`_runtime_is_current`, which compares its generation with the active pointer.
+When pause has cleared, a superseded watcher stops its change source and calls
+`_restart_watcher` through the stable launcher. Thus the old code can finish and
+record a run, then hand off without changing its installed bytes. While its run
+is active, defer replacement of the same subscription to avoid an extra watcher.
+If it exits while still paused, normal maintenance restores the missing watcher.
+Rollback to its original generation leaves the preserved watcher valid.
+
+An old fire can finish between maintenance planning and commit. Serialize updated
+handoff with the launch gate, exclude its retiring launcher ancestors from the
+ownership check, and skip spawning when another watcher already owns the key.
+Convergence must also re-list owned watchers immediately before each start under
+the gate. Preserve every logical watcher tree in the diff, prefer the selected
+generation, and stop idle duplicates rather than collapsing all processes into
+one dictionary entry. Native launcher/child rows are one tree; interpreter paths
+identify the executing generation even when stable-launcher fingerprints match.
+
+RC4's `_restart_watcher` itself remains old code and has no gate. Its stable
+launcher follows `current` to the selected generation, where the replacement
+child loads new code; that child does not re-execute the parent's handoff guard.
+Duplicate reconciliation is still necessary for legacy parents and keeps busy
+extras until their runs finish. Source fixtures verify the stable path's selected
+target, competing plan/handoff ownership, and cleanup of duplicate native trees.
+
+Generations are sealed side-by-side environments. Selecting `current` changes
+new launches, not the interpreter, imports or files of a run already executing.
+Keep shared per-agent lock and event formats unchanged: the new generation
+must skip a firing for an agent still locked by its old run, and must read that
+run's eventual completion record. Run-scoped retention markers protect its
+artifacts independently of which generation is selected.
+
+Generation retention is a deletion-layer obligation, not just CLI advice.
+Inventory live generation users under the deployment lock, fail closed on
+unavailable process evidence, and recheck before each removal. Preserve in-use
+versions regardless of rollback retention count or caller-supplied holder hints.
+The #574 source regressions exercise activation during dispatch, duplicate-run
+exclusion, post-switch completion records, busy watcher-tree preservation,
+post-fire handoff with pause cleared, deferred replacement followed by retirement,
+maintenance/gate refusal and pruning;
+they do not establish installed-runtime or provider acceptance.
 
 ## Bound cascading watcher writes
 

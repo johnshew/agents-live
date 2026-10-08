@@ -11,23 +11,6 @@ from pathlib import Path
 from ... import deploy, preflight
 from .. import identity
 from . import install_generation
-from ...runtime.hosts import system as hostruntime
-from ...runtime.hosts.processes import within
-
-
-def _holders(root: Path) -> dict[str, tuple[str, ...]]:
-    found: dict[str, list[str]] = {}
-    try:
-        processes = hostruntime.process_command_lines()
-    except OSError:
-        return {}
-    for pid, command in processes:
-        for argument in hostruntime.split_command_line(command):
-            generation = deploy.layout.generation_of(argument, root)
-            if generation is not None and within(argument, deploy.layout.generation_dir(generation, root)):
-                found.setdefault(generation, []).append(f"process {pid}")
-                break
-    return {name: tuple(processes) for name, processes in found.items()}
 
 
 def _require_self_managed() -> deploy.ownership.Installation:
@@ -119,7 +102,6 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         _require_self_managed()
-        holders = _holders(root)
         if args.command == "classify":
             deploy.generation.classify(args.version, args.status, root=root)
             print(f"Classified version {args.version} as {args.status}")
@@ -128,12 +110,11 @@ def main(argv: list[str] | None = None) -> int:
             install_generation.activate_generation(selected, root=root)
             print(f"Activated version {selected.name}")
         elif args.command == "remove":
-            deploy.generation.remove(
-                args.version, root=root, held=holders.get(args.version, ()))
+            deploy.generation.remove(args.version, root=root)
             print(f"Removed version {args.version}")
         else:
             removed = deploy.generation.collect(
-                root=root, held=holders, retain=args.retain)
+                root=root, retain=args.retain)
             if removed:
                 print(f"Collected {len(removed)} version(s): {', '.join(removed)}")
             else:
