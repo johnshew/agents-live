@@ -474,3 +474,54 @@ Use the explicit legacy-tag migration command only for the recorded unpublished
 conflict. Never relabel historical deployment observations as package acceptance
 or overwrite a published tag. Remote testing distribution requires separate
 authorization and does not confer stable-publication approval.
+
+<!-- glp-update:v1 id=44e97798-a467-4dd5-a714-5195a7aedd5c -->
+<a id="glp-44e97798-a467-4dd5-a714-5195a7aedd5c"></a>
+### GLP Update: Record a consumed RC on main before it runs for long
+
+- Update-ID: 44e97798-a467-4dd5-a714-5195a7aedd5c
+- Recorded-UTC: 2026-10-08T14:21:29Z
+- Kind: addition
+- Topics: numbered RC lifecycle, release-cycles.toml, next_rc, release report, operational load
+- Workstream: 6.9.4rc5 (#565) orchestration
+- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main dccdc4b
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+After an RC is prepared and locally activated, land a small release-metadata
+change on main promptly that records its history entry and advances `next_rc`.
+Do not wait until the next RC is planned. Otherwise the release report shows
+the active runtime's RC as the next RC with no selected RC, and routing agents
+must reconstruct state from tags, branches and retained receipts. During RC
+evaluation, also check scheduled maintenance and the hold time of the launch
+gate under realistic agent counts: #565 surfaced only after days of
+production use on RC4.
+
+#### Evidence
+- Observed 2026-10-08: tag `rc/6.9.4rc4` exists on origin and the local runtime
+  selection is 6.9.4rc4, but `.github/release-cycles.toml` on main (dccdc4b)
+  still had `next_rc = "6.9.4rc4"` and no RC4 history. The generated report
+  listed Selected RC "-" and Next RC 6.9.4rc4. The local
+  `release/v6.9.4rc4-candidate` branch had no remote counterpart.
+- #565 (filed 2026-10-08): a maintenance run on 6.9.4rc4 held the gate for
+  about 19 minutes, and scheduled launches were missed.
+- Precedent: 8b20e9f recorded RC3 only when RC4 was planned.
+
+#### Previous Knowledge
+Numbered attempt commands above describe preparation, acceptance and approval.
+They do not say when a consumed RC's history must reach main. This adds that
+timing; it does not change allocation or immutability rules.
+
+#### Verification and Limits
+Inference from one cycle. Allocation already refuses to reuse a consumed
+identity, so the gap is a routing and reporting risk, not a byte-safety risk.
+Whether `tools/release.py` should write the record automatically is not
+decided.
+
+#### Follow-up
+Consider having release tooling report an unrecorded consumed RC (related
+to #562). Fold into Numbered RC lifecycle at the next consolidation.
+<!-- /glp-update:v1 id=44e97798-a467-4dd5-a714-5195a7aedd5c -->

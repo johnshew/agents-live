@@ -323,3 +323,44 @@ a new agent receives the same answer from either entry point.
 - `Agents/` - local triggered-agent runtime dir (handlers, logs)
 - `.agents/` - agent-facing guides (this file's targets)
 - `.github/workflows/` - CI: publish to PyPI on GitHub release
+
+<!-- glp-update:v1 id=3ab5dbe2-212c-4db9-ac2f-edad5bc0f035 -->
+<a id="glp-3ab5dbe2-212c-4db9-ac2f-edad5bc0f035"></a>
+### GLP Update: Ask decisions in plain English with a recommendation
+
+- Update-ID: 3ab5dbe2-212c-4db9-ac2f-edad5bc0f035
+- Recorded-UTC: 2026-10-08T14:21:29Z
+- Kind: addition
+- Topics: developer questions, ask_user, decision framing
+- Workstream: 6.9.4rc5 (#565) orchestration
+- Target: AGENTS.md, Continuous Development and Learning; compared origin/main dccdc4b
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: user_direction
+- Application: applied
+- Consolidation: pending
+
+#### Change
+When asking the developer to decide, explain each option in plain English: what
+problem it addresses, what changes and the risk or cost. Do not rely on issue
+numbers or internal terms alone. State a recommendation and the reason for it.
+Keep the choice labels self-explanatory.
+
+#### Evidence
+- User direction, 2026-10-08, after a scope question whose choices were
+  issue numbers and short technical labels, the developer asked for
+  plain-English context and a recommendation instead of assumed familiarity
+  with issue numbers.
+- The question was restated with plain-English context and a recommendation,
+  and the developer then chose the recommended narrow scope.
+
+#### Previous Knowledge
+None. The steering rules above cover classifying inputs, not how to frame
+questions to the developer.
+
+#### Verification and Limits
+One observed correction. It applies to every decision question, not only
+release scope.
+
+#### Follow-up
+Fold into the steering guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=3ab5dbe2-212c-4db9-ac2f-edad5bc0f035 -->
