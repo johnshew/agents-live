@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-05
+ms.date: 2026-10-08
 ms.topic: reference
 ---
 
@@ -11,6 +11,12 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: keep slow maintenance planning outside the runtime launch gate. (#565)
+  Inventory, rendering and drift detection no longer exclude agent launches.
+  Maintenance revalidates a persisted commit epoch and intent tokens before
+  applying changes, recomputing stale plans outside the gate with bounded clean
+  deferral. Start/stop keep full gating; activation and partial commits invalidate
+  stale plans. Existing contention waits and holder attribution are preserved.
 - fix: check wheel-upgrade plugin compatibility with the candidate runtime. (#560)
   Source plugins are checked in the exact wheel environment before selection,
   so candidate loader fixes can unblock upgrades. Candidate rejection messages
