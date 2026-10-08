@@ -198,10 +198,14 @@ from `243ec7e` on 2026-10-04, but preparation failed at packaged dashboard
 repositories readiness and it was not accepted. Preserve its attempt, commit,
 build records and artifacts. `6.9.4rc3` was prepared and consumed from
 `8cda101` on 2026-10-04, passed isolated acceptance and was locally activated,
-but is not publication-approved. Activation exposed #560 candidate-runtime
-plugin preflight and #561 Windows skill replacement; the developer added both
-to RC4 on 2026-10-04. Changed source must use `6.9.4rc4`, retaining the merged
-#556 and #538 work and the dashboard responsiveness follow-up.
+but is not publication-approved. RC4 was prepared and consumed from `dccdc4b`
+on 2026-10-05, passed isolated acceptance and is selected locally on the
+candidate channel, but is not publication-approved. On 2026-10-08, the
+developer assigned #565 to RC5 for the main lock fix only after a maintenance
+run on RC4 held the runtime launch gate for about 19 minutes and missed
+scheduled launches. Task Scheduler query batching is a separate follow-up
+tracked by #566. Changed source must use `6.9.4rc5`, retaining the merged #556,
+#538, #560 and #561 work and the dashboard responsiveness follow-up.
 Retained RC6 does not supersede RC5's selection. Preserve all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
 
