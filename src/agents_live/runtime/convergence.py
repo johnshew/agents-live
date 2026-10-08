@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 
 from .diff import diff
@@ -111,9 +111,18 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                 elif operation.kind == "start-watcher":
                     assert operation.rendered is not None
                     if operation.key in deferred:
+                        done.append(replace(
+                            operation, detail="start deferred: watcher has an active run"))
                         continue
-                    if any(item.key == operation.key
-                           for item in host.supervisor.owned(role="watcher")):
+                    owners = [
+                        item for item in host.supervisor.owned(role="watcher")
+                        if item.key == operation.key]
+                    if owners:
+                        if any(item.fingerprint != operation.rendered.fingerprint
+                               for item in owners):
+                            raise RuntimeError("replacement deferred: stale watcher is still alive")
+                        done.append(replace(
+                            operation, detail="start not needed: watcher is already alive"))
                         continue
                     host.supervisor.spawn_detached(
                         operation.rendered.watcher_argv,
@@ -125,6 +134,8 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                     assert operation.process is not None
                     if operation.process.pid in running:
                         deferred.add(operation.key)
+                        done.append(replace(
+                            operation, detail="stop deferred: watcher has an active run"))
                         continue
                     host.supervisor.terminate(operation.process)
                 else:

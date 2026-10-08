@@ -3918,8 +3918,9 @@ class TestActivationHandoff(TempRepository):
         ):
             result = lifecycle.commit_maintenance(prepared)
         self.assertFalse(result.failed)
-        self.assertNotIn(watcher.key, [
-            op.key for op in result.done if op.kind == "start-watcher"])
+        self.assertIn("start not needed: watcher is already alive", [
+            op.detail for op in result.done
+            if op.kind == "start-watcher" and op.key == watcher.key])
         self.assertTrue(checks)
         spawn.assert_not_called()
         self.assertIn(replacement, self.host.supervisor.owned("watcher"))
@@ -3984,7 +3985,7 @@ class TestActivationHandoff(TempRepository):
 
         def stop(pid):
             rows.pop(pid)
-            rows.pop(pid - 1, None)  # Its console launcher exits with its child.
+            rows.pop(pid + 1, None)  # Terminating the root also stops its child.
 
         with (
             mock.patch.object(hostruntime, "process_command_lines",
@@ -3999,17 +4000,97 @@ class TestActivationHandoff(TempRepository):
             with handoff.gate():
                 self.assertFalse(convergence.converge(
                     (subscription,), _host=self.host).failed)
-            terminate.assert_called_once_with(19721)
+            terminate.assert_called_once_with(19720)
             lock.unlink()
             with handoff.gate():
                 self.assertFalse(convergence.converge(
                     (subscription,), _host=self.host).failed)
-            self.assertEqual([mock.call(19721), mock.call(19611)],
+            self.assertEqual([mock.call(19720), mock.call(19610)],
                              terminate.call_args_list)
             self.assertEqual({19700, 19701}, set(rows))
             with handoff.gate():
                 self.assertFalse(convergence.converge(
                     (subscription,), _host=self.host).done)
+
+    def test_changed_watcher_replaces_entire_launcher_tree_without_stopping_busy_run(self) -> None:
+        from agents_live.runtime import convergence, handoff
+
+        subscription = next(
+            item for item in lifecycle.plan_maintenance().collected.subscriptions
+            if item.kind == "watch")
+        self.host.supervisor = WindowsProcesses()
+        with mock.patch.object(windowshost, "cli_executable_path",
+                               return_value=install_generation.executable(self.old)):
+            old = windowshost.WindowsHost().render(subscription)
+        with mock.patch.object(windowshost, "cli_executable_path",
+                               return_value=install_generation.executable(self.new)):
+            desired = windowshost.WindowsHost().render(
+                replace(subscription, trigger="docs/**"))
+        self.host.render = lambda _: desired
+        rows = {
+            19700: subprocess.list2cmdline(old.watcher_argv),
+            19701: subprocess.list2cmdline((
+                str(install_generation._interpreter(self.old.path)),
+                *old.watcher_argv)),
+        }
+        lock = paths.repo_state_dir(self.root) / "locks" / "active.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text(json.dumps({"pid": 19701}), encoding="ascii")
+
+        def stop(pid):
+            rows.pop(pid)
+            if pid == 19700:
+                rows.pop(19701, None)
+            # Stopping the child does not immediately retire its launcher.
+
+        def spawn(argv, **kwargs):
+            rows[19800] = subprocess.list2cmdline(argv)
+            return mock.Mock(pid=19800)
+
+        with (
+            mock.patch.object(hostruntime, "process_command_lines",
+                              side_effect=lambda: list(rows.items())),
+            mock.patch.object(hostruntime, "process_start_time", return_value=1),
+            mock.patch.object(hostruntime, "process_parent_ids",
+                              return_value={19701: 19700}),
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(hostruntime, "terminate", side_effect=stop) as terminate,
+            mock.patch.object(hostruntime, "spawn_detached", side_effect=spawn) as start,
+        ):
+            with handoff.gate():
+                busy = convergence.converge((subscription,), _host=self.host)
+            self.assertFalse(busy.failed)
+            self.assertIn("start deferred: watcher has an active run",
+                          [operation.detail for operation in busy.done])
+            terminate.assert_not_called()
+            start.assert_not_called()
+            self.assertEqual({19700, 19701}, set(rows))
+            lock.unlink()
+            with handoff.gate():
+                result = convergence.converge((subscription,), _host=self.host)
+            self.assertFalse(result.failed)
+            terminate.assert_called_once_with(19700)
+            start.assert_called_once()
+            self.assertEqual({19800}, set(rows))
+            self.assertEqual(["stop-watcher", "start-watcher"],
+                             [operation.kind for operation in result.done])
+
+    def test_lingering_stale_watcher_reports_replacement_failure(self) -> None:
+        watcher = self.host.supervisor.owned("watcher")[0]
+        stale = replace(watcher, fingerprint="stale")
+        self.host.supervisor.processes[watcher.key] = stale
+        with (
+            mock.patch.object(self.host.supervisor, "terminate") as terminate,
+            mock.patch.object(self.host.supervisor, "spawn_detached") as spawn,
+        ):
+            result = lifecycle.converge()
+        terminate.assert_called_once_with(stale)
+        spawn.assert_not_called()
+        self.assertIn(
+            ("start-watcher", "replacement deferred: stale watcher is still alive"),
+            [(operation.kind, error) for operation, error in result.failed])
+        self.assertFalse(result.health.healthy)
+        self.assertIn(stale, self.host.supervisor.owned("watcher"))
 
     def test_old_run_lock_acquired_during_withdrawal_does_not_prevent_switch(self) -> None:
         from agents_live.dispatch import _RunLock

@@ -30,20 +30,28 @@ def diff(
         item.pid: item for item in processes if item.role == "watcher" and item.key
     }
     parents = process_parents or {}
-    ancestors: set[int] = set()
+    trees: dict[int, tuple[int, ProcessRef]] = {}
     # A console launcher and its Python child represent one watch loop.
     for process in candidates.values():
+        root = process.pid
+        depth = 0
+        distance = 0
         parent = parents.get(process.pid, 0)
         visited = {process.pid}
         while parent > 0 and parent not in visited:
             visited.add(parent)
+            distance += 1
             if parent in candidates and candidates[parent].key == process.key:
-                ancestors.add(parent)
+                root = parent
+                depth = distance
             parent = parents.get(parent, 0)
+        if root not in trees or depth > trees[root][0]:
+            # Interpreter children identify the generation; launchers may use current.
+            trees[root] = (depth, process)
     watchers: dict[str, list[ProcessRef]] = {}
-    for pid, process in candidates.items():
-        if pid not in ancestors:
-            watchers.setdefault(process.key, []).append(process)
+    for pid in trees:
+        process = candidates[pid]
+        watchers.setdefault(process.key, []).append(process)
     protected_keys = set(protected_process_keys) | {
         key for key, item in installed.items()
         if item.scope in protected_scopes
@@ -64,8 +72,10 @@ def diff(
             continue
         owners = watchers.get(key, [])
         process = min(owners, key=lambda item: (
-            not (preferred_generation and item.generation == preferred_generation),
-            item.fingerprint != target.fingerprint, item.created_at, item.pid,
+            not (preferred_generation
+                 and trees[item.pid][1].generation == preferred_generation),
+            trees[item.pid][1].fingerprint != target.fingerprint,
+            trees[item.pid][1].created_at, item.pid,
         ), default=None)
         for extra in owners:
             if extra != process:
