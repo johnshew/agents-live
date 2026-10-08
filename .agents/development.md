@@ -230,3 +230,90 @@ the switch. Whether the switch should be undone afterwards is unknown.
 #### Follow-up
 Fold into Commit hygiene at the next consolidation of this document.
 <!-- /glp-update:v1 id=c90f511b-cf45-4dac-a71d-bd556d82e313 -->
+
+<!-- glp-update:v1 id=7dcc21e7-7a86-4cd9-89e5-480ca755c02e -->
+<a id="glp-7dcc21e7-7a86-4cd9-89e5-480ca755c02e"></a>
+### GLP Update: Pin the owner token per process; the active gh account can be reverted
+
+- Update-ID: 7dcc21e7-7a86-4cd9-89e5-480ca755c02e
+- Recorded-UTC: 2026-10-08T23:35:44Z
+- Kind: correction
+- Topics: github-cli, credentials, gh auth switch, GH_TOKEN, git push, PowerShell quoting
+- Workstream: 6.9.4rc5/rc6 release operations
+- Target: .agents/development.md, Commit hygiene; compared origin/main 3733230
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+`gh auth switch` changes shared host state and was observed to be reverted by a
+concurrent process during 6.9.4rc5/rc6 work, so switching alone is unreliable.
+In each command process, clear `GITHUB_TOKEN` and set `GH_TOKEN` from
+`gh auth token --user <owner>` without printing the token. Push with the
+process-scoped credential helper
+`git -c credential.helper= -c "credential.helper=!gh auth git-credential" push ...`.
+Pass issue and PR bodies through `--body-file` using a temporary file because
+inline PowerShell quoting broke bodies.
+
+#### Evidence
+- Observed 2026-10-08: repeated EMU 403s after switching; pinning the token
+  worked for PRs #570, #571, #573, #575 and #576, and issues #572 and #574.
+- Observed 2026-10-08: inline PowerShell body quoting failed; using a temporary
+  file with `--body-file` avoids that quoting path.
+
+#### Previous Knowledge
+The preceding [GLP update](#glp-c90f511b-cf45-4dac-a71d-bd556d82e313) says to
+clear `GH_TOKEN` before switching. This corrects that method: avoid shared
+account switching and pin the owner credential per process instead.
+
+#### Verification and Limits
+The process-scoped token approach succeeded for the listed GitHub writes.
+Tokens were not printed. This evidence does not establish behavior for other
+credential providers or shells.
+
+#### Follow-up
+Fold into Commit hygiene at the next consolidation of this document.
+<!-- /glp-update:v1 id=7dcc21e7-7a86-4cd9-89e5-480ca755c02e -->
+
+<!-- glp-update:v1 id=49387356-34c6-4342-aa9c-8354137ae10e -->
+<a id="glp-49387356-34c6-4342-aa9c-8354137ae10e"></a>
+### GLP Update: Merge with the full head SHA and guard branch cleanup on merge success
+
+- Update-ID: 49387356-34c6-4342-aa9c-8354137ae10e
+- Recorded-UTC: 2026-10-08T23:35:44Z
+- Kind: lesson
+- Topics: pull requests, merge, head SHA, branch cleanup
+- Workstream: 6.9.4rc5/rc6 release operations
+- Target: .agents/development.md, Commit hygiene; compared origin/main 3733230
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: observed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+`gh pr merge --match-head-commit` requires the full 40-character SHA. A short
+SHA failed the merge, and chained cleanup then deleted the head branch and
+closed PR #571; the branch had to be restored and the PR reopened. Check the
+merge exit code, then verify the head commit is reachable from `origin/main`
+with `git merge-base --is-ancestor` before deleting worktrees or branches. The
+repository may already delete the remote head branch on merge, so a subsequent
+failed remote delete is expected.
+
+#### Evidence
+- Observed during PR #571 on 2026-10-08: the short SHA merge failed and the
+  chained cleanup deleted the branch; restoration and reopening were required.
+
+#### Previous Knowledge
+Commit hygiene already requires a full tested head SHA and guarded merges. This
+adds the specific 40-character requirement, cleanup ordering, reachability
+check, and expected remote-branch deletion behavior.
+
+#### Verification and Limits
+The PR #571 merge was completed after restoring the branch and reopening the
+PR. The exact cleanup outcome can vary when the repository deletes remote
+branches automatically.
+
+#### Follow-up
+Fold into Commit hygiene at the next consolidation of this document.
+<!-- /glp-update:v1 id=49387356-34c6-4342-aa9c-8354137ae10e -->
