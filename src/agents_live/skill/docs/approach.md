@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-10-04
+ms.date: 2026-10-08
 ms.topic: concept-article
 ---
 
@@ -46,8 +46,23 @@ observed holder's operation, run, agent, repository and elapsed wait in queryabl
 admin attributes. Expiry records one `maintenance_deferred` event, keeps the
 previous health beacon, waits 30 seconds and attempts acquisition once more.
 A second expiry remains deferred, not a maintenance error or a retry storm.
-The gate covers lifecycle convergence only; collection, retention and health
-reporting afterward do not block agent launches.
+Maintenance collects desired intent, inventories triggers and watchers once,
+renders subscriptions and computes the diff before acquiring the gate. Under
+the gate it revalidates a persisted runtime commit epoch and cheap registry and
+started-state content tokens, then persists adoption and applies the prepared
+operations. A stale plan is discarded and recomputed outside the gate, up to
+three times; exhaustion records a clean deferral and preserves the health beacon.
+Health, retention and reporting remain outside the gate.
+
+Start/stop convergence retains its full gated path. Maintenance, start/stop,
+activation and rollback bracket potentially partial mutations with atomic epoch
+updates under the gate; dispatch does not advance the epoch. An odd epoch marks
+an unfinished commit, so even a plan collected during a writer's critical section
+cannot be applied. After acquiring the gate, maintenance can retire an interrupted
+writer's odd marker, but must collect a fresh plan before applying anything.
+This detects cooperating Agents Live commits, not external edits to definitions
+or native scheduler artifacts. Registry and started-state tokens provide an
+additional check, not transactional isolation from outside actors.
 This policy does not explain historical firings without their original evidence.
 
 Automatic maintenance is the sole writer of the host-local health record.

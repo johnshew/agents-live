@@ -18,7 +18,7 @@ from ... import __version__, agent, deploy, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...obs import retention
-from ...runtime import handoff
+from ...runtime import convergence, handoff
 from ...runtime.grammars import parse_watch
 from ...runtime.hosts import filesystem as watchsource
 from ...runtime.watchloop import run as run_watchloop
@@ -29,6 +29,7 @@ from .. import lifecycle
 _AGENT_FAILURE_THRESHOLD = 3
 _MAINTENANCE_GATE_WAIT_SECONDS = 60.0
 _MAINTENANCE_RETRY_DELAY_SECONDS = 30.0
+_MAINTENANCE_PLAN_ATTEMPTS = 3
 
 
 def main(
@@ -94,6 +95,16 @@ def _maintain(
                 code = _maintain_once(dry_run=False, outcome=end,
                                       run_id=fields["correlation_id"])
                 break
+            except lifecycle.PlanChanged:
+                end.update(
+                    status="deferred",
+                    health=_health_beacon().get("status", "unknown"),
+                    message="maintenance deferred by concurrent runtime commits",
+                    plan_attempts=_MAINTENANCE_PLAN_ATTEMPTS,
+                    exit_code=0,
+                )
+                adminlog.record("maintenance_deferred", **fields, **end)
+                return 0
             except lifecycle.hostruntime.LockBusy as exc:
                 end.update(getattr(exc, "observation", {}))
                 end.update(status="deferred", health=_health_beacon().get("status", "unknown"),
@@ -123,13 +134,26 @@ def _maintain_once(*, dry_run: bool, outcome: dict | None = None,
     outcome = outcome if outcome is not None else {}
     try:
         if dry_run:
-            result = lifecycle.converge(dry_run=True)
+            prepared = lifecycle.plan_maintenance()
+            collected = prepared.collected
+            result = convergence.assess(runtime.Converged(
+                True, prepared.runtime_plan.operations, (), runtime.Health(True)),
+                _host=prepared.runtime_plan.host)
         else:
-            with handoff.gate(timeout=_MAINTENANCE_GATE_WAIT_SECONDS,
-                              operation="maintenance", run_id=run_id) as observation:
-                outcome.update(observation)
-                result = lifecycle._converge(dry_run=False)
-        collected = lifecycle.collect(persist=False)
+            for attempt in range(_MAINTENANCE_PLAN_ATTEMPTS):
+                prepared = lifecycle.plan_maintenance()
+                outcome["plan_attempts"] = attempt + 1
+                with handoff.gate(timeout=_MAINTENANCE_GATE_WAIT_SECONDS,
+                                  operation="maintenance", run_id=run_id) as observation:
+                    outcome.update(observation)
+                    if not lifecycle.maintenance_plan_current(prepared):
+                        continue
+                    result = lifecycle.commit_maintenance(prepared)
+                    break
+            else:
+                raise lifecycle.PlanChanged()
+            collected = prepared.collected
+            result = convergence.assess(result, _host=prepared.runtime_plan.host)
     except lifecycle.CollectionUnavailable as exc:
         outcome["message"] = str(exc)
         print(str(exc), file=sys.stderr)

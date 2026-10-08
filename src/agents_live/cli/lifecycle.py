@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import agent, runtime, state
-from ..runtime import handoff
+from .. import agent, paths, runtime, state
+from ..runtime import convergence, handoff
 from ..runtime.hosts import system as hostruntime
 from ..state import ownership, registry as repos
 
 
 class CollectionUnavailable(RuntimeError):
+    pass
+
+
+class PlanChanged(RuntimeError):
     pass
 
 
@@ -25,6 +30,7 @@ class Collected:
     protected_targets: tuple[str, ...] = ()
     protected_process_keys: tuple[str, ...] = ()
     unknown_metadata: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+    started_updates: tuple[tuple[Path, frozenset[str]], ...] = ()
 
 
 def collect(
@@ -33,6 +39,7 @@ def collect(
     removals: dict[Path, set[str]] | None = None,
     selected_roots: Iterable[Path] | None = None,
     persist: bool = True,
+    installed_items: tuple[runtime.InstalledTrigger, ...] | None = None,
 ) -> Collected:
     additions = {
         root.resolve(): names for root, names in (additions or {}).items()}
@@ -53,7 +60,8 @@ def collect(
     roots = list(roots_by_path.items())
     host = runtime.current()
     try:
-        installed_items = host.trigger_store.list()
+        if installed_items is None:
+            installed_items = tuple(host.trigger_store.list())
         installed = {item.key for item in installed_items}
         running_watchers = (
             host.supervisor.owned(role="watcher")
@@ -169,18 +177,18 @@ def collect(
             if identifiers_by_name.get(name, [None])[0] in snapshots[root]
         )
 
-    if persist:
-        for root, agents in snapshots.items():
-            complete = (
-                f"repo:{root}" not in protected
-                and not broken_by_root.get(root))
-            explicit = bool(additions.get(root) or removals.get(root))
-            if (not agents and not initialized.get(root)
-                    and not complete and not explicit):
-                # An adoption that found nothing, in a repository that did not
-                # read completely, is not a fact about what the user started.
-                # Recording it would spend the one chance to adopt.
-                continue
+    started_updates = []
+    for root, agents in snapshots.items():
+        complete = (
+            f"repo:{root}" not in protected
+            and not broken_by_root.get(root))
+        explicit = bool(additions.get(root) or removals.get(root))
+        if (not agents and not initialized.get(root)
+                and not complete and not explicit):
+            # Incomplete empty adoption would spend the one chance to adopt.
+            continue
+        started_updates.append((root, agents))
+        if persist:
             state.replace(root, agents)
 
     desired: list[runtime.Subscription] = []
@@ -222,7 +230,84 @@ def collect(
             for spec in specs.values()
             if spec.unknown_metadata
         ),
+        tuple(started_updates),
     )
+
+
+@dataclass(frozen=True)
+class MaintenancePlan:
+    epoch: int
+    inputs: tuple[tuple[Path, bytes | None], ...]
+    collected: Collected
+    runtime_plan: convergence.Plan
+
+
+def _maintenance_inputs() -> tuple[tuple[Path, bytes | None], ...]:
+    def token(path: Path) -> tuple[Path, bytes | None]:
+        try:
+            return path, path.read_bytes()
+        except FileNotFoundError:
+            return path, None
+
+    registry_token = token(repos.config_path())
+    roots = sorted(set(repos.load()["repos"].values()))
+    return (registry_token, *(
+        token(paths.repo_state_dir(Path(root)) / "started.json")
+        for root in roots
+    ))
+
+
+def plan_maintenance() -> MaintenancePlan:
+    try:
+        epoch = handoff.commit_epoch()
+        inputs = _maintenance_inputs()
+        host = runtime.current()
+        installed = tuple(host.trigger_store.list())
+        watchers = tuple(host.supervisor.owned(role="watcher"))
+        collected = collect(persist=False, installed_items=installed)
+        prepared = convergence.plan(
+            collected.subscriptions,
+            installed=installed,
+            watchers=watchers,
+            protected_scopes=collected.protected_scopes,
+            protected_targets=collected.protected_targets,
+            protected_process_keys=collected.protected_process_keys,
+            _host=host,
+        )
+        return MaintenancePlan(epoch, inputs, collected, prepared)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CollectionUnavailable(str(exc)) from exc
+
+
+def maintenance_plan_current(prepared: MaintenancePlan) -> bool:
+    """Revalidate under the gate; an interrupted writer requires a fresh plan."""
+    try:
+        epoch = handoff.commit_epoch()
+        if epoch % 2:
+            # Holding the gate proves the odd writer is no longer running.
+            with handoff.commit():
+                pass
+            return False
+        return (
+            prepared.epoch % 2 == 0
+            and epoch == prepared.epoch
+            and _maintenance_inputs() == prepared.inputs
+        )
+    except (OSError, ValueError) as exc:
+        raise CollectionUnavailable(str(exc)) from exc
+
+
+def commit_maintenance(prepared: MaintenancePlan) -> runtime.Converged:
+    """Caller holds the gate and has revalidated the plan."""
+    try:
+        with handoff.commit():
+            for root, agents in prepared.collected.started_updates:
+                state.replace(root, agents)
+            return _cleanup_legacy(
+                prepared.collected, convergence.commit(prepared.runtime_plan),
+                host=prepared.runtime_plan.host)
+    except (OSError, state.StartedStateUnavailable, ValueError) as exc:
+        raise CollectionUnavailable(str(exc)) from exc
 
 
 def converge(
@@ -233,13 +318,15 @@ def converge(
     dry_run: bool = False,
 ) -> runtime.Converged:
     try:
-        with handoff.gate():
+        with handoff.gate(), (nullcontext() if dry_run else handoff.commit()):
             return _converge(
                 additions=additions, removals=removals,
                 selected_roots=selected_roots, dry_run=dry_run)
     except hostruntime.LockBusy as exc:
         raise CollectionUnavailable(
             "runtime activation or convergence is in progress; retry shortly") from exc
+    except (OSError, ValueError) as exc:
+        raise CollectionUnavailable(str(exc)) from exc
 
 
 def _converge(
@@ -262,9 +349,17 @@ def _converge(
         protected_targets=collected.protected_targets,
         protected_process_keys=collected.protected_process_keys,
     )
-    if dry_run or converged.failed:
+    if dry_run:
         return converged
-    host = runtime.current()
+    return _cleanup_legacy(collected, converged, host=runtime.current())
+
+
+def _cleanup_legacy(
+    collected: Collected, converged: runtime.Converged, *,
+    host: runtime.HostAdapter,
+) -> runtime.Converged:
+    if converged.failed:
+        return converged
     done = list(converged.done)
     failed = list(converged.failed)
     for root, name in collected.legacy:

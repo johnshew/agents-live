@@ -76,6 +76,30 @@ def operation():
     return system.exclusive_lock(paths.state_home() / "activation-operation.lock")
 
 
+def commit_epoch() -> int:
+    """Read the cooperating runtime writers' sequence; odd means in progress."""
+    try:
+        value = int((paths.state_home() / "runtime-commit-epoch").read_text(
+            encoding="ascii"))
+    except FileNotFoundError:
+        return 0
+    if value < 0:
+        raise ValueError("runtime commit epoch is invalid")
+    return value
+
+
+@contextmanager
+def commit():
+    """Mark a possibly partial runtime mutation while the caller holds gate()."""
+    location = paths.state_home() / "runtime-commit-epoch"
+    started = (commit_epoch() // 2 + 1) * 2 - 1
+    paths.atomic_write_text(location, f"{started}\n")
+    try:
+        yield
+    finally:
+        paths.atomic_write_text(location, f"{started + 1}\n")
+
+
 def pause_watchers():
     return system.exclusive_lock(paths.state_home() / "activation-paused.lock")
 

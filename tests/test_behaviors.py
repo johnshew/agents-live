@@ -31,6 +31,7 @@ import venv
 import warnings
 import zipfile
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -1784,10 +1785,13 @@ class TestFrameworkRetention(TempRepository):
             os.utime(artifact, (expired_time, expired_time))
 
         result = mock.Mock(done=(), failed=(), health=runtime.Health(True))
-        collected = mock.Mock(subscriptions=())
+        collected = lifecycle.Collected((), ())
         with (
+            isolated_host(self.root),
             mock.patch.object(
-                internal.lifecycle, "_converge", return_value=result),
+                internal.lifecycle, "commit_maintenance", return_value=result),
+            mock.patch.object(
+                internal.convergence, "assess", side_effect=lambda result, **_kwargs: result),
             mock.patch.object(
                 internal.lifecycle, "collect", return_value=collected),
         ):
@@ -3515,7 +3519,10 @@ class TestActivationHandoff(TempRepository):
         self.assert_restored(self.old.name)
 
     def test_trigger_removal_failure_restores_previous_runtime(self) -> None:
+        from agents_live.runtime import handoff
+
         remove = self.host.trigger_store.remove
+        epoch = handoff.commit_epoch()
         count = 0
 
         def failing_remove(key):
@@ -3532,6 +3539,42 @@ class TestActivationHandoff(TempRepository):
             with self.assertRaisesRegex(deploy.generation.GenerationError, "trigger store unavailable"):
                 install_generation.activate_generation(self.new)
         self.assert_restored(self.old.name)
+        self.assertGreaterEqual(handoff.commit_epoch(), epoch + 6)
+        self.assertEqual(0, handoff.commit_epoch() % 2)
+
+    def test_activation_between_plan_and_commit_invalidates_old_runtime_artifacts(self) -> None:
+        from agents_live.runtime import handoff
+
+        original_render = self.host.render
+        original_plan = lifecycle.plan_maintenance
+        plans = []
+
+        def selected_render(subscription):
+            rendered = original_render(subscription)
+            selected = deploy.pointer.read().generation
+            return replace(rendered, fingerprint=f"{rendered.fingerprint}:{selected}")
+
+        def plan_then_activate():
+            prepared = original_plan()
+            plans.append(prepared)
+            if len(plans) == 1:
+                before = handoff.commit_epoch()
+                install_generation.activate_generation(self.new)
+                self.assertGreater(handoff.commit_epoch(), before)
+                self.assertEqual(prepared.inputs, lifecycle._maintenance_inputs())
+            return prepared
+
+        with (
+            mock.patch.object(self.host, "render", side_effect=selected_render),
+            mock.patch.object(lifecycle, "plan_maintenance", side_effect=plan_then_activate),
+            mock.patch.object(install_generation, "_run", side_effect=self.maintain),
+        ):
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(2, len(plans))
+        self.assertEqual(self.new.name, deploy.pointer.read().generation)
+        self.assertTrue(all(
+            trigger.fingerprint.endswith(f":{self.new.name}")
+            for trigger in self.host.trigger_store.list()))
 
     def test_unavailable_process_inventory_refuses_without_mutation(self) -> None:
         with mock.patch.object(hostruntime, "process_command_lines", return_value=[]):
@@ -3600,6 +3643,288 @@ class TestActivationHandoff(TempRepository):
             with self.assertRaises(lifecycle.CollectionUnavailable):
                 lifecycle.converge()
         self.assert_restored(self.old.name)
+
+
+class TestMaintenancePlanning(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        _root, self.host = self.enterContext(isolated_host(self.root))
+        repos.ensure_registered(self.root)
+        self.identifiers = []
+        for name in ("first", "second"):
+            self.skill(name, [
+                'agents-live.selector: "copilot"',
+                'agents-live.schedule: "0 9 * * *"',
+            ])
+            self.identifiers.append(agent.load(name, root=self.root).identifier)
+        state.replace(self.root, {self.identifiers[0]})
+
+    def test_slow_planning_and_health_do_not_exclude_launches(self) -> None:
+        from agents_live.runtime import convergence, handoff
+
+        phases = []
+
+        def free(phase, call):
+            def checked(*args, **kwargs):
+                with handoff.gate(operation="probe"):
+                    phases.append(phase)
+                return call(*args, **kwargs)
+            return checked
+
+        def gated(call):
+            def checked(*args, **kwargs):
+                with self.assertRaises(hostruntime.LockBusy), handoff.gate():
+                    pass
+                return call(*args, **kwargs)
+            return checked
+
+        write = paths.atomic_write_text
+
+        def written(path, *args, **kwargs):
+            if path == paths.health_beacon_path():
+                with handoff.gate(operation="probe"):
+                    phases.append("beacon")
+            return write(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(self.host.trigger_store, "list",
+                              side_effect=free("inventory", self.host.trigger_store.list)) as inventory,
+            mock.patch.object(self.host.supervisor, "owned",
+                              side_effect=free("watchers", self.host.supervisor.owned)) as watchers,
+            mock.patch.object(lifecycle, "collect", side_effect=free("collection", lifecycle.collect)),
+            mock.patch.object(self.host, "legacy_agents", side_effect=free("legacy", self.host.legacy_agents)),
+            mock.patch.object(self.host, "render", side_effect=free("render", self.host.render)),
+            mock.patch.object(convergence, "diff", side_effect=free("diff", convergence.diff)),
+            mock.patch.object(self.host, "health", side_effect=free("health", self.host.health)),
+            mock.patch.object(internal.retention, "maintain",
+                              side_effect=free("retention", internal.retention.maintain)),
+            mock.patch.object(self.host, "prepare", side_effect=gated(self.host.prepare)),
+            mock.patch.object(self.host.trigger_store, "install",
+                              side_effect=gated(self.host.trigger_store.install)),
+            mock.patch.object(state, "replace", side_effect=gated(state.replace)),
+            mock.patch.object(paths, "atomic_write_text", side_effect=written),
+        ):
+            self.assertEqual(0, internal.main(["maintain"]))
+            self.assertEqual(1, inventory.call_count)
+            self.assertEqual(1, watchers.call_count)
+        self.assertEqual(
+            {"inventory", "watchers", "collection", "legacy", "render", "diff",
+             "health", "retention", "beacon"}, set(phases))
+        self.assertEqual(2, len(self.host.trigger_store.list()))
+
+    def test_concurrent_start_invalidates_removal_and_preserves_new_trigger(self) -> None:
+        from agents_live.runtime import handoff
+
+        first, second = self.identifiers
+        self.assertFalse(lifecycle.converge().failed)
+        discovered = lifecycle._discover(self.root)[1]
+        trigger = self.host.render(discovered[second][0])
+        self.host.trigger_store.install(trigger)
+        original_plan = lifecycle.plan_maintenance
+        plans = []
+
+        def plan_then_start():
+            prepared = original_plan()
+            plans.append(prepared)
+            if len(plans) == 1:
+                self.assertIn(trigger.key, [
+                    op.key for op in prepared.runtime_plan.operations
+                    if op.kind == "remove-trigger"])
+                self.assertFalse(lifecycle.converge(
+                    additions={self.root: {second}}).failed)
+            return prepared
+
+        before = handoff.commit_epoch()
+        with (
+            mock.patch.object(lifecycle, "plan_maintenance", side_effect=plan_then_start),
+            mock.patch.object(self.host.trigger_store, "remove",
+                              wraps=self.host.trigger_store.remove) as removed,
+        ):
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(2, len(plans))
+        removed.assert_not_called()
+        self.assertIn(trigger.key, {item.key for item in self.host.trigger_store.list()})
+        self.assertEqual({first, second}, set(state.load(self.root).agents))
+        self.assertGreater(handoff.commit_epoch(), before)
+
+    def test_concurrent_stop_is_not_undone_by_a_stale_install(self) -> None:
+        identifier = self.identifiers[0]
+        original_plan = lifecycle.plan_maintenance
+        calls = []
+
+        def plan_then_stop():
+            prepared = original_plan()
+            calls.append(prepared)
+            if len(calls) == 1:
+                self.assertFalse(lifecycle.converge(
+                    removals={self.root: {identifier}}).failed)
+            return prepared
+
+        with mock.patch.object(lifecycle, "plan_maintenance", side_effect=plan_then_stop):
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(2, len(calls))
+        self.assertFalse(state.load(self.root).agents)
+        self.assertEqual(
+            {"runtime"}, {item.target for item in self.host.trigger_store.list()})
+
+    def test_started_and_registry_tokens_detect_changes_without_epoch_writes(self) -> None:
+        for changed in ("started", "registry"):
+            with self.subTest(changed=changed):
+                state.replace(self.root, {self.identifiers[0]})
+                original_plan = lifecycle.plan_maintenance
+                calls = []
+
+                def plan_then_edit():
+                    prepared = original_plan()
+                    calls.append(prepared)
+                    if len(calls) == 1:
+                        if changed == "started":
+                            state.replace(self.root, set(self.identifiers))
+                        else:
+                            second_root = self.root / "registered"
+                            second_root.mkdir()
+                            repos.ensure_registered(second_root)
+                    return prepared
+
+                with mock.patch.object(lifecycle, "plan_maintenance", side_effect=plan_then_edit):
+                    self.assertEqual(0, internal.main(["maintain"]))
+                self.assertEqual(2, len(calls))
+                if changed == "started":
+                    self.assertEqual(set(self.identifiers), set(state.load(self.root).agents))
+
+    def test_continuous_commits_defer_cleanly_after_three_plans(self) -> None:
+        self.assertFalse(lifecycle.converge().failed)
+        paths.atomic_write_text(
+            paths.health_beacon_path(), '{"status":"healthy","ts":"retained"}\n')
+        beacon = paths.health_beacon_path().read_bytes()
+        baseline = self.host.trigger_store.list()
+        original_plan = lifecycle.plan_maintenance
+
+        def invalidate():
+            prepared = original_plan()
+            self.assertFalse(lifecycle.converge().failed)
+            return prepared
+
+        with (
+            mock.patch.object(lifecycle, "plan_maintenance", side_effect=invalidate) as planning,
+            mock.patch.object(lifecycle, "commit_maintenance",
+                              wraps=lifecycle.commit_maintenance) as committing,
+            mock.patch.object(internal, "_retry_sleep") as sleeping,
+        ):
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(3, planning.call_count)
+        committing.assert_not_called()
+        sleeping.assert_not_called()
+        self.assertEqual(baseline, self.host.trigger_store.list())
+        self.assertEqual(beacon, paths.health_beacon_path().read_bytes())
+        records = obs.load([internal.adminlog.log_path()])
+        self.assertEqual(1, sum(
+            record.get("operation") == "maintenance_deferred" for record in records))
+        terminal = records[-1]
+        self.assertEqual("deferred", terminal["status"])
+        self.assertEqual(3, terminal["plan_attempts"])
+        self.assertEqual(0, terminal["exit_code"])
+        self.assertFalse(any(record.get("error_category") == "maintenance_failed" for record in records))
+
+    def test_failed_and_partial_commits_advance_epoch(self) -> None:
+        from agents_live.runtime import handoff
+
+        before = handoff.commit_epoch()
+        original_install = self.host.trigger_store.install
+
+        def partially_install(rendered):
+            original_install(rendered)
+            if rendered.target != "runtime":
+                raise OSError("failed after writing trigger")
+
+        with (
+            mock.patch.object(self.host.trigger_store, "install", side_effect=partially_install),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(1, internal.main(["maintain"]))
+        self.assertGreater(handoff.commit_epoch(), before)
+        self.assertEqual(0, handoff.commit_epoch() % 2)
+        self.assertEqual(2, len(self.host.trigger_store.list()))
+        before = handoff.commit_epoch()
+        with mock.patch.object(self.host.trigger_store, "install", side_effect=OSError("refused")):
+            self.assertTrue(lifecycle.converge(
+                additions={self.root: {self.identifiers[1]}}).failed)
+        self.assertGreater(handoff.commit_epoch(), before)
+        self.assertEqual(0, handoff.commit_epoch() % 2)
+
+    def test_plan_observed_mid_commit_cannot_be_used_after_writer_finishes(self) -> None:
+        from agents_live.runtime import handoff
+
+        prepared = []
+        original_install = self.host.trigger_store.install
+
+        def snapshot_during_install(rendered):
+            if not prepared:
+                prepared.append(lifecycle.plan_maintenance())
+            original_install(rendered)
+
+        with mock.patch.object(self.host.trigger_store, "install", side_effect=snapshot_during_install):
+            self.assertFalse(lifecycle.converge().failed)
+        self.assertEqual(1, prepared[0].epoch % 2)
+        with handoff.gate():
+            self.assertFalse(lifecycle.maintenance_plan_current(prepared[0]))
+
+    def test_epoch_write_failures_refuse_or_leave_an_invalid_partial_commit(self) -> None:
+        from agents_live.runtime import handoff
+
+        write = paths.atomic_write_text
+        before = state.load(self.root)
+        for fail_on in (1, 2):
+            with self.subTest(fail_on=fail_on):
+                writes = []
+
+                def denied(path, content, **kwargs):
+                    if path.name == "runtime-commit-epoch":
+                        writes.append(content)
+                        if len(writes) == fail_on:
+                            raise OSError("epoch write denied")
+                    return write(path, content, **kwargs)
+
+                with (
+                    mock.patch.object(paths, "atomic_write_text", side_effect=denied),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(1, internal.main(["maintain"]))
+                self.assertEqual(before, state.load(self.root))
+                self.assertFalse(paths.health_beacon_path().exists())
+                if fail_on == 1:
+                    self.assertEqual([], self.host.trigger_store.list())
+                    self.assertEqual(0, handoff.commit_epoch())
+                else:
+                    self.assertEqual(2, len(self.host.trigger_store.list()))
+                    self.assertEqual(1, handoff.commit_epoch() % 2)
+                    self.assertEqual(0, internal.main(["maintain"]))
+                    self.assertEqual(0, handoff.commit_epoch() % 2)
+                    self.assertTrue(paths.health_beacon_path().exists())
+
+    def test_interrupted_epoch_requires_fresh_planning_before_recovery(self) -> None:
+        from agents_live.runtime import handoff
+
+        paths.atomic_write_text(paths.state_home() / "runtime-commit-epoch", "1\n")
+        with mock.patch.object(lifecycle, "plan_maintenance",
+                               wraps=lifecycle.plan_maintenance) as planning:
+            self.assertEqual(0, internal.main(["maintain"]))
+        self.assertEqual(2, planning.call_count)
+        self.assertEqual(2, len(self.host.trigger_store.list()))
+        self.assertEqual(0, handoff.commit_epoch() % 2)
+        self.assertTrue(paths.health_beacon_path().exists())
+
+    def test_dry_run_does_not_commit_adoption_or_take_the_gate(self) -> None:
+        from agents_live.runtime import handoff
+
+        discovered = lifecycle._discover(self.root)[1]
+        self.host.trigger_store.install(self.host.render(discovered[self.identifiers[0]][0]))
+        (paths.repo_state_dir(self.root) / "started.json").unlink()
+        with mock.patch.object(handoff, "gate", side_effect=AssertionError("preview acquired gate")):
+            self.assertEqual(0, internal.main(["maintain", "--dry-run"]))
+        self.assertFalse(state.load(self.root).initialized)
+        self.assertEqual(0, handoff.commit_epoch())
+        self.assertFalse(paths.health_beacon_path().exists())
 
 
 class TestClockActivationHandoff(TempRepository):

@@ -1640,9 +1640,10 @@ class TestRuntimeCore(unittest.TestCase):
         argv = json.loads(rendered.rendered)["argv"]
         self.assertEqual(str(launcher.resolve()), argv[0])
         result = mock.Mock(done=(), failed=(), health=Health(True))
-        collected = mock.Mock(subscriptions=())
+        collected = lifecycle.Collected((), ())
         with (
-            mock.patch.object(internal.lifecycle, "converge", return_value=result),
+            isolated_host(),
+            mock.patch.object(internal.convergence, "assess", return_value=result),
             mock.patch.object(internal.lifecycle, "collect", return_value=collected),
             mock.patch(
                 "agents_live.cli.main.state.resolve_root",
@@ -1680,12 +1681,15 @@ class TestRuntimeCore(unittest.TestCase):
             beacon = root / "health.ok"
             log = root / "admin.log"
             result = mock.Mock(done=(), failed=(), health=Health(True))
-            collected = mock.Mock(subscriptions=())
+            collected = lifecycle.Collected((), ())
             metadata = runtime.artifacts.InvocationMetadata(
                 "0123456789abcdef01234567", "runtime:test", "runtime")
             with (
+                isolated_host(root),
                 mock.patch.object(
-                    internal.lifecycle, "_converge", return_value=result),
+                    internal.lifecycle, "commit_maintenance", return_value=result),
+                mock.patch.object(
+                    internal.convergence, "assess", return_value=result),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1729,7 +1733,7 @@ class TestRuntimeCore(unittest.TestCase):
                 mock.Mock(
                     done=(), failed=(),
                     health=Health(False, "stale", detail=("beacon stale",))),
-                mock.Mock(subscriptions=()),
+                lifecycle.Collected((), ()),
                 "unhealthy",
             ),
         )
@@ -1742,8 +1746,11 @@ class TestRuntimeCore(unittest.TestCase):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
                 log = Path(temporary) / "admin.log"
                 with (
+                    isolated_host(),
                     mock.patch.object(
-                        internal.lifecycle, "_converge", return_value=result),
+                        internal.lifecycle, "commit_maintenance", return_value=result),
+                    mock.patch.object(
+                        internal.convergence, "assess", return_value=result),
                     mock.patch.object(
                         internal.lifecycle, "collect",
                         side_effect=(collected if isinstance(
@@ -1767,7 +1774,7 @@ class TestRuntimeCore(unittest.TestCase):
                 self.assertEqual(expected_health, records[1]["health"])
 
     def test_internal_maintain_refreshes_the_host_health_beacon(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, isolated_host(Path(temporary)):
             root = Path(temporary)
             beacon = root / "health.ok"
             beacon.write_text(json.dumps({
@@ -1795,13 +1802,14 @@ class TestRuntimeCore(unittest.TestCase):
             )
             result = mock.Mock(
                 failed=(), health=Health(True, "not-required"))
-            collected = mock.Mock(subscriptions=subscriptions)
+            collected = lifecycle.Collected(subscriptions, ())
             converge_maintenance = mock.Mock(return_value=result)
             with (
                 mock.patch.object(
-                    internal.lifecycle, "converge", converge_maintenance),
+                    internal.lifecycle, "commit_maintenance", converge_maintenance),
                 mock.patch.object(
-                    internal.lifecycle, "_converge", converge_maintenance),
+                    internal.convergence, "assess",
+                    side_effect=lambda _result, **_kwargs: converge_maintenance.return_value),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1838,7 +1846,9 @@ class TestRuntimeCore(unittest.TestCase):
             converge_maintenance.return_value = result
             with (
                 mock.patch.object(
-                    internal.lifecycle, "_converge", converge_maintenance),
+                    internal.lifecycle, "commit_maintenance", converge_maintenance),
+                mock.patch.object(
+                    internal.convergence, "assess", return_value=result),
                 mock.patch.object(
                     internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
@@ -1904,9 +1914,11 @@ class TestRuntimeCore(unittest.TestCase):
                     kind="schedule", trigger="0 8 * * *"),
             )
             result = mock.Mock(failed=(), health=Health(True, "not-required"))
-            collected = mock.Mock(subscriptions=subscriptions)
+            collected = lifecycle.Collected(subscriptions, ())
             with (
-                mock.patch.object(internal.lifecycle, "_converge", return_value=result),
+                isolated_host(),
+                mock.patch.object(internal.lifecycle, "commit_maintenance", return_value=result),
+                mock.patch.object(internal.convergence, "assess", return_value=result),
                 mock.patch.object(internal.lifecycle, "collect", return_value=collected),
                 mock.patch.object(
                     internal.paths, "health_beacon_path", return_value=beacon),
