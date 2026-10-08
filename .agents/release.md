@@ -170,7 +170,13 @@ the installed tool as an additional release acceptance check.
 
 Use `--prepare-attempt <attempt> --yes` in its retained worktree to retry unchanged
 preparation. Completed builds are reused byte-for-byte; changed or unreceipted
-bytes are refused. An interruption before the commit/build record is complete
+bytes are refused. Normal `local-deploy.py --rc <rc>` also reuses an existing
+prepared attempt after instruction-only descendant commits: the retained source
+must be an ancestor of current tooling, with all package inputs unchanged,
+including the skill changelog. It requires no readiness requalification and
+records candidate source and tooling commits separately in the deployment
+receipt. Package-input changes or non-ancestor source require the next RC.
+An interruption before the commit/build record is complete
 may require a new identity after preserving the failed attempt for inspection.
 Use `--accept-candidate --attempt <attempt> --resume` with all live arguments
 and `--yes` only when a matching upgrade checkpoint exists. Cycle mutation and
@@ -202,7 +208,8 @@ Hatch's default sdist also includes this collateral, but requalification reuses
 all four retained artifacts byte-for-byte, not a new sdist built from the tooling
 checkout. This is a candidate package-staleness check, not an assertion that
 every retained sdist file matches current tooling. Provider-readiness recovery
-shares the input check without the changelog exception. Neither path bypasses
+shares the input check without the changelog exception, as does normal retained
+candidate deployment. None of these paths bypasses
 artifact or provider-health checks. Use the corrected tooling for subsequent explicit
 `--attempt` acceptance, finalization and publication; it selects and verifies
 the retained checkout before acting. Operational acceptance remains separate.

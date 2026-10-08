@@ -245,15 +245,22 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         lock.unlink()
 
 
-def _prepare_candidate(commit: str, version: str) -> tuple[Path, str]:
+def _prepare_candidate(tool_commit: str, version: str) -> tuple[str, Path, str]:
     directory = RELEASE["_cycle_directory"](version.split("rc", 1)[0]) / version
     if not (directory / "attempt.json").exists():
         RELEASE["prepare_cycle"](rc=version)
     record = RELEASE["_load_attempt"](version)
-    if record["source_commit"] != commit:
-        raise LocalDeployError("prepared RC belongs to different source; use the next RC")
+    commit = record["source_commit"]
+    if commit != tool_commit:
+        ancestry = _run([
+            "git", "merge-base", "--is-ancestor", commit, tool_commit,
+        ], capture=True, check=False)
+        if ancestry.returncode != 0:
+            raise LocalDeployError(
+                "retained source is not an ancestor of deployment tooling; use the next RC")
+        _require_unchanged_package_inputs(commit, tool_commit)
     preparation = RELEASE["_retained_preparation"](record)
-    return Path(preparation["wheel"]), preparation["wheel_sha256"]
+    return commit, Path(preparation["wheel"]), preparation["wheel_sha256"]
 
 
 def _build_artifact(commit: str, version: str) -> tuple[Path, str]:
@@ -672,7 +679,7 @@ def _postcheck(
 
 
 def _write_receipt(
-    *, commit: str, version: str, previous_version: str, wheel: Path,
+    *, commit: str, tool_commit: str, version: str, previous_version: str, wheel: Path,
     wheel_sha256: str, operation_id: str | None,
     baseline: tuple[tuple[object, ...], ...],
     watchers: tuple[tuple[str, str], ...],
@@ -684,6 +691,7 @@ def _write_receipt(
         "deployed": True,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
         "commit": commit,
+        "tool_commit": tool_commit,
         "version": version,
         "previous_version": previous_version,
         "wheel": str(wheel),
@@ -752,7 +760,7 @@ def deploy(
             raise LocalDeployError("deployment requires reviewed readiness requalification")
         wheel, digest = Path(preparation["wheel"]), preparation["wheel_sha256"]
     else:
-        wheel, digest = _prepare_candidate(commit, version)
+        commit, wheel, digest = _prepare_candidate(tool_commit, version)
     _require_unchanged_checkout(tool_commit)
     with ThreadPoolExecutor(max_workers=3) as pool:
         status_future = pool.submit(RELEASE["_installed_all_json"], "status")
@@ -838,7 +846,8 @@ def deploy(
             _restart_dashboards(tuple(stopped))
         raise
     receipt = _write_receipt(
-        commit=commit, version=version, previous_version=previous_version,
+        commit=commit, tool_commit=tool_commit,
+        version=version, previous_version=previous_version,
         wheel=wheel, wheel_sha256=digest, operation_id=None,
         baseline=baseline, watchers=all_watchers, dashboards=tuple(stopped))
     if recovery is not None:

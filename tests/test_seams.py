@@ -1342,7 +1342,7 @@ class TestReleaseTool(unittest.TestCase):
                 "_release_configuration": lambda: ("main", "6.9.4"),
                 "_requested_rc": lambda *_args, **_kwargs: "6.9.4rc1",
                 "_prepare_candidate": lambda *_args: (
-                    temporary_root / "candidate.whl", "digest"),
+                    "a" * 40, temporary_root / "candidate.whl", "digest"),
                 "_require_unchanged_checkout": lambda _commit: None,
                 "_installed_cli": lambda: (
                     temporary_root / "runtime" / "Scripts" / "agents-live.exe"),
