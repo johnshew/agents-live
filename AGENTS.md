@@ -26,12 +26,16 @@ Preserve compatible unfinished goals and explicit sequencing dependencies. A
 question or status request does not pause work. Continue authorized, unblocked
 work until acceptance, an explicit pause/stop, or a genuine boundary prevents it.
 
-After steering and completion summaries, show a scoped single-line checklist for
-goals/workstreams, steering, repository protocol and GLP, followed by a brief
-workstream/phase/verified-delta/next-action update. Refresh it at meaningful phase,
-checkpoint, blocker and resumption changes; do not repeat unchanged ceremony.
-Use ASCII `[x]` and `[ ]` instead of the portable contract's Unicode symbols.
-Check only verified obligations and name pending or not-needed dispositions.
+After steering and completion summaries, provide a brief
+workstream/phase/verified-delta/next-action update. Harnesses other than the
+GitHub Copilot app and Copilot CLI also show a scoped single-line checklist for
+goals/workstreams, steering, repository protocol and GLP. Refresh applicable
+status at meaningful phase, checkpoint, blocker and resumption changes; do not
+repeat unchanged ceremony. For those checklists, use ASCII `[x]` and `[ ]`
+instead of the portable contract's Unicode symbols. Check only verified
+obligations and name pending or
+not-needed dispositions. The harness-aware exception and final-accounting duties
+are defined in Local Policy below.
 
 Before reporting completion, run session analysis and the GLP learning pass,
 apply any necessary authorized durable updates and independently read them back.
@@ -43,8 +47,11 @@ open work; continue if an authorized, unblocked action remains.
 
 Delegate substantive work when allowed and supported, within the current user's
 scope, tool restrictions and project policies. Give delegates bounded ownership
-and require compact evidence reports; the supervisor verifies acceptance. If
-delegation is unavailable or prohibited, proceed directly within authority.
+and require compact evidence reports; the supervisor verifies acceptance. A
+coordinator or session handoff carries standing rules and later developer
+directions, plus each workstream's owner, branch or head SHA, state and next
+action. If delegation is unavailable or prohibited, proceed directly within
+authority.
 
 ### Local Policy and Overrides
 
@@ -52,9 +59,21 @@ This policy overrides the portable contracts' tracked-log, checkpoint-all-edits
 and publication defaults. Existing project safety, validation and release rules
 prevail; CDL/GLP add no write, integration, release or deployment authority.
 
-- **Session records:** create one UUID-named, UTC-timestamped Markdown log in
-  gitignored `logs/cdl/`; reuse it across turns/resumption and append verified
-  snapshots, outcomes and GLP dispositions. Logs remain local-only: never track,
+- **Plain-language reporting:** describe each workstream by its purpose for the
+  developer, what is ready or blocked, and the next action. Omit session IDs, SHAs
+  and code names unless requested or needed for a technical handoff.
+- **Harness-aware bookkeeping:** in the GitHub Copilot app or Copilot CLI, the
+  harness already records session history, so do not create a local `logs/cdl/`
+  session log or print the per-update single-line checklist. Still provide the
+  answer-first final accounting of every goal and workstream, outstanding checks,
+  learning, publication and open decisions before stopping; include evidence in
+  delegate handoffs; and run the GLP learning pass with independent readback. Other
+  harnesses keep the log and checklist rules below. This local exception overrides
+  the portable CDL session-log and checklist defaults only for the named harnesses.
+- **Session records:** in harnesses other than the GitHub Copilot app or Copilot
+  CLI, create one UUID-named, UTC-timestamped Markdown log in gitignored
+  `logs/cdl/`; reuse it across turns/resumption and append verified snapshots,
+  outcomes and GLP dispositions. Logs remain local-only: never track,
   commit, push or publish them, including receipt-only checkpoints. Do not copy
   raw operational logs into docs, issues, PRs or memory. Publish only sanitized
   instruction/GLP changes under explicit authority. Preserve pre-adoption records
@@ -364,3 +383,36 @@ release scope.
 #### Follow-up
 Fold into the steering guidance at the next consolidation of this document.
 <!-- /glp-update:v1 id=3ab5dbe2-212c-4db9-ac2f-edad5bc0f035 -->
+
+<!-- glp-update:v1 id=862700f1-84a3-428c-b798-a76a2b4011c3 -->
+<a id="glp-862700f1-84a3-428c-b798-a76a2b4011c3"></a>
+### GLP Update: Safer fixtures, coordinated integration and harness-aware reporting
+
+- Update-ID: 862700f1-84a3-428c-b798-a76a2b4011c3
+- Recorded-UTC: 2026-10-08T18:42:04Z
+- Kind: addition
+- Topics: testing fixtures, negative probes, RC integration, handoffs, release reporting, harness bookkeeping
+- Workstream: reviewed testing and coordination instruction adoption
+- Target: AGENTS.md Local Policy and handoffs; .agents/testing.md; docs/testing-methodology.md; .agents/development.md; .agents/release-report.md; tools/release-report.py; .agents/cdl-glp/README.md; compared worktree baseline d174cb52
+- Source-Session: reviewed method-learning comparison and developer decision, 2026-10-08
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Observed-use defects should become sanitized causal fixtures exercised through owning code, while causal scale or distribution retains a full-size synthetic or retained check. Guarded negative probes must remain harmless if the guard fails. RC integration uses one reusable tester per candidate, one owner for live runtime mutation/restoration, serialized integration and gate reuse only for unchanged inputs. Handoffs preserve governing rules and current owner, branch/head, state and next action. Reports put readiness, blockers and next action before identities. In the GitHub Copilot app and Copilot CLI, existing session history replaces local CDL logs and per-update checklists while final accounting, delegate evidence and GLP readback remain required. Plain-language status describes purpose, readiness and next action without unnecessary internal identifiers.
+
+#### Evidence
+- A reviewed method-learning comparison with another repository maintained by the developer, 2026-10-08, second-model reviewed; adoption scope supplied by the developer for these destinations.
+- Developer decision, 2026-10-08: use GitHub Copilot app/CLI session history instead of local `logs/cdl/` logs and per-update checklists, while retaining answer-first final accounting, delegate evidence, and GLP readback.
+- Documentation and report-order changes were checked against the destinations listed in Target; no private source text or identity was copied.
+
+#### Previous Knowledge
+The compared worktree baseline had test and release guidance but not these causal-fixture, negative-probe, and coordinated-integration requirements. AGENTS.md and the adaptation guide required local logging and checklists without a harness exception. The portable CDL contract still states those defaults; this project's explicit Local Policy overrides them for the GitHub Copilot app and Copilot CLI without modifying the vendored contract. Release reporting required next actions but did not prioritize readiness and blockers ahead of source identities.
+
+#### Verification and Limits
+Two focused release-report behavior tests passed, including assertions that readiness, blocker and next action precede the source-identity table. `uv run --script tools/release-report.py` generated a report with that order. The pre-release audit scanned 168 files and reported no issues. Documentation checks do not claim fresh-client, installed-runtime or RC acceptance. Final checks after this append remain required.
+
+#### Follow-up
+At a separately scoped consolidation, fold this pending update into AGENTS.md and assess other pending records in the same document. No other repository is identified or cited.
+<!-- /glp-update:v1 id=862700f1-84a3-428c-b798-a76a2b4011c3 -->

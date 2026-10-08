@@ -27,6 +27,13 @@ text or a mocked translation. Before keeping a regression test, demonstrate
 that it fails when its fix is absent; a test that stays green does not guard
 the defect.
 
+When a defect comes from observed use, reduce the observed input to a sanitized
+fixture that preserves the causal property and drive it through the owning code.
+When size or distribution is causal, keep a full-size synthetic or retained
+check. Keep existing safety and fault-injection mocks. Acceptance means eventual
+recovery, not one successful partial result. Never put real user data or private
+paths in tracked fixtures.
+
 ## Test boundaries
 
 For the numbered-RC cycle tracked in
@@ -248,6 +255,10 @@ Preparation evidence and immutable wheels live under the common Git directory,
 shared by all worktrees. Moving to a clean worktree must not trigger a repeat
 of an already successful build or dashboard gate for the same commit, digest,
 platform, interpreter, and gate list. A valid receipt skips both commands.
+For large coordinated work, use one reusable integration tester per RC that
+returns the tested head, base, scope and result. One agent owns live local runtime
+mutation and restoration during RC deployment; serialize integration and do not
+rerun a gate already passed on the same head and environment.
 Never delete this common artifact storage when removing a worktree.
 
 Do not repeat a passing check simply because work moved from implementation to

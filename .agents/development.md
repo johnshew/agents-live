@@ -105,7 +105,10 @@ reports any package and skill payload version mismatch.
 Follow [subagent-models.md](subagent-models.md) when selecting development and
 review models. Disclose unavailable model or effort controls rather than
 silently substituting. Small trivial edits and short reads may stay with the
-supervisor under CDL.
+supervisor under CDL. For large coordinated work, use one reusable integration
+tester per RC that returns the tested head, base, scope and result. One agent
+owns live local runtime mutation and restoration during RC deployment; serialize
+integration. Do not rerun a gate already passed on the same head and environment.
 
 ## Commit hygiene
 

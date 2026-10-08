@@ -155,6 +155,13 @@ message.
 an implementation detail" is a valid reason to delete. "It no longer compiles"
 is not; that is the moment the test is doing its job.
 
+When a defect comes from observed use, reduce the observed input to a sanitized
+fixture that preserves the causal property and drive it through the owning code.
+When size or distribution is causal, keep a full-size synthetic or retained
+check. Keep existing safety and fault-injection mocks. Acceptance means eventual
+recovery, not one successful partial result. Never put real user data or private
+paths in tracked fixtures.
+
 **Every gate runs against the artifact, not only the source.** The release
 gates build the wheel and then exercise it. A cross-module assertion in
 `tests/test_behaviors.py` requires every `tests/test_*.py` to appear in both
@@ -192,7 +199,10 @@ roots, and restores the adapter and environment even after an exception. All
 portable suites enable `native_guard()`: an audit hook rejects native scheduler
 writes and watcher launches before subprocess execution. The hook protects the
 test interpreter, not arbitrary child interpreters; subprocess fixtures must
-also import and enable it or isolate their OS effects explicitly.
+also import and enable it or isolate their OS effects explicitly. A negative probe must remain harmless even if its guard fails:
+target a disposable resource, cover every constructor, alias and child-process
+path, pin storage and configuration defaults before imports, and assert an
+observable no-write postcondition.
 
 Real scheduler tests require both `AGENTS_LIVE_TEST_NATIVE=1` and a narrowly
 scoped `allow_native_runtime()` context. They must use unique resource names

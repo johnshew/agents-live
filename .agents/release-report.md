@@ -99,6 +99,10 @@ their immutable receipts. Never discard another writer's changes.
 
 ## Evidence and report contents
 
+The report and each summary lead with readiness, the blocker and the next action;
+reference detail such as hashes and other identities follows the decision-oriented
+summary.
+
 - Show every configured release cycle, its full source commit, selected and next
   RC, approval, decisions, blockers, recommendation and concrete next action.
 - Show retained candidate and final attempts, including prepared but unselected,
