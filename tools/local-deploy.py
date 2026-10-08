@@ -89,6 +89,33 @@ def _git(*args: str) -> str:
     return _run(["git", *args], capture=True).stdout.strip()
 
 
+def _changed_package_inputs(
+    changed: list[str], *, allow_changelog: bool = False,
+) -> list[str]:
+    # Retained artifacts are reused, not rebuilt from later sdist-only collateral.
+    inputs = {"pyproject.toml", "README.md", "LICENSE", ".gitignore",
+              "install.ps1", "install.sh"}
+    changelog = "src/agents_live/skill/docs/changelog.md"
+    return sorted({
+        path for path in changed
+        if (path in inputs or path == "src" or path.startswith("src/"))
+        and not (allow_changelog and path == changelog)
+    })
+
+
+def _require_unchanged_package_inputs(
+    source_commit: str, tool_commit: str, *, allow_changelog: bool = False,
+) -> None:
+    changed = _git(
+        "diff", "--no-renames", "--name-only", source_commit, tool_commit,
+    ).splitlines()
+    offending = _changed_package_inputs(changed, allow_changelog=allow_changelog)
+    if offending:
+        raise LocalDeployError(
+            "candidate package inputs changed; use a new RC: "
+            + ", ".join(offending))
+
+
 def _release_configuration() -> tuple[str, str]:
     try:
         configuration = tomllib.loads(CYCLES.read_text(encoding="utf-8"))
@@ -708,9 +735,7 @@ def deploy(
             raise LocalDeployError("retained source identity is invalid")
         if _git("merge-base", commit, tool_commit) != commit:
             raise LocalDeployError("retained candidate is not an ancestor of recovery tooling")
-        if _git("diff", "--name-only", commit, tool_commit, "--",
-                "src", "pyproject.toml", "install.ps1", "install.sh"):
-            raise LocalDeployError("candidate package inputs changed; use a new RC")
+        _require_unchanged_package_inputs(commit, tool_commit)
         prepared = _prepared_artifact(commit, version)
         if prepared is None:
             raise LocalDeployError("recovery requires matching successful packaged readiness")
@@ -720,12 +745,7 @@ def deploy(
         commit = record["source_commit"]
         if _git("merge-base", commit, tool_commit) != commit:
             raise LocalDeployError("retained source is not an ancestor of deployment tooling")
-        changed = set(_git("diff", "--name-only", commit, tool_commit).splitlines())
-        collateral = {".agents/release.md", "tools/release.py", "tools/local-deploy.py",
-                      "tools/dashboard-readiness.py", "src/agents_live/skill/docs/changelog.md"}
-        if any(path not in collateral and not path.startswith(("docs/", "tests/"))
-               for path in changed):
-            raise LocalDeployError("candidate package inputs changed; use a new RC")
+        _require_unchanged_package_inputs(commit, tool_commit, allow_changelog=True)
         preparation = RELEASE["_retained_preparation"](record)
         validator = preparation.get("readiness_recovery")
         if not validator or _git("merge-base", validator["tool_commit"], tool_commit) != validator["tool_commit"]:

@@ -11,6 +11,9 @@ history is retained in the source repository.
 
 ## Unreleased
 
+- fix: allow instruction-only changes when deploying a requalified retained candidate. (#572)
+  Package, metadata and installer changes still require a new RC, with offending
+  paths named in both requalification and provider-readiness recovery refusals.
 - fix: keep dashboard readiness from blocking a noisy server on undrained output.
 - fix: keep slow maintenance planning outside the runtime launch gate. (#565)
   Inventory, rendering and drift detection no longer exclude agent launches.
