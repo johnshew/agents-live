@@ -8416,6 +8416,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
             result = json.loads(render(config, moment, as_json=True))
             self.assertEqual("RC prepared", result["cycles"]["1.2.3"]["state"])
             self.assertIn("decision_needed", report)
+            self.assertIn("Readiness: RC prepared.", report)
+            self.assertIn("Blocker:", report)
+            self.assertIn("Next action:", report)
+            self.assertLess(report.index("## Readiness, blockers, and next actions"),
+                            report.index("| Target | Source branch | Source commit |"))
             self.assertIn("#395", report)
             self.assertIn("#400", report)
             self.assertIn("rejected: retained", report)
@@ -8428,7 +8433,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
             self.assertEqual("not-verified", result["cycles"]["1.2.3"]["pypi_status"])
             published = True
             result = json.loads(render(config, moment, as_json=True))
+            published_report = render(config, moment)
             self.assertEqual("published", result["cycles"]["1.2.3"]["state"])
+            self.assertIn("Blocker: None; this cycle is published.", published_report)
+            self.assertIn("Continue later runtime work in a subsequent development cycle", published_report)
             self.assertEqual([], result["next_actions"])
             self.assertEqual("not-verified", result["cycles"]["1.2.3"]["pypi_status"])
 

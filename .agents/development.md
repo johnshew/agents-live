@@ -105,7 +105,10 @@ reports any package and skill payload version mismatch.
 Follow [subagent-models.md](subagent-models.md) when selecting development and
 review models. Disclose unavailable model or effort controls rather than
 silently substituting. Small trivial edits and short reads may stay with the
-supervisor under CDL.
+supervisor under CDL. For large coordinated work, use one reusable integration
+tester per RC that returns the tested head, base, scope and result. One agent
+owns live local runtime mutation and restoration during RC deployment; serialize
+integration. Do not rerun a gate already passed on the same head and environment.
 
 ## Commit hygiene
 
@@ -180,3 +183,50 @@ agents-live framework; the earlier flow that assembled releases from a
 private source repository is retired. Consumer repositories receive the skill
 payload through `agents-live init`/`upgrade`; never treat an installed payload
 as a source checkout or propose back-porting changes into one.
+
+<!-- glp-update:v1 id=c90f511b-cf45-4dac-a71d-bd556d82e313 -->
+<a id="glp-c90f511b-cf45-4dac-a71d-bd556d82e313"></a>
+### GLP Update: Select the repository owner account before each gh sequence
+
+- Update-ID: c90f511b-cf45-4dac-a71d-bd556d82e313
+- Recorded-UTC: 2026-10-08T14:21:29Z
+- Kind: correction
+- Topics: github-cli, credentials, gh auth switch, GH_TOKEN, issue creation
+- Workstream: 6.9.4rc5 (#565) orchestration
+- Target: .agents/development.md, Commit hygiene; compared origin/main dccdc4b
+- Source-Session: CDL session 2026-10-08 (local log only)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+The developer directed that every `gh` command sequence start by switching to
+the repository owner account (`gh auth switch --user <owner>`). A `GH_TOKEN`
+(or `GITHUB_TOKEN`) environment
+variable overrides the switch, so clear it in the command process first. When
+the in-app issue tool returns 403 for an Enterprise Managed User, file the issue
+with `gh` under the owner account instead of retrying the tool.
+
+#### Evidence
+- User direction, 2026-10-08: start each gh command sequence by switching to
+  the right user, naming the repository owner account.
+- Observed 2026-10-08: the issue tool and `gh issue create` returned "As an
+  Enterprise Managed User, you cannot access this content"; `gh auth switch`
+  then printed that the `GH_TOKEN` value was being used. After removing
+  `GH_TOKEN` in the process and switching, `gh issue create` filed #566.
+
+#### Previous Knowledge
+Commit hygiene above says to use an owner credential scoped to the command
+process and never switch the shared active account while other agents work.
+This user direction supersedes the "never switch" clause for this repository.
+Process-scoped token removal remains required; do not print tokens.
+
+#### Verification and Limits
+Verified once by filing #566. `gh auth switch` changes the shared active
+account for every process on the host, so a concurrent agent that expects a
+different account may be affected; the developer accepted this by directing
+the switch. Whether the switch should be undone afterwards is unknown.
+
+#### Follow-up
+Fold into Commit hygiene at the next consolidation of this document.
+<!-- /glp-update:v1 id=c90f511b-cf45-4dac-a71d-bd556d82e313 -->

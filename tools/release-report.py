@@ -117,6 +117,7 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
     except (OSError, ReportError) as exc:
         installed = f"unavailable: {exc}"
     cycles = {}
+    summary_actions = {}
     inventory = _retained_inventory()
     actions = []
     assigned = set()
@@ -165,6 +166,7 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
                 action = (f"Finish planned {version} work and source validation, then prepare {cycle['next_rc']} "
                           "under release authority. Artifact and operational acceptance remain independent.")
             actions.append(action)
+            summary_actions[version] = action
         rows = []
         for disposition, numbers in cycle.get("issues", {}).items():
             for number in numbers:
@@ -177,6 +179,11 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
                                approval_valid=approval_valid, source_changes=source_changes,
                                work=rows, github_published=published,
                                pypi_status="not-verified")
+    for version, cycle in cycles.items():
+        if cycle["github_published"]:
+            summary_actions[version] = (
+                "Continue later runtime work in a subsequent development cycle; "
+                "do not republish this version.")
     unassigned = [item for item in issues if item["number"] not in assigned]
     payload = {"schema": 2, "generated_at": generated_at.isoformat(),
                "repository": repository, "target_branch": config["development_branch"],
@@ -187,8 +194,15 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
                "next_actions": actions}
     if as_json:
         return json.dumps(payload, indent=2) + "\n"
-    lines = ["# Release Report", "",
-             f"Point-in-time report for {repository}, generated at `{generated_at.isoformat()}`.",
+    lines = ["# Release Report", "", "## Readiness, blockers, and next actions", ""]
+    for version, cycle in cycles.items():
+        recommendation = cycle.get("recommendation", "No blocker or recommendation recorded.")
+        blocker = "None; this cycle is published." if cycle["github_published"] else recommendation
+        lines.extend([f"### {version}", "", f"Readiness: {cycle['state']}.",
+                      f"Blocker: {blocker}", f"Next action: {summary_actions[version]}", ""])
+        if cycle["github_published"]:
+            lines.extend([f"Context: {recommendation}", ""])
+    lines.extend([f"Point-in-time report for {repository}, generated at `{generated_at.isoformat()}`.",
              "", f"Latest GitHub stable release: `{latest or 'none'}`. PyPI availability is not independently verified.",
              f"Local selection: {installed}.", "",
              "Local activation is part of RC testing. Installation is not publication approval.",
@@ -196,13 +210,12 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
              "Publication audits tagged source and uploads retained bytes without rebuilding.",
              "", "## Release Cycles", "",
              "| Target | Source branch | Source commit | Selected RC | Next RC | State |",
-             "|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|"])
     for version, cycle in cycles.items():
         lines.append(f"| {version} | `{cycle['branch']}` | `{cycle['commit']}` | "
                      f"{cycle.get('selected_rc', '-')} | {cycle.get('next_rc', '-')} | {cycle['state']} |")
     for version, cycle in cycles.items():
-        lines.extend(["", f"## {version}", "", cycle.get("recommendation", ""), "",
-                      "### Candidates and Final Packages", "",
+        lines.extend(["", f"## {version}", "", "### Candidates and Final Packages", "",
                       "| Attempt | Local evidence |", "|---|---|"])
         for attempt in cycle["attempts"]:
             lines.append(f"| {attempt['attempt']} | {attempt['state']} |")

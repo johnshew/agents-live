@@ -25,13 +25,22 @@ document or export checks alone.
 The canonical contracts below are preserved without project-specific additions.
 The following explicit overrides in AGENTS.md take precedence over their defaults:
 
-- Session logs live in gitignored `logs/cdl/` and remain local-only. Do not track,
-  commit or publish them, including receipt-only checkpoints. Sanitize instruction
-  and learning changes for publication instead of publishing operational records.
+- In the GitHub Copilot app or Copilot CLI, harness session history replaces a
+  local `logs/cdl/` session log and per-update checklist. Still provide answer-first
+  final accounting of goals/workstreams, outstanding checks, learning, publication
+  and open decisions; include evidence in delegate handoffs; and run GLP with
+  independent readback. Other harnesses retain the log and checklist rules below.
+- For other harnesses, session logs live in gitignored `logs/cdl/` and remain
+  local-only. Do not track, commit or publish them, including receipt-only
+  checkpoints. Sanitize instruction and learning changes for publication instead
+  of publishing operational records.
   The ignore rule is not retroactive: preserve pre-adoption records already
   tracked on main unchanged as historical evidence. New session logs stay untracked.
-- Use ASCII checklist markers `[x]` and `[ ]`, not Unicode symbols, under the
-  project's existing style rule.
+- For other harnesses, use ASCII checklist markers `[x]` and `[ ]`, not Unicode
+  symbols, under the project's existing style rule.
+- Describe each workstream by its purpose for the developer, what is ready or
+  blocked, and the next action. Omit session IDs, SHAs and code names unless
+  requested or needed for a technical handoff.
 - Project authority and current user restrictions control all writes, delegation,
   validation and delivery. CDL does not authorize publishing concurrent edits or
   bypassing release gates. Routine prose does not add broad validation gates.
