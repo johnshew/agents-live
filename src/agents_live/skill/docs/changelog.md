@@ -11,6 +11,8 @@ history is retained in the source repository.
 
 ## Unreleased
 
+## 6.9.4 - 2026-10-09
+
 - fix: activate new versions without waiting for in-flight agent runs. (#574)
   Old runs keep their immutable generation and shared per-agent locks.
   Busy watcher trees also finish their in-process dispatch before retirement
