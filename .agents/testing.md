@@ -247,7 +247,12 @@ stamped as `<target>rc<N>` without changing tracked release versions.
 It runs the built-wheel
 dashboard readiness gate in normal and development modes, then records the
 validated commit, artifact digest, and exact gate list. A later deployment of
-the same commit reuses that preparation evidence; a changed commit, wheel,
+the same candidate source reuses that preparation evidence. Normal deployment
+also permits later instruction, tooling or design-documentation commits when
+the retained source is an ancestor of the synchronized tooling and package
+inputs are unchanged, including the skill changelog. The deployment receipt
+records the retained candidate as `commit` and current tooling as `tool_commit`.
+A changed candidate source, wheel,
 platform, Python version, Test workflow, or gate list invalidates it
 mechanically.
 
@@ -328,8 +333,11 @@ Numbered source identity, wheels and preparation evidence live under the common
 Git directory's `agents-live-release/cycle-<target>/<attempt>/`; retained attempt
 worktrees live beside those records under `worktrees/`. Deployment receipts are
 separate observations, not publication approval.
-A retry uses the same wheel even after readiness fails. Changed source must use
-the next RC; changed retained bytes fail closed. An interrupted lock or wheel
+A retry uses the same wheel even after readiness fails. Changed package inputs
+or a retained source outside the tooling's ancestry must use the next RC.
+Instruction-only descendant commits may reuse the prepared candidate without
+readiness requalification; no changelog exception applies in the normal path.
+Changed retained bytes fail closed. An interrupted lock or wheel
 without its identity receipt requires inspection, not deletion or rebuilding
 under the same version. Local deployment is not provider-backed acceptance or
 approval of final stable bytes. Follow [release.md](release.md) for exact RC

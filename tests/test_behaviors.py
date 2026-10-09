@@ -9406,7 +9406,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "_synchronize": lambda: "abc123",
                 "_release_configuration": lambda: ("main", "1.2.3"),
                 "_requested_rc": lambda version, target, **options: version,
-                "_prepare_candidate": lambda *_args: (wheel, "digest"),
+                "_prepare_candidate": lambda *_args: ("abc123", wheel, "digest"),
                 "_require_unchanged_checkout": mock.Mock(
                     side_effect=script["LocalDeployError"]("checkout changed")),
                 "_running_dashboards": dashboards,
@@ -9417,6 +9417,133 @@ class TestCrossModuleAgreements(unittest.TestCase):
                         script["LocalDeployError"], "checkout changed"):
                     deploy(root, rc="1.2.3rc1")
             dashboards.assert_not_called()
+
+    @contextlib.contextmanager
+    def _retained_local_deployment(
+        self, changed_path: str = "AGENTS.md", *,
+        non_ancestor: bool = False, existing_attempt: bool = True,
+    ):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
+        scope = script["deploy"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", str(root), *arguments], check=True,
+                    capture_output=True, text=True,
+                ).stdout.strip()
+
+            identity = ("-c", "user.name=Test", "-c", "user.email=test@example.invalid")
+            git("init", "-q")
+            package = root / "src" / "agents_live" / "sample.py"
+            package.parent.mkdir(parents=True)
+            package.write_text('print("candidate")\n', encoding="utf-8")
+            git("add", ".")
+            git(*identity, "commit", "-qm", "candidate source")
+            source = git("rev-parse", "HEAD")
+            if non_ancestor:
+                tool = git(*identity, "commit-tree", "HEAD^{tree}", "-m", "unrelated tooling")
+            else:
+                changed = root / changed_path
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_text("later change\n", encoding="utf-8")
+                git("add", ".")
+                git(*identity, "commit", "-qm", "later change")
+                tool = git("rev-parse", "HEAD")
+            if not existing_attempt:
+                source = tool
+            cycle = root / "cycle"
+            attempt = cycle / "1.2.3rc1"
+            attempt.mkdir(parents=True)
+            if existing_attempt:
+                (attempt / "attempt.json").write_text("{}", encoding="utf-8")
+            wheel = root / "candidate.whl"
+            wheel.write_bytes(b"immutable candidate")
+            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            preparation = mock.Mock(return_value={
+                "wheel": str(wheel), "wheel_sha256": digest,
+            })
+            prepare = mock.Mock()
+            upgrade = mock.Mock()
+            unchanged = mock.Mock()
+            with mock.patch.dict(scope, {
+                "ROOT": root,
+                "_synchronize": lambda: tool,
+                "_release_configuration": lambda: ("main", "1.2.3"),
+                "_requested_rc": lambda version, target, **options: version,
+                "_preparation_directory": lambda _version: root / "deployment",
+                "_require_unchanged_checkout": unchanged,
+                "_installed_cli": lambda: root / "current" / "Scripts" / "agents-live.exe",
+                "watchers_on_host": lambda **options: [],
+                "_running_dashboards": lambda: (),
+                "_restart_dashboards": mock.Mock(),
+                "_upgrade": upgrade,
+                "_postcheck": mock.Mock(),
+            }), mock.patch.dict(scope["RELEASE"], {
+                "_installed_version": lambda: "1.2.2",
+                "_cycle_directory": lambda _target: cycle,
+                "prepare_cycle": prepare,
+                "_load_attempt": lambda _version: {"source_commit": source},
+                "_retained_preparation": preparation,
+                "_installed_all_json": lambda command: (
+                    {"ok": True} if command == "doctor" else {"agents": []}),
+                "_started_watchers": lambda _status: (),
+            }):
+                yield root, script, source, tool, prepare, preparation, upgrade, unchanged
+
+    def test_local_deploy_accepts_instruction_only_drift_with_candidate_provenance(self) -> None:
+        with self._retained_local_deployment(".agents/testing.md") as fixture:
+            root, script, source, tool, prepare, preparation, upgrade, unchanged = fixture
+            receipt = script["deploy"](root, rc="1.2.3rc1")
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            self.assertEqual(source, payload["commit"])
+            self.assertEqual(tool, payload["tool_commit"])
+            self.assertEqual(hashlib.sha256(b"immutable candidate").hexdigest(),
+                             payload["wheel_sha256"])
+            prepare.assert_not_called()
+            preparation.assert_called_once_with({"source_commit": source})
+            upgrade.assert_called_once()
+            unchanged.assert_called_once_with(tool)
+
+    def test_local_deploy_refuses_package_input_drift_without_activation(self) -> None:
+        for path in (
+            "src/agents_live/sample.py", "src/agents_live/skill/docs/changelog.md",
+            "pyproject.toml", "README.md", "LICENSE", ".gitignore",
+            "install.ps1", "install.sh",
+        ):
+            with self.subTest(path=path), self._retained_local_deployment(path) as fixture:
+                root, script, _source, _tool, prepare, preparation, upgrade, unchanged = fixture
+                with self.assertRaisesRegex(
+                        script["LocalDeployError"], "package inputs changed") as refused:
+                    script["deploy"](root, rc="1.2.3rc1")
+                self.assertIn(path, str(refused.exception))
+                prepare.assert_not_called()
+                preparation.assert_not_called()
+                upgrade.assert_not_called()
+                unchanged.assert_not_called()
+                self.assertFalse((root / "deployment" / "receipt.json").exists())
+
+    def test_local_deploy_refuses_non_ancestor_without_activation(self) -> None:
+        with self._retained_local_deployment(non_ancestor=True) as fixture:
+            root, script, _source, _tool, prepare, preparation, upgrade, unchanged = fixture
+            with self.assertRaisesRegex(script["LocalDeployError"], "not an ancestor"):
+                script["deploy"](root, rc="1.2.3rc1")
+            prepare.assert_not_called()
+            preparation.assert_not_called()
+            upgrade.assert_not_called()
+            unchanged.assert_not_called()
+
+    def test_local_deploy_prepares_missing_attempt_from_head(self) -> None:
+        with self._retained_local_deployment(existing_attempt=False) as fixture:
+            root, script, source, tool, prepare, _preparation, upgrade, unchanged = fixture
+            receipt = script["deploy"](root, rc="1.2.3rc1")
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            self.assertEqual(source, payload["commit"])
+            self.assertEqual(tool, payload["tool_commit"])
+            prepare.assert_called_once_with(rc="1.2.3rc1")
+            upgrade.assert_called_once()
+            unchanged.assert_called_once_with(tool)
 
     def test_requalified_deploy_rejects_runtime_drift_before_activation(self) -> None:
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
