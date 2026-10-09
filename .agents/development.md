@@ -110,6 +110,42 @@ tester per RC that returns the tested head, base, scope and result. One agent
 owns live local runtime mutation and restoration during RC deployment; serialize
 integration. Do not rerun a gate already passed on the same head and environment.
 
+## Orchestrating delegates and child sessions
+
+These rules refine CDL supervision for a supervisor that coordinates subagents
+or app child sessions. They add no commit, merge, release or runtime authority.
+
+- **Stay steerable.** Run long builds, test suites, preparation and live runs
+  asynchronously and check them later; keep synchronous shell calls short so
+  developer input is not blocked. While the developer is active, report and
+  take steering before starting another batch. Run status checks with explicit
+  repository paths so a delegate's working directory cannot mislead the report.
+  Do not attach a periodic self-wake timer during RC work; rely on idle
+  notifications and child reports.
+- **Name the workspace in every brief.** State the exact worktree and tested
+  head the delegate may read, edit or test, and the excluded locations (for
+  example the primary checkout and the live runtime). Repeat the repository's
+  ban on checkout, reset, restore and stash. Verify the delegate's actual
+  working directory from its report; do not infer isolation from its name.
+- **Never stall a child.** The supervisor owns its children's questions and plan
+  approvals. Answer them within the developer's goals and recorded authority,
+  give a next action, and escalate to the developer only a genuinely new
+  authority or scope decision, framed with options and a recommendation.
+- **Carry plan conditions into review.** When approving a child's plan with
+  conditions, copy them verbatim into the reviewer's or tester's brief as
+  pass/fail checks.
+- **A pass belongs to one head.** A tester or reviewer leads its report with
+  result, tested head and base, scope and evidence reference. A pass on an older
+  head does not cover a newer one. When merges are authorized, merge one passing
+  head at a time with the full SHA guard below and read back the PR state and
+  merge commit before the next.
+- **Close out finished children.** A child is finished when its worktree is
+  clean, it has no unpushed commits, its PR is merged or closed and it owns no
+  ongoing work or automation. Before teardown, preserve any ignored scratch a
+  successor still needs in an approved durable home. Archive through the
+  harness lifecycle (in the GitHub Copilot app, only the creating session can
+  archive its child); never remove an app-managed worktree by hand.
+
 ## Commit hygiene
 
 Refresh `origin` at meaningful checkpoints: before branching, after a long
@@ -317,3 +353,103 @@ branches automatically.
 #### Follow-up
 Fold into Commit hygiene at the next consolidation of this document.
 <!-- /glp-update:v1 id=49387356-34c6-4342-aa9c-8354137ae10e -->
+
+<!-- glp-update:v1 id=b617d870-e34d-43e9-93a8-a8a30740e229 -->
+<a id="glp-b617d870-e34d-43e9-93a8-a8a30740e229"></a>
+### GLP Update: Orchestrator practices for delegates and child sessions
+
+- Update-ID: b617d870-e34d-43e9-93a8-a8a30740e229
+- Recorded-UTC: 2026-10-09T14:30:54Z
+- Kind: addition
+- Topics: orchestration, delegation, child sessions, steerability, review briefs, session teardown
+- Workstream: orchestrator ideas adoption
+- Target: .agents/development.md, Orchestrating delegates and child sessions; AGENTS.md, Load before acting; compared origin/main fc669cf
+- Source-Session: Copilot app session 2026-10-09 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Added a section covering six orchestrator practices: stay steerable by running
+long work asynchronously; name the exact workspace, head and excluded locations
+in every brief and verify the delegate's real working directory; answer child
+questions and plan approvals within existing authority instead of stalling;
+copy plan-approval conditions into review briefs as pass/fail checks; treat a
+pass as valid only for the tested head and merge serially with readback; and
+close out finished children through the harness lifecycle after preserving
+needed scratch.
+
+#### Evidence
+- User direction, 2026-10-09: read a notes repository maintained by the
+  developer for orchestrator guidance and incorporate useful ideas here.
+- A reviewed method-learning comparison with that repository on 2026-10-09.
+  Its practices rest on its own provisional observations; none was re-observed
+  in this repository before adoption. No private source text or identity was
+  copied.
+
+#### Previous Knowledge
+CDL supervision and this guide already covered delegate briefs, compact
+reports, a reusable RC tester, single ownership of live runtime mutation, gate
+reuse and full-SHA guarded merges. AGENTS.md already covered handoff content,
+plain-language reporting and decision framing. The new section refines those
+rules without duplicating them.
+
+#### Verification and Limits
+Documentation only. Checked by the pre-release audit and `git diff --check`.
+No behavioral acceptance is claimed. Rejected for this repository: a mandated
+periodic orchestration wake-up, a direct-commit review cursor, deploy-range
+authorization and a separate model table, because they target a different
+workflow or duplicate existing local rules. Developer decision, 2026-10-09: no
+periodic self-wake timer for coordinators during RC work.
+
+#### Follow-up
+Mark each practice confirmed after a later orchestration here follows it
+successfully; fold this block at the next consolidation of this document.
+<!-- /glp-update:v1 id=b617d870-e34d-43e9-93a8-a8a30740e229 -->
+
+<!-- glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
+<a id="glp-7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0"></a>
+### GLP Update: Override URL-specific app credential helpers for owner pushes
+
+- Update-ID: 7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0
+- Recorded-UTC: 2026-10-09T15:20:18Z
+- Kind: correction
+- Topics: git push, credential helper, GIT_CONFIG_PARAMETERS, release publication
+- Workstream: 6.9.4 publication from RC6
+- Target: .agents/development.md, Commit hygiene; compared origin/main 0f0bf55
+- Source-Session: delegated release session report, 2026-10-09
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+An agent harness may inject a URL-specific `credential.https://github.com.helper`
+through inherited `GIT_CONFIG_PARAMETERS`. A generic `-c credential.helper=`
+override does not displace a URL-specific helper, so the push still uses the
+harness account. When an owner push must succeed, scope the fix to the push
+process: clear `GIT_CONFIG_PARAMETERS`, set `GIT_CONFIG_COUNT=2` with two
+`credential.https://github.com.helper` entries (the first empty to reset the
+list, the second `!gh auth git-credential`), and pin the owner `GH_TOKEN` as in
+the preceding update. Do not change shared Git configuration.
+
+#### Evidence
+- Observation, 2026-10-09: the 6.9.4 atomic stable push was refused under the
+  harness account despite owner-pinned `gh` and a generic helper override. No
+  tag or artifacts were published by the refused attempt.
+- Retrying the same finalized attempt with the process-scoped URL-specific
+  override succeeded; the stable commit and tag reached the remote and
+  publication completed without a rebuild.
+
+#### Previous Knowledge
+The [preceding GLP update](#glp-7dcc21e7-7a86-4cd9-89e5-480ca755c02e) pins the
+owner token and uses a generic process-scoped credential helper. That works
+only when no URL-specific helper is injected; this update extends it.
+
+#### Verification and Limits
+One observed failure and one successful retry, in one harness on Windows
+PowerShell. Tokens were not printed. Other harnesses may inject credentials
+differently.
+
+#### Follow-up
+Fold into Commit hygiene at the next consolidation of this document.
+<!-- /glp-update:v1 id=7a98e19a-07e1-45d3-b1e8-4d92ae0f54c0 -->
