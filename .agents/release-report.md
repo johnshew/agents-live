@@ -65,9 +65,12 @@ renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
 
-The selected 6.9.4 candidate is developer-approved `6.9.4rc6`; no further RC
-is planned for this frozen release. Stable preparation, finalization and
-publication are authorized. The developer explicitly approved shipping with
+Published `6.9.4` retains developer-approved `6.9.4rc6`; no further RC
+is planned for this completed release. Stable attempt `6.9.4-final-1` was
+prepared once, finalized and published on 2026-10-09 without functional
+retesting or runtime activation. GitHub package downloads and PyPI digests
+matched retained package hashes; the package proxy did not yet list `6.9.4`.
+Do not prepare or publish this version again. The developer explicitly approved shipping with
 the logging and watcher observability gaps in #582, to be listed as known
 deferred work in release notes. On 2026-10-09, #582 moved to 6.9.5 and #581
 was closed and folded into its logging scope. RC1 was
@@ -123,11 +126,14 @@ approved this exact RC6 source and retained wheel for 6.9.4 publication.
 The manifest binds that approval to source
 `3733230d61b5f94e67cd33bf4d5482bb4fa38601` and wheel digest
 `1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac`.
-Prepare stable metadata once, finalize and publish retained files without
-functional retesting or runtime activation.
-Issue #578 is tooling-only; defer its changelog entry until the next package
-change. Retain the merged #556, #538, #560 and #561 work and the dashboard
-responsiveness follow-up. Issues #565, #572, #574 and #578 remain planned;
+The stable tag binds commit `0f0bf55834ca3c37481d7127c80be825e2321ae6`
+to retained final artifacts and RC6 approval. The report generator observes
+GitHub publication independently, suppresses further release instructions,
+and uses the manifest's frozen RC6 source rather than later development on main.
+Issue #578 is tooling-only; the GitHub release notes include its correction
+without changing approved RC package inputs. Its shipped changelog entry remains
+deferred until the next package change. Retain the merged #556, #538, #560 and
+#561 work and the dashboard responsiveness follow-up. Issues #565, #572, #574 and #578 are delivered;
 #566, #567 and #582 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
