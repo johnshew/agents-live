@@ -67,8 +67,13 @@ history](../.github/release-cycles.toml).
 - Observed 2026-10-08: RC4 refused RC6 activation while an agent run was
   active; RC5 acceptance and activation history is recorded in the
   [release-cycle manifest](../.github/release-cycles.toml).
+- Developer-provided verified outcome, 2026-10-09: after #578 merged in PR #579,
+  local-deploy reused the retained RC6 bytes and activated them at the first
+  idle moment via a background retry. `agents-live --version` reported 6.9.4rc6
+  on the candidate channel, `doctor --all-repos` exited 0, and watchers ran
+  from the 6.9.4rc6 generation.
 - Issues #572 and #574 track the deployment-input and in-flight activation
-  behavior, respectively.
+  behavior, respectively; #578 and PR #579 record the local-deploy tooling fix.
 
 #### Previous Knowledge
 The local numbered RC workflow above describes activation through the installed
@@ -76,12 +81,19 @@ upgrade command but does not distinguish which installed runtime governs the
 bootstrap activation.
 
 #### Verification and Limits
-RC5's isolation acceptance and failed activation path were observed. The RC6
-bootstrap activation outcome is pending at the time of writing.
+The installed 6.9.4rc4 runtime refused RC6 bootstrap activation while an agent
+run was in flight. After #578 fixed the local-deploy source check in PR #579,
+the retained RC6 bytes were activated at the first idle moment via a background
+retry. Verified results: `agents-live --version` reported 6.9.4rc6 on the
+candidate channel, `doctor --all-repos` exited 0, and watchers ran from the
+6.9.4rc6 generation. The source-check gap was tooling-only; its changelog entry
+is deferred to the next package change. These observations establish local
+activation and checks only, not publication approval or later operational
+acceptance.
 
 #### Follow-up
-Consolidate into the local numbered RC guidance after RC6 bootstrap activation
-is verified.
+Consolidate into the local numbered RC guidance in a separately scoped
+per-document phase; consolidation remains pending.
 <!-- /glp-update:v1 id=18a71247-6a91-49f6-87cd-8ca4f6ad4c0d -->
 
 ### Numbered attempt commands

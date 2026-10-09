@@ -65,7 +65,7 @@ renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
 
-The default development cycle is 6.9.4 with next identity `6.9.4rc6`. RC1 was
+The default development cycle is 6.9.4 with next identity `6.9.4rc7`. RC1 was
 prepared and consumed from `cd0be2e` on 2026-10-04; preserve its candidate commit,
 immutable artifacts and retained receipts. RC2 was allocated and consumed from
 `243ec7e` on the same date, but preparation failed at packaged dashboard
@@ -83,7 +83,7 @@ The 2026-10-04 user-directed reassignment of #530/#531 from 6.9.3 does not rewri
 that published cycle's retained attempts, deployment history or approval.
 Published 6.9.2 and 6.9.3 have no next RC. Keep #530/#531 partial in 6.9.3,
 not also deferred there; their outstanding work is planned in 6.9.4.
-Do not reuse consumed RC1 through RC5. The developer assigned #565 to RC5 on
+Do not reuse consumed RC1 through RC6. The developer assigned #565 to RC5 on
 2026-10-08 for the main lock fix only after observing a maintenance run on RC4
 hold the runtime launch gate for about 19 minutes and miss scheduled launches.
 Task Scheduler query batching is a separate deferred follow-up tracked by #566.
@@ -103,11 +103,20 @@ repository registration for a missing folder to clear the candidate doctor
 check. RC5 passed isolated acceptance but was never locally activated and is
 superseded by RC6. On 2026-10-08, the developer directed that activation must
 not wait for agent runs already in progress; the orchestrator filed #574 for
-this package-changing product fix. Prepare RC6 from main after #574 merges,
-carrying #565, the #571 readiness-validator correction, #572 and #574. Issue
-#572 is tooling-only and does not change package bytes. Do not reuse consumed
-RC1 through RC5. Retain the merged #556, #538, #560 and #561 work and the
-dashboard responsiveness follow-up. Issues #565, #572 and #574 remain planned;
+this package-changing product fix. RC6 included #565, the #571 readiness-
+validator correction, #572 and #574; #572 is tooling-only and does not change
+package bytes. RC6 was prepared from
+`3733230d61b5f94e67cd33bf4d5482bb4fa38601`, passed packaged readiness and
+isolated hello-world acceptance, and was locally activated on 2026-10-09.
+The installed RC4 runtime first refused while an agent run was in flight. Later,
+local-deploy refused because instruction-only commits advanced main after
+preparation; #578 corrected this tooling gap in PR #579. Local-deploy reused
+retained RC6 bytes and activated them at the first idle moment via a background
+retry. The installed RC6 version, `doctor --all-repos` exit 0, and watchers
+running from the RC6 generation were verified. RC6 is not publication-approved.
+Issue #578 is tooling-only; defer its changelog entry until the next package
+change. Retain the merged #556, #538, #560 and #561 work and the dashboard
+responsiveness follow-up. Issues #565, #572, #574 and #578 remain planned;
 #566 and #567 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.

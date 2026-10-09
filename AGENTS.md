@@ -234,17 +234,24 @@ allowlist, which excluded instruction-only changes from PR #570 since RC5
 source. The orchestrator's tooling-only #572 correction merged in PR #573;
 the requalified deployment then passed the package-input check, but activation
 was refused while scheduled agent runs were in progress because activation
-refuses while any run is active. The orchestrator also
-removed a stale repository registration for a missing folder to clear the
-candidate doctor check. RC5 was never locally activated and is superseded by
-RC6. On 2026-10-08, the developer directed that activation must not wait for
-agent runs already in progress; the orchestrator filed #574 for this
-package-changing product fix. Prepare RC6 from main after #574 merges, carrying
-#565, the #571 readiness-validator correction, #572 and #574. Issue #572 is
-tooling-only and does not change package bytes. Do not reuse consumed RC1
-through RC5. Retain the merged #556, #538, #560 and #561 work and the dashboard
-responsiveness follow-up. Issues #565, #572 and #574 remain planned; #566 and
-#567 remain deferred. RC5 is not publication-approved.
+refuses while any run is active. The orchestrator also removed a stale
+repository registration for a missing folder to clear the candidate doctor
+check. RC5 was never locally activated and is superseded by RC6. On 2026-10-08,
+the developer directed that activation must not wait for agent runs already in
+progress; the orchestrator filed #574 for this package-changing product fix.
+RC6 was prepared from source `3733230d61b5f94e67cd33bf4d5482bb4fa38601`,
+passed packaged readiness and isolated hello-world acceptance, and was locally
+activated on 2026-10-09. The installed RC4 runtime refused the first activation
+while an agent run was in flight. After instruction-only commits advanced main,
+local-deploy refused the older prepared source until tooling fix #578 merged in
+PR #579. Local-deploy then reused retained RC6 bytes and activated them at the
+first idle moment via a background retry. The installed version, all-repository
+doctor check and RC6-generation watchers were verified. RC6 is not
+publication-approved. #578 is tooling-only and its changelog entry is deferred
+to the next package change. Do not reuse consumed RC1 through RC6. Retain the
+merged #556, #538, #560 and #561 work and the dashboard responsiveness
+follow-up. Issues #565, #572, #574 and #578 remain planned; #566 and #567
+remain deferred. RC5 is not publication-approved.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
