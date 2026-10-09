@@ -110,15 +110,19 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 
 [cycles."6.9.4"]
 branch = "main"
-next_rc = "6.9.4rc7"
-recommendation = "Preserve consumed RC1 through RC6 and their immutable artifacts. RC2 preparation failed at packaged dashboard readiness; RC3, RC4 and RC6 passed isolated acceptance and were locally activated, but none is publication-approved. RC5 was accepted in isolation but never activated and is superseded. RC6 was prepared from 3733230d61b5f94e67cd33bf4d5482bb4fa38601, passed packaged readiness and isolated hello-world acceptance, then was locally activated on 2026-10-09 after tooling fix #578 merged in PR #579. Initial RC4 bootstrap activation refused while a run was active; after #579, local-deploy reused the retained RC6 bytes and activated them at the first idle moment. The deployed version, doctor check and RC6-generation watchers were verified. #578 is tooling-only; its changelog entry is deferred to the next package change. RC6 is not publication-approved. #565, #572, #574 and #578 remain planned; #566 and #567 remain deferred."
+selected_rc = "6.9.4rc6"
+recommendation = "The developer approved the exact deployed RC6 for 6.9.4 on 2026-10-09 and explicitly approved shipping with the known deferred logging and watcher observability work in #582, including the former #581. Prepare stable metadata, finalize and publish retained files without rebuilding RC bytes, functional retesting or runtime activation. Preserve consumed RC1 through RC6 and their immutable evidence; RC5 was never activated and is superseded. #582 is assigned to 6.9.5; #566 and #567 remain deferred. #578 is tooling-only and its changelog entry remains deferred to the next package change."
 
 [cycles."6.9.4".approval]
-decision = "testing"
+decision = "approved"
+attempt = "6.9.4rc6"
+commit = "3733230d61b5f94e67cd33bf4d5482bb4fa38601"
+wheel_sha256 = "1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac"
+decided_on = "2026-10-09"
 
 [cycles."6.9.4".issues]
 planned = [547, 540, 531, 542, 549, 530, 550, 556, 538, 560, 561, 565, 572, 574, 578]
-deferred = [566, 567]
+deferred = [566, 567, 582]
 
 [cycles."6.9.4".decisions]
 "530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
@@ -133,6 +137,7 @@ deferred = [566, 567]
 "572" = "Orchestrator added the requalified deployment allowlist correction on 2026-10-08 so RC5's accepted bytes could be deployed; tooling-only, no package change. Merged in PR #573."
 "574" = "Developer directed on 2026-10-08 that activation must not wait for agent runs already in progress; assigned to RC6 by the orchestrator."
 "578" = "Instruction-only commits after RC6 preparation exposed a local-deploy source check gap. Fixed in PR #579 so the retained RC6 bytes could be activated; tooling-only. Defer the changelog entry until the next package change."
+"582" = "Developer assigned lock hold time, launch timing, runtime identity and watcher exit evidence to 6.9.5 on 2026-10-09, folding and closing #581 into this logging scope. Developer explicitly approved shipping 6.9.4 from RC6 with these known observability gaps. Watcher exit codes and stderr are not persisted, so an unexplained watcher exit cannot be attributed; maintenance can replace a missing watcher and no activation regression was established. List #582 as known deferred work in the release notes; scope assignment is not delivery."
 
 [cycles."6.9.4".history."6.9.4rc1"]
 status = "prepared"
@@ -192,4 +197,4 @@ commit = "4ed8fd9d1b395c22133492b83f87b6f4caf9c114"
 source_commit = "3733230d61b5f94e67cd33bf4d5482bb4fa38601"
 wheel_sha256 = "1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac"
 sdist_sha256 = "8f476d6fd41fa1aab917a6cfc478bb79867b1f261b5303d913fbb62a3bbd0e29"
-evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness and isolated hello-world acceptance passed. During bootstrap activation, the installed 6.9.4rc4 refused while an agent run was in flight. Local-deploy also refused because instruction-only commits had advanced main after preparation; #578 fixed this tooling gap in PR #579. On 2026-10-09, local-deploy reused the retained RC6 bytes and activated them at the first idle moment via a background retry. Verified locally: agents-live --version reported 6.9.4rc6 on the candidate channel, doctor --all-repos exited 0, and watchers ran from the 6.9.4rc6 generation. Not publication-approved. #578's changelog entry is deferred to the next package change."
+evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness and isolated hello-world acceptance passed. During bootstrap activation, the installed 6.9.4rc4 refused while an agent run was in flight. Local-deploy also refused because instruction-only commits had advanced main after preparation; #578 fixed this tooling gap in PR #579. On 2026-10-09, local-deploy reused the retained RC6 bytes and activated them at the first idle moment via a background retry. Verified locally: agents-live --version reported 6.9.4rc6 on the candidate channel, doctor --all-repos exited 0, and watchers ran from the 6.9.4rc6 generation. Developer approved this exact source and retained wheel for 6.9.4 publication on 2026-10-09. #578's changelog entry is deferred to the next package change."

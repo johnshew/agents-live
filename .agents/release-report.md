@@ -65,7 +65,12 @@ renewed validation and approval. An open issue can contain work delivered in an
 RC but not yet released; show those states separately. A developer-approved
 deferral is not a claim that the issue is fixed.
 
-The default development cycle is 6.9.4 with next identity `6.9.4rc7`. RC1 was
+The selected 6.9.4 candidate is developer-approved `6.9.4rc6`; no further RC
+is planned for this frozen release. Stable preparation, finalization and
+publication are authorized. The developer explicitly approved shipping with
+the logging and watcher observability gaps in #582, to be listed as known
+deferred work in release notes. On 2026-10-09, #582 moved to 6.9.5 and #581
+was closed and folded into its logging scope. RC1 was
 prepared and consumed from `cd0be2e` on 2026-10-04; preserve its candidate commit,
 immutable artifacts and retained receipts. RC2 was allocated and consumed from
 `243ec7e` on the same date, but preparation failed at packaged dashboard
@@ -113,11 +118,17 @@ local-deploy refused because instruction-only commits advanced main after
 preparation; #578 corrected this tooling gap in PR #579. Local-deploy reused
 retained RC6 bytes and activated them at the first idle moment via a background
 retry. The installed RC6 version, `doctor --all-repos` exit 0, and watchers
-running from the RC6 generation were verified. RC6 is not publication-approved.
+running from the RC6 generation were verified. On 2026-10-09, the developer
+approved this exact RC6 source and retained wheel for 6.9.4 publication.
+The manifest binds that approval to source
+`3733230d61b5f94e67cd33bf4d5482bb4fa38601` and wheel digest
+`1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac`.
+Prepare stable metadata once, finalize and publish retained files without
+functional retesting or runtime activation.
 Issue #578 is tooling-only; defer its changelog entry until the next package
 change. Retain the merged #556, #538, #560 and #561 work and the dashboard
 responsiveness follow-up. Issues #565, #572, #574 and #578 remain planned;
-#566 and #567 remain deferred. RC5 is not publication-approved.
+#566, #567 and #582 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
 
