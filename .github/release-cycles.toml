@@ -111,7 +111,7 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 [cycles."6.9.4"]
 branch = "main"
 selected_rc = "6.9.4rc6"
-recommendation = "The developer approved the exact deployed RC6 for 6.9.4 on 2026-10-09 and explicitly approved shipping with #581 open as a known deferred watcher observability issue. Prepare stable metadata, finalize and publish retained files without rebuilding RC bytes, functional retesting or runtime activation. Preserve consumed RC1 through RC6 and their immutable evidence; RC5 was never activated and is superseded. #582 is assigned to 6.9.5; #566 and #567 remain deferred. #578 is tooling-only and its changelog entry remains deferred to the next package change."
+recommendation = "The developer approved the exact deployed RC6 for 6.9.4 on 2026-10-09 and explicitly approved shipping with the known deferred logging and watcher observability work in #582, including the former #581. Prepare stable metadata, finalize and publish retained files without rebuilding RC bytes, functional retesting or runtime activation. Preserve consumed RC1 through RC6 and their immutable evidence; RC5 was never activated and is superseded. #582 is assigned to 6.9.5; #566 and #567 remain deferred. #578 is tooling-only and its changelog entry remains deferred to the next package change."
 
 [cycles."6.9.4".approval]
 decision = "approved"
@@ -122,7 +122,7 @@ decided_on = "2026-10-09"
 
 [cycles."6.9.4".issues]
 planned = [547, 540, 531, 542, 549, 530, 550, 556, 538, 560, 561, 565, 572, 574, 578]
-deferred = [566, 567, 581]
+deferred = [566, 567, 582]
 
 [cycles."6.9.4".decisions]
 "530" = "Developer assigned outstanding diagnostic/result separation work from 6.9.3 on 2026-10-04; live provider acceptance remains required."
@@ -137,8 +137,7 @@ deferred = [566, 567, 581]
 "572" = "Orchestrator added the requalified deployment allowlist correction on 2026-10-08 so RC5's accepted bytes could be deployed; tooling-only, no package change. Merged in PR #573."
 "574" = "Developer directed on 2026-10-08 that activation must not wait for agent runs already in progress; assigned to RC6 by the orchestrator."
 "578" = "Instruction-only commits after RC6 preparation exposed a local-deploy source check gap. Fixed in PR #579 so the retained RC6 bytes could be activated; tooling-only. Defer the changelog entry until the next package change."
-"582" = "Developer assigned run-log timing and runtime identity observability to 6.9.5 on 2026-10-09 so 6.9.4 can publish from approved RC6; scope assignment is not delivery."
-"581" = "Developer explicitly approved shipping 6.9.4 from RC6 with this issue open on 2026-10-09. Watcher exit codes and stderr are not persisted, so an unexplained watcher exit cannot be attributed. Maintenance can replace a missing watcher; no activation regression was established. List this known deferred observability issue in the release notes."
+"582" = "Developer assigned lock hold time, launch timing, runtime identity and watcher exit evidence to 6.9.5 on 2026-10-09, folding and closing #581 into this logging scope. Developer explicitly approved shipping 6.9.4 from RC6 with these known observability gaps. Watcher exit codes and stderr are not persisted, so an unexplained watcher exit cannot be attributed; maintenance can replace a missing watcher and no activation regression was established. List #582 as known deferred work in the release notes; scope assignment is not delivery."
 
 [cycles."6.9.4".history."6.9.4rc1"]
 status = "prepared"

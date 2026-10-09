@@ -68,8 +68,9 @@ deferral is not a claim that the issue is fixed.
 The selected 6.9.4 candidate is developer-approved `6.9.4rc6`; no further RC
 is planned for this frozen release. Stable preparation, finalization and
 publication are authorized. The developer explicitly approved shipping with
-#581 open as a known deferred watcher observability issue, to be listed in
-release notes, and moved #582 to 6.9.5 on 2026-10-09. RC1 was
+the logging and watcher observability gaps in #582, to be listed as known
+deferred work in release notes. On 2026-10-09, #582 moved to 6.9.5 and #581
+was closed and folded into its logging scope. RC1 was
 prepared and consumed from `cd0be2e` on 2026-10-04; preserve its candidate commit,
 immutable artifacts and retained receipts. RC2 was allocated and consumed from
 `243ec7e` on the same date, but preparation failed at packaged dashboard
@@ -127,7 +128,7 @@ functional retesting or runtime activation.
 Issue #578 is tooling-only; defer its changelog entry until the next package
 change. Retain the merged #556, #538, #560 and #561 work and the dashboard
 responsiveness follow-up. Issues #565, #572, #574 and #578 remain planned;
-#566, #567 and #581 remain deferred. RC5 is not publication-approved.
+#566, #567 and #582 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
 
