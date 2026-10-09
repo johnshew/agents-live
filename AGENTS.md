@@ -114,6 +114,7 @@ prevail; CDL/GLP add no write, integration, release or deployment authority.
 | When you are... | Read first |
 |---|---|
 | Selecting a subagent model | [.agents/subagent-models.md](.agents/subagent-models.md) |
+| Coordinating delegates or child sessions | [.agents/development.md](.agents/development.md#orchestrating-delegates-and-child-sessions) |
 | Changing code, running tests, or building | [.agents/development.md](.agents/development.md) |
 | Understanding the development and release state machine | [docs/development-release-process.md](docs/development-release-process.md) |
 | Comparing source, wheel, and installed-tool behavior | [.agents/testing.md](.agents/testing.md) |
@@ -316,6 +317,18 @@ a new agent receives the same answer from either entry point.
   pull request are its record. Reference an existing issue from a
   commit (`Fixes #N` closes on merge). `docs/backlog.md` records
   direction and links to those issues; it never restates their detail.
+- **Use the repository owner's GitHub account for GitHub writes.** An
+  enterprise-managed account may be active by default and is refused (403) when
+  it creates issues, PRs or comments here, including through agent issue tools.
+  Before a `gh` write, switch to the account that owns `origin`. A `GH_TOKEN`
+  environment variable silently overrides the switch, and the switch may not
+  persist to later agent shell processes, so clear the token and switch in the
+  same process as every write. In PowerShell:
+  `$env:GH_TOKEN = $null; gh auth switch --hostname github.com --user <origin-owner>; gh ...`.
+  Read-only queries may work under either account. The app's own PR and issue
+  tools may also return the enterprise-account 403; fall back to
+  `gh pr create` or `gh issue create` under `<origin-owner>` only when the
+  developer explicitly directs it.
 - **Treat GitHub issue dates as UTC.** For a rolling recent-issue review, use
   `updated:>=YYYY-MM-DD` or an exact timestamp and omit a local-calendar upper
   bound. A local late-evening issue may already be dated tomorrow by GitHub;
