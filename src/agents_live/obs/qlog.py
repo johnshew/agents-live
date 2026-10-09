@@ -64,6 +64,7 @@ import argparse
 import glob as _glob
 import json
 import sys
+from datetime import datetime
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -75,7 +76,7 @@ PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.append(str(PACKAGE_PARENT))
 from agents_live import preflight  # noqa: E402
-from agents_live.obs import query  # noqa: E402
+from agents_live.obs import query, clock  # noqa: E402
 from agents_live.paths import (  # noqa: E402
     host_logs_dir,
     repo_state_dir,
@@ -155,6 +156,11 @@ def build_view(
     con: duckdb.DuckDBPyConnection,
     patterns: list[str],
     archives: Path | Iterable[Path] | None = None,
+    *,
+    repositories: Iterable[str] = (),
+    since: str | None = None,
+    until: str | None = None,
+    sql: str | None = None,
 ) -> None:
     """Create a `log` view over the given files plus retained archives.
 
@@ -164,6 +170,9 @@ def build_view(
 
     `archives` names directories holding framework JSONL segments or legacy
     monthly Parquet archives. The caller knows which archives match its globs.
+
+    `sql` selects optional clock views using parsed table references. `since`
+    and `until` bound expected-slot work, not the underlying log view.
 
     Adds `_src` (filename) for provenance.
     """
@@ -265,6 +274,18 @@ def build_view(
         "holder_agent": "VARCHAR", "holder_repository": "VARCHAR",
         "holder_pid": "INTEGER", "holder_acquired_at": "VARCHAR",
         "retry_count": "INTEGER", "retry_wait_s": "DOUBLE",
+        "lock_kind": "VARCHAR", "lock_id": "VARCHAR", "acquisition_id": "VARCHAR",
+        "lock_wait_s": "DOUBLE", "lock_hold_s": "DOUBLE",
+        "lock_acquired_at": "TIMESTAMP WITH TIME ZONE",
+        "gate_wait_s": "DOUBLE", "planned_at": "TIMESTAMP WITH TIME ZONE",
+        "actual_start_at": "TIMESTAMP WITH TIME ZONE", "arrival_at": "TIMESTAMP WITH TIME ZONE",
+        "launch_lag_s": "DOUBLE", "fire_status": "VARCHAR", "planned_source": "VARCHAR",
+        "runtime_version": "VARCHAR", "runtime_generation": "VARCHAR",
+        "schedules": "VARCHAR", "schedule_timezone": "VARCHAR",
+        "watcher_pid": "BIGINT", "subscription_id": "VARCHAR",
+        "stop_reason": "VARCHAR", "stderr_tail": "VARCHAR", "stderr_bytes": "BIGINT",
+        "stderr_truncated": "BOOLEAN", "stderr_complete": "BOOLEAN",
+        "capture_error": "VARCHAR",
     }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:
@@ -346,6 +367,7 @@ def build_view(
     STANDARD_COLUMNS = (
         "ts", "run_id", "agent_name", "phase", "status", "trigger", "level",
         "message", "error_category", "traceback", "duration_s", "transcript",
+        "repository",
     )
     for col in STANDARD_COLUMNS:
         if col not in present:
@@ -353,6 +375,101 @@ def build_view(
             projections.append(f'CAST(NULL AS {target_type}) AS "{col}"')
 
     con.sql(f"CREATE VIEW log AS SELECT {', '.join(projections)} FROM _log_raw")
+    # Use DuckDB's parser rather than SQL text matching: CTEs, quoted names,
+    # joins and query_table all retain the public arbitrary-SQL contract.
+    try:
+        references = {name.casefold().split(".")[-1]
+                      for name in con.get_table_names(sql)} if sql else set()
+    except duckdb.Error:
+        references = set()  # The actual query reports its original SQL error.
+    if references & {"clock_fires", "clock_coverage"}:
+        _clock_view(con, tuple(repositories), since=since, until=until,
+                    project_expected="clock_fires" in references)
+
+
+def _clock_view(con, repositories: tuple[str, ...], *, since=None, until=None,
+                project_expected=True) -> None:
+    con.sql(
+        "CREATE TABLE _clock_expected (repository VARCHAR, agent_name VARCHAR, "
+        "planned_at TIMESTAMP WITH TIME ZONE, runtime_version VARCHAR, runtime_generation VARCHAR)")
+    snapshots = con.sql(
+        "SELECT CAST(ts AS VARCHAR), repository, agent_name, schedules, runtime_version, runtime_generation, schedule_timezone "
+        "FROM log WHERE phase = 'clock-schedule' AND ts IS NOT NULL "
+        "AND repository IN (SELECT unnest(?))", params=[list(repositories)]
+    ).fetchall() if repositories else []
+    damaged = con.sql(
+        "SELECT count(*) FROM log WHERE _jsonl AND "
+        "(ts IS NULL OR agent_name IS NULL)"
+    ).fetchone()[0]
+    con.sql(
+        "CREATE TABLE clock_coverage (repository VARCHAR, status VARCHAR, "
+        "known_from TIMESTAMP WITH TIME ZONE, detail VARCHAR)"
+    )
+    for repository in repositories:
+        starts = [row[0] for row in snapshots if row[1] == repository]
+        unknown = any(row[1] == repository and (
+            row[3] is None or row[6] != clock.timezone_signature()) for row in snapshots)
+        con.execute("INSERT INTO clock_coverage VALUES (?, ?, ?, ?)", [
+            repository, "unavailable" if damaged else "partial" if unknown
+            else "retained" if starts else "unobserved",
+            min(starts) if starts else None,
+            "damaged structured records; missed-fire inference disabled" if damaged else
+            "unknown convergence or changed host timezone; affected intervals are not audited" if unknown else
+            "expected slots use retained schedule intent and this host's local timezone",
+        ])
+    lower = datetime.fromisoformat(query.resolve_since(since)) if since else None
+    upper = datetime.fromisoformat(query.resolve_since(until)) if until else None
+    if project_expected:
+        batch = []
+        for item in clock.expected(snapshots if not damaged else (), since=lower, before=upper):
+            batch.append(item)
+            if len(batch) == 1000:
+                _insert_expected(con, batch)
+                batch.clear()
+        if batch:
+            _insert_expected(con, batch)
+    # Arrival records prevent a still-waiting fire from being called missed;
+    # the terminal outcome replaces its arrival, rather than counting twice.
+    con.sql("""
+        CREATE VIEW clock_fires AS
+        WITH observed AS (
+            SELECT repository, agent_name, planned_at, ts AS observed_at,
+                   actual_start_at, launch_lag_s,
+                   gate_wait_s, COALESCE(fire_status, CASE WHEN phase = 'clock-arrival'
+                       THEN 'received' ELSE 'unmeasured' END) AS fire_status,
+                   run_id, message, runtime_version, runtime_generation
+            FROM log
+            WHERE trigger = 'clock'
+              AND phase IN ('clock-arrival', 'done', 'firing')
+            QUALIFY row_number() OVER (
+                PARTITION BY repository, run_id
+                ORDER BY CASE WHEN phase = 'clock-arrival' THEN 1 ELSE 0 END, ts DESC) = 1
+        )
+        SELECT * FROM observed
+        UNION ALL
+        SELECT e.repository, e.agent_name, e.planned_at,
+               NULL, NULL, NULL, NULL, 'missed', NULL,
+               'no recorded firing after 120s grace',
+               e.runtime_version, e.runtime_generation
+        FROM _clock_expected e
+        WHERE NOT EXISTS (
+            SELECT 1 FROM observed o WHERE o.repository = e.repository
+              AND o.agent_name = e.agent_name AND o.planned_at = e.planned_at)
+    """)
+
+
+def _insert_expected(con, batch) -> None:
+    # One JSON parameter avoids per-cell Python type inference on large nested
+    # lists; decoding stays vectorized inside DuckDB and needs no extra package.
+    con.execute(
+        "INSERT INTO _clock_expected SELECT "
+        "json_extract_string(value, '$[0]'), json_extract_string(value, '$[1]'), "
+        "TRY_CAST(json_extract_string(value, '$[2]') AS TIMESTAMP WITH TIME ZONE), "
+        "json_extract_string(value, '$[3]'), json_extract_string(value, '$[4]') "
+        "FROM json_each(?)",
+        [json.dumps([[repository, identifier, planned.isoformat(), version, generation]
+                     for repository, identifier, planned, version, generation in batch])],
+    )
 
 
 def _schema_violations(patterns: list[str]) -> tuple[int, list[str]]:
@@ -550,7 +667,8 @@ def main() -> int:
         return 2
 
     con = duckdb.connect(":memory:")
-    build_view(con, patterns, archives=archives)
+    build_view(con, patterns, archives=archives,
+               repositories=[str(resolve_root(allow_sole_registered=True))], sql=args.sql)
 
     if args.check_schema:
         violations = check_schema(con, patterns)

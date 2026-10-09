@@ -110,6 +110,8 @@ def runtime_observations(
             installed = {item.key: item for item in host.trigger_store.list()}
             processes = {
                 item.key: item for item in host.supervisor.owned(role="watcher")}
+            from ..runtime import handoff
+            busy = handoff.running_watchers(tuple(processes.values()))
             for spec in watched:
                 execution = spec.execution
                 assert execution is not None and execution.watch
@@ -127,6 +129,8 @@ def runtime_observations(
                     trigger is None
                     or trigger.fingerprint != expected.fingerprint
                     or process.fingerprint != expected.fingerprint
+                    or process.pid not in busy
+                    and host.supervisor.watcher_health(process) not in {"watching", "starting"}
                 ):
                     liveness[spec.identifier] = "degraded"
                 else:

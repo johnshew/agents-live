@@ -493,6 +493,23 @@ def _assert_operational_viewport(
                         if min(bounds["right"], other["right"]) > max(bounds["left"], other["left"]) + 1 \
                                 and min(bounds["bottom"], other["bottom"]) > max(bounds["top"], other["top"]) + 1:
                             raise ReadinessError(f"{mode} {width}x{height}: toolbar controls overlap")
+                if viewport_name == "desktop" and mode in {"normal", "source"}:
+                    page.get_by_role("button", name="Run timing", exact=True).click()
+                    dialog = page.get_by_role("dialog")
+                    for title in ("Run timing", "Locks by operation", "Gate waits by agent",
+                                  "Clock fires", "Clock history coverage", "Watcher exits and stops"):
+                        dialog.get_by_text(title, exact=True).wait_for()
+                    dialog.get_by_label("Time window").click()
+                    page.get_by_role("option", name="1h", exact=True).click()
+                    dialog.get_by_text("Locks by operation", exact=True).wait_for()
+                    timing = json.loads(urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/timing?since=1h", timeout=30).read())
+                    if timing.get("status") not in {"ok", "empty"} \
+                            or not all(key in timing for key in
+                                       ("locks", "agents", "clock", "clock_coverage", "watchers")):
+                        raise ReadinessError(f"{mode}: timing report unavailable: {timing}")
+                    dialog.get_by_role("button", name="Close", exact=True).click()
+                    dialog.wait_for(state="hidden")
                 if screenshot_dir := os.environ.get("AGENTS_LIVE_READINESS_SCREENSHOTS"):
                     destination = Path(screenshot_dir)
                     destination.mkdir(parents=True, exist_ok=True)

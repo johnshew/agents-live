@@ -10,7 +10,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from .runtime import ChildRunner, handoff, parse_schedule
 from .runtime.budget import claim as claim_budget
 from .runtime.hosts import system as hostruntime
 from .runtime.hosts.processes import pid_exists
+from .obs import timing
 
 # An unreadable lock is only abandoned once it outlives any plausible run.
 _LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -54,9 +55,28 @@ def dispatch(
     runner: ChildRunner | None = None,
     now: datetime | None = None,
 ) -> Outcome:
+    firing = replace(firing, root=str(Path(firing.root).resolve()))
     started = time.monotonic()
-    accounting = _Accounting(firing.agent_id)
-    result = _dispatch(firing, accounting, runner=runner, now=now)
+    instant = now or datetime.now().astimezone()
+    if instant.tzinfo is None:
+        instant = instant.astimezone()
+    accounting = _Accounting(
+        firing.agent_id, uuid.uuid4().hex,
+        budget_now=now.timestamp() if now is not None else None)
+    if firing.origin == "clock":
+        accounting.planned_at = instant.replace(second=0, microsecond=0)
+        accounting.planned_source = "arrival-minute"
+        obs.record(_event_path(Path(firing.root).resolve(), firing.agent_id), obs.create(
+            "clock-arrival", "received", repository=firing.root,
+            agent=firing.agent_id, run_id=accounting.run_id, origin=firing.origin,
+            attributes=(("planned_at", accounting.planned_at.isoformat()),
+                        ("arrival_at", instant.isoformat()),
+                        ("planned_source", "arrival-minute")),
+        ))
+    with timing.context("dispatch", run_id=accounting.run_id, agent=firing.agent_id,
+                        repository=firing.root, origin=firing.origin):
+        result = _dispatch(firing, accounting, runner=runner, now=instant,
+                           started=started)
     if accounting.attempts:
         result = replace(result, usage=_total_usage(accounting.attempts))
         if not result.transcript:
@@ -87,6 +107,15 @@ def dispatch(
             ("processor_record", accounting.processor_record),
             ("model_called", model_called),
             ("transcript_state", transcript_state),
+            ("gate_wait_s", accounting.gate_wait_s),
+            ("planned_at", accounting.planned_at.isoformat() if accounting.planned_at else None),
+            ("actual_start_at", accounting.actual_start_at.isoformat() if accounting.actual_start_at else None),
+            ("launch_lag_s", (accounting.actual_start_at - accounting.planned_at).total_seconds()
+             if accounting.actual_start_at and accounting.planned_at else None),
+            ("planned_source", accounting.planned_source),
+            ("fire_status", ("skipped" if result.status == "skipped" else
+                             "launched" if accounting.actual_start_at else "failed")
+             if firing.origin == "clock" else None),
         ),
     ))
     return result
@@ -95,6 +124,12 @@ def dispatch(
 @dataclass
 class _Accounting:
     identifier: str
+    run_id: str
+    budget_now: float | None = None
+    gate_wait_s: float | None = None
+    planned_at: datetime | None = None
+    actual_start_at: datetime | None = None
+    planned_source: str | None = None
     transcript_enabled: bool = True
     completion_reason: str | None = None
     processor_record: str | None = None
@@ -131,14 +166,16 @@ def _dispatch(
     *,
     runner: ChildRunner | None,
     now: datetime | None,
+    started: float,
 ) -> Outcome:
     root = Path(firing.root).resolve()
-    run_id = uuid.uuid4().hex
+    run_id = accounting.run_id
     instant = now or datetime.now().astimezone()
     timeout = _CLOCK_ACTIVATION_WAIT_SECONDS if firing.origin == "clock" else 0
     try:
         with handoff.gate(timeout=timeout, operation="dispatch", run_id=run_id,
-                  agent=firing.agent_id, repository=firing.root):
+                  agent=firing.agent_id, repository=firing.root) as observation:
+            accounting.gate_wait_s = observation["gate_wait_s"]
             if firing.origin != "manual":
                 try:
                     if not state.is_started(root, firing.agent_id):
@@ -164,13 +201,20 @@ def _dispatch(
                     or firing.timeout > (config.overall_timeout or config.timeout or 120)):
                 raise ValueError("run --timeout must be positive and cannot raise the overall timeout")
             accounting.transcript_enabled = config.transcript
-            if firing.origin == "clock" and not any(
-                    parse_schedule(item).matches(instant) for item in config.schedules):
-                return _skip(run_id, "not-due")
+            if firing.origin == "clock":
+                schedules = tuple(parse_schedule(item) for item in config.schedules)
+                if not any(schedule.matches(instant) for schedule in schedules):
+                    candidates = [planned for schedule in schedules
+                                  if (planned := schedule.previous(instant)) is not None]
+                    accounting.planned_at = max(candidates) if candidates else None
+                    accounting.planned_source = "previous-due-minute"
+                    return _skip(run_id, "not-due")
+                accounting.planned_source = "due-minute"
             lock = _RunLock(root, firing.agent_id)
             if not lock.acquire():
                 return _skip(run_id, "already-running")
-    except hostruntime.LockBusy:
+    except hostruntime.LockBusy as exc:
+        accounting.gate_wait_s = getattr(exc, "observation", {}).get("gate_wait_s")
         if firing.origin == "clock":
             return _failure(
                 run_id, "runtime_activation_timeout",
@@ -178,12 +222,14 @@ def _dispatch(
         return _skip(run_id, "runtime-activation")
     try:
         budget = claim_budget(
-            _budget_path(root), now=(now.timestamp() if now is not None else None))
+            _budget_path(root), now=accounting.budget_now)
         if not budget.allowed:
             return _skip(run_id, "dispatch-budget")
         selected_runner = runner or runtime.current().child_runner
         try:
             _event_path(root, firing.agent_id).parent.mkdir(parents=True, exist_ok=True)
+            accounting.actual_start_at = instant.astimezone(UTC) + timedelta(
+                seconds=time.monotonic() - started)
             return _pipeline(spec, firing, selected_runner, run_id, accounting)
         except (agent.DefinitionError, ValueError) as exc:
             return _failure(
@@ -838,8 +884,10 @@ class _RunLock:
         safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in key)
         self.path = repo_state_dir(root) / "locks" / f"{safe}.lock"
         self._owned = False
+        self._hold = None
 
     def acquire(self) -> bool:
+        started = time.monotonic()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists() and self._stale():
             self.path.unlink(missing_ok=True)
@@ -850,6 +898,7 @@ class _RunLock:
         with os.fdopen(descriptor, "w", encoding="ascii") as stream:
             json.dump({"pid": os.getpid(), "created": time.time()}, stream)
         self._owned = True
+        self._hold = timing.acquired(self.path, "agent-run", started)
         return True
 
     def _stale(self) -> bool:
@@ -872,5 +921,9 @@ class _RunLock:
 
     def release(self) -> None:
         if self._owned:
-            self.path.unlink(missing_ok=True)
-            self._owned = False
+            try:
+                self.path.unlink(missing_ok=True)
+            finally:
+                self._owned = False
+                if self._hold is not None:
+                    self._hold.finish()

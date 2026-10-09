@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 from .. import paths
 from .events import create, record as record_event
+from . import timing
 
 AGENT_NAME = "admin"
 MAX_COMMAND_LENGTH = 512
@@ -102,7 +103,9 @@ def operation(name: str, **fields: Any) -> Iterator[dict[str, Any]]:
     started = time.time()
     end_fields: dict[str, Any] = {}
     try:
-        yield end_fields
+        with timing.context(name, run_id=fields["correlation_id"],
+                            repository=str(fields.get("root", ""))):
+            yield end_fields
     except BaseException as exc:
         payload = {**fields, **end_fields}
         payload.update(status="error", level="error",

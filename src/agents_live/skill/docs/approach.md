@@ -1,7 +1,7 @@
 ---
 title: Architecture
 description: Runtime, agent, dispatch, state, and observability seams
-ms.date: 2026-10-08
+ms.date: 2026-10-09
 ms.topic: concept-article
 ---
 
@@ -47,7 +47,7 @@ lock is never terminated or waited on for run completion. Its subscription's
 replacement is deferred rather than starting a second watch loop. After the fire
 returns and records its outcome, the old watcher checks pause and the active
 generation: it exits while paused, or hands off to the selected runtime when
-superseded. Maintenance restores missing watchers and defers any stop/replacement
+superseded. Maintenance restores missing or non-progressing watchers and defers any stop/replacement
 operation whose watcher tree still owns a run. This also supports older watchers
 that know only the shared pause signal and generation pointer.
 
@@ -137,6 +137,34 @@ distribution at a bounded idle check. A mismatch is handled only between
 dispatches: the old loop stops its change source, launches the same marked
 subscription through the current CLI, and exits.
 
+Each detached watcher has an independent exit observer in a separate process
+group. It drains stderr continuously into an 8 KiB tail and records the OS exit
+code, total stderr bytes, truncation/completeness flags and termination reason,
+even if the watcher exits without Python cleanup or is terminated during
+convergence. Native boot subscriptions use the same observer, whose process
+role is not a watcher. Launcher and interpreter identities share one observation.
+Convergence persists every idle stop intent before termination and logs busy
+deferrals without claiming a termination. Cooperative retirement supplies its
+activation, replacement or watch-failure reason; an unexplained exit is explicitly
+`unexpected_exit`.
+The launcher waits at most five seconds for the observer's child identity, not
+for functional watch-loop acceptance. Watcher descendants are owned before
+execution and cleaned up before declaring stderr complete.
+On Windows only watcher jobs permit explicit breakaway, and only a replacement
+observer requests it. The replacement observer owns its own watcher job, so old
+job cleanup cannot terminate it; ordinary provider/processor jobs still forbid
+escape. Stored boot-task fingerprints distinguish old unsupervised actions
+from the supervised route, while resident loop markers associate with that route.
+
+Functional health comes from the executing loop after change-source startup
+and each poll/dispatch boundary, not a timer beside a stalled loop. Idle polls
+are bounded to 15 seconds; progress expires after 45 seconds, with a 30-second
+startup grace. Maintenance replaces idle owners with missing/stale progress,
+checks again before stopping a recovered loop, and preserves watcher trees
+holding active run locks. A bounded startup grace is not functional acceptance,
+and a heartbeat does not prove that every native filesystem notification arrived.
+Completed observer evidence follows host retention; active evidence is retained.
+
 ## Agent port
 
 `agent/` owns a runnable unit of work through five pure operations:
@@ -204,6 +232,36 @@ assignment decision.
 
 `obs/` creates versioned immutable event records. The dispatch envelope and
 event envelope are deliberately separate.
+
+The shared file-lock primitive and the two PID-file locks record every
+successful acquisition and release with monotonic wait/hold measurements,
+operation and run identity. Logging failure never changes lock exclusion or
+cleanup. Dispatch terminal events carry launch-gate wait; clock arrivals
+preserve a planned due minute, and admitted runs record actual pipeline start
+and launch lag. Every framework event and pipeline journal entry identifies
+its loaded runtime version and generation independently of later activation.
+Idle watcher pause checks acquire no lock: they read an atomically published
+pause owner and verify its OS process-start identity and liveness. A crashed or
+reused owner is not an active pause. Publication/removal brackets the pause
+body inside the actual measured pause lock; read/identity errors remain visible.
+
+Convergence records successful clock intent and withdrawal under its existing
+gate. Failed partial convergence records an unknown interval rather than
+asserting automation was installed. Log readers build the `clock_fires` view
+from retained intent and arrivals, reporting an expected slot with no recorded
+invocation after 120 seconds as inferred missed work. The view never launches
+work, invents pre-observation history, or audits repositories whose run history
+was not loaded. Damaged structured records disable missed-fire inference.
+Only SQL referencing a clock view prepares clock history; DuckDB's parser
+recognizes arbitrary query shapes rather than matching SQL text. Calendar
+projection enumerates schedule candidates in UTC hour buckets, with a minute
+fallback inside offset-transition hours, instead of testing every retained minute.
+Dashboard bounds reach projection itself, retaining the preceding observation
+as interval context without inventing pre-observation coverage.
+The dashboard's Timing panel and `/api/timing` reuse these SQL views and expose
+watcher exits and convergence stop reasons.
+See [diagnostics](diagnostics.md#locks-clock-fires-and-runtime-identity) for
+measurement semantics, limitations, and single-query recipes.
 
 ## Safety invariants
 

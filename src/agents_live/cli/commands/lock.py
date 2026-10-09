@@ -30,10 +30,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--timeout must be zero or greater")
 
     path = args.path.expanduser().resolve()
-    deadline = time.monotonic() + args.timeout
+    started = time.monotonic()
+    deadline = started + args.timeout
     while True:
         try:
-            with hostruntime.exclusive_lock(path, blocking=False):
+            with hostruntime.exclusive_lock(
+                    path, blocking=False, kind="command-lock",
+                    operation="lock-command", wait_started=started):
                 return subprocess.run(command, check=False).returncode
         except hostruntime.LockBusy:
             if time.monotonic() >= deadline:

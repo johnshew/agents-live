@@ -159,7 +159,8 @@ def classify(name: str, status: str, *, root: Path | None = None) -> None:
     install_root = root or layout.installation_root()
     try:
         with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                layout.deployment_lock_path(install_root), blocking=False,
+                kind="deployment", operation="version-classify"):
             generation = load(name, root=install_root)
             if ".dev" in generation.name:
                 raise GenerationError("development generations cannot be classified as releases")
@@ -196,7 +197,8 @@ def build(
     install_root.mkdir(parents=True, exist_ok=True)
     try:
         with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                layout.deployment_lock_path(install_root), blocking=False,
+                kind="deployment", operation="version-build"):
             if layout.is_sealed(target):
                 raise GenerationError(
                     f"generation {generation_name} is already installed and "
@@ -235,7 +237,8 @@ def activate(generation: Generation, *, root: Path | None = None) -> pointer.Poi
     install_root = root or layout.installation_root()
     try:
         with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                layout.deployment_lock_path(install_root), blocking=False,
+                kind="deployment", operation="version-activate"):
             installed = load(generation.name, root=install_root)
             if installed != generation:
                 raise GenerationError(
@@ -319,7 +322,8 @@ def remove(name: str, *, root: Path | None = None,
     generation_name = layout.generation_name(name)
     try:
         with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                layout.deployment_lock_path(install_root), blocking=False,
+                kind="deployment", operation="version-remove"):
             active, state, detail = pointer.status(
                 layout.current_path(install_root))
             if state not in (pointer.ACTIVE, pointer.MISSING):
@@ -348,7 +352,8 @@ def collect(*, root: Path | None = None,
     install_root = root or layout.installation_root()
     try:
         with hostruntime.exclusive_lock(
-                layout.deployment_lock_path(install_root), blocking=False):
+                layout.deployment_lock_path(install_root), blocking=False,
+                kind="deployment", operation="version-collect"):
             active, state, detail = pointer.status(
                 layout.current_path(install_root))
             if state not in (pointer.ACTIVE, pointer.MISSING):

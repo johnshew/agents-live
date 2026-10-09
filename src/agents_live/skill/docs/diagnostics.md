@@ -1,7 +1,7 @@
 ---
 title: Diagnostics
 description: Diagnose definitions, convergence, dispatch, and WSL liveness
-ms.date: 2026-10-08
+ms.date: 2026-10-09
 ms.topic: troubleshooting
 ---
 
@@ -79,6 +79,127 @@ agents-live logs --columns run_id,usage,attempts
 Older records without these measurements remain null. This accounting does
 not introduce nested spans, tracing exporters, aggregate usage summaries, or
 a model-bypass processor signal.
+
+## Locks, clock fires and runtime identity
+
+Every successful cross-process lock acquisition emits an `acquired` and, on
+normal release including exception unwinding, a `released` event with
+`phase=lock`. `operation`, `run_id`, `agent_name`, `repository`, `lock_kind`,
+`lock_id` and `acquisition_id` identify its owner and resource. `lock_wait_s`
+measures monotonic time to acquisition; `lock_hold_s` measures acquisition to
+release. Both contended and uncontended acquisitions are recorded. Aggregate
+only `released` rows: an acquired lock whose process dies has no measured hold
+duration. Resource paths are hashed rather than recorded. This covers the
+runtime launch gate, agent run and dispatch-budget locks, registry, crontab,
+deployment, activation/pause locks, and the public `agents-live lock` wrapper.
+Processor lock commands inherit the processor's run and agent identity.
+Idle watcher pause checks are atomic read-only owner checks, not acquisitions.
+They add no lock events; actual pause operations still log every successful
+acquisition. Crashed/reused owners clear logically, while unreadable or
+unverifiable pause state reports an error instead of claiming a safe read.
+
+Agent terminal events carry `gate_wait_s`, including failed waits. Clock fires
+also carry `planned_at`, `actual_start_at`, `launch_lag_s` and `fire_status`.
+The actual start is admission to pipeline execution, after gate, concurrency
+and budget checks, not terminal-event time. A skipped fire has no actual start.
+Normal clock invocations retain their arrival's due minute through a gate wait.
+A non-due arrival still skips; `planned_source=previous-due-minute` labels its
+most recent due minute, not proof of which native firing caused the invocation.
+`arrival-minute` means the definition was not loaded before refusal. Native
+schedulers do not supply their original fire timestamp, so startup delay that
+crossed a minute cannot be recovered as an exact launch lag.
+
+Successful convergence records clock schedule intent, including withdrawal,
+configuration changes, and repository removal. `clock_fires` is a read-only SQL
+view of those expected slots and recorded arrivals/outcomes. `missed` means no
+recorded invocation after a 120-second grace period. It does not prove a native
+scheduler failed. A received fire is not called missed while waiting or running;
+its terminal event replaces the arrival rather than counting the run twice.
+Terminal outcomes with no calculable due minute remain visible using
+`observed_at`; old outcomes without timing are labeled `unmeasured`.
+Reboot-only triggers do not create inferred calendar slots.
+Partial convergence closes the known interval until another successful
+observation. There is no claim before the first retained observation, after
+withdrawal, or outside retained history. Multiple schedules due in one minute
+produce one expected agent slot; actual attempts keep their own run IDs.
+Queries use the owning host's local scheduler timezone, including DST minutes.
+`clock_coverage` reports the retained baseline, omits unknown convergence or
+changed-timezone intervals, and disables missed-fire inference when structured
+records are damaged. The recorded host-timezone signature must match the reader;
+query imported history on its owning host rather than assuming a different local
+timezone. This adds no catch-up launches,
+scheduler-policy changes or span correlation.
+Ordinary log queries do not project clock expectations. Queries referencing
+clock views are discovered by the SQL parser, including joins, CTEs and quoted
+names. Projection enumerates schedule candidates rather than every historical
+minute, preserving missing/repeated DST minutes.
+
+All framework events and pipeline journal entries carry `runtime_version` and
+`runtime_generation` from the loaded runtime, never the current selection.
+Source and other unmanaged environments explicitly report `unmanaged` as their
+generation; historical records without identity remain null.
+
+Each question is one public query; put time filters inside SQL:
+
+```bash
+agents-live logs --sql "SELECT operation, lock_kind, max(lock_hold_s) AS max_hold_s, quantile_cont(lock_hold_s, .95) AS p95_hold_s FROM log WHERE phase = 'lock' AND status = 'released' AND ts >= now() - INTERVAL 1 DAY GROUP BY operation, lock_kind ORDER BY max_hold_s DESC"
+agents-live logs --sql "SELECT agent_name, max(gate_wait_s) AS max_wait_s, quantile_cont(gate_wait_s, .95) AS p95_wait_s FROM log WHERE phase IN ('done', 'firing') AND ts >= now() - INTERVAL 1 DAY GROUP BY agent_name"
+agents-live logs --sql "SELECT agent_name, planned_at, observed_at, actual_start_at, launch_lag_s, fire_status, run_id FROM clock_fires WHERE COALESCE(planned_at, observed_at) >= now() - INTERVAL 1 DAY ORDER BY COALESCE(planned_at, observed_at) DESC"
+agents-live logs --sql "SELECT * FROM clock_coverage"
+```
+
+The dashboard's **Timing** panel uses the same normalized SQL views for
+1-hour, 24-hour and 7-day windows. Its read-only `/api/timing?since=24h`
+endpoint accepts relative or ISO `since` and optional `until` bounds and
+returns host lock max/p95, agent gate waits, clock outcomes, coverage and
+watcher exits/stops.
+The selected window also bounds expected-slot projection, not just the displayed
+rows. An observation before the window supplies interval context; grace is
+measured against current time, not subtracted from a historical window's end.
+Single-repository clock queries never infer missed work for other repositories
+whose run history was not loaded. Aggregate dashboards load all registered
+repository histories before auditing their clocks.
+
+### Watcher exits and functional health
+
+Detached watcher exit observation survives its launching process and watcher
+termination. `phase=watcher`, `status=exited` records `watcher_pid`,
+`subscription_id`, `exit_code`, `stderr_tail`, `stderr_bytes`,
+`stderr_truncated`, `stderr_complete`, `capture_error`, `stop_reason` and
+`operation`. Stderr drains continuously and only its final 8 KiB is retained.
+An incomplete stream or persistence failure is explicit, not claimed complete.
+The observer's loaded runtime identity is retained independently of activation.
+Unexpected exits, including unexplained code zero, also appear in `logs --errors`.
+Expected cooperative or convergence stops are informational even when the OS
+uses a nonzero termination code. Observer/launch failure uses code `-1` when no
+child exit code is available; `capture_error` distinguishes it.
+
+Every convergence stop records `status=stopping` and its reason before attempting
+termination. A busy tree records `deferred`; that is not an exit. Exit records
+prefer the persisted stop intent, then cooperative activation/replacement or
+watch-failure diagnosis. An otherwise unexplained exit, even code zero, is
+`unexpected_exit`; no cause is invented. Historical unsupervised processes have
+no recoverable exit code or discarded stderr, but their new stop intents are
+logged.
+
+Maintenance checks progress written by the actual loop after source startup and
+at poll/dispatch boundaries. Polls use a 15-second bound; progress expires after
+45 seconds. A newly spawned process gets 30 seconds to initialize. Missing,
+stopped or stale progress is not a functioning loop, even with matching argv.
+Idle unhealthy owners are replaced, recovered owners are rechecked before stop,
+and active-run lock holders remain protected regardless of heartbeat age.
+This detects stalled/non-watching owners at the next maintenance pass, not
+instantaneously. It does not certify native notification delivery. Killing the
+observer itself, losing host power, or losing writable storage can prevent an
+exit record; retained partial stderr/state is not an OS exit-code receipt.
+
+```bash
+agents-live logs --sql "SELECT ts, agent_name, watcher_pid, status, exit_code, stop_reason, operation, stderr_tail, stderr_bytes, stderr_truncated, stderr_complete, capture_error FROM log WHERE phase = 'watcher' AND status IN ('exited', 'stopping', 'deferred') AND ts >= now() - INTERVAL 1 DAY ORDER BY ts DESC"
+```
+
+The **Watcher exits and stops** table in dashboard **Timing** and the `watchers`
+array in `/api/timing` expose the same records. Completed observation state
+follows host log retention; active observations are not collected.
 
 ## Native Windows first run
 

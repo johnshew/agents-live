@@ -43,7 +43,8 @@ class PosixTriggerStore:
                     metadata.id,
                     metadata.scope,
                     _kind(line),
-                    artifacts.PREFIX + metadata.id,
+                    artifacts.PREFIX + metadata.id + (
+                        ":supervised" if "watch-supervise" in shlex.split(line) else ""),
                     line,
                     metadata.target,
                 ))
@@ -90,6 +91,8 @@ class PosixHost:
         else:
             root, target = _address(subscription)
         fingerprint = artifacts.PREFIX + subscription.key
+        if subscription.kind == "watch":
+            fingerprint += ":supervised"
         origin = None
         if subscription.kind == "schedule" and subscription.target != "runtime":
             origin = "boot" if parse_schedule(
@@ -122,6 +125,7 @@ class PosixHost:
             )
             watcher_argv = (*watcher_base, "--watch-expression", watch.canonical)
             argv = list(watcher_base)
+            argv[4] = "watch-supervise"
         if subscription.target == "runtime":
             rendered = f"{trigger} {shlex.join(argv)} 2>&1"
         else:
@@ -176,4 +180,4 @@ def _kind(line: str) -> str:
         tokens = shlex.split(line)
     except ValueError:
         tokens = line.split()
-    return "watch" if "watch-loop" in tokens else "schedule"
+    return "watch" if {"watch-loop", "watch-supervise"}.intersection(tokens) else "schedule"

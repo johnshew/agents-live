@@ -5,8 +5,10 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from threading import RLock
 
+from ..obs import timing
+
 from .diff import diff
-from . import handoff
+from . import handoff, watcher
 from .protocols import HostAdapter
 from .values import Converged, Health, InstalledTrigger, Operation, ProcessRef, Subscription
 
@@ -37,6 +39,7 @@ def health() -> Health:
 class Plan:
     host: HostAdapter
     operations: tuple[Operation, ...]
+    addresses: tuple[tuple[str, str, str], ...] = ()
 
 
 def plan(
@@ -55,6 +58,11 @@ def plan(
     host = _host or current()
     rendered = tuple(host.render(item) for item in subscriptions)
     processes = tuple(host.supervisor.owned(role="watcher") if watchers is None else watchers)
+    running = handoff.running_watchers(processes) if processes else set()
+    watcher_health = {
+        item.pid: "busy" if item.pid in running else host.supervisor.watcher_health(item)
+        for item in processes}
+    installed = tuple(host.trigger_store.list() if installed is None else installed)
     keys = [item.key for item in processes if item.key]
     parents = system.process_parent_ids() if len(set(keys)) != len(keys) else {}
     try:
@@ -63,14 +71,17 @@ def plan(
         preferred_generation = ""
     return Plan(host, tuple(diff(
         rendered,
-        host.trigger_store.list() if installed is None else installed,
+        installed,
         processes,
         protected_scopes,
         protected_targets,
         protected_process_keys,
         preferred_generation=preferred_generation,
         process_parents=parents,
-    )))
+        watcher_health=watcher_health,
+    )), tuple((item.key, item.scope.removeprefix("repo:"),
+               item.target.removeprefix("agent:"))
+              for item in (*installed, *rendered)))
 
 
 def _prepare(host: HostAdapter) -> Converged | None:
@@ -101,6 +112,7 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
             operation.process for operation in prepared.operations
             if operation.kind == "stop-watcher" and operation.process is not None))
         deferred: set[str] = set()
+        addresses = {key: (repository, agent) for key, repository, agent in prepared.addresses}
         for operation in prepared.operations:
             try:
                 if operation.kind == "install-trigger":
@@ -121,6 +133,11 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                         if any(item.fingerprint != operation.rendered.fingerprint
                                for item in owners):
                             raise RuntimeError("replacement deferred: stale watcher is still alive")
+                        busy_owners = handoff.running_watchers(owners)
+                        if any(host.supervisor.watcher_health(item) not in {"watching", "starting"}
+                               for item in owners
+                               if item.pid not in busy_owners):
+                            raise RuntimeError("replacement deferred: non-watching owner is still alive")
                         done.append(replace(
                             operation, detail="start not needed: watcher is already alive"))
                         continue
@@ -133,11 +150,28 @@ def commit(prepared: Plan, *, prepare: bool = True) -> Converged:
                 elif operation.kind == "stop-watcher":
                     assert operation.process is not None
                     if operation.process.pid in running:
+                        repository, agent = addresses.get(operation.key, ("", "watcher"))
+                        watcher.stop(
+                            operation.process, reason=operation.detail,
+                            operation=timing.current().operation,
+                            repository=repository, agent=agent, status="deferred")
                         deferred.add(operation.key)
                         done.append(replace(
                             operation, detail="stop deferred: watcher has an active run"))
                         continue
+                    if operation.detail == "watcher is not watching" and (
+                        host.supervisor.watcher_health(operation.process) in {"watching", "starting"}
+                    ):
+                        done.append(replace(operation, detail="stop not needed: watcher recovered"))
+                        continue
+                    repository, agent = addresses.get(operation.key, ("", "watcher"))
+                    watcher.stop(
+                        operation.process, reason=operation.detail,
+                        operation=timing.current().operation,
+                        repository=repository, agent=agent)
                     host.supervisor.terminate(operation.process)
+                    if host.supervisor.alive(operation.process):
+                        raise RuntimeError("watcher did not stop")
                 else:
                     raise ValueError(f"unknown convergence operation: {operation.kind}")
             except Exception as exc:

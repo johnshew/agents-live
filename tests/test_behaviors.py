@@ -2152,9 +2152,10 @@ class TestWindowsDetachedProcess(unittest.TestCase):
         terminate.assert_called_once_with(42)
 
     def test_a_detached_watcher_uses_host_spawn_policy(self) -> None:
-        process = mock.Mock(pid=42)
+        from agents_live.runtime import watcher
+        process = mock.Mock(pid=42, created_at=1)
         with mock.patch.object(
-                hostruntime, "spawn_detached", return_value=process) as spawn:
+                watcher, "spawn", return_value=process) as spawn:
             WindowsProcesses().spawn_detached(
                 ["agents-live.exe", "internal", "watch-loop", "sample"],
                 role="watcher",
@@ -2165,6 +2166,8 @@ class TestWindowsDetachedProcess(unittest.TestCase):
         spawn.assert_called_once_with(
             ["agents-live.exe", "internal", "watch-loop", "sample"],
             cwd=None,
+            key="subscription",
+            stdout=subprocess.DEVNULL,
         )
 
     @unittest.skipUnless(sys.platform == "win32", "Windows console behavior")
@@ -2182,7 +2185,7 @@ class TestWindowsDetachedProcess(unittest.TestCase):
                 warnings.simplefilter("ignore", ResourceWarning)
                 WindowsProcesses().spawn_detached(
                     [sys.executable, "-c", source, str(result)],
-                    role="watcher",
+                    role="provider-child",
                     key="subscription",
                     fingerprint="fingerprint",
                 )
@@ -2332,6 +2335,978 @@ class TestStateSurvivesAConcurrentReader(TempRepository):
                 paths.atomic_write_text(target, "replacement\n")
             waited = time.monotonic() - started
         self.assertLess(waited, 30.0, f"waited {waited:.1f}s before failing")
+
+
+class TestWatcherExitEvidence(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(isolated_host(self.root))
+
+    def _records(self):
+        return obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+
+    def _wait(self, predicate):
+        deadline = time.monotonic() + 15
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(predicate(), "synthetic watcher did not reach its expected state")
+
+    def _reference(self, session):
+        from agents_live.runtime import watcher
+        self._wait(lambda: bool(watcher._read(session / "child.json")))
+        child = watcher._read(session / "child.json")
+        return ProcessRef(child["pid"], child["created_at"], "python", "watcher",
+                          key=child["key"], fingerprint="synthetic")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows job ownership")
+    def test_replacement_outlives_retiring_watcher_job_and_keeps_exit_receipt(self):
+        from agents_live.runtime import watcher
+        marker = self.root / "replacement.json"
+        replacement = "import os, time; os.write(2, b'replacement evidence'); time.sleep(20)"
+        retiring = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "from tests.host_safety import native_guard, allow_native_runtime\n"
+            "from agents_live.runtime import watcher\n"
+            "with native_guard(), allow_native_runtime():\n"
+            f" child = watcher.spawn([sys.executable, '-c', {replacement!r}], "
+            f"cwd={str(self.root)!r}, key='replacement')\n"
+            " identity = watcher._read(watcher._home() / 'pids' / f'{child.pid}.json')\n"
+            f" Path({str(marker)!r}).write_text(json.dumps(identity), encoding='utf-8')\n")
+        with mock.patch.dict(os.environ, {"PYTHONPATH": os.pathsep.join(
+                (str(REPOSITORY), str(REPOSITORY / "src")))}):
+            session = watcher.prepare([sys.executable, "-c", retiring], cwd=self.root)
+            code = watcher.supervise(session)
+        replacement_identity = json.loads(marker.read_text(encoding="utf-8"))
+        pid = replacement_identity["pid"]
+        replacement_session = Path(replacement_identity["session"])
+        try:
+            self.assertEqual(0, code, watcher._read(session / "exit.json"))
+            self.assertTrue(hostruntime.is_alive(pid), "old job cleanup killed replacement")
+            self.assertFalse((replacement_session / "exit.json").exists())
+            self._wait(lambda: (replacement_session / "stderr.txt").exists()
+                       and "replacement evidence" in (replacement_session / "stderr.txt").read_text())
+        finally:
+            if hostruntime.is_alive(pid):
+                hostruntime.terminate(pid, grace_s=0.1)
+            self._wait(lambda: (replacement_session / "exit.json").is_file())
+        receipt = watcher._read(replacement_session / "exit.json")
+        self.assertEqual("replacement evidence", receipt["stderr_tail"])
+        self.assertTrue(receipt["stderr_complete"])
+        self.assertFalse(hostruntime.is_alive(pid))
+
+    def test_windows_boot_task_migrates_without_losing_watcher_association(self):
+        from agents_live.runtime.diff import diff
+        from agents_live.runtime.hosts import task_scheduler
+        subscription = Subscription.create(
+            scope=f"repo:{self.root}", target="agent:sample", kind="watch", trigger="src/**")
+        with mock.patch.object(windowshost, "cli_executable_path", return_value=Path("agents-live.exe")):
+            desired = windowshost.WindowsHost().render(subscription)
+        data = json.loads(desired.rendered)
+        legacy = list(data["argv"])
+        legacy[4] = "watch-loop"
+        task = {"name": "Subscription-" + desired.key, "command": legacy[0],
+                "arguments": task_scheduler.argument_string(legacy[1:]),
+                "working_dir": data["root"]}
+        with mock.patch.object(task_scheduler, "registered_tasks", return_value=[task]):
+            operations = diff((desired,), windowshost.WindowsTriggerStore().list())
+        self.assertEqual(["remove-trigger", "install-trigger"],
+                         [item.kind for item in operations if item.kind.endswith("trigger")])
+        markers = windowshost._process_markers(desired.watcher_argv)
+        self.assertEqual(desired.key, markers["key"])
+        self.assertEqual(desired.fingerprint, markers["fingerprint"])
+        task["arguments"] = task_scheduler.argument_string(data["argv"][1:])
+        with mock.patch.object(task_scheduler, "registered_tasks", return_value=[task]):
+            self.assertEqual([], [item for item in diff(
+                (desired,), windowshost.WindowsTriggerStore().list()) if item.kind.endswith("trigger")])
+
+    def test_abrupt_exit_survives_launching_process_and_preserves_bounded_stderr(self):
+        from agents_live.runtime import watcher
+        marker = self.root / "session.txt"
+        synthetic = (
+            "import os, sys, time\n"
+            "from tests.host_safety import native_guard\n"
+            "with native_guard():\n"
+            " time.sleep(0.5)\n"
+            " os.write(2, b'x' * 131072 + b'causal stderr tail')\n"
+            " os._exit(7)\n")
+        launcher = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from agents_live.runtime import watcher\n"
+            "from agents_live.runtime.hosts import system\n"
+            f"session = watcher.prepare([sys.executable, '-c', {synthetic!r}], "
+            f"cwd={str(self.root)!r}, key='synthetic')\n"
+            "code = 'import sys; from pathlib import Path; "
+            "from tests.host_safety import native_guard; "
+            "from agents_live.runtime import watcher; "
+            "guard = native_guard(); guard.__enter__(); "
+            "watcher.supervise(Path(sys.argv[1]))'\n"
+            "observer = system.spawn_detached([sys.executable, '-c', code, str(session)])\n"
+            f"Path({str(marker)!r}).write_text(str(session), encoding='utf-8')\n")
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join(
+            (str(REPOSITORY), str(REPOSITORY / "src")))}
+        launched = subprocess.run([sys.executable, "-c", launcher],
+                                  env=environment, capture_output=True, timeout=15)
+        self.assertEqual(0, launched.returncode, launched.stderr)
+        session = Path(marker.read_text(encoding="utf-8"))
+        self._wait(lambda: any(row.get("status") == "exited" for row in self._records()))
+        row = next(row for row in self._records() if row["status"] == "exited")
+        self.assertEqual(7, row["exit_code"])
+        self.assertEqual("unexpected_exit", row["stop_reason"])
+        self.assertTrue(row["stderr_tail"].endswith("causal stderr tail"))
+        self.assertLessEqual(len(row["stderr_tail"]), watcher.STDERR_LIMIT)
+        self.assertEqual(131072 + len(b"causal stderr tail"), row["stderr_bytes"])
+        self.assertTrue(row["stderr_truncated"])
+        self.assertTrue(row["stderr_complete"])
+        self.assertEqual("error", row["level"])
+        self.assertTrue(row["runtime_version"])
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, [str(item) for item in obs.files(
+                paths.repo_state_dir(self.root) / "logs")])
+            self.assertEqual((7, "unexpected_exit", True), connection.sql(
+                "SELECT exit_code, stop_reason, stderr_truncated FROM log "
+                "WHERE phase = 'watcher' AND status = 'exited'").fetchone())
+        self.assertTrue((session / "exit.json").is_file())
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module("agents_live.cli.scripts.dashboard")
+        with mock.patch.object(dashboard, "REPO_ROOT", self.root):
+            snapshot = dashboard.api_timing(since="1h")
+        self.assertEqual("ok", snapshot["status"])
+        self.assertEqual(7, snapshot["watchers"][0]["exit_code"])
+        self.assertEqual("unexpected_exit", snapshot["watchers"][0]["stop_reason"])
+
+    def test_forced_exit_has_persisted_convergence_reason_and_stderr(self):
+        from agents_live.runtime import watcher
+        source = "import os, time; os.write(2, b'before forced stop'); time.sleep(30)"
+        session = watcher.prepare([sys.executable, "-c", source],
+                                  cwd=self.root, key="synthetic")
+        observer = threading.Thread(target=watcher.supervise, args=(session,))
+        observer.start()
+        reference = self._reference(session)
+        try:
+            self._wait(lambda: (session / "stderr.txt").exists()
+                       and "before forced stop" in (session / "stderr.txt").read_text())
+            watcher.stop(reference, reason="watch expression changed", operation="maintenance")
+            hostruntime.terminate(reference.pid, grace_s=0.1)
+        finally:
+            if hostruntime.is_alive(reference.pid):
+                hostruntime.terminate(reference.pid, grace_s=0.1)
+            observer.join(timeout=15)
+        self.assertFalse(observer.is_alive())
+        exits = [row for row in self._records() if row["status"] == "exited"]
+        self.assertEqual(1, len(exits))
+        self.assertEqual("watch expression changed", exits[0]["stop_reason"])
+        self.assertEqual("maintenance", exits[0]["operation"])
+        self.assertEqual("before forced stop", exits[0]["stderr_tail"])
+        self.assertIsInstance(exits[0]["exit_code"], int)
+        self.assertNotEqual(0, exits[0]["exit_code"])
+        self.assertEqual("info", exits[0]["level"])
+
+    def test_maintenance_replaces_alive_but_not_watching_owner_and_records_every_stop(self):
+        from agents_live.runtime import watcher
+        self.skill("watch-work", [
+            'agents-live.selector: "fake"', 'agents-live.watch: "src/** debounce 1ms"'])
+        (self.root / "src").mkdir()
+        identifier = agent.load("watch-work", root=self.root).identifier
+        repos.ensure_registered(self.root)
+        state.replace(self.root, {identifier})
+        host = runtime.current()
+        self.assertFalse(lifecycle.converge().failed)
+        original = host.supervisor.owned("watcher")[0]
+        session = watcher.prepare(["synthetic-watch"], cwd=self.root, key=original.key)
+        identity = {"pid": original.pid, "created_at": original.created_at,
+                    "session": str(session), "key": original.key,
+                    "started": time.monotonic() - 1440}
+        watcher._write(session / "child.json", identity)
+        watcher._write(watcher._home() / "pids" / f"{original.pid}.json", identity)
+        watcher._write(session / "progress.json", {
+            "pid": original.pid, "phase": "poll", "at": time.monotonic() - 1440})
+        next_pid = original.pid + 1
+
+        def replacement(argv, **kwargs):
+            process = ProcessRef(next_pid, time.time(), "synthetic", "watcher",
+                                 kwargs["key"], kwargs["fingerprint"])
+            host.supervisor.processes[process.key] = process
+            return process
+
+        with (
+            mock.patch.object(host.supervisor, "watcher_health", side_effect=lambda ref:
+                              watcher.health(ref) if ref.pid == original.pid else "watching"),
+            mock.patch.object(host.supervisor, "spawn_detached", side_effect=replacement),
+        ):
+            self.assertTrue(host.supervisor.alive(original))
+            self.assertEqual("not-watching", watcher.health(original))
+            self.assertEqual(0, internal._maintain(dry_run=False))
+            self.assertNotIn(original, host.supervisor.owned("watcher"))
+            self.assertEqual(next_pid, host.supervisor.owned("watcher")[0].pid)
+            # A recovered functioning owner is kept on the next maintenance pass.
+            self.assertEqual(0, internal._maintain(dry_run=False))
+            stops = [row for row in self._records() if row["status"] == "stopping"]
+            self.assertEqual(1, len(stops))
+            self.assertEqual("watcher is not watching", stops[0]["stop_reason"])
+            self.assertEqual("maintenance", stops[0]["operation"])
+            state.replace(self.root, set())
+            self.assertEqual(0, internal._maintain(dry_run=False))
+        reasons = {row["stop_reason"] for row in self._records() if row["status"] == "stopping"}
+        self.assertEqual({"watcher is not watching", "watcher is not desired"}, reasons)
+        self.assertEqual([], host.supervisor.owned("watcher"))
+
+    def test_loop_progress_not_marker_controls_health(self):
+        from agents_live.runtime import watcher
+        self.skill("progress-work", [
+            'agents-live.selector: "fake"', 'agents-live.watch: "src/** debounce 1ms"'])
+        (self.root / "src").mkdir()
+        session = watcher.prepare(["synthetic-watch"], cwd=self.root, key="synthetic")
+        reference = ProcessRef(os.getpid(), hostruntime.process_start_time(os.getpid()),
+                               "python", "watcher", key="synthetic")
+        identity = {"pid": reference.pid, "created_at": reference.created_at,
+                    "session": str(session), "key": reference.key, "started": time.monotonic() - 60}
+        watcher._write(session / "child.json", identity)
+        watcher._write(watcher._home() / "pids" / f"{reference.pid}.json", identity)
+        self.assertEqual("not-watching", watcher.health(reference))
+        observed = []
+
+        class Source:
+            def start(self):
+                pass
+            def poll(self, timeout):
+                observed.append(watcher.health(reference))
+                self.timeout = timeout
+                return []
+            def stop(self):
+                pass
+
+        source = Source()
+        with (
+            mock.patch.dict(os.environ, {watcher.SESSION_ENV: str(session)}),
+            mock.patch.object(runtime.current(), "change_source", return_value=source),
+            mock.patch.object(internal, "_runtime_is_current", side_effect=(True, False)),
+            mock.patch.object(internal, "_restart_watcher"),
+        ):
+            self.assertEqual(0, internal._watch(argparse.Namespace(
+                name="progress-work", watch_expression=None)))
+        self.assertEqual(["watching"], observed)
+        self.assertEqual(watcher.POLL_SECONDS, source.timeout)
+        self.assertEqual("not-watching", watcher.health(reference))
+
+    def test_native_reboot_routes_observe_exits_without_becoming_watcher_owners(self):
+        subscription = Subscription.create(
+            scope=f"repo:{self.root}", target="agent:sample", kind="watch", trigger="src/**")
+        posix = PosixHost().render(subscription)
+        self.assertIn("watch-supervise", shlex.split(posix.rendered))
+        self.assertIn("watch-loop", posix.watcher_argv)
+        with mock.patch.object(windowshost, "cli_executable_path", return_value=Path("agents-live.exe")):
+            windows = windowshost.WindowsHost().render(subscription)
+        self.assertIn("watch-supervise", json.loads(windows.rendered)["argv"])
+        self.assertEqual(windows.fingerprint, windowshost._process_markers(
+            windows.watcher_argv)["fingerprint"])
+        from agents_live.runtime.hosts import processes
+        self.assertIsNone(processes._watcher_name(json.loads(windows.rendered)["argv"][1:]))
+
+    def test_watch_source_failure_is_captured_through_the_real_loop_entry(self):
+        from agents_live.runtime import watcher
+        self.skill("failed-watch", [
+            'agents-live.selector: "fake"', 'agents-live.watch: "src/**"'])
+        (self.root / "src").mkdir()
+        code = (
+            "import argparse, sys\n"
+            "from tests.host_safety import native_guard\n"
+            "from agents_live import runtime\n"
+            "from agents_live.runtime.hosts.memory import MemoryHost\n"
+            "from agents_live.runtime.hosts.filesystem import WatchFailed\n"
+            "from agents_live.cli.commands import internal\n"
+            "class Source:\n"
+            " def start(self): pass\n"
+            " def poll(self, timeout): raise WatchFailed('synthetic change stream ended')\n"
+            " def stop(self): pass\n"
+            "class Host(MemoryHost):\n"
+            " def change_source(self, roots): return Source()\n"
+            "with native_guard():\n"
+            " runtime.configure(Host())\n"
+            " sys.exit(internal._watch(argparse.Namespace("
+            "name='failed-watch', watch_expression=None)))\n")
+        with mock.patch.dict(os.environ, {"PYTHONPATH": os.pathsep.join(
+            (str(REPOSITORY), str(REPOSITORY / "src")))}):
+            session = watcher.prepare([sys.executable, "-c", code], cwd=self.root)
+            self.assertEqual(1, watcher.supervise(session))
+        row = next(row for row in self._records() if row["status"] == "exited")
+        self.assertEqual(1, row["exit_code"])
+        self.assertEqual("watch_failed", row["stop_reason"])
+        self.assertIn("synthetic change stream ended", row["stderr_tail"])
+        self.assertTrue(row["stderr_complete"])
+        identifier = agent.load("failed-watch", root=self.root).identifier
+        self.assertEqual(identifier, row["agent_name"])
+        starts = [row for row in self._records() if row["phase"] == "watcher" and row["status"] == "start"]
+        self.assertEqual(starts[0]["run_id"], row["run_id"])
+        self.assertTrue(any(row["status"] == "exited" for row in obs.load([
+            paths.repo_state_dir(self.root) / "logs" / f"{identifier}.jsonl"])))
+
+    def test_interpreter_progress_covers_its_launcher_and_rejects_stale_or_damaged_progress(self):
+        from agents_live.runtime import watcher
+        session = watcher.prepare(["synthetic-watch"], cwd=self.root, key="synthetic")
+        launcher = ProcessRef(1000, 1, "synthetic-launcher", "watcher", key="synthetic")
+        identity = {"pid": launcher.pid, "created_at": 1,
+                    "session": str(session), "key": launcher.key,
+                    "started": time.monotonic() - 60}
+        watcher._write(session / "child.json", identity)
+        watcher._write(watcher._home() / "pids" / "1000.json", identity)
+        with mock.patch.dict(os.environ, {watcher.SESSION_ENV: str(session)}):
+            watcher.progress("poll")
+        interpreter = ProcessRef(os.getpid(), hostruntime.process_start_time(os.getpid()),
+                                 "python", "watcher", key="synthetic")
+        self.assertEqual("watching", watcher.health(interpreter))
+        self.assertEqual("watching", watcher.health(launcher))
+        watcher.stop(launcher, reason="duplicate watcher", operation="maintenance")
+        self.assertEqual("duplicate watcher", watcher._read(session / "stop.json")["stop_reason"])
+        watcher._write(session / "progress.json", {
+            "pid": interpreter.pid, "phase": "poll", "at": time.monotonic() - 1440})
+        self.assertEqual("not-watching", watcher.health(launcher))
+        watcher._write(session / "progress.json", {"at": ["damaged"]})
+        self.assertEqual("not-watching", watcher.health(interpreter))
+        with mock.patch.object(hostruntime, "process_start_token", return_value=-1):
+            self.assertEqual("unverified", watcher.health(interpreter))
+
+    def test_child_descendants_cannot_leave_stderr_reader_or_processes_alive_after_exit(self):
+        from agents_live.runtime import watcher
+        pid_path = self.root / "descendant.pid"
+        code = (
+            "import os, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"Path({str(pid_path)!r}).write_text(str(child.pid), encoding='ascii')\n"
+            "os.write(2, b'parent exit evidence')\n"
+            "os._exit(7)\n")
+        session = watcher.prepare([sys.executable, "-c", code], cwd=self.root)
+        self.assertEqual(7, watcher.supervise(session))
+        descendant = int(pid_path.read_text(encoding="ascii"))
+        self.assertFalse(hostruntime.is_alive(descendant))
+        row = next(row for row in self._records() if row["status"] == "exited")
+        self.assertEqual("parent exit evidence", row["stderr_tail"])
+        self.assertTrue(row["stderr_complete"])
+        self.assertEqual("", row["capture_error"])
+
+    def test_recovered_watcher_is_rechecked_before_a_prepared_stop(self):
+        from agents_live.runtime import convergence, handoff
+        subscription = Subscription.create(scope=f"repo:{self.root}",
+            target="agent:synthetic", kind="watch", trigger="src/**")
+        host = runtime.current()
+        self.assertFalse(convergence.converge((subscription,)).failed)
+        owner = host.supervisor.owned("watcher")[0]
+        with mock.patch.object(host.supervisor, "watcher_health", return_value="not-watching"):
+            prepared = convergence.plan((subscription,))
+        self.assertIn("stop-watcher", [operation.kind for operation in prepared.operations])
+        with handoff.gate(operation="maintenance"):
+            result = convergence.commit(prepared)
+        self.assertFalse(result.failed)
+        self.assertIn(owner, host.supervisor.owned("watcher"))
+        self.assertIn("stop not needed: watcher recovered", [operation.detail for operation in result.done])
+
+    def test_busy_nonwatching_tree_is_protected_until_the_run_finishes(self):
+        from agents_live.runtime import convergence, handoff
+        subscription = Subscription.create(scope=f"repo:{self.root}",
+            target="agent:synthetic", kind="watch", trigger="src/**")
+        host = runtime.current()
+        self.assertFalse(convergence.converge((subscription,)).failed)
+        owner = host.supervisor.owned("watcher")[0]
+        prepared = convergence.plan(())
+        lock = paths.repo_state_dir(self.root) / "locks" / "synthetic.lock"
+        lock.parent.mkdir(parents=True)
+        lock.write_text(json.dumps({"pid": owner.pid}), encoding="ascii")
+        with (
+            mock.patch.object(handoff, "pid_exists", return_value=True),
+            mock.patch.object(host.supervisor, "watcher_health", return_value="not-watching"),
+            handoff.gate(operation="maintenance"),
+        ):
+            result = convergence.commit(prepared)
+            self.assertFalse(result.failed)
+            self.assertIn(owner, host.supervisor.owned("watcher"))
+            self.assertEqual("deferred", self._records()[-1]["status"])
+            lock.unlink()
+            result = convergence.commit(prepared)
+            self.assertFalse(result.failed)
+            self.assertEqual([], host.supervisor.owned("watcher"))
+        self.assertEqual("stopping", self._records()[-1]["status"])
+
+    def test_unexplained_zero_exit_is_not_healthy_and_retention_preserves_active_observation(self):
+        from agents_live.runtime import watcher
+        from agents_live.obs import retention
+        session = watcher.prepare([sys.executable, "-c", "import os; os._exit(0)"],
+                                  cwd=self.root)
+        self.assertEqual(0, watcher.supervise(session))
+        row = next(row for row in self._records() if row["status"] == "exited")
+        self.assertEqual(0, row["exit_code"])
+        self.assertEqual("unexpected_exit", row["stop_reason"])
+        self.assertEqual("", row["stderr_tail"])
+        self.assertEqual("error", row["level"])
+        active = watcher.prepare(["synthetic-active"], cwd=self.root)
+        os.utime(session / "exit.json", (1, 1))
+        result = retention.maintain_host()
+        self.assertEqual(1, result.removed_run_artifacts)
+        self.assertFalse(session.exists())
+        self.assertTrue(active.exists())
+
+
+class TestRunTimingObservability(TempRepository):
+    def setUp(self) -> None:
+        super().setUp()
+        self.enterContext(isolated_host(self.root))
+        bundle = self.skill("timed-work", [
+            'agents-live.selector: "none"',
+            'agents-live.schedule: "* * * * *"',
+            'agents-live.post-processor: "record.py"',
+        ])
+        (bundle / "record.py").write_text("print('done')\n", encoding="utf-8")
+        self.identifier = agent.load("timed-work", root=self.root).identifier
+        state.replace(self.root, {self.identifier})
+        self.runner = mock.Mock()
+        self.runner.run_child.return_value = ChildResult(("processor",), 0, "done", "")
+
+    def test_successful_locks_and_run_events_have_timing_and_loaded_identity(self):
+        from agents_live import __version__
+        from agents_live.runtime import handoff
+
+        with handoff.gate(operation="synthetic-maintenance", run_id="holder"):
+            time.sleep(0.02)
+        outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                           runner=self.runner)
+        self.assertEqual("success", outcome.status)
+        records = obs.load(obs.files(paths.host_logs_dir()))
+        released = [row for row in records if row["phase"] == "lock"
+                    and row["status"] == "released"]
+        self.assertTrue(released, "successful acquisitions must emit lock timings")
+        holder = next(row for row in released if row["run_id"] == "holder")
+        self.assertEqual("synthetic-maintenance", holder["operation"])
+        self.assertGreaterEqual(holder["lock_hold_s"], 0.02)
+        self.assertGreaterEqual(holder["lock_wait_s"], 0)
+        owned = [row for row in released if row["run_id"] == outcome.run_id]
+        self.assertEqual({"runtime-launch-gate", "agent-run", "dispatch-budget"},
+                         {row["lock_kind"] for row in owned})
+        runs = obs.load(obs.files(paths.repo_state_dir(self.root) / "logs"))
+        terminal = next(row for row in runs if row["phase"] == "done")
+        self.assertGreaterEqual(terminal["gate_wait_s"], 0)
+        self.assertIsNotNone(terminal["planned_at"])
+        self.assertIsNotNone(terminal["actual_start_at"])
+        self.assertGreaterEqual(terminal["launch_lag_s"], 0)
+        for row in [*released, *runs]:
+            self.assertEqual(__version__, row["runtime_version"])
+            self.assertTrue(row["runtime_generation"])
+
+    def test_clock_contention_wait_and_skip_are_queryable_without_double_counting(self):
+        from agents_live.runtime import handoff
+
+        holder = hostruntime.exclusive_lock(
+            paths.state_home() / "activation.lock", kind="runtime-launch-gate",
+            operation="synthetic-maintenance")
+        holder.__enter__()
+        before_wait = time.time()
+        releaser = threading.Timer(0.08, lambda: holder.__exit__(None, None, None))
+        releaser.start()
+        try:
+            outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                               runner=self.runner)
+        finally:
+            releaser.join()
+        self.assertEqual("success", outcome.status)
+        budget_timestamps = json.loads(
+            (paths.repo_state_dir(self.root) / "dispatch-budget.json").read_text(encoding="utf-8"))
+        self.assertGreaterEqual(budget_timestamps[-1], before_wait + 0.07)
+        state.clear(self.root, self.identifier)
+        skipped = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                           runner=self.runner)
+        self.assertEqual("skipped", skipped.status)
+        with qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs())
+            waited = con.sql(
+                "SELECT gate_wait_s, fire_status FROM log "
+                "WHERE run_id = ? AND phase = 'done'", params=[outcome.run_id]
+            ).fetchone()
+            self.assertGreaterEqual(waited[0], 0.07)
+            self.assertEqual("launched", waited[1])
+            summary = con.sql(
+                "SELECT operation, max(lock_hold_s), quantile_cont(lock_hold_s, .95) "
+                "FROM log WHERE phase = 'lock' AND ts >= now() - INTERVAL 1 HOUR "
+                "GROUP BY operation"
+            ).fetchall()
+            self.assertTrue(summary)
+            self.assertEqual(("skipped", "not-started"), con.sql(
+                "SELECT fire_status, message FROM log "
+                "WHERE run_id = ? AND phase = 'firing'", params=[skipped.run_id]
+            ).fetchone())
+
+    def test_known_clock_intent_reports_missed_slots_and_stops_at_withdrawal(self):
+        from agents_live.obs import clock
+
+        baseline = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+        repos.ensure_registered(self.root)
+        with mock.patch.object(clock, "now", return_value=baseline):
+            self.assertFalse(lifecycle.converge().failed)
+        outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                           runner=self.runner, now=baseline + timedelta(minutes=2, seconds=20))
+        self.assertEqual("success", outcome.status)
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=4)):
+            self.assertFalse(lifecycle.converge(removals={self.root: {self.identifier}}).failed)
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=10)), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_fires")
+            rows = con.sql(
+                "SELECT epoch(planned_at), fire_status FROM clock_fires ORDER BY planned_at"
+            ).fetchall()
+            self.assertEqual([
+                (baseline.timestamp(), "missed"),
+                ((baseline + timedelta(minutes=1)).timestamp(), "missed"),
+                ((baseline + timedelta(minutes=2)).timestamp(), "launched"),
+                ((baseline + timedelta(minutes=3)).timestamp(), "missed"),
+            ], rows)
+            self.assertGreaterEqual(con.sql(
+                "SELECT launch_lag_s FROM clock_fires WHERE fire_status = 'launched'"
+            ).fetchone()[0], 20)
+            self.assertEqual(1, con.sql(
+                "SELECT count(*) FROM clock_fires WHERE run_id = ?", params=[outcome.run_id]
+            ).fetchone()[0])
+            self.assertEqual([], con.sql(
+                "SELECT * FROM clock_fires WHERE planned_at < ?", params=[baseline]
+            ).fetchall())
+
+    def test_received_clock_fire_is_not_missed_and_other_repositories_are_not_audited(self):
+        from agents_live.obs import clock
+
+        baseline = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+        repos.ensure_registered(self.root)
+        with mock.patch.object(clock, "now", return_value=baseline):
+            self.assertFalse(lifecycle.converge().failed)
+        log = paths.repo_state_dir(self.root) / "logs" / f"{self.identifier}.jsonl"
+        obs.record(log, obs.create(
+            "clock-arrival", "received", repository=str(self.root),
+            agent=self.identifier, run_id="waiting", origin="clock",
+            attributes=(("planned_at", baseline.isoformat()),),
+        ))
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=3)), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_fires")
+            self.assertEqual([("received",)], con.sql(
+                "SELECT fire_status FROM clock_fires"
+            ).fetchall())
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=5)), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root / "another-repository")],
+                            sql="SELECT * FROM clock_fires")
+            self.assertEqual(0, con.sql(
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'"
+            ).fetchone()[0])
+
+    def test_dashboard_timing_uses_public_query_projection_and_loaded_identity(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module("agents_live.cli.scripts.dashboard")
+        outcome = dispatch(Firing(self.identifier, str(self.root), "manual"),
+                           runner=self.runner)
+        with mock.patch.object(dashboard, "REPO_ROOT", self.root):
+            snapshot = dashboard.api_timing(since="1h")
+        self.assertEqual("ok", snapshot["status"])
+        row = next(row for row in snapshot["agents"] if row["agent_name"] == self.identifier)
+        self.assertEqual(1, row["fires"])
+        self.assertGreaterEqual(row["p95_gate_wait_s"], 0)
+        self.assertTrue(row["runtime_version"])
+        self.assertTrue(row["runtime_generation"])
+        self.assertEqual(1, next(row for row in snapshot["locks"]
+                                if row["lock_kind"] == "agent-run")["acquisitions"])
+        self.assertEqual("success", outcome.status)
+
+    def test_other_lock_owners_and_telemetry_failures_preserve_lock_semantics(self):
+        from agents_live.cli.commands import lock as lock_command
+        from agents_live.obs import timing
+        from agents_live.runtime import handoff
+
+        repos.ensure_registered(self.root)
+        with crontasks.lock():
+            pass
+        install_root = self.root / "synthetic-installation"
+        deploy.generation.build(
+            "1.2.3", root=install_root,
+            populate=lambda directory: directory.mkdir(parents=True),
+            validate=lambda _directory: None,
+        )
+        with mock.patch.dict(os.environ, {"AGENTS_LIVE_RUN_ID": "processor-run",
+                                         "AGENTS_LIVE_AGENT_ID": self.identifier}):
+            code = lock_command.main([str(self.root / "resource.lock"), "--",
+                                      sys.executable, "-c", "print('locked')"])
+        self.assertEqual(0, code)
+        rows = obs.load(obs.files(paths.host_logs_dir()))
+        releases = [row for row in rows if row["phase"] == "lock" and row["status"] == "released"]
+        self.assertTrue({"registry", "crontab", "deployment", "command-lock"} <=
+                        {row["lock_kind"] for row in releases})
+        command = next(row for row in releases if row["lock_kind"] == "command-lock")
+        self.assertEqual("processor-run", command["run_id"])
+        self.assertEqual(self.identifier, command["agent_name"])
+        self.assertEqual("lock-command", command["operation"])
+        with mock.patch.object(timing, "record", side_effect=OSError("synthetic telemetry failure")):
+            with self.assertRaisesRegex(ValueError, "synthetic body failure"), handoff.gate():
+                raise ValueError("synthetic body failure")
+        with handoff.gate():
+            pass
+        self.assertEqual("success", dispatch(
+            Firing(self.identifier, str(self.root), "manual"), runner=self.runner).status)
+
+    def test_late_native_arrival_keeps_skip_policy_and_identifies_previous_due_minute(self):
+        definition = self.root / "Agents" / "timed-work" / "SKILL.md"
+        definition.write_text(definition.read_text(encoding="utf-8").replace(
+            '"* * * * *"', '"0 9 * * *"'), encoding="utf-8")
+        instant = datetime.now().astimezone().replace(hour=9, minute=1, second=20, microsecond=0)
+        outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                           runner=self.runner, now=instant)
+        self.assertEqual("skipped", outcome.status)
+        self.runner.run_child.assert_not_called()
+        terminal = next(row for row in obs.load(obs.files(
+            paths.repo_state_dir(self.root) / "logs")) if row["phase"] == "firing")
+        self.assertEqual(instant.replace(minute=0, second=0).isoformat(), terminal["planned_at"])
+        self.assertEqual("previous-due-minute", terminal["planned_source"])
+        self.assertEqual("not-due", terminal["message"])
+        self.assertIsNone(terminal["actual_start_at"])
+
+    def test_damaged_history_and_changed_timezone_do_not_invent_missed_fires(self):
+        from agents_live.obs import clock
+
+        baseline = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+        repos.ensure_registered(self.root)
+        with mock.patch.object(clock, "now", return_value=baseline):
+            self.assertFalse(lifecycle.converge().failed)
+        log = paths.repo_state_dir(self.root) / "logs" / "damaged.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("not a JSON event\n", encoding="utf-8")
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=5)), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_fires")
+            self.assertEqual(("unavailable",), con.sql(
+                "SELECT status FROM clock_coverage").fetchone())
+            self.assertEqual(0, con.sql(
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchone()[0])
+        log.unlink()
+        with mock.patch.object(clock, "timezone_signature", return_value="synthetic-changed-timezone"), qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_fires")
+            self.assertEqual(("partial",), con.sql(
+                "SELECT status FROM clock_coverage").fetchone())
+            self.assertEqual(0, con.sql(
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchone()[0])
+
+    def test_loaded_generation_survives_selection_change_in_run_and_pipeline_events(self):
+        source = REPOSITORY / "src" / "agents_live"
+        install_root = self.root / "synthetic-installation"
+        generation = deploy.generation.build(
+            "1.2.3", root=install_root,
+            populate=lambda directory: shutil.copytree(
+                source, directory / "lib" / "agents_live",
+                ignore=shutil.ignore_patterns("__pycache__")),
+            validate=lambda _directory: None,
+        )
+        code = """
+import json
+from pathlib import Path
+from agents_live import deploy, obs, paths
+from agents_live.pipeline.server import PipelineMcp
+first = obs.create('run', 'start', repository='fixture', agent='fixture', run_id='identity-run', origin='manual')
+root = deploy.layout.installation_root()
+other = deploy.generation.build('2.0.0', root=root,
+    populate=lambda directory: directory.mkdir(parents=True),
+    validate=lambda directory: None)
+deploy.generation.activate(other, root=root)
+last = obs.create('run', 'success', repository='fixture', agent='fixture', run_id='identity-run', origin='manual')
+journal = paths.state_home() / 'pipeline.jsonl'
+pipeline = PipelineMcp(agent_log=journal, run_id='identity-run')
+pipeline.seed([('/fixture', 1)])
+entries = obs.load([journal])
+print(json.dumps({
+    'first': [first.runtime_version, first.runtime_generation],
+    'last': [last.runtime_version, last.runtime_generation],
+    'selected': deploy.pointer.read(deploy.layout.current_path(root)).generation,
+    'journal': [[row['runtime_version'], row['runtime_generation']] for row in entries],
+}))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code], cwd=self.root,
+            env={**os.environ, "PYTHONPATH": str(generation.path / "lib"),
+                 deploy.layout.ENV_INSTALL_ROOT: str(install_root)},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual("2.0.0", payload["selected"])
+        self.assertEqual(payload["first"], payload["last"])
+        self.assertEqual("1.2.3", payload["last"][1])
+        self.assertTrue(payload["journal"])
+        self.assertTrue(all(row == payload["first"] for row in payload["journal"]))
+
+    def test_lock_measurement_construction_failure_cannot_orphan_agent_or_budget_locks(self):
+        from agents_live.obs import timing
+
+        with mock.patch.object(timing, "Hold", side_effect=RuntimeError("synthetic measurement failure")):
+            outcome = dispatch(Firing(self.identifier, str(self.root), "manual"),
+                               runner=self.runner)
+        self.assertEqual("success", outcome.status)
+        self.assertEqual([], list((paths.repo_state_dir(self.root) / "locks").glob("*.lock")))
+        self.assertFalse((paths.repo_state_dir(self.root) / "dispatch-budget.json.lock").exists())
+        self.assertEqual("success", dispatch(Firing(self.identifier, str(self.root), "manual"),
+                                            runner=self.runner).status)
+
+    def test_partial_convergence_closes_known_clock_interval_and_public_sql_reads_it(self):
+        from agents_live.obs import clock
+
+        baseline = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+        repos.ensure_registered(self.root)
+        with mock.patch.object(clock, "now", return_value=baseline):
+            self.assertFalse(lifecycle.converge().failed)
+        store = runtime.current().trigger_store
+        store.clear()
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=2)), \
+                mock.patch.object(store, "install", side_effect=OSError("synthetic partial convergence")):
+            self.assertTrue(lifecycle.converge().failed)
+        with mock.patch.object(clock, "now", return_value=baseline + timedelta(minutes=6)):
+            self.assertFalse(lifecycle.converge().failed)
+        sql = ("SELECT epoch(planned_at) AS planned, fire_status FROM clock_fires "
+               f"WHERE planned_at < to_timestamp({(baseline + timedelta(minutes=8)).timestamp()}) "
+               "ORDER BY planned_at")
+        argv = ["--repo", str(self.root), "logs", "--sql", sql, "--format", "jsonl"]
+        completed = subprocess.run(
+            [sys.executable, "-c",
+             f"from agents_live.cli import main; raise SystemExit(main({argv!r}))"],
+            cwd=self.root, capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        rows = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual([
+            {"planned": (baseline + timedelta(minutes=minute)).timestamp(), "fire_status": "missed"}
+            for minute in (0, 1, 6, 7)
+        ], rows)
+
+    def test_unknown_planned_minute_keeps_terminal_outcome(self):
+        definition = self.root / "Agents" / "timed-work" / "SKILL.md"
+        definition.write_text(definition.read_text(encoding="utf-8").replace(
+            '"* * * * *"', '"@reboot"'), encoding="utf-8")
+        outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
+                           runner=self.runner)
+        self.assertEqual("skipped", outcome.status)
+        with qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs(), sql="SELECT * FROM clock_fires")
+            self.assertEqual([(outcome.run_id, "skipped", "not-due", True, True)], con.sql(
+                "SELECT run_id, fire_status, message, planned_at IS NULL, "
+                "observed_at IS NOT NULL FROM clock_fires").fetchall())
+
+    def test_idle_pause_reads_acquire_no_locks_but_real_pause_is_measured(self):
+        from agents_live.runtime import handoff
+        for _ in range(100):
+            self.assertFalse(handoff.paused())
+        self.assertEqual([], [row for row in obs.load(obs.files(paths.host_logs_dir()))
+                              if row["phase"] == "lock"])
+        with handoff.pause_watchers():
+            for _ in range(100):
+                self.assertTrue(handoff.paused())
+            with self.assertRaises(hostruntime.LockBusy):
+                with handoff.pause_watchers():
+                    pass
+        self.assertFalse(handoff.paused())
+        rows = [row for row in obs.load(obs.files(paths.host_logs_dir()))
+                if row["phase"] == "lock"]
+        self.assertEqual(["acquired", "released"], [row["status"] for row in rows])
+        self.assertEqual({"watcher-pause"}, {row["lock_kind"] for row in rows})
+
+    def test_clock_projection_is_lazy_and_schedule_candidates_bound_large_history(self):
+        from agents_live.obs import clock
+        from agents_live.runtime.grammars import Schedule
+        endpoint = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        baseline = endpoint - timedelta(days=60)
+        log = paths.host_logs_dir() / "clock-schedules.jsonl"
+        for index in range(10):
+            event = obs.create("clock-schedule", "observed", repository=str(self.root),
+                agent=f"daily-{index}", run_id="synthetic-intent", origin="clock",
+                attributes=(("schedules", ["@daily"]),
+                            ("schedule_timezone", clock.timezone_signature())))
+            obs.record(log, replace(event, timestamp=baseline.isoformat()))
+        original = Schedule.matches
+        calls = []
+        def counted(schedule, moment):
+            calls.append(moment)
+            return original(schedule, moment)
+        with (
+            mock.patch.object(clock, "now", return_value=endpoint + timedelta(minutes=2)),
+            mock.patch.object(clock, "expected", wraps=clock.expected) as projection,
+            mock.patch.object(Schedule, "matches", counted),
+            qlog.duckdb.connect(":memory:") as con,
+        ):
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT 'clock_fires' FROM log")
+            self.assertEqual((10,), con.sql("SELECT count(*) FROM log").fetchone())
+            projection.assert_not_called()
+        sql = ('WITH slots AS (SELECT * FROM "clock_fires") '
+               "SELECT count(*) FROM slots WHERE fire_status = 'missed'")
+        with (
+            mock.patch.object(clock, "now", return_value=endpoint + timedelta(minutes=2)),
+            mock.patch.object(Schedule, "matches", counted),
+            qlog.duckdb.connect(":memory:") as con,
+        ):
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)], sql=sql)
+            self.assertEqual((600,), con.sql(sql).fetchone())
+            self.assertLessEqual(len(calls), 10 * 60 * 2)
+        calls.clear()
+        sql = "SELECT epoch(planned_at) FROM query_table('clock_fires')"
+        with (
+            mock.patch.object(clock, "now", return_value=endpoint + timedelta(minutes=2)),
+            mock.patch.object(Schedule, "matches", counted),
+            qlog.duckdb.connect(":memory:") as con,
+        ):
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            since=(endpoint - timedelta(days=1)).isoformat(),
+                            until=endpoint.isoformat(), sql=sql)
+            rows = con.sql(sql).fetchall()
+            self.assertEqual(10, len(rows))
+            self.assertTrue(all((endpoint - timedelta(days=1)).timestamp()
+                                <= row[0] < endpoint.timestamp() for row in rows))
+            self.assertLessEqual(len(calls), 20)
+        with (
+            mock.patch.object(clock, "expected", side_effect=AssertionError("coverage projected slots")),
+            qlog.duckdb.connect(":memory:") as con,
+        ):
+            qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
+                            sql="SELECT * FROM clock_coverage")
+            self.assertEqual(("retained",), con.sql("SELECT status FROM clock_coverage").fetchone())
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module("agents_live.cli.scripts.dashboard")
+        calls.clear()
+        with (
+            mock.patch.object(dashboard, "REPO_ROOT", self.root),
+            mock.patch.object(clock, "now", return_value=endpoint + timedelta(minutes=2)),
+            mock.patch.object(Schedule, "matches", counted),
+        ):
+            snapshot = dashboard.api_timing(
+                since=(endpoint - timedelta(days=1)).isoformat(), until=endpoint.isoformat())
+        self.assertEqual("ok", snapshot["status"])
+        self.assertEqual(10, sum(row["fires"] for row in snapshot["clock"]))
+        self.assertLessEqual(len(calls), 20)
+
+    def test_pause_cleanup_waits_for_concurrent_reader_and_surfaces_persistent_failure(self):
+        from agents_live.runtime import handoff
+        marker = paths.state_home() / "activation-paused.json"
+        original = Path.unlink
+        attempts = []
+        def transient(location, *args, **kwargs):
+            if location == marker:
+                attempts.append(location)
+                if len(attempts) < 3:
+                    raise PermissionError("synthetic concurrent reader")
+            return original(location, *args, **kwargs)
+        with mock.patch.object(Path, "unlink", transient):
+            with handoff.pause_watchers():
+                self.assertTrue(handoff.paused())
+        self.assertEqual(3, len(attempts))
+        self.assertFalse(handoff.paused())
+        with (
+            mock.patch.object(Path, "unlink", side_effect=PermissionError("persistent hold")),
+            mock.patch.object(handoff, "monotonic", side_effect=[0, 3]),
+        ):
+            with self.assertRaisesRegex(PermissionError, "persistent hold"):
+                with handoff.pause_watchers():
+                    pass
+        marker.unlink()
+        if os.name == "nt":
+            reader = None
+            closer = None
+            try:
+                with handoff.pause_watchers():
+                    reader = marker.open("r", encoding="utf-8")
+                    closer = threading.Thread(target=lambda: (time.sleep(0.1), reader.close()))
+                    closer.start()
+                closer.join(timeout=5)
+                self.assertFalse(closer.is_alive())
+                self.assertFalse(handoff.paused())
+            finally:
+                if reader is not None:
+                    reader.close()
+                if closer is not None:
+                    closer.join(timeout=5)
+
+    def test_pause_owner_crash_releases_state_without_losing_acquisition_evidence(self):
+        from agents_live.runtime import handoff
+        code = (
+            "import time\n"
+            "from tests.host_safety import native_guard\n"
+            "from agents_live.runtime import handoff\n"
+            "with native_guard(), handoff.pause_watchers(): time.sleep(20)\n")
+        process = subprocess.Popen([sys.executable, "-c", code],
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                (str(REPOSITORY), str(REPOSITORY / "src")))},
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while not handoff.paused() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(handoff.paused())
+            with self.assertRaises(hostruntime.LockBusy):
+                with handoff.pause_watchers():
+                    pass
+        finally:
+            process.kill()
+            process.communicate(timeout=10)
+        self.assertFalse(handoff.paused())
+        with handoff.pause_watchers():
+            self.assertTrue(handoff.paused())
+            with mock.patch.object(hostruntime, "process_start_token", return_value=None):
+                with self.assertRaisesRegex(OSError, "cannot verify"):
+                    handoff.paused()
+        rows = [row for row in obs.load(obs.files(paths.host_logs_dir()))
+                if row["phase"] == "lock"]
+        self.assertEqual(2, sum(row["status"] == "acquired" for row in rows))
+        self.assertEqual(1, sum(row["status"] == "released" for row in rows))
+        self.assertFalse(handoff.paused())
+
+    def test_clock_window_keeps_retained_intent_dst_folds_and_half_hour_transition(self):
+        import struct
+        from zoneinfo import ZoneInfo
+        from agents_live.obs import clock
+        spring = datetime(2026, 3, 8, 7, tzinfo=timezone.utc)
+        autumn = datetime(2026, 11, 1, 6, tzinfo=timezone.utc)
+        header = b"TZif\0" + b"\0" * 15 + struct.pack(">6l", 0, 0, 0, 2, 2, 4)
+        tzif = (header + struct.pack(">2l", int(spring.timestamp()), int(autumn.timestamp()))
+                + b"\x01\x00" + struct.pack(">lbb", -5 * 3600, 0, 0)
+                + struct.pack(">lbb", -4 * 3600, 1, 2) + b"S\0D\0")
+        zone = ZoneInfo.from_file(io.BytesIO(tzif), key="synthetic-dst")
+        signature = clock.timezone_signature()
+        def slots(expression, start, end, observations=None):
+            snapshots = observations or [
+                ((start - timedelta(days=60)).isoformat(), "fixture", "calendar",
+                 [expression], "synthetic", "unmanaged", signature)]
+            return [row[2] for row in clock.expected(
+                snapshots, until=end + timedelta(seconds=clock.MISFIRE_GRACE_S),
+                since=start, before=end, local_timezone=zone)]
+        self.assertEqual([], slots("30 2 * * *",
+            spring - timedelta(hours=3), spring + timedelta(hours=3)))
+        self.assertEqual([autumn - timedelta(minutes=30), autumn + timedelta(minutes=30)],
+            slots("30 1 * * *", autumn - timedelta(hours=2), autumn + timedelta(hours=2)))
+        start = autumn - timedelta(hours=2)
+        observations = [
+            ((start - timedelta(days=60)).isoformat(), "fixture", "calendar",
+             ["30 1 * * *"], "synthetic", "unmanaged", signature),
+            ((autumn + timedelta(minutes=15)).isoformat(), "fixture", "calendar",
+             None, "synthetic", "unmanaged", signature)]
+        self.assertEqual([autumn - timedelta(minutes=30)],
+                         slots("30 1 * * *", start, autumn + timedelta(hours=2), observations))
+        self.assertEqual([], slots("30 1 * * *", start, autumn + timedelta(hours=2),
+            [(autumn.isoformat(), "fixture", "calendar", ["30 1 * * *"],
+              "synthetic", "unmanaged", "changed-zone")]))
+        # A transition in the middle of a UTC hour repeats half an hour.
+        transition = datetime(2026, 4, 4, 15, 30, tzinfo=timezone.utc)
+        header = b"TZif\0" + b"\0" * 15 + struct.pack(">6l", 0, 0, 0, 1, 2, 4)
+        half_hour = (header + struct.pack(">l", int(transition.timestamp())) + b"\x01"
+            + struct.pack(">lbb", 11 * 3600, 0, 0)
+            + struct.pack(">lbb", 10 * 3600 + 1800, 0, 2) + b"A\0B\0")
+        zone = ZoneInfo.from_file(io.BytesIO(half_hour), key="synthetic-half-hour")
+        self.assertEqual([transition - timedelta(minutes=15), transition + timedelta(minutes=15)],
+                         slots("15 2 * * *", transition - timedelta(hours=1),
+                               transition + timedelta(hours=1)))
 
 
 class TestRunsRecordWhatTheySpent(TempRepository):
@@ -3996,6 +4971,7 @@ class TestActivationHandoff(TempRepository):
                               return_value={19701: 19700, 19611: 19610, 19721: 19720}),
             mock.patch.object(handoff, "pid_exists", return_value=True),
             mock.patch.object(hostruntime, "terminate", side_effect=stop) as terminate,
+            mock.patch.object(self.host.supervisor, "watcher_health", return_value="watching"),
         ):
             with handoff.gate():
                 self.assertFalse(convergence.converge(
@@ -4013,7 +4989,7 @@ class TestActivationHandoff(TempRepository):
                     (subscription,), _host=self.host).done)
 
     def test_changed_watcher_replaces_entire_launcher_tree_without_stopping_busy_run(self) -> None:
-        from agents_live.runtime import convergence, handoff
+        from agents_live.runtime import convergence, handoff, watcher
 
         subscription = next(
             item for item in lifecycle.plan_maintenance().collected.subscriptions
@@ -4045,7 +5021,7 @@ class TestActivationHandoff(TempRepository):
 
         def spawn(argv, **kwargs):
             rows[19800] = subprocess.list2cmdline(argv)
-            return mock.Mock(pid=19800)
+            return mock.Mock(pid=19800, created_at=1)
 
         with (
             mock.patch.object(hostruntime, "process_command_lines",
@@ -4055,7 +5031,8 @@ class TestActivationHandoff(TempRepository):
                               return_value={19701: 19700}),
             mock.patch.object(handoff, "pid_exists", return_value=True),
             mock.patch.object(hostruntime, "terminate", side_effect=stop) as terminate,
-            mock.patch.object(hostruntime, "spawn_detached", side_effect=spawn) as start,
+            mock.patch.object(watcher, "spawn", side_effect=spawn) as start,
+            mock.patch.object(self.host.supervisor, "watcher_health", return_value="watching"),
         ):
             with handoff.gate():
                 busy = convergence.converge((subscription,), _host=self.host)
@@ -4484,18 +5461,20 @@ class TestClockActivationHandoff(TempRepository):
         process_clock = time.monotonic
         original_sleep = handoff.sleep
         gate = handoff.gate(operation="dispatch", run_id="collision", agent=self.identifier, repository=str(self.root))
-        gate.__enter__()
+        from contextvars import Context
+        holder_context = Context()
+        holder_context.run(gate.__enter__)
         def advance(seconds):
             elapsed[0] += seconds
             if elapsed[0] >= 0.2:
-                gate.__exit__(None, None, None)
+                holder_context.run(gate.__exit__, None, None, None)
             original_sleep(0)
         try:
             with mock.patch.object(handoff, "monotonic", side_effect=lambda: elapsed[0]), mock.patch.object(handoff, "sleep", side_effect=advance):
                 self.assertIs(process_clock, time.monotonic)
                 self.assertEqual(0, internal.main(["maintain"]))
         finally:
-            gate.__exit__(None, None, None)
+            holder_context.run(gate.__exit__, None, None, None)
         records = obs.load([internal.adminlog.log_path()])
         terminal = next(record for record in reversed(records) if record.get("operation") == "maintenance" and record["status"] != "start")
         self.assertGreaterEqual(terminal["waited_s"], 0.2)

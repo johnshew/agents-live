@@ -219,6 +219,8 @@ def _stop_runtime(root: Path) -> set[int]:
     while idle_watchers() and time.monotonic() < deadline:
         time.sleep(0.1)
     for process in idle_watchers():
+        from ...runtime import watcher
+        watcher.stop(process, reason="activation", operation="activation")
         host.supervisor.terminate(process)
         if host.supervisor.alive(process):
             raise deploy.generation.GenerationError(

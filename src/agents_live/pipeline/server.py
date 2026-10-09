@@ -623,6 +623,9 @@ class PipelineMcp:
 
     def _log_event(self, **fields: Any) -> None:
         """Append a single JSONL line to the agent log (or stderr fallback)."""
+        from .. import __version__
+        from ..obs.events import RUNTIME_GENERATION
+
         entry = {
             "ts": _utc_now(),
             "log_schema": 5,
@@ -632,12 +635,16 @@ class PipelineMcp:
             **({"agent_name": self._agent_log.stem} if self._agent_log else {}),
             **({"run_id": self._run_id} if self._run_id else {}),
             **fields,
+            "runtime_version": __version__,
+            "runtime_generation": RUNTIME_GENERATION,
         }
         try:
             line = json.dumps(entry, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
-            line = json.dumps({"ts": entry["ts"], "component": "pipeline-mcp",
-                               "op": fields.get("op"), "error": "unserialisable"})
+            line = json.dumps({**{key: entry[key] for key in (
+                "ts", "log_schema", "event_id", "component", "attempt", "agent_name",
+                "run_id", "runtime_version", "runtime_generation") if key in entry},
+                               "op": fields.get("op"), "error": "unserialisable"}, default=str)
         if self._agent_log is None:
             # No agent log: write to stderr so the developer can still see the trail
             # during interactive testing.

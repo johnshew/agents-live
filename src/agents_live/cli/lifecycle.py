@@ -10,6 +10,7 @@ from .. import agent, paths, runtime, state
 from ..runtime import convergence, handoff
 from ..runtime.hosts import system as hostruntime
 from ..state import ownership, registry as repos
+from ..obs import clock, admin
 
 
 class CollectionUnavailable(RuntimeError):
@@ -303,9 +304,11 @@ def commit_maintenance(prepared: MaintenancePlan) -> runtime.Converged:
         with handoff.commit():
             for root, agents in prepared.collected.started_updates:
                 state.replace(root, agents)
-            return _cleanup_legacy(
+            result = _cleanup_legacy(
                 prepared.collected, convergence.commit(prepared.runtime_plan),
                 host=prepared.runtime_plan.host)
+            _observe_clocks(prepared.collected, result)
+            return result
     except (OSError, state.StartedStateUnavailable, ValueError) as exc:
         raise CollectionUnavailable(str(exc)) from exc
 
@@ -351,7 +354,18 @@ def _converge(
     )
     if dry_run:
         return converged
-    return _cleanup_legacy(collected, converged, host=runtime.current())
+    result = _cleanup_legacy(collected, converged, host=runtime.current())
+    _observe_clocks(collected, result)
+    return result
+
+
+def _observe_clocks(collected: Collected, result: runtime.Converged) -> None:
+    try:
+        clock.observe(collected.subscriptions, protected_scopes=collected.protected_scopes,
+                      protected_targets=collected.protected_targets,
+                      complete=not result.failed)
+    except (OSError, ValueError, TypeError) as exc:
+        admin.record("clock-observation", status="error", message=str(exc))
 
 
 def _cleanup_legacy(
