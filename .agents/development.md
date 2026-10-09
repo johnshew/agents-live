@@ -120,8 +120,32 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   developer input is not blocked. While the developer is active, report and
   take steering before starting another batch. Run status checks with explicit
   repository paths so a delegate's working directory cannot mislead the report.
-  Do not attach a periodic self-wake timer during RC work; rely on idle
-  notifications and child reports.
+- **Attach one self-wake automation while coordinating active work.** In the
+  GitHub Copilot app, attach a single 11-minute same-session automation to the
+  orchestrator and clear it on explicit shutdown with a final handoff. Use this
+  step list as its prompt template, in order:
+  0. Preflight: `git fetch origin --prune`. Before any `gh` write, clear
+     `GH_TOKEN` and `GITHUB_TOKEN`, run
+     `gh auth switch --hostname github.com --user <origin-owner>` in the same
+     process, and verify `gh api user --jq .login`.
+  1. Unblock: read session status; answer every owned child awaiting input or
+     plan approval within existing authority and resume interrupted children.
+     Escalate only new scope or authority, with options and a recommendation.
+  2. Pull requests: check owned open PRs for state, checks and behind-main.
+     Merge only a PR the developer authorized, one head at a time with the
+     full-SHA guard, then read the result back; otherwise report it ready for
+     review.
+  3. Runtime health: `agents-live logs --all --since 15m --errors`. Report new
+     errors, non-ok statuses and runs slower than their recent p95; investigate
+     through a delegate and never change the live runtime without authority.
+  4. Release state: when release-relevant state changed, run
+     `uv run --script tools/release-report.py` and note changes in readiness,
+     blockers or next action.
+  5. Cleanup: archive finished owned children (see below), preserving needed
+     artifacts first. Remove only clean worktrees whose HEAD is on origin,
+     without `--force`.
+  6. Report: message the creator only when something changed or needs a
+     decision, in plain language. Silence is fine on a no-change tick.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
   example the primary checkout and the live runtime). Repeat the repository's
@@ -370,8 +394,9 @@ Fold into Commit hygiene at the next consolidation of this document.
 - Consolidation: pending
 
 #### Change
-Added a section covering six orchestrator practices: stay steerable by running
-long work asynchronously; name the exact workspace, head and excluded locations
+Added a section covering seven orchestrator practices: stay steerable by running
+long work asynchronously; attach one 11-minute self-wake automation with a fixed
+step list while coordinating active work; name the exact workspace, head and excluded locations
 in every brief and verify the delegate's real working directory; answer child
 questions and plan approvals within existing authority instead of stalling;
 copy plan-approval conditions into review briefs as pass/fail checks; treat a
@@ -396,11 +421,14 @@ rules without duplicating them.
 
 #### Verification and Limits
 Documentation only. Checked by the pre-release audit and `git diff --check`.
-No behavioral acceptance is claimed. Rejected for this repository: a mandated
-periodic orchestration wake-up, a direct-commit review cursor, deploy-range
-authorization and a separate model table, because they target a different
-workflow or duplicate existing local rules. Developer decision, 2026-10-09: no
-periodic self-wake timer for coordinators during RC work.
+No behavioral acceptance is claimed. Rejected for this repository: a
+direct-commit review cursor, deploy-range authorization and a separate model
+table, because they target a different workflow or duplicate existing local
+rules. The developer first declined a periodic self-wake timer, then on
+2026-10-09 directed adding one modeled on the compared repository's
+orchestrator: a single 11-minute same-session automation with the step list
+above, minus steps specific to that repository. The first tick ran
+immediately after attachment and completed every step.
 
 #### Follow-up
 Mark each practice confirmed after a later orchestration here follows it
