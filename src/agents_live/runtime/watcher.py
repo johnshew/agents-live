@@ -63,8 +63,13 @@ def spawn(argv, *, cwd=None, key="", stdout=subprocess.DEVNULL):
     """Return the real watcher pid, not its independently detached observer."""
     session = prepare(argv, cwd=cwd, key=key)
     try:
+        route = 3 if list(argv[1:2]) == ["--repo"] else 1
+        observer_argv = (
+            [*argv[:route], "internal", "watch-observe", str(session)]
+            if list(argv[route:route + 2]) == ["internal", "watch-loop"] else
+            [argv[0], "-m", "agents_live.runtime.watcher", str(session)])
         observer = system.spawn_detached(
-            [sys.executable, "-m", "agents_live.runtime.watcher", str(session)],
+            observer_argv,
             cwd=cwd, stdout=stdout,
             breakaway=bool(os.environ.get(SESSION_ENV)),
         )

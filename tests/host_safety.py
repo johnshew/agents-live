@@ -35,7 +35,7 @@ def _audit(event: str, arguments: tuple) -> None:
         and re.search(r"schtasks|crontab|(?:register|unregister|set|start|stop|enable|disable)-scheduledtask", tokens)
     )
     watcher = (
-        bool({"watch-loop", "watch-supervise"}.intersection(parts))
+        bool({"watch-loop", "watch-supervise", "watch-observe"}.intersection(parts))
         and ("agents-live" in tokens or "agents_live" in tokens)
         or "agents_live.runtime.watcher" in parts
     )

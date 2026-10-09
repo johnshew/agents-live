@@ -143,6 +143,9 @@ code, total stderr bytes, truncation/completeness flags and termination reason,
 even if the watcher exits without Python cleanup or is terminated during
 convergence. Native boot subscriptions use the same observer, whose process
 role is not a watcher. Launcher and interpreter identities share one observation.
+Observers launch through the target command's generation, never the retiring
+caller's interpreter. Detached handoff reuses its prepared session; native boot
+supervision reuses its invoked entry point rather than rediscovering one on PATH.
 Convergence persists every idle stop intent before termination and logs busy
 deferrals without claiming a termination. Cooperative retirement supplies its
 activation, replacement or watch-failure reason; an unexplained exit is explicitly

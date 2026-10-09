@@ -2358,6 +2358,74 @@ class TestWatcherExitEvidence(TempRepository):
         return ProcessRef(child["pid"], child["created_at"], "python", "watcher",
                           key=child["key"], fingerprint="synthetic")
 
+    def test_observer_launch_uses_target_generation_and_preserves_session(self):
+        from agents_live.cli.main import main as cli_main
+        from agents_live.runtime import watcher
+        subscription = Subscription.create(
+            scope=f"repo:{self.root}", target="agent:sample", kind="watch", trigger="src/**")
+        target_cli = str(self.root / "selected-runtime" / "selected-command")
+        target_python = str(self.root / "selected-runtime" / "target-python")
+        retired_python = str(self.root / "retired-runtime" / "caller-python")
+        posix = PosixHost().render(subscription)
+        with mock.patch.object(windowshost, "cli_executable_path", return_value=Path(target_cli)):
+            windows = windowshost.WindowsHost().render(subscription)
+        cases = [
+            ((target_cli, *posix.watcher_argv[1:]), True),
+            (list(windows.watcher_argv), True),
+            ([target_cli, "internal", "watch-loop", "sample"], True),
+            ([target_python, "-c", "pass"], False),
+            ([target_python, "-m", "synthetic_child"], False),
+            ([target_python, str(self.root / "synthetic_child.py")], False),
+        ]
+        for argv, is_cli in cases:
+            with self.subTest(argv=argv):
+                launched = []
+
+                def launch(command, **kwargs):
+                    session = Path(command[-1])
+                    prefix = argv[:3] if argv[1] == "--repo" else argv[:1]
+                    expected = (
+                        [*prefix, "internal", "watch-observe", str(session)] if is_cli else
+                        [argv[0], "-m", "agents_live.runtime.watcher", str(session)])
+                    self.assertEqual(expected, command)
+                    self.assertNotIn(retired_python, command)
+                    self.assertEqual({
+                        "cwd": self.root, "stdout": subprocess.PIPE, "breakaway": True,
+                    }, kwargs)
+                    request = watcher._read(session / "request.json")
+                    self.assertEqual(list(argv), request["argv"])
+                    self.assertEqual(str(self.root), request["repository"])
+                    self.assertEqual(str(self.root), request["cwd"])
+                    self.assertEqual(subscription.key, request["key"])
+                    self.assertEqual(session.name, request["run_id"])
+                    if is_cli and "--metadata" in argv:
+                        self.assertEqual("sample", request["agent"])
+                        self.assertEqual(subscription.key, artifacts.from_argv(request["argv"]).id)
+                    watcher._write(session / "child.json", {"pid": 42, "created_at": 123.5})
+                    launched.append((command, session))
+                    return mock.Mock()
+
+                with (
+                    mock.patch.object(sys, "executable", retired_python),
+                    mock.patch.dict(os.environ, {watcher.SESSION_ENV: "retiring-session"}),
+                    mock.patch.object(hostruntime, "spawn_detached", side_effect=launch),
+                ):
+                    child = watcher.spawn(argv, cwd=self.root, key=subscription.key,
+                                          stdout=subprocess.PIPE)
+                self.assertEqual((42, 123.5), (child.pid, child.created_at))
+                command, session = launched[0]
+                request = watcher._read(session / "request.json")
+                if is_cli:
+                    with (
+                        mock.patch.object(sys, "argv", [target_cli]),
+                        mock.patch.object(watcher, "supervise", return_value=0) as observe,
+                    ):
+                        self.assertEqual(0, cli_main(command[1:]))
+                    observe.assert_called_once_with(session)
+                    self.assertEqual(request, watcher._read(session / "request.json"))
+                    from agents_live.runtime.hosts import processes
+                    self.assertIsNone(processes._watcher_name(command[1:]))
+
     @unittest.skipUnless(os.name == "nt", "native Windows job ownership")
     def test_replacement_outlives_retiring_watcher_job_and_keeps_exit_receipt(self):
         from agents_live.runtime import watcher
@@ -2594,6 +2662,8 @@ class TestWatcherExitEvidence(TempRepository):
         self.assertEqual("not-watching", watcher.health(reference))
 
     def test_native_reboot_routes_observe_exits_without_becoming_watcher_owners(self):
+        from agents_live.cli.main import main as cli_main
+        from agents_live.runtime import watcher
         subscription = Subscription.create(
             scope=f"repo:{self.root}", target="agent:sample", kind="watch", trigger="src/**")
         posix = PosixHost().render(subscription)
@@ -2606,6 +2676,36 @@ class TestWatcherExitEvidence(TempRepository):
             windows.watcher_argv)["fingerprint"])
         from agents_live.runtime.hosts import processes
         self.assertIsNone(processes._watcher_name(json.loads(windows.rendered)["argv"][1:]))
+        target = str(self.root / "selected-runtime" / "selected-command")
+        unrelated = str(self.root / "unrelated-runtime" / "path-command")
+        posix_tokens = shlex.split(posix.rendered)
+        posix_argv = posix_tokens[posix_tokens.index("&&") + 1:-1]
+        for argv in (posix_argv, json.loads(windows.rendered)["argv"]):
+            with self.subTest(argv=argv):
+                command = [target, *argv[1:]]
+                observed = []
+
+                def observe(session):
+                    observed.append(watcher._read(session / "request.json"))
+                    return 0
+
+                with (
+                    mock.patch.object(sys, "argv", [target]),
+                    mock.patch.object(internal.shutil, "which", return_value=unrelated),
+                    mock.patch.object(watcher, "supervise", side_effect=observe),
+                ):
+                    self.assertEqual(0, cli_main(command[1:]))
+                self.assertEqual(1, len(observed))
+                request = observed[0]
+                self.assertEqual(
+                    [target, "--repo", str(self.root), "internal", "watch-loop",
+                     "--metadata", artifacts.encode(artifacts.InvocationMetadata(
+                         subscription.key, subscription.scope, subscription.target)), "sample"],
+                    request["argv"])
+                self.assertEqual(subscription.key, request["key"])
+                self.assertEqual("sample", request["agent"])
+                self.assertEqual(str(self.root), request["repository"])
+                self.assertEqual(str(self.root), request["cwd"])
 
     def test_watch_source_failure_is_captured_through_the_real_loop_entry(self):
         from agents_live.runtime import watcher

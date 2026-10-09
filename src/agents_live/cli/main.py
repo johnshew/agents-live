@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         ""
     )
     supported_metadata_routes = {
-        "run", "internal watch-loop", "internal maintain",
+        "run", "internal watch-loop", "internal watch-supervise", "internal maintain",
     }
     if metadata is not None and metadata_route not in supported_metadata_routes:
         _emit_failure(
@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             "automated run metadata requires a clock or boot origin",
             json_mode=json_mode)
         return 2
-    if metadata_route in {"internal watch-loop", "internal maintain"} \
+    if metadata_route in {"internal watch-loop", "internal watch-supervise", "internal maintain"} \
             and metadata is not None and metadata.origin is not None:
         _emit_failure(
             "usage_error", "--metadata",
@@ -579,7 +579,11 @@ def main(argv: list[str] | None = None) -> int:
     if __package__:
         module_name = f"{__package__.rsplit('.', 1)[0]}.{module_name}"
     module = importlib.import_module(module_name)
-    sys.argv = [f"agents-live {cmd}", *rest]
+    # Boot observation must relaunch its exact entry point, not another PATH command.
+    sys.argv = [
+        sys.argv[0] if metadata_route == "internal watch-supervise" else f"agents-live {cmd}",
+        *rest,
+    ]
     try:
         if capture:
             stdout = io.StringIO()

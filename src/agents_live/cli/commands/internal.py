@@ -46,6 +46,8 @@ def main(
     supervised = commands.add_parser("watch-supervise")
     supervised.add_argument("name")
     supervised.add_argument("--watch-expression")
+    observe = commands.add_parser("watch-observe")
+    observe.add_argument("session", type=Path)
     maintain = commands.add_parser("maintain")
     maintain.add_argument("--quiet", action="store_true")
     maintain.add_argument("--dry-run", action="store_true")
@@ -62,9 +64,11 @@ def main(
         return 0
     if args.command == "maintain":
         return _maintain(dry_run=args.dry_run, metadata=metadata)
+    if args.command == "watch-observe":
+        return watcher.supervise(args.session)
     if args.command == "watch-supervise":
         root = paths.resolve_root()
-        executable = str(Path(shutil.which("agents-live") or sys.argv[0]).resolve())
+        executable = str(Path(sys.argv[0]).resolve())
         argv = [executable, "--repo", str(root), "internal", "watch-loop",
                 *(("--metadata", runtime.artifacts.encode(metadata)) if metadata else ()),
                 args.name,
