@@ -1019,7 +1019,7 @@ def _check_final_source(accepted_source: str, final_source: str) -> None:
     if _git("merge-base", accepted_source, final_source) != accepted_source:
         raise ReleaseError("final source must descend from the accepted RC source")
     changed = set(_git("diff", "--name-only", accepted_source, final_source).splitlines())
-    collateral = {manifest, ".github/release-channels.toml", "tools/release.py", "tools/dashboard-readiness.py",
+    collateral = {manifest, ".github/release-channels.toml", "tools/release.py", "tools/local-deploy.py", "tools/dashboard-readiness.py",
                   "tools/candidate-operational.py", "tools/release-report.py",
                   "AGENTS.md", "CLAUDE.md"}
     offending = sorted(path for path in changed
