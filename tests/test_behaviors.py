@@ -6887,6 +6887,46 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 preserved.assert_called_once()
                 sealed.assert_called_once()
 
+    def test_final_source_allows_reviewed_local_deploy_tooling_only(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        check = script["_check_final_source"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                return subprocess.run(["git", *arguments], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "tools").mkdir()
+            (root / "tools" / "local-deploy.py").write_text("# original tooling\n")
+            manifest = root / ".github" / "release-cycles.toml"
+            manifest.parent.mkdir()
+            manifest.write_text('[cycles."1.2.3"]\nbranch = "main"\n')
+            git("add", ".")
+            git("commit", "-m", "approved runtime fixture")
+            source = git("rev-parse", "HEAD")
+            manifest.write_text(manifest.read_text() + (
+                '[cycles."1.2.3".approval]\ndecision = "approved"\n'
+                f'commit = "{source}"\ndecided_on = "2026-10-09"\n'))
+            (root / "tools" / "local-deploy.py").write_text("# reviewed tooling fix\n")
+            git("add", ".")
+            git("commit", "-m", "reviewed local deployment tooling")
+            with mock.patch.dict(check.__globals__, {
+                    "_git": git, "ACTIVE_ATTEMPT": {"target": "1.2.3"}}):
+                check(source, git("rev-parse", "HEAD"))
+                for path in ("tools/other-tool.py", "src/agents_live/runtime.py"):
+                    target = root.joinpath(*path.split("/"))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("# unapproved change\n")
+                    git("add", ".")
+                    git("commit", "-m", "unapproved change fixture")
+                    with self.subTest(path=path), self.assertRaisesRegex(
+                            script["ReleaseError"], re.escape(path)):
+                        check(source, git("rev-parse", "HEAD"))
+
     def test_final_source_requires_exact_approval_and_unchanged_runtime(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
         check = script["_check_final_source"]

@@ -157,8 +157,9 @@ as `<target>-final-1`. Its preparation stamps the accumulated stable changelog,
 runs the export/privacy audit, builds stable artifacts from the same runtime
 source, and retains the RC approval.
 Version and release metadata may change; runtime changes require a new RC and
-new developer acceptance. Reviewed `.agents/` Markdown guides and `CLAUDE.md`
-may change; publication workflows and runtime paths are not allowed collateral.
+new developer acceptance. Reviewed `.agents/` Markdown guides, `CLAUDE.md`
+and `tools/local-deploy.py` may change; publication workflows, other unlisted
+tooling and runtime paths are not allowed collateral.
 Final source validation precedes sealing RC approval under the allocation lock.
 There is no stable acceptance stage and no functional
 test execution during final preparation, finalization, or publication:
