@@ -252,11 +252,15 @@ publication and moved #582 to 6.9.5, folding and closing #581 into its logging
 scope. The developer explicitly approved shipping with the logging and watcher
 observability gaps in #582; list that known deferred work in the release notes.
 Preserve the approval identity in the cycle manifest and do not
-retest functionality or change the local runtime. #578 is tooling-only and its
-changelog entry is deferred
-to the next package change. Do not reuse consumed RC1 through RC6. Retain the
+retest functionality or change the local runtime. Stable `6.9.4` was published
+from RC6 through retained attempt `6.9.4-final-1` on 2026-10-09. GitHub package
+downloads and PyPI package digests matched the retained stable artifacts; the
+package proxy did not yet list `6.9.4`. Do not prepare or publish it again.
+Publication did not change the local runtime. #578's tooling-only correction
+is included in the GitHub release notes; its shipped changelog entry remains
+deferred to the next package change. Do not reuse consumed RC1 through RC6. Retain the
 merged #556, #538, #560 and #561 work and the dashboard responsiveness
-follow-up. Issues #565, #572, #574 and #578 remain planned; #566, #567 and #582
+follow-up. Issues #565, #572, #574 and #578 are delivered; #566, #567 and #582
 remain deferred. RC5 is not publication-approved.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
