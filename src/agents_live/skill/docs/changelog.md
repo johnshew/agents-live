@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-08
+ms.date: 2026-10-09
 ms.topic: reference
 ---
 
@@ -10,6 +10,26 @@ changelog starts at the initial public release; earlier development
 history is retained in the source repository.
 
 ## Unreleased
+
+### 6.9.5 (Unreleased)
+
+- fix: reuse prepared candidates after later instruction-only source advances. (#578)
+  Deployment accepts an ancestor candidate when package inputs are unchanged,
+  retaining its exact bytes and recording the newer tooling identity separately.
+- feat: expose lock holds, clock timing, runtime identity and watcher exit evidence in diagnostics. ([#582](https://github.com/johnshew/agents-live/issues/582))
+  Every successful cross-process acquisition records wait and hold measurements
+  with operation and run identity. Idle pause checks read atomic owner state
+  without acquiring a lock or generating synthetic acquisition records.
+  Clock queries show planned versus actual starts and inferred missed or skipped
+  fires within retained schedule intent. Projection runs only for requested clock
+  views; dashboard windows bound calendar candidates while preserving DST gaps/folds.
+  SQL and dashboard timing reports expose max/p95 measurements; events retain
+  their producing runtime version and generation across activation.
+  Detached watcher exits retain exit code, bounded stderr tail and stop reason;
+  Windows handoff observers escape the retiring watcher's job while owning the
+  replacement tree, and old boot tasks migrate to the supervised route.
+  Maintenance repairs alive processes whose actual watch loop has stopped
+  progressing, while protecting active agent runs.
 
 ## 6.9.4 - 2026-10-09
 
