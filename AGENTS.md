@@ -246,11 +246,16 @@ while an agent run was in flight. After instruction-only commits advanced main,
 local-deploy refused the older prepared source until tooling fix #578 merged in
 PR #579. Local-deploy then reused retained RC6 bytes and activated them at the
 first idle moment via a background retry. The installed version, all-repository
-doctor check and RC6-generation watchers were verified. RC6 is not
-publication-approved. #578 is tooling-only and its changelog entry is deferred
+doctor check and RC6-generation watchers were verified. On 2026-10-09, the
+developer approved the exact deployed RC6 source and retained wheel for 6.9.4
+publication and moved #582 to 6.9.5. The developer explicitly approved shipping
+with #581 open as a known deferred watcher observability issue; list it in the
+release notes. Preserve the approval identity in the cycle manifest and do not
+retest functionality or change the local runtime. #578 is tooling-only and its
+changelog entry is deferred
 to the next package change. Do not reuse consumed RC1 through RC6. Retain the
 merged #556, #538, #560 and #561 work and the dashboard responsiveness
-follow-up. Issues #565, #572, #574 and #578 remain planned; #566 and #567
+follow-up. Issues #565, #572, #574 and #578 remain planned; #566, #567 and #581
 remain deferred. RC5 is not publication-approved.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
