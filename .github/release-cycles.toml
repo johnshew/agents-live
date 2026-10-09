@@ -110,14 +110,14 @@ deferred = [547, 540, 542, 549, 550, 538, 539]
 
 [cycles."6.9.4"]
 branch = "main"
-next_rc = "6.9.4rc6"
-recommendation = "Preserve consumed RC1 through RC5 and their immutable artifacts. RC2 preparation failed at packaged dashboard readiness; RC3 and RC4 passed isolated acceptance and were locally activated, but neither is publication-approved. RC5 passed requalification and isolated acceptance, but was never locally activated: its requalified deployment passed the package-input check, then activation was refused while scheduled agent runs were in progress because the activation guard refuses while any run is active. The developer directed that activation must not wait for already-started runs; the orchestrator filed #574 for this product change. Prepare RC6 from main after #574 merges, carrying #565, the #571 readiness-validator correction, the #572 tooling fix and #574. Issue #574 changes package bytes, so RC6 is required; #572 is tooling-only and does not change package bytes. RC5 is superseded and is not publication-approved. #565, #572 and #574 remain planned; #566 and #567 remain deferred."
+next_rc = "6.9.4rc7"
+recommendation = "Preserve consumed RC1 through RC6 and their immutable artifacts. RC2 preparation failed at packaged dashboard readiness; RC3, RC4 and RC6 passed isolated acceptance and were locally activated, but none is publication-approved. RC5 was accepted in isolation but never activated and is superseded. RC6 was prepared from 3733230d61b5f94e67cd33bf4d5482bb4fa38601, passed packaged readiness and isolated hello-world acceptance, then was locally activated on 2026-10-09 after tooling fix #578 merged in PR #579. Initial RC4 bootstrap activation refused while a run was active; after #579, local-deploy reused the retained RC6 bytes and activated them at the first idle moment. The deployed version, doctor check and RC6-generation watchers were verified. #578 is tooling-only; its changelog entry is deferred to the next package change. RC6 is not publication-approved. #565, #572, #574 and #578 remain planned; #566 and #567 remain deferred."
 
 [cycles."6.9.4".approval]
 decision = "testing"
 
 [cycles."6.9.4".issues]
-planned = [547, 540, 531, 542, 549, 530, 550, 556, 538, 560, 561, 565, 572, 574]
+planned = [547, 540, 531, 542, 549, 530, 550, 556, 538, 560, 561, 565, 572, 574, 578]
 deferred = [566, 567]
 
 [cycles."6.9.4".decisions]
@@ -132,6 +132,7 @@ deferred = [566, 567]
 "565" = "Developer observed the maintenance trigger-inventory lock on the running 6.9.4rc4 on 2026-10-08: one run held the runtime launch gate for about 19 minutes and scheduled launches were missed. Assigned to RC5 for the main lock fix only; Task Scheduler query batching is deferred as a separate follow-up tracked by #566."
 "572" = "Orchestrator added the requalified deployment allowlist correction on 2026-10-08 so RC5's accepted bytes could be deployed; tooling-only, no package change. Merged in PR #573."
 "574" = "Developer directed on 2026-10-08 that activation must not wait for agent runs already in progress; assigned to RC6 by the orchestrator."
+"578" = "Instruction-only commits after RC6 preparation exposed a local-deploy source check gap. Fixed in PR #579 so the retained RC6 bytes could be activated; tooling-only. Defer the changelog entry until the next package change."
 
 [cycles."6.9.4".history."6.9.4rc1"]
 status = "prepared"
@@ -182,3 +183,13 @@ source_commit = "2d97ddcacbb14708f8192acb390667fda10f1c4c"
 wheel_sha256 = "e441787437750fbe4dcfbf34b4cf915508d7511fb48cde1982d28407e0a55e40"
 sdist_sha256 = "f3aa38362a7f6c03d8e90fa93ebe5d016c1f1e3f5aa63602d2d5087363369f5f"
 evidence = "Allocated and consumed from main on 2026-10-08 with #565. Initial preparation and one retry failed packaged dashboard readiness because the validator did not drain the dashboard child's output pipe, blocking its logging; the failure reproduced at RC4 source and was not a product regression. PR #571 corrected the validator (commit 66c9fcfb02c0cde24e54c25f81f2fcb36df73de7). Requalification reused all four recorded artifacts byte-exact and all gates passed; isolated candidate acceptance passed and its receipt exists. The first local deployment with --requalified was refused by the overly restrictive allowlist, which excludes instruction-only changes from PR #570 since the RC5 source; #572 corrected it in PR #573. A subsequent requalified deployment passed the package-input check, but activation was refused because scheduled agent runs were in progress; activation refuses while any run is active. The orchestrator removed a stale repository registration for a missing folder to clear the candidate doctor check. RC5 was never locally activated and is superseded by RC6; it is not publication-approved. Preserve its candidate, artifacts and receipts."
+
+[cycles."6.9.4".history."6.9.4rc6"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.4rc6"
+commit = "4ed8fd9d1b395c22133492b83f87b6f4caf9c114"
+source_commit = "3733230d61b5f94e67cd33bf4d5482bb4fa38601"
+wheel_sha256 = "1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac"
+sdist_sha256 = "8f476d6fd41fa1aab917a6cfc478bb79867b1f261b5303d913fbb62a3bbd0e29"
+evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness and isolated hello-world acceptance passed. During bootstrap activation, the installed 6.9.4rc4 refused while an agent run was in flight. Local-deploy also refused because instruction-only commits had advanced main after preparation; #578 fixed this tooling gap in PR #579. On 2026-10-09, local-deploy reused the retained RC6 bytes and activated them at the first idle moment via a background retry. Verified locally: agents-live --version reported 6.9.4rc6 on the candidate channel, doctor --all-repos exited 0, and watchers ran from the 6.9.4rc6 generation. Not publication-approved. #578's changelog entry is deferred to the next package change."
