@@ -2347,9 +2347,16 @@ class TestWatcherExitEvidence(TempRepository):
 
     def _wait(self, predicate):
         deadline = time.monotonic() + 15
-        while not predicate() and time.monotonic() < deadline:
+        sharing_error = None
+        while time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return
+            except PermissionError as exc:
+                sharing_error = exc
             time.sleep(0.02)
-        self.assertTrue(predicate(), "synthetic watcher did not reach its expected state")
+        self.fail("synthetic watcher did not reach its expected state"
+                  + (f": {sharing_error}" if sharing_error else ""))
 
     def _reference(self, session):
         from agents_live.runtime import watcher
@@ -2357,6 +2364,41 @@ class TestWatcherExitEvidence(TempRepository):
         child = watcher._read(session / "child.json")
         return ProcessRef(child["pid"], child["created_at"], "python", "watcher",
                           key=child["key"], fingerprint="synthetic")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows file sharing")
+    def test_snapshot_poll_waits_for_an_open_file_to_allow_reads(self):
+        import ctypes
+        from ctypes import wintypes
+
+        snapshot = self.root / "stderr.txt"
+        snapshot.write_text("captured stderr", encoding="utf-8")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.CreateFileW(str(snapshot), 0x80000000, 0, None, 3, 0, None)
+        self.assertNotEqual(ctypes.c_void_p(-1).value, handle, ctypes.get_last_error())
+        release = threading.Timer(0.2, kernel.CloseHandle, args=(handle,))
+        try:
+            with self.assertRaises(PermissionError):
+                snapshot.read_text(encoding="utf-8")
+            with (
+                mock.patch.object(time, "monotonic", side_effect=[0, 0, 16]),
+                mock.patch.object(time, "sleep"),
+                self.assertRaisesRegex(AssertionError, "Permission denied"),
+            ):
+                self._wait(lambda: snapshot.read_text(encoding="utf-8") == "captured stderr")
+            release.start()
+            self._wait(lambda: snapshot.read_text(encoding="utf-8") == "captured stderr")
+        finally:
+            if release.ident is None:
+                kernel.CloseHandle(handle)
+            else:
+                release.join(timeout=5)
+        self.assertFalse(release.is_alive())
 
     def test_observer_launch_uses_target_generation_and_preserves_session(self):
         from agents_live.cli.main import main as cli_main
@@ -3016,6 +3058,35 @@ class TestRunTimingObservability(TempRepository):
         self.assertEqual(1, next(row for row in snapshot["locks"]
                                 if row["lock_kind"] == "agent-run")["acquisitions"])
         self.assertEqual("success", outcome.status)
+
+    def test_dashboard_timing_includes_current_clock_tick_but_explicit_until_is_exclusive(self):
+        nicegui = mock.MagicMock()
+        nicegui.app.get.side_effect = lambda _path: lambda function: function
+        nicegui.ui.refreshable.side_effect = lambda function: function
+        with mock.patch.dict(sys.modules, {"nicegui": nicegui}):
+            dashboard = importlib.import_module("agents_live.cli.scripts.dashboard")
+        tick = datetime.now(timezone.utc)
+        lower = (tick - timedelta(hours=1)).isoformat()
+        with (
+            mock.patch.object(obs.events, "datetime", wraps=datetime) as event_clock,
+            mock.patch.object(dashboard, "datetime", wraps=datetime) as report_clock,
+            mock.patch.object(dashboard, "REPO_ROOT", self.root),
+        ):
+            event_clock.now.return_value = tick
+            report_clock.now.return_value = tick
+            outcome = dispatch(Firing(self.identifier, str(self.root), "manual"),
+                               runner=self.runner)
+            snapshot = dashboard.api_timing(since=lower)
+            self.assertEqual("success", outcome.status)
+            self.assertEqual("ok", snapshot["status"])
+            self.assertEqual([(self.identifier, 1)],
+                             [(row["agent_name"], row["fires"]) for row in snapshot["agents"]])
+            self.assertEqual(1, next(row for row in snapshot["locks"]
+                                    if row["lock_kind"] == "agent-run")["acquisitions"])
+            bounded = dashboard.api_timing(since=lower, until=tick.isoformat())
+            self.assertEqual("ok", bounded["status"])
+            self.assertEqual([], bounded["agents"])
+            self.assertEqual([], bounded["locks"])
 
     def test_other_lock_owners_and_telemetry_failures_preserve_lock_semantics(self):
         from agents_live.cli.commands import lock as lock_command
@@ -5027,6 +5098,15 @@ class TestActivationHandoff(TempRepository):
         self.assertEqual(str(install_generation.executable(self.new)),
                          spawn.call_args.args[0][0])
 
+    def test_duplicate_windows_watcher_inventory_is_independent_of_posix_layout(self) -> None:
+        with (
+            mock.patch.object(deploy.layout, "command_path",
+                              return_value=deploy.layout.current_path() / "bin" / "agents-live"),
+            mock.patch.object(install_generation, "_interpreter",
+                              side_effect=lambda root: root / "bin" / "python"),
+        ):
+            self.test_maintenance_removes_duplicate_watcher_trees_preferring_selected_generation()
+
     def test_maintenance_removes_duplicate_watcher_trees_preferring_selected_generation(self) -> None:
         from agents_live.runtime import convergence, handoff
 
@@ -5036,7 +5116,8 @@ class TestActivationHandoff(TempRepository):
         deploy.generation.activate(self.new)
         self.host.supervisor = WindowsProcesses()
         with mock.patch.object(windowshost, "cli_executable_path",
-                               return_value=deploy.layout.command_path()):
+                               return_value=deploy.layout.current_path()
+                               / "Scripts" / "agents-live.exe"):
             rendered = windowshost.WindowsHost().render(subscription)
         self.host.render = lambda _: rendered
         rows = {}
@@ -5044,7 +5125,7 @@ class TestActivationHandoff(TempRepository):
         def add(pid, generation, python=False):
             command = list(rendered.watcher_argv)
             if python:
-                command.insert(0, str(install_generation._interpreter(generation.path)))
+                command.insert(0, str(generation.path / "Scripts" / "python.exe"))
             rows[pid] = subprocess.list2cmdline(command)
 
         # Stable-launcher fingerprints match; only interpreter generation differs.

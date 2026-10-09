@@ -1184,6 +1184,7 @@ def _timing_snapshot(since: str = "24h", until: str | None = None) -> dict:
 
     lower = obs_query.resolve_since(since)
     upper = obs_query.resolve_since(until) if until else datetime.now(timezone.utc).isoformat()
+    upper_operator = "<" if until else "<="
     roots = [REPO_ROOT] if REPO_ROOT is not None else [
         Path(value) for value in repos.load()["repos"].values()]
     directories = [paths.host_logs_dir(), *(
@@ -1213,21 +1214,23 @@ def _timing_snapshot(since: str = "24h", until: str | None = None) -> dict:
             "SELECT operation, lock_kind, count(*) AS acquisitions, "
             "max(lock_hold_s) AS max_hold_s, quantile_cont(lock_hold_s, .95) AS p95_hold_s, "
             "max(lock_wait_s) AS max_wait_s "
-            "FROM log WHERE phase = 'lock' AND status = 'released' AND ts >= ? AND ts < ? "
+            "FROM log WHERE phase = 'lock' AND status = 'released' AND ts >= ? "
+            f"AND ts {upper_operator} ? "
             "GROUP BY operation, lock_kind ORDER BY max_hold_s DESC", [lower, upper])
         result["agents"] = rows(
             "SELECT repository, agent_name, count(*) AS fires, "
             "max(gate_wait_s) AS max_gate_wait_s, quantile_cont(gate_wait_s, .95) AS p95_gate_wait_s, "
             "arg_max(runtime_version, ts) AS runtime_version, "
             "arg_max(runtime_generation, ts) AS runtime_generation "
-            "FROM log WHERE phase IN ('done', 'firing') AND ts >= ? AND ts < ? "
+            "FROM log WHERE phase IN ('done', 'firing') AND ts >= ? "
+            f"AND ts {upper_operator} ? "
             "GROUP BY repository, agent_name ORDER BY max_gate_wait_s DESC", [lower, upper])
         result["clock"] = rows(
             "SELECT repository, agent_name, fire_status, count(*) AS fires, "
             "max(launch_lag_s) AS max_launch_lag_s, "
             "quantile_cont(launch_lag_s, .95) AS p95_launch_lag_s "
             "FROM clock_fires WHERE COALESCE(planned_at, observed_at) >= ? "
-            "AND COALESCE(planned_at, observed_at) < ? "
+            f"AND COALESCE(planned_at, observed_at) {upper_operator} ? "
             "GROUP BY repository, agent_name, fire_status ORDER BY repository, agent_name, fire_status",
             [lower, upper])
         result["clock_coverage"] = rows(
@@ -1238,7 +1241,7 @@ def _timing_snapshot(since: str = "24h", until: str | None = None) -> dict:
             "status, stop_reason, operation, exit_code, stderr_tail, stderr_bytes, "
             "stderr_truncated, stderr_complete, capture_error, runtime_version, runtime_generation "
             "FROM log WHERE phase = 'watcher' AND status IN ('stopping', 'deferred', 'exited') "
-            "AND ts >= ? AND ts < ? ORDER BY ts DESC", [lower, upper])
+            f"AND ts >= ? AND ts {upper_operator} ? ORDER BY ts DESC", [lower, upper])
     return result
 
 

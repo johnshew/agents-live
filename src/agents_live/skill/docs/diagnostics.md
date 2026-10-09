@@ -153,6 +153,8 @@ The dashboard's **Timing** panel uses the same normalized SQL views for
 endpoint accepts relative or ISO `since` and optional `until` bounds and
 returns host lock max/p95, agent gate waits, clock outcomes, coverage and
 watcher exits/stops.
+The default upper bound includes the captured current clock tick, so a just-finished
+run is visible even on a coarse-resolution clock. An explicit `until` is exclusive.
 The selected window also bounds expected-slot projection, not just the displayed
 rows. An observation before the window supplies interval context; grace is
 measured against current time, not subtracted from a historical window's end.
