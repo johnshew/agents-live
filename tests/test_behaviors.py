@@ -12925,5 +12925,144 @@ class TestSteeringHook(unittest.TestCase):
             self.assertIn(mode, self.hook["MODES"])
 
 
+class TestStartStopRecordAdminEvents(TempRepository):
+    """Start and stop leave one admin event per affected agent (#591)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertTrue(paths.host_logs_dir().is_relative_to(self.root))
+
+    def _run(self, command, argv: list[str]) -> tuple[int, str]:
+        output = io.StringIO()
+        previous = runtime.current()
+        runtime.configure(MemoryHost())
+        try:
+            with (
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(output),
+                mock.patch.object(lifecycle.repos, "load", return_value={
+                    "repos": {"here": str(self.root)}, "default_repo": "here"}),
+                mock.patch.object(sys, "argv", [
+                    "agents-live", command.__name__.rsplit(".", 1)[-1],
+                    *argv]),
+            ):
+                code = command.main(argv)
+        finally:
+            runtime.configure(previous)
+        return code, output.getvalue()
+
+    def _events(self) -> list[dict]:
+        return [
+            record for record in obs.load(obs.files(paths.host_logs_dir()))
+            if record.get("operation") in {"agent-start", "agent-stop"}
+        ]
+
+    def _definition(self, name: str) -> str:
+        self.skill(name, [
+            'agents-live.selector: "fake"',
+            'agents-live.schedule: "0 8 * * *"',
+        ])
+        return agent.load(name, root=self.root).identifier
+
+    def test_start_then_stop_record_the_agent_and_its_state_change(self) -> None:
+        identifier = self._definition("alpha")
+
+        code, output = self._run(start, ["--name", "alpha"])
+        self.assertEqual(0, code, output)
+        code, output = self._run(stop, ["--name", "alpha"])
+        self.assertEqual(0, code, output)
+
+        started, stopped = self._events()
+        for record, action, before, after in (
+            (started, "start", "stopped", "started"),
+            (stopped, "stop", "started", "stopped"),
+        ):
+            with self.subTest(action=action):
+                self.assertEqual("admin", record["agent_name"])
+                self.assertEqual(f"agent-{action}", record["operation"])
+                self.assertEqual("ok", record["status"])
+                self.assertEqual("ok", record["outcome"])
+                self.assertEqual(identifier, record["target_agent"])
+                self.assertEqual("alpha", record["target_name"])
+                self.assertEqual(str(self.root), record["repository"])
+                self.assertEqual(before, record["previous_state"])
+                self.assertEqual(after, record["new_state"])
+                self.assertIsNone(record["error_category"])
+                self.assertIn(f"{action} --name alpha", record["command"])
+
+    def test_start_all_records_one_event_per_agent(self) -> None:
+        identifiers = {self._definition("alpha"), self._definition("beta")}
+
+        code, output = self._run(start, ["--all"])
+
+        self.assertEqual(0, code, output)
+        events = self._events()
+        self.assertEqual(identifiers, {item["target_agent"] for item in events})
+        self.assertEqual(2, len(events))
+        self.assertEqual(1, len({item["run_id"] for item in events}))
+        self.assertEqual({"started"}, {item["new_state"] for item in events})
+
+    def test_refused_and_failed_stops_record_an_error_category(self) -> None:
+        identifier = self._definition("alpha")
+        state.replace(self.root, {identifier})
+
+        code, _ = self._run(stop, ["--name", "absent"])
+        self.assertEqual(1, code)
+        with mock.patch.object(
+                stop.lifecycle, "converge",
+                side_effect=lifecycle.CollectionUnavailable("busy")):
+            code, _ = self._run(stop, ["--name", "alpha"])
+        self.assertEqual(1, code)
+
+        refused, failed = self._events()
+        self.assertEqual(
+            ("error", "refused", "DefinitionNotFound", "absent"),
+            (refused["status"], refused["outcome"],
+             refused["error_category"], refused["target_agent"]))
+        self.assertEqual(
+            ("error", "failed", "CollectionUnavailable", identifier,
+             "started", "started"),
+            (failed["status"], failed["outcome"], failed["error_category"],
+             failed["target_agent"], failed["previous_state"],
+             failed["new_state"]))
+
+    def test_a_dry_run_records_nothing(self) -> None:
+        self._definition("alpha")
+        with mock.patch.object(start.repos, "require_registered"):
+            code, output = self._run(start, ["--name", "alpha", "--dry-run"])
+        self.assertEqual(0, code, output)
+        self.assertEqual([], self._events())
+
+    def test_logs_agent_filter_and_timeline_find_the_event(self) -> None:
+        from agents_live import preflight
+        from agents_live.obs import timeline
+
+        identifier = self._definition("alpha")
+        self.assertEqual(0, self._run(start, ["--name", "alpha"])[0])
+        self.assertEqual(0, self._run(stop, ["--name", "alpha"])[0])
+
+        with qlog.duckdb.connect(":memory:") as con:
+            qlog.build_view(con, qlog.all_log_globs())
+            rows = con.sql(
+                "SELECT operation, target_agent FROM log WHERE agent_name = 'admin' "
+                "AND " + qlog._agent_filter("alpha") + " ORDER BY ts").fetchall()
+        self.assertEqual(
+            [("agent-start", identifier), ("agent-stop", identifier)], rows)
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(timeline, "HOST_LOGS", paths.host_logs_dir()),
+            mock.patch.object(sys, "argv", ["timeline.py", "alpha"]),
+            mock.patch.dict(os.environ, {preflight.JSON_ENV_VAR: "1"}),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(0, timeline.main())
+        events = json.loads(output.getvalue())["events"]
+        self.assertEqual(
+            ["agent-start", "agent-stop"],
+            [item["operation"] for item in events
+             if item.get("target_agent") == identifier])
+
+
 if __name__ == "__main__":
     unittest.main()

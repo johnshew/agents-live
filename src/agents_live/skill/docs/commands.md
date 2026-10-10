@@ -225,6 +225,15 @@ agents-live stop link-check
 agents-live stop link-check --dry-run
 ```
 
+Every `start` and `stop` that is not a dry run records one `agent-start` or
+`agent-stop` administrative event per affected agent, including each agent
+`start --all` selects. The event names the agent (`target_name`,
+`target_agent`), its repository, the previous and new started state, the
+outcome (`ok`, `refused`, or `failed`), an `error_category` when it did not
+succeed, and the redacted command. `agents-live logs --agent NAME` and
+`agents-live logs timeline NAME` include these events alongside the agent's
+own runs.
+
 ### Cross-repository resolution
 
 `run`, `start`, `stop`, and `status` look in the selected repository first.

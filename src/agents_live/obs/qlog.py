@@ -285,7 +285,7 @@ def build_view(
         "watcher_pid": "BIGINT", "subscription_id": "VARCHAR",
         "stop_reason": "VARCHAR", "stderr_tail": "VARCHAR", "stderr_bytes": "BIGINT",
         "stderr_truncated": "BOOLEAN", "stderr_complete": "BOOLEAN",
-        "capture_error": "VARCHAR",
+        "capture_error": "VARCHAR", "target_agent": "VARCHAR",
     }
     projections: list[str] = []
     for name, dtype, *_ in raw_cols:
@@ -582,6 +582,12 @@ def _cell(value: object) -> str:
     return text if len(text) <= MAX_CELL_WIDTH else text[:MAX_CELL_WIDTH - 3] + "..."
 
 
+def _agent_filter(value: str) -> str:
+    """Rows for an agent, including admin events that name it (#591)."""
+    return (f"(agent_name LIKE '%{value}%' "
+            f"OR target_agent LIKE '%{value}%')")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", nargs="?",
@@ -685,7 +691,7 @@ def main() -> int:
         # the equivalent WHERE fragment the user can paste into their
         # SQL.
         filter_map = [
-            ("--agent", args.agent, lambda v: f"agent_name LIKE '%{v}%'"),
+            ("--agent", args.agent, _agent_filter),
             ("--since", since, lambda v: f"ts >= '{v}'"),
             ("--until", until, lambda v: f"ts < '{v}'"),
             ("--phase", args.phase, lambda v: f"phase = '{v}'"),
@@ -708,7 +714,7 @@ def main() -> int:
         q = args.sql
     else:
         where = []
-        if args.agent:   where.append(f"agent_name LIKE '%{args.agent}%'")
+        if args.agent:   where.append(_agent_filter(args.agent))
         if since:        where.append(f"ts >= '{since}'")
         if until:        where.append(f"ts < '{until}'")
         if args.phase:   where.append(f"phase = '{args.phase}'")
