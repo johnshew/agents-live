@@ -265,6 +265,8 @@ def _render(config: dict, generated_at: datetime, *, as_json: bool = False) -> s
                   *(f"{index}. {action}" for index, action in enumerate(actions, 1)), "",
                   "Use a clean checkout or isolated worktree; verify source ancestry before committing or pushing.",
                   "Remove task worktrees after delivery, preserving retained candidate worktrees and receipts.",
+                  "Retained attempts are tags (rc/<attempt>, v<version>); review "
+                  "`tools/release.py --retention-plan` before pruning release branches manually.",
                   "Retain immutable packages and receipts. Restore dashboards and watchers after activation.", ""])
     return "\n".join(lines)
 
