@@ -215,6 +215,8 @@ def normalize(raw: object) -> dict[str, object] | None:
         "usage": raw.get("usage", []),
         "repository": raw.get("repository", ""),
         "changed_files": [],
+        "runtime_version": raw.get("runtime_version"),
+        "runtime_generation": raw.get("runtime_generation"),
     }
     attributes = raw.get("attributes", [])
     if isinstance(attributes, list):

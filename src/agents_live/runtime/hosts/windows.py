@@ -26,7 +26,7 @@ from ..values import (
     Subscription,
 )
 from .posix import _address
-from .processes import LocalChildRunner, process_generation
+from .processes import LocalChildRunner, process_generation, _watcher_name
 from . import task_scheduler as wintasks
 from . import windows_watch as winwatch
 
@@ -79,7 +79,7 @@ class WindowsTriggerStore:
                 found.append(InstalledTrigger(
                     metadata.id,
                     metadata.scope,
-                    "watch" if "watch-loop" in argv else "schedule",
+                    "watch" if {"watch-loop", "watch-supervise"}.intersection(argv) else "schedule",
                     _action_fingerprint(argv, task["working_dir"]),
                     json.dumps(task, sort_keys=True, default=str),
                     metadata.target,
@@ -121,6 +121,15 @@ class WindowsProcesses:
         stderr=None,
     ) -> ProcessRef:
         from . import system as hostruntime
+        if role == "watcher":
+            from .. import watcher
+            import subprocess
+            process = watcher.spawn(
+                argv, cwd=cwd, key=key,
+                stdout=stdout if stdout is not None else subprocess.DEVNULL)
+            return ProcessRef(
+                process.pid, process.created_at, Path(argv[0]).name,
+                role, key, fingerprint, generation=process_generation(argv))
         streams = {}
         if stdout is not None:
             streams["stdout"] = stdout
@@ -158,6 +167,10 @@ class WindowsProcesses:
         created_at = hostruntime.process_start_time(pid) or time.time()
         return ProcessRef(
             pid, created_at, image, role, key, fingerprint)
+
+    def watcher_health(self, ref: ProcessRef) -> str:
+        from .. import watcher
+        return watcher.health(ref)
 
     def terminate(self, ref: ProcessRef) -> None:
         if not self.alive(ref):
@@ -237,6 +250,7 @@ class WindowsHost:
                 "--watch-expression", watch.canonical,
             )
             argv = list(watcher_argv[:-2])
+            argv[4] = "watch-supervise"
         rendered = json.dumps(
             {"argv": argv, "root": root, "schedule": schedule},
             sort_keys=True,
@@ -280,7 +294,7 @@ def _action_fingerprint(argv: Sequence[str], root: str) -> str:
     arguments = list(argv)
     if arguments:
         arguments[0] = ntpath.normcase(ntpath.normpath(arguments[0]))
-    if "watch-loop" in arguments and "--watch-expression" in arguments:
+    if "watch-supervise" in arguments and "--watch-expression" in arguments:
         index = arguments.index("--watch-expression")
         del arguments[index:index + 2]
     material = json.dumps(
@@ -298,11 +312,16 @@ def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
     ):
         argv = argv[1:]
     metadata = artifacts.from_argv(argv)
-    if metadata is None or "watch-loop" not in argv:
+    if metadata is None or _watcher_name(argv[1:]) is None:
         return None
+    # A resident loop belongs to the supervised boot action, but a stored old
+    # boot action must retain its old route so convergence detects migration.
+    arguments = list(argv)
+    if arguments[3:5] == ["internal", "watch-loop"]:
+        arguments[4] = "watch-supervise"
     return {
         "role": "watcher",
         "key": metadata.id,
         "fingerprint": _action_fingerprint(
-            argv, metadata.scope.removeprefix("repo:")),
+            arguments, metadata.scope.removeprefix("repo:")),
     }

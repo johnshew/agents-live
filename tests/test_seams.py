@@ -2156,8 +2156,8 @@ class TestStartedState(TempRepository):
                 internal, "_runtime_is_current", side_effect=(True, True, False)),
             mock.patch.object(internal, "_restart_watcher") as restart,
             mock.patch(
-                "agents_live.runtime.watchloop.time.monotonic",
-                side_effect=lambda: next(clock_values, 0.01)),
+                "agents_live.runtime.watchloop.time",
+                mock.Mock(monotonic=lambda: next(clock_values, 0.01))),
         ):
             self.assertEqual(0, internal._watch(args))
 
@@ -2950,9 +2950,10 @@ class TestStartedState(TempRepository):
 
 class TestRuntimeProcessPolicy(unittest.TestCase):
     def test_posix_supervisor_uses_host_spawn_policy(self) -> None:
-        process = mock.Mock(pid=42)
+        from agents_live.runtime import watcher
+        process = mock.Mock(pid=42, created_at=1)
         with mock.patch.object(
-                processes.system, "spawn_detached", return_value=process) as spawn:
+                watcher, "spawn", return_value=process) as spawn:
             reference = LocalProcesses().spawn_detached(
                 ["agents-live", "internal", "watch-loop", "sample"],
                 role="watcher",
@@ -2963,8 +2964,8 @@ class TestRuntimeProcessPolicy(unittest.TestCase):
         spawn.assert_called_once_with(
             ["agents-live", "internal", "watch-loop", "sample"],
             cwd=None,
+            key="subscription",
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
         self.assertEqual(42, reference.pid)
 
@@ -3816,7 +3817,8 @@ class TestProcessorContractVersion2(TempRepository):
         self.assertIn("truncated", terminal["message"])
         completed = subprocess.run([
             sys.executable, "-m", "agents_live.cli", "--repo", str(self.root),
-            "logs", "--columns", "run_id,status,completion_reason,processor_record", "--format", "jsonl",
+            "logs", "--phase", "done",
+            "--columns", "run_id,status,completion_reason,processor_record", "--format", "jsonl",
         ], capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(0, completed.returncode, completed.stderr)
         public_record = json.loads(completed.stdout.strip())

@@ -21,6 +21,7 @@ def run(
     should_continue: Callable[[], bool] | None = None,
     on_retire: Callable[[], None] | None = None,
     idle_check_s: float = 60.0,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     pending: set[str] = set()
     deadline: float | None = None
@@ -28,6 +29,8 @@ def run(
     retiring = False
     source.start()
     try:
+        if progress is not None:
+            progress("poll")
         while True:
             if should_continue is not None and not should_continue():
                 retiring = True
@@ -38,6 +41,8 @@ def run(
                 else min(idle_check_s, max(0.0, deadline - time.monotonic()))
             )
             changed = source.poll(timeout)
+            if progress is not None:
+                progress("poll")
             for value in changed:
                 path = Path(value)
                 try:
@@ -54,12 +59,18 @@ def run(
             while dispatches and instant - dispatches[0] >= window_s:
                 dispatches.popleft()
             if pending and len(dispatches) < max_dispatches:
+                if progress is not None:
+                    progress("dispatch")
                 fire(tuple(sorted(pending)))
+                if progress is not None:
+                    progress("poll")
                 dispatches.append(instant)
             pending.clear()
             deadline = None
     finally:
         source.stop()
+        if progress is not None:
+            progress("stopped")
     if retiring and on_retire is not None:
         on_retire()
 

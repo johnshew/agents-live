@@ -1178,6 +1178,81 @@ def api_agents() -> dict:
     }
 
 
+def _timing_snapshot(since: str = "24h", until: str | None = None) -> dict:
+    """One read-only query surface for lock holds, agent waits and clock fires."""
+    from agents_live.obs import qlog
+
+    lower = obs_query.resolve_since(since)
+    upper = obs_query.resolve_since(until) if until else datetime.now(timezone.utc).isoformat()
+    upper_operator = "<" if until else "<="
+    roots = [REPO_ROOT] if REPO_ROOT is not None else [
+        Path(value) for value in repos.load()["repos"].values()]
+    directories = [paths.host_logs_dir(), *(
+        paths.repo_state_dir(root) / "logs" for root in roots)]
+    result = {"since": lower, "until": upper, "locks": [], "agents": [], "clock": [],
+              "clock_coverage": [], "watchers": [],
+              "status": "ok", "misfire_grace_s": 120}
+    with qlog.duckdb.connect(":memory:") as connection:
+        try:
+            qlog.build_view(connection, [
+                str(directory / suffix) for directory in directories
+                for suffix in ("*.jsonl", "*.log")
+            ], archives=[directory / "archive" for directory in directories],
+                repositories=[str(root) for root in roots], since=lower, until=upper,
+                sql="SELECT * FROM clock_fires")
+        except SystemExit:
+            result["status"] = "empty"
+            return result
+        except (OSError, qlog.duckdb.Error) as exc:
+            result.update(status="unavailable", detail=str(exc))
+            return result
+        def rows(sql, parameters):
+            relation = connection.sql(sql, params=parameters)
+            return [dict(zip(relation.columns, row, strict=True)) for row in relation.fetchall()]
+
+        result["locks"] = rows(
+            "SELECT operation, lock_kind, count(*) AS acquisitions, "
+            "max(lock_hold_s) AS max_hold_s, quantile_cont(lock_hold_s, .95) AS p95_hold_s, "
+            "max(lock_wait_s) AS max_wait_s "
+            "FROM log WHERE phase = 'lock' AND status = 'released' AND ts >= ? "
+            f"AND ts {upper_operator} ? "
+            "GROUP BY operation, lock_kind ORDER BY max_hold_s DESC", [lower, upper])
+        result["agents"] = rows(
+            "SELECT repository, agent_name, count(*) AS fires, "
+            "max(gate_wait_s) AS max_gate_wait_s, quantile_cont(gate_wait_s, .95) AS p95_gate_wait_s, "
+            "arg_max(runtime_version, ts) AS runtime_version, "
+            "arg_max(runtime_generation, ts) AS runtime_generation "
+            "FROM log WHERE phase IN ('done', 'firing') AND ts >= ? "
+            f"AND ts {upper_operator} ? "
+            "GROUP BY repository, agent_name ORDER BY max_gate_wait_s DESC", [lower, upper])
+        result["clock"] = rows(
+            "SELECT repository, agent_name, fire_status, count(*) AS fires, "
+            "max(launch_lag_s) AS max_launch_lag_s, "
+            "quantile_cont(launch_lag_s, .95) AS p95_launch_lag_s "
+            "FROM clock_fires WHERE COALESCE(planned_at, observed_at) >= ? "
+            f"AND COALESCE(planned_at, observed_at) {upper_operator} ? "
+            "GROUP BY repository, agent_name, fire_status ORDER BY repository, agent_name, fire_status",
+            [lower, upper])
+        result["clock_coverage"] = rows(
+            "SELECT repository, status, CAST(known_from AS VARCHAR) AS known_from, detail "
+            "FROM clock_coverage", [])
+        result["watchers"] = rows(
+            "SELECT CAST(ts AS VARCHAR) AS ts, repository, agent_name, watcher_pid, "
+            "status, stop_reason, operation, exit_code, stderr_tail, stderr_bytes, "
+            "stderr_truncated, stderr_complete, capture_error, runtime_version, runtime_generation "
+            "FROM log WHERE phase = 'watcher' AND status IN ('stopping', 'deferred', 'exited') "
+            f"AND ts >= ? AND ts {upper_operator} ? ORDER BY ts DESC", [lower, upper])
+    return result
+
+
+@app.get("/api/timing")
+def api_timing(since: str = "24h", until: str | None = None) -> dict:
+    try:
+        return _timing_snapshot(since, until)
+    except ValueError as exc:
+        return {"status": "unavailable", "detail": str(exc)}
+
+
 def _filtered_agent_rows(rows: list[dict], filters: dict) -> list[dict]:
     name_filter = str(filters.get("name", "")).casefold().strip()
     return [
@@ -2460,6 +2535,43 @@ def _build_operational_page(page_state: dict | None = None) -> None:
     settings_dialog.on("show", lambda: settings_visibility(True))
     settings_dialog.on("hide", lambda: settings_visibility(False))
 
+    with ui.dialog() as timing_dialog, ui.card().classes("w-full max-w-5xl"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Run timing").classes("text-lg font-semibold")
+            ui.button("Close", on_click=timing_dialog.close).props("flat")
+        timing_window = ui.select(
+            ["1h", "24h", "7d"], value="24h", label="Time window")
+        timing_content = ui.column().classes("w-full")
+
+    async def show_timing():
+        timing_dialog.open()
+        snapshot = await ng_run.io_bound(_timing_snapshot, timing_window.value)
+        timing_content.clear()
+        with timing_content:
+            ui.label(
+                "Host lock holds, agent gate waits and observed clock intent. "
+                "Missed means no recorded arrival after 120 seconds; it is not proof of scheduler failure."
+            ).classes("text-sm")
+            if snapshot["status"] != "ok":
+                ui.label(snapshot.get("detail", "No timing records yet."))
+            for key, title in (("locks", "Locks by operation"),
+                               ("agents", "Gate waits by agent"),
+                               ("clock", "Clock fires"),
+                               ("clock_coverage", "Clock history coverage"),
+                               ("watchers", "Watcher exits and stops")):
+                ui.label(title).classes("font-semibold")
+                rows = snapshot[key]
+                if rows:
+                    ui.table(columns=[
+                        {"name": name, "label": name.replace("_", " "), "field": name,
+                         "sortable": True}
+                        for name in rows[0]
+                    ], rows=rows).classes("w-full")
+                else:
+                    ui.label("No records in this window.")
+
+    timing_window.on_value_change(show_timing)
+
     with ui.row().classes(
             "dashboard-header w-full items-center justify-between gap-x-4 gap-y-2"):
         with ui.row().classes("dashboard-identity items-center gap-4 no-wrap"):
@@ -2484,6 +2596,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             ui.button(icon="settings", on_click=settings_dialog.open).classes(
                 "settings-trigger").props(
                     "flat round dense aria-label=Settings")
+            ui.button("Timing", on_click=show_timing).props(
+                'flat dense aria-label="Run timing"')
 
     with ui.element("div").classes("dashboard-body w-full grow min-h-0"):
         with ui.element("section").classes("agent-panel w-full min-h-0"):

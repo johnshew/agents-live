@@ -5,7 +5,8 @@ import fnmatch
 import re
 import shlex
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import PurePosixPath
 
 _SPECIALS = {
@@ -48,11 +49,7 @@ class Schedule:
         if expression == "@reboot":
             return False
         fields = expression.split()
-        limits = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
-        values = [
-            _expand_field(field, low, high)
-            for field, (low, high) in zip(fields, limits, strict=True)
-        ]
+        values = _schedule_values(expression)
         if moment.minute not in values[0] or moment.hour not in values[1]:
             return False
         if moment.month not in values[3]:
@@ -63,6 +60,74 @@ class Schedule:
         if fields[2] != "*" and fields[4] != "*":
             return day_matches or weekday_matches
         return day_matches and weekday_matches
+
+    def previous(self, moment: datetime) -> datetime | None:
+        """Most recent due minute, without guessing that a late arrival is due."""
+        expression = {
+            "@yearly": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+            "@weekly": "0 0 * * 0", "@daily": "0 0 * * *",
+            "@hourly": "0 * * * *",
+        }.get(self.canonical, self.canonical)
+        if expression == "@reboot":
+            return None
+
+        values = _schedule_values(expression)
+        fields = expression.split()
+        date = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Eight years covers leap-day schedules around a non-leap century.
+        for _ in range(366 * 8):
+            day_matches = date.day in values[2]
+            weekday_matches = ((date.weekday() + 1) % 7) in {
+                0 if item == 7 else item for item in values[4]}
+            due_day = (day_matches or weekday_matches
+                       if fields[2] != "*" and fields[4] != "*"
+                       else day_matches and weekday_matches)
+            if date.month in values[3] and due_day:
+                for hour in sorted(values[1], reverse=True):
+                    for minute in sorted(values[0], reverse=True):
+                        candidate = date.replace(hour=hour, minute=minute)
+                        if candidate <= moment and self.matches(candidate):
+                            return candidate
+            date -= timedelta(days=1)
+        return None
+
+    def slots(self, start: datetime, end: datetime, *, zone=None):
+        """Enumerate calendar candidates in UTC, including both DST folds."""
+        expression = {
+            "@yearly": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+            "@weekly": "0 0 * * 0", "@daily": "0 0 * * *",
+            "@hourly": "0 * * * *",
+        }.get(self.canonical, self.canonical)
+        if expression == "@reboot":
+            return
+        values = _schedule_values(expression)
+        hour = start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        while hour < end:
+            local = hour.astimezone(zone)
+            last = (hour + timedelta(hours=1, microseconds=-1)).astimezone(zone)
+            if local.utcoffset() != last.utcoffset():
+                # Offset transitions inside an hour can shift by 30 minutes.
+                minutes = range(60)
+            else:
+                minutes = sorted((minute - local.minute) % 60 for minute in values[0])
+            for minute in minutes:
+                candidate = hour + timedelta(minutes=minute)
+                if not start <= candidate < end:
+                    continue
+                wall = candidate.astimezone(zone)
+                if wall.hour in values[1] and self.matches(wall):
+                    yield candidate
+            hour += timedelta(hours=1)
+
+
+@lru_cache(maxsize=256)
+def _schedule_values(expression: str):
+    return tuple(
+        frozenset(_expand_field(field, low, high))
+        for field, (low, high) in zip(
+            expression.split(), ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7)),
+            strict=True)
+    )
 
 
 @dataclass(frozen=True)

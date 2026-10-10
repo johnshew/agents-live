@@ -1,7 +1,7 @@
 ---
 title: Agents Live commands
 description: Command reference for lifecycle, diagnostics, and repository operations
-ms.date: 2026-10-08
+ms.date: 2026-10-09
 ms.topic: reference
 ---
 
@@ -262,6 +262,10 @@ that ran the agent.
   and `--raw` prints one private provider envelope for deep diagnosis.
   `--attempt N` selects a retry; `--attempts` exposes retained attempt provenance.
   Unfinished runs expose bounded snapshots without being marked complete.
+  `logs --sql` also exposes lock wait/hold and gate-wait measurements, runtime
+  identity, and the `clock_fires` and `clock_coverage` views for launch lag and
+  inferred missed fires, watcher exit codes, bounded stderr tails and
+  convergence termination reasons. See [timing recipes](diagnostics.md#locks-clock-fires-and-runtime-identity).
 - `lock PATH [--timeout SECONDS] -- COMMAND [ARGS...]` runs one command while
   holding the same cross-platform advisory lock used by Agents Live. It opens
   the lock file in append mode so another contender cannot replace the locked
@@ -269,6 +273,8 @@ that ran the agent.
   waits for that many seconds. Use this wrapper from handlers, processors, and
   plugins instead of importing `fcntl`, which is POSIX-only and provides no
   exclusion when an ImportError fallback silently continues on Windows.
+  Successful acquisitions and releases are queryable with operation and run
+  identity; processor invocations inherit their parent agent run identity.
 - `smoketest` exercises an end-to-end provider path.
 - `init [--repo PATH]` initializes or registers a workspace.
 - `upgrade` upgrades the tool or its installed skill payload. An installed

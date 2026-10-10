@@ -18,7 +18,7 @@ from ... import __version__, agent, deploy, obs, paths, runtime
 from ...dispatch import Firing, dispatch
 from ...obs import admin as adminlog
 from ...obs import retention
-from ...runtime import convergence, handoff
+from ...runtime import convergence, handoff, watcher
 from ...runtime.grammars import parse_watch
 from ...runtime.hosts import filesystem as watchsource
 from ...runtime.watchloop import run as run_watchloop
@@ -43,6 +43,11 @@ def main(
     watch = commands.add_parser("watch-loop")
     watch.add_argument("name")
     watch.add_argument("--watch-expression")
+    supervised = commands.add_parser("watch-supervise")
+    supervised.add_argument("name")
+    supervised.add_argument("--watch-expression")
+    observe = commands.add_parser("watch-observe")
+    observe.add_argument("session", type=Path)
     maintain = commands.add_parser("maintain")
     maintain.add_argument("--quiet", action="store_true")
     maintain.add_argument("--dry-run", action="store_true")
@@ -59,6 +64,16 @@ def main(
         return 0
     if args.command == "maintain":
         return _maintain(dry_run=args.dry_run, metadata=metadata)
+    if args.command == "watch-observe":
+        return watcher.supervise(args.session)
+    if args.command == "watch-supervise":
+        root = paths.resolve_root()
+        executable = str(Path(sys.argv[0]).resolve())
+        argv = [executable, "--repo", str(root), "internal", "watch-loop",
+                *(("--metadata", runtime.artifacts.encode(metadata)) if metadata else ()),
+                args.name,
+                *(("--watch-expression", args.watch_expression) if args.watch_expression else ())]
+        return watcher.supervise(watcher.prepare(argv, cwd=root))
     return _watch(args, metadata)
 
 
@@ -301,7 +316,8 @@ def _watch(
 ) -> int:
     root = paths.resolve_root()
     retirement: dict[str, str | None] = {"reason": None, "operation": None}
-    watcher_run_id = uuid.uuid4().hex
+    session = os.environ.get(watcher.SESSION_ENV)
+    watcher_run_id = Path(session).name if session else uuid.uuid4().hex
     watcher_id = args.name
 
     def should_continue() -> bool:
@@ -319,6 +335,8 @@ def _watch(
             return
 
     def record(status: str, message: str, **fields: Any) -> None:
+        fields.setdefault("watcher_pid", os.getpid())
+        fields.setdefault("subscription_id", metadata.id if metadata is not None else "")
         _record_watcher_event(
             root,
             watcher_id,
@@ -331,6 +349,7 @@ def _watch(
     try:
         spec = agent.load(args.name, root=root)
         watcher_id = spec.identifier
+        watcher.identify(watcher_id)
         if spec.execution is None or not spec.execution.watch:
             raise agent.DefinitionError(f"'{args.name}' has no watch expression")
         expression = args.watch_expression or spec.execution.watch
@@ -372,8 +391,11 @@ def _watch(
             ),
             should_continue=should_continue,
             on_retire=lambda: on_retire(expression),
+            progress=watcher.progress,
+            idle_check_s=watcher.POLL_SECONDS,
         )
         reason = retirement["reason"] or "stopped"
+        watcher.result(reason)
         record(
             "ok",
             f"watcher stopped ({reason})",
@@ -381,6 +403,7 @@ def _watch(
         )
     except watchsource.WatchFailed as exc:
         text = str(exc)
+        watcher.result("watch_failed")
         record(
             "error",
             f"watcher failed: {text}",
@@ -392,6 +415,7 @@ def _watch(
         print(text, file=sys.stderr)
         return 1
     except (agent.DefinitionError, RuntimeError, OSError, ValueError) as exc:
+        watcher.result("error")
         record(
             "error",
             f"watcher stopped: {exc}",
@@ -560,7 +584,7 @@ def _restart_watcher(
             role="watcher",
             key=key,
             fingerprint=(
-                runtime.artifacts.PREFIX + metadata.id
+                runtime.artifacts.PREFIX + metadata.id + ":supervised"
                 if metadata is not None else ""
             ),
             cwd=str(root),

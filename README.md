@@ -171,6 +171,14 @@ existing repositories, and repair.
 
 ## Go further
 
+Run diagnostics retain lock acquire waits and hold times, planned versus actual
+clock launch times, and the producing runtime version and generation.
+Use `agents-live logs --sql` for max/p95 timings and the `clock_fires` view for
+missed or skipped fires within recorded schedule intent. The dashboard's Timing
+panel exposes the same queries plus watcher exit codes, bounded stderr tails
+and termination reasons. Maintenance checks actual watch-loop progress rather
+than only process markers. See the [diagnostics guide](src/agents_live/skill/docs/diagnostics.md#locks-clock-fires-and-runtime-identity).
+
 Definitions live under a registered repository's `Agents/` directory by
 default, and Agents Live also searches `.claude/skills/`, `.github/skills/`,
 and `.agents/skills/`, claiming a skill there only when it carries

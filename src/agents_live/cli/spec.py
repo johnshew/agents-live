@@ -136,6 +136,22 @@ COMMANDS = (
                 ),
             ),
             Cmd(
+                "watch-supervise", "Observe one watcher loop.", "cli.commands.internal", "in-process",
+                hidden=True,
+                args=(
+                    Arg(("name",), "Agent name.", kind="positional", required=True),
+                    Arg(("--watch-expression",), "Canonical watch expression.",
+                        kind="value", hidden=True),
+                    Arg(("--metadata",), "Runtime subscription metadata.",
+                        kind="value", hidden=True),
+                ),
+            ),
+            Cmd(
+                "watch-observe", "Observe a prepared watcher session.", "cli.commands.internal",
+                "in-process", root="none", hidden=True,
+                args=(Arg(("session",), "Prepared session directory.", kind="positional", required=True),),
+            ),
+            Cmd(
                 "maintain", "Run automatic host maintenance.", "cli.commands.internal",
                 "in-process", root="none", hidden=True,
                 args=(

@@ -16,6 +16,7 @@ def diff(
     *,
     preferred_generation: str = "",
     process_parents: Mapping[int, int] | None = None,
+    watcher_health: Mapping[int, str] | None = None,
 ) -> tuple[Operation, ...]:
     """Operations that make the host match ``desired``.
 
@@ -30,6 +31,7 @@ def diff(
         item.pid: item for item in processes if item.role == "watcher" and item.key
     }
     parents = process_parents or {}
+    health = watcher_health or {}
     trees: dict[int, tuple[int, ProcessRef]] = {}
     # A console launcher and its Python child represent one watch loop.
     for process in candidates.values():
@@ -75,15 +77,21 @@ def diff(
             not (preferred_generation
                  and trees[item.pid][1].generation == preferred_generation),
             trees[item.pid][1].fingerprint != target.fingerprint,
+            health.get(trees[item.pid][1].pid, "") not in {"", "watching", "starting", "busy"},
             trees[item.pid][1].created_at, item.pid,
         ), default=None)
         for extra in owners:
             if extra != process:
                 operations.append(Operation(
                     "stop-watcher", key, "duplicate watcher", process=extra))
-        if process is not None and process.fingerprint != target.fingerprint:
+        if process is not None and (
+            process.fingerprint != target.fingerprint
+            or health.get(trees[process.pid][1].pid, "") not in {"", "watching", "starting", "busy"}
+        ):
             operations.append(Operation(
-                "stop-watcher", key, "watch expression changed", process=process))
+                "stop-watcher", key,
+                "watch expression changed" if process.fingerprint != target.fingerprint
+                else "watcher is not watching", process=process))
             process = None
         if process is None:
             operations.append(Operation("start-watcher", key, "watcher is not alive", rendered=target))

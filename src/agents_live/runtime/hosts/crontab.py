@@ -87,7 +87,7 @@ def lock() -> Iterator[None]:
     held = ExitStack()
     try:
         held.enter_context(
-            hostruntime.exclusive_lock(state_dir() / "crontab.lock"))
+            hostruntime.exclusive_lock(state_dir() / "crontab.lock", kind="crontab"))
     except hostruntime.LockBusy as exc:
         raise RuntimeError(
             "crontab is busy; another agents-live process is updating it; retry"

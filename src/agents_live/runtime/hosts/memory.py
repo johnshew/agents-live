@@ -64,6 +64,9 @@ class MemorySupervisor:
     def alive(self, ref: ProcessRef) -> bool:
         return self.processes.get(ref.key) == ref
 
+    def watcher_health(self, ref: ProcessRef) -> str:
+        return "watching" if self.alive(ref) else "not-watching"
+
     def terminate(self, ref: ProcessRef) -> None:
         self.processes.pop(ref.key, None)
 

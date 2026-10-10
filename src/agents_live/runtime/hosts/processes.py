@@ -108,6 +108,13 @@ class LocalProcesses:
         stdout: IO[bytes] | int | None = None,
         stderr: IO[bytes] | int | None = None,
     ) -> ProcessRef:
+        if role == "watcher":
+            from .. import watcher
+            process = watcher.spawn(argv, cwd=cwd, key=key,
+                                    stdout=stdout if stdout is not None else subprocess.DEVNULL)
+            return ProcessRef(
+                process.pid, process.created_at, Path(argv[0]).name,
+                role, key, fingerprint, generation=process_generation(argv))
         process = system.spawn_detached(
             argv,
             cwd=cwd,
@@ -129,7 +136,12 @@ class LocalProcesses:
             os.kill(ref.pid, 0)
         except OSError:
             return False
-        return True
+        started = system.process_start_time(ref.pid)
+        return started is not None and abs(started - ref.created_at) < 2.0
+
+    def watcher_health(self, ref: ProcessRef) -> str:
+        from .. import watcher
+        return watcher.health(ref)
 
     def adopt(
         self, pid: int, *, role: str, key: str = "",
@@ -161,7 +173,7 @@ class LocalProcesses:
                 continue
             found.append(ProcessRef(
                 int(item.name),
-                float(stat[21]) if len(stat) > 21 else 0.0,
+                system.process_start_time(int(item.name)) or 0.0,
                 Path(argv[0]).name,
                 parsed["role"],
                 parsed["key"],
@@ -364,10 +376,10 @@ def _shell_processor_argv(argv: Sequence[str]) -> tuple[str, ...]:
 def _markers(argv: Sequence[str]) -> dict[str, str] | None:
     from .. import artifacts
     metadata = artifacts.from_argv(argv)
-    if metadata is None or "watch-loop" not in argv:
+    if metadata is None or _watcher_name(argv[1:]) is None:
         return None
     return {
         "role": "watcher",
         "key": metadata.id,
-        "fingerprint": artifacts.PREFIX + metadata.id,
+        "fingerprint": artifacts.PREFIX + metadata.id + ":supervised",
     }

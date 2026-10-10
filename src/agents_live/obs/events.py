@@ -3,11 +3,26 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import __version__
+
 SCHEMA_VERSION = 1
+
+
+def _loaded_generation() -> str:
+    # Capture the executing image, never the mutable selected-runtime pointer.
+    for location in (Path(__file__).resolve(), Path(sys.executable).resolve()):
+        for parent in location.parents:
+            if parent.parent.name == "versions" and (parent / "generation.json").is_file():
+                return parent.name
+    return "unmanaged"
+
+
+RUNTIME_GENERATION = _loaded_generation()
 
 
 @dataclass(frozen=True)
@@ -26,6 +41,8 @@ class Event:
     usage: tuple[tuple[str, str | None], ...] = ()
     attributes: tuple[tuple[str, object], ...] = ()
     spec: int = SCHEMA_VERSION
+    runtime_version: str = __version__
+    runtime_generation: str = RUNTIME_GENERATION
 
 
 def create(

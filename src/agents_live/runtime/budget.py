@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..obs import timing
 
 @dataclass(frozen=True)
 class BudgetResult:
@@ -20,12 +21,18 @@ def claim(path: Path, *, limit: int = 60, window_s: float = 60.0, now: float | N
     instant = time.time() if now is None else now
     lock = path.with_suffix(f"{path.suffix}.lock")
     try:
+        started = time.monotonic()
         path.parent.mkdir(parents=True, exist_ok=True)
         _acquire(lock)
+        held = timing.acquired(lock, "dispatch-budget", started)
         try:
             return _claim(path, limit=limit, window_s=window_s, instant=instant)
         finally:
-            lock.unlink(missing_ok=True)
+            try:
+                lock.unlink(missing_ok=True)
+            finally:
+                if held is not None:
+                    held.finish()
     except (OSError, TimeoutError, TypeError, ValueError, json.JSONDecodeError):
         return BudgetResult(True, 0, limit)
 

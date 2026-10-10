@@ -732,7 +732,9 @@ def pin_executable(name: str, *, path: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 @contextmanager
-def exclusive_lock(path: Path, *, blocking: bool = False) -> Iterator[None]:
+def exclusive_lock(path: Path, *, blocking: bool = False,
+                   kind: str = "file-lock", operation: str = "",
+                   wait_started: float | None = None) -> Iterator:
     """Hold an exclusive inter-process lock on *path* for the block.
 
     The lock file is opened in append mode and never truncated, so the
@@ -744,13 +746,25 @@ def exclusive_lock(path: Path, *, blocking: bool = False) -> Iterator[None]:
     second acquisition from the same process blocks or raises, exactly
     as one from a different process would.
     """
+    from ...obs import timing
+
+    started = time.monotonic() if wait_started is None else wait_started
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as lock_file:
         _lock_acquire(lock_file, blocking=blocking)
+        held = None
         try:
-            yield
+            try:
+                held = timing.acquired(path, kind, started, operation=operation)
+            except Exception:
+                pass
+            yield held
         finally:
-            _lock_release(lock_file)
+            try:
+                _lock_release(lock_file)
+            finally:
+                if held is not None:
+                    held.finish()
 
 
 if _IS_WINDOWS:
@@ -1255,7 +1269,7 @@ def process_parent_ids() -> dict[int, int]:
     return dict(pairs)
 
 
-def supervise_child(process: subprocess.Popen) -> Callable[[], None]:
+def supervise_child(process: subprocess.Popen, *, allow_breakaway: bool = False) -> Callable[[], None]:
     """Own descendants until cleanup; Windows callers must launch suspended."""
     if not _IS_WINDOWS:
         def stop_group() -> None:
@@ -1307,7 +1321,9 @@ def supervise_child(process: subprocess.Popen) -> Callable[[], None]:
 
     try:
         limits = ExtendedLimits()
-        limits.basic.flags = 0x2000
+        # Only a watcher may hand off to a new independent observer. Ordinary
+        # provider/processor descendants remain unable to escape their owner.
+        limits.basic.flags = 0x2000 | (0x0800 if allow_breakaway else 0)
         if not job or not _kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
             raise ctypes.WinError(ctypes.get_last_error())
         handle = _kernel32.OpenProcess(0x0101, False, process.pid)
@@ -1360,6 +1376,8 @@ def spawn_detached(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
     text: bool = False,
+    suspended: bool = False,
+    breakaway: bool = False,
 ) -> subprocess.Popen:
     """Start *argv* as a process that outlives this one.
 
@@ -1369,8 +1387,14 @@ def spawn_detached(
 
     ``text`` decodes the child's streams through :data:`CHILD_TEXT`
     rather than the locale, for the same reason every other capture in
-    the tool does.
+    the tool does. ``breakaway`` is reserved for watcher-observer handoff;
+    other descendants retain their existing Job Object ownership.
     """
+    options = _detached_popen_kwargs()
+    if suspended and _IS_WINDOWS:
+        options["creationflags"] = options.get("creationflags", 0) | 0x00000004
+    if breakaway and _IS_WINDOWS:
+        options["creationflags"] = options.get("creationflags", 0) | 0x01000000
     return subprocess.Popen(
         list(argv),
         cwd=str(cwd) if cwd is not None else None,
@@ -1379,7 +1403,7 @@ def spawn_detached(
         stdout=stdout,
         stderr=stderr,
         **(CHILD_TEXT if text else {}),
-        **_detached_popen_kwargs(),
+        **options,
     )
 
 

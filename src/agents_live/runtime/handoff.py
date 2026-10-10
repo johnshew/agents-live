@@ -10,6 +10,7 @@ from contextlib import ExitStack, contextmanager
 from time import monotonic, sleep
 
 from .. import paths
+from ..obs import timing
 from .hosts import system
 from .hosts.processes import pid_exists
 from .values import ProcessRef
@@ -23,11 +24,14 @@ def gate(*, timeout: float = 0, operation: str = "convergence",
     holder_path = paths.state_home() / "activation-holder.json"
     lock_path = paths.state_home() / "activation.lock"
     observed = {}
-    with ExitStack() as acquired:
+    wait_started = time.monotonic()
+    with timing.context(operation, run_id=run_id, agent=agent,
+                        repository=repository), ExitStack() as acquired:
         while True:
             try:
-                acquired.enter_context(system.exclusive_lock(
-                    lock_path))
+                held = acquired.enter_context(system.exclusive_lock(
+                    lock_path, kind="runtime-launch-gate",
+                    wait_started=wait_started))
                 break
             except system.LockBusy:
                 try:
@@ -51,7 +55,10 @@ def gate(*, timeout: float = 0, operation: str = "convergence",
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     error = system.LockBusy("runtime launch gate wait expired")
-                    error.observation = {**observed, "waited_s": monotonic() - started}
+                    error.observation = {
+                        **observed, "waited_s": monotonic() - started,
+                        "gate_wait_s": time.monotonic() - wait_started,
+                    }
                     raise error
                 sleep(min(0.1, remaining))
         holder = {
@@ -66,7 +73,9 @@ def gate(*, timeout: float = 0, operation: str = "convergence",
         except OSError:
             pass
         try:
-            yield {**observed, "waited_s": monotonic() - started}
+            yield {**observed, "waited_s": monotonic() - started,
+                   "gate_wait_s": held.wait_s if held is not None
+                   else time.monotonic() - wait_started}
         finally:
             try:
                 holder_path.unlink(missing_ok=True)
@@ -75,7 +84,8 @@ def gate(*, timeout: float = 0, operation: str = "convergence",
 
 
 def operation():
-    return system.exclusive_lock(paths.state_home() / "activation-operation.lock")
+    return system.exclusive_lock(paths.state_home() / "activation-operation.lock",
+                                 kind="activation-operation")
 
 
 def running_watchers(watchers: Sequence[ProcessRef]) -> set[int]:
@@ -137,13 +147,44 @@ def commit():
         paths.atomic_write_text(location, f"{started + 1}\n")
 
 
+@contextmanager
 def pause_watchers():
-    return system.exclusive_lock(paths.state_home() / "activation-paused.lock")
+    marker = paths.state_home() / "activation-paused.json"
+    with system.exclusive_lock(paths.state_home() / "activation-paused.lock",
+                               kind="watcher-pause"):
+        birth = system.process_start_token(os.getpid())
+        if birth is None:
+            raise OSError("cannot identify watcher-pause owner")
+        paths.atomic_write_text(marker, json.dumps({"pid": os.getpid(), "birth": birth}))
+        try:
+            yield
+        finally:
+            deadline = monotonic() + 2.0
+            delay = 0.005
+            while True:
+                try:
+                    marker.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    if monotonic() >= deadline:
+                        raise
+                    sleep(delay)
+                    delay = min(delay * 2, 0.05)
 
 
 def paused() -> bool:
+    """Read atomically published intent, without taking a lock on every poll."""
     try:
-        with system.exclusive_lock(paths.state_home() / "activation-paused.lock"):
-            return False
-    except system.LockBusy:
-        return True
+        holder = json.loads((paths.state_home() / "activation-paused.json").read_text(
+            encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    if (not isinstance(holder, dict) or not isinstance(holder.get("pid"), int)
+            or holder["pid"] <= 0 or not isinstance(holder.get("birth"), (int, float))):
+        raise ValueError("invalid watcher-pause owner")
+    if not system.is_alive(holder["pid"]):
+        return False
+    birth = system.process_start_token(holder["pid"])
+    if birth is None:
+        raise OSError("cannot verify watcher-pause owner")
+    return birth == holder["birth"]

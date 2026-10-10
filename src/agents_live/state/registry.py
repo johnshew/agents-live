@@ -123,14 +123,15 @@ def _validated_path(value: str | Path, alias: str) -> Path:
 
 
 @contextmanager
-def _registry_lock() -> Iterator[None]:
+def _registry_lock(operation: str) -> Iterator[None]:
     """Serialize load-modify-write registry mutations across processes.
 
     Without it, two concurrent repository registrations each rewrite the file
     from their own snapshot and the last rename silently drops the other
     repo."""
     with hostruntime.exclusive_lock(
-        config_path().parent / ".config.lock", blocking=True,
+        config_path().parent / ".config.lock", blocking=True, kind="registry",
+        operation=operation,
     ):
         yield
 
@@ -169,7 +170,7 @@ def _register_path(registry: dict, value: str) -> str:
 
 
 def _add(value: str) -> Path:
-    with _registry_lock():
+    with _registry_lock("repo-register"):
         registry = load()
         name = _register_path(registry, value)
         _write(registry)
@@ -189,7 +190,7 @@ def require_registered(value: str | Path) -> None:
 def ensure_registered(value: str | Path) -> bool:
     """Register *value* once; return True when the registry changed."""
     path = str(Path(value).expanduser().resolve())
-    with _registry_lock():
+    with _registry_lock("repo-register"):
         registry = load()
         if path in registry["repos"].values():
             return False
@@ -202,7 +203,7 @@ def ensure_registered(value: str | Path) -> bool:
 def ensure_default(value: str | Path) -> bool:
     """Register *value* and select it as default in one locked update."""
     path = str(Path(value).expanduser().resolve())
-    with _registry_lock():
+    with _registry_lock("repo-default"):
         registry = load()
         name = next(
             (name for name, registered in registry["repos"].items()
@@ -237,7 +238,7 @@ def _resolve_ref(registry: dict, ref: str) -> str:
 
 def _set_default(ref: str) -> Path:
     registered = False
-    with _registry_lock():
+    with _registry_lock("repo-default"):
         registry = load()
         try:
             name = _resolve_ref(registry, ref)
@@ -257,7 +258,7 @@ def _set_default(ref: str) -> Path:
 
 
 def _remove(ref: str) -> None:
-    with _registry_lock():
+    with _registry_lock("repo-remove"):
         registry = load()
         name = _resolve_ref(registry, ref)
         # A default only means something when there is a choice to make.
@@ -277,7 +278,7 @@ def _remove(ref: str) -> None:
 
 
 def _clear_default() -> bool:
-    with _registry_lock():
+    with _registry_lock("repo-default-clear"):
         registry = load()
         if registry["default_repo"] is None:
             return False

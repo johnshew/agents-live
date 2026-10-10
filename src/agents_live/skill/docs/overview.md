@@ -1,7 +1,7 @@
 ---
 title: Agents Live overview
 description: Safe local automation for standard Agent Skill definitions
-ms.date: 2026-10-08
+ms.date: 2026-10-09
 ms.topic: overview
 ---
 
@@ -104,6 +104,14 @@ The runtime and agent ports do not import each other.
 Only immutable records made from primitive values cross a seam. Host behavior
 lives behind POSIX and Windows adapters; provider quirks live behind Claude,
 Copilot, Codex, and deterministic fake-provider plugins.
+
+Run diagnostics retain lock acquire waits and hold times, planned versus actual
+clock launch times, and the producing runtime version and generation.
+Use `agents-live logs --sql` for max/p95 timings and the `clock_fires` view for
+missed or skipped fires within recorded schedule intent. The dashboard's Timing
+panel exposes the same queries plus watcher exit codes, bounded stderr tails
+and termination reasons. Maintenance checks actual watch-loop progress rather
+than only process markers. See [diagnostics](diagnostics.md#locks-clock-fires-and-runtime-identity).
 
 ## Installation
 

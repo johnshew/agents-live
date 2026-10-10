@@ -58,11 +58,13 @@ def maintain_host(
     now: datetime | None = None,
 ) -> Result:
     """Rotate host-scoped logs using the host's effective policy."""
+    from ..runtime import watcher
+    removed = watcher.retain(cutoff=_cutoff(days, now).timestamp())
     return _maintain_logs(
         paths.host_logs_dir(),
         cutoff=_cutoff(days, now),
         now=now,
-    )
+    ) + Result(removed_run_artifacts=removed)
 
 
 def maintain_state(
