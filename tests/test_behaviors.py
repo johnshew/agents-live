@@ -2480,7 +2480,7 @@ class TestWatcherExitEvidence(TempRepository):
             "from agents_live.runtime import watcher\n"
             "with native_guard(), allow_native_runtime():\n"
             f" child = watcher.spawn([sys.executable, '-c', {replacement!r}], "
-            f"cwd={str(self.root)!r}, key='replacement')\n"
+            f"cwd={str(REPOSITORY)!r}, key='replacement')\n"
             " identity = watcher._read(watcher._home() / 'pids' / f'{child.pid}.json')\n"
             f" Path({str(marker)!r}).write_text(json.dumps(identity), encoding='utf-8')\n")
         with mock.patch.dict(os.environ, {"PYTHONPATH": os.pathsep.join(
@@ -2500,6 +2500,9 @@ class TestWatcherExitEvidence(TempRepository):
             if hostruntime.is_alive(pid):
                 hostruntime.terminate(pid, grace_s=0.1)
             self._wait(lambda: (replacement_session / "exit.json").is_file())
+            # The detached observer writes exit.json before its event and pid-index
+            # cleanup; wait for that last step so teardown does not race it (#593).
+            self._wait(lambda: not (watcher._home() / "pids" / f"{pid}.json").exists())
         receipt = watcher._read(replacement_session / "exit.json")
         self.assertEqual("replacement evidence", receipt["stderr_tail"])
         self.assertTrue(receipt["stderr_complete"])
