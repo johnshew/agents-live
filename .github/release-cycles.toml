@@ -1,6 +1,6 @@
 schema = 2
 development_branch = "main"
-default_cycle = "6.9.4"
+default_cycle = "6.9.5"
 
 [cycles."6.9.2"]
 branch = "release/6.9.2"
@@ -199,3 +199,21 @@ source_commit = "3733230d61b5f94e67cd33bf4d5482bb4fa38601"
 wheel_sha256 = "1b623266e30e4d78f50ed489ad451adf2448aaa0e7da8e60aa5649abadf192ac"
 sdist_sha256 = "8f476d6fd41fa1aab917a6cfc478bb79867b1f261b5303d913fbb62a3bbd0e29"
 evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness and isolated hello-world acceptance passed. During bootstrap activation, the installed 6.9.4rc4 refused while an agent run was in flight. Local-deploy also refused because instruction-only commits had advanced main after preparation; #578 fixed this tooling gap in PR #579. On 2026-10-09, local-deploy reused the retained RC6 bytes and activated them at the first idle moment via a background retry. Verified locally: agents-live --version reported 6.9.4rc6 on the candidate channel, doctor --all-repos exited 0, and watchers ran from the 6.9.4rc6 generation. Developer approved this exact source and retained wheel for 6.9.4 publication on 2026-10-09. #578's changelog entry is deferred to the next package change."
+
+[cycles."6.9.5"]
+branch = "main"
+next_rc = "6.9.5rc1"
+recommendation = "Prepare and locally activate 6.9.5rc1 from main to evaluate the #582 lock, timing, runtime-identity and watcher-exit diagnostics, #591 named start/stop admin events and the #590 test isolation fix in situ. Source tests are not artifact, installed or operational acceptance. Activation from installed 6.9.4rc6 already includes #574, so in-flight agent runs do not block it; #588 is on hold until evidence shows remaining refusals matter."
+
+[cycles."6.9.5".approval]
+decision = "testing"
+
+[cycles."6.9.5".issues]
+planned = [582, 591, 590]
+deferred = [588, 566, 567]
+
+[cycles."6.9.5".decisions]
+"582" = "Developer assigned lock hold time, launch timing, runtime identity and watcher exit evidence to 6.9.5 on 2026-10-09; merged to main in PR #587."
+"591" = "Developer requested named agent start/stop admin events for the next RC on 2026-10-10; merged to main in PR #594."
+"590" = "Developer requested the test leak into the live admin log be fixed for the next RC on 2026-10-10; merged to main in PR #596."
+"588" = "Developer directed on 2026-10-10 not to implement waiting activation until evidence shows it is needed; #574 already removes the in-flight run refusal."
