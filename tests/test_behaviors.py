@@ -69,7 +69,8 @@ from agents_live.state import registry as repos
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(REPOSITORY))
-from tests.host_safety import allow_native_runtime, isolated_host, native_guard
+from tests.host_safety import (
+    allow_native_runtime, assert_real_host_state_untouched, isolated_host, native_guard)
 
 _ISOLATED_HOMES = {
     "XDG_STATE_HOME": "state",
@@ -198,6 +199,7 @@ def setUpModule() -> None:
     guard = native_guard()
     guard.__enter__()
     unittest.addModuleCleanup(guard.__exit__, None, None, None)
+    unittest.addModuleCleanup(assert_real_host_state_untouched)
     global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT, _PREVIOUS_CONFIG_HOME
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
     _PREVIOUS_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME")

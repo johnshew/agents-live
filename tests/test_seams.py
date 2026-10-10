@@ -80,7 +80,9 @@ from agents_live.runtime.hosts import windows_watch as winwatch
 from agents_live.runtime.hosts import filesystem as watchsource
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tests.host_safety import allow_native_runtime, isolated_host, native_guard
+from tests.host_safety import (
+    REAL_STATE_HOME, allow_native_runtime, assert_real_host_state_untouched,
+    isolated_host, native_guard)
 
 
 # The repository registry lives under the data home, not the state home, so
@@ -106,6 +108,7 @@ def setUpModule() -> None:
     guard = native_guard()
     guard.__enter__()
     unittest.addModuleCleanup(guard.__exit__, None, None, None)
+    unittest.addModuleCleanup(assert_real_host_state_untouched)
     global _INSTALL_ROOT, _PREVIOUS_INSTALL_ROOT, _PREVIOUS_CONFIG_HOME
     _PREVIOUS_INSTALL_ROOT = os.environ.get(deploy.layout.ENV_INSTALL_ROOT)
     _PREVIOUS_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME")
@@ -1976,6 +1979,23 @@ class TestRuntimeCore(unittest.TestCase):
             self.assertEqual(1, uninstall.main([]))
         self.assertEqual(1, len(host.trigger_store.list()))
         self.assertEqual(1, len(host.supervisor.owned("watcher")))
+
+    def test_uninstall_admin_events_stay_out_of_the_real_host_log(self) -> None:
+        # #590: uninstall, ownership and maintenance tests appended admin
+        # events to the developer's live host admin log.
+        log = uninstall.adminlog.log_path()
+        real = REAL_STATE_HOME.resolve()
+        self.assertFalse(log.resolve().is_relative_to(real), log)
+        with (
+            mock.patch.object(uninstall.runtime, "current", return_value=MemoryHost()),
+            mock.patch.object(
+                uninstall.deploy.ownership, "refusal", return_value="blocked"),
+            mock.patch.object(uninstall, "_stop_own_watchers", return_value=[]),
+            mock.patch.object(uninstall.preflight, "emit_failure"),
+        ):
+            self.assertEqual(1, uninstall.main([]))
+        self.assertIn("uninstall", [
+            record.get("operation") for record in obs.load([log])])
 
     def test_uninstall_wsl_cleanup_failure_preserves_structured_runtime(
             self) -> None:
