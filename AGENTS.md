@@ -320,15 +320,17 @@ a new agent receives the same answer from either entry point.
 - **Use the repository owner's GitHub account for GitHub writes.** An
   enterprise-managed account may be active by default and is refused (403) when
   it creates issues, PRs or comments here, including through agent issue tools.
-  Before a `gh` write, switch to the account that owns `origin`. A `GH_TOKEN`
-  environment variable silently overrides the switch, and the switch may not
-  persist to later agent shell processes, so clear the token and switch in the
-  same process as every write. In PowerShell:
-  `$env:GH_TOKEN = $null; gh auth switch --hostname github.com --user <origin-owner>; gh ...`.
-  Read-only queries may work under either account. The app's own PR and issue
-  tools may also return the enterprise-account 403; fall back to
-  `gh pr create` or `gh issue create` under `<origin-owner>` only when the
-  developer explicitly directs it.
+  Before a `gh` write, switch to the account that owns `origin`. `GH_TOKEN` and
+  `GITHUB_TOKEN` environment variables silently override the switch, and the
+  switch may not persist to later agent shell processes, so clear both tokens,
+  switch and verify in the same process as every write. In PowerShell:
+  `$env:GH_TOKEN = $null; $env:GITHUB_TOKEN = $null; gh auth switch --hostname github.com --user <origin-owner>; gh api user --jq .login; gh ...`.
+  Read-only queries may work under either account. When the app's own PR or
+  issue tool returns the enterprise-account 403, any authority to file that
+  issue or open that PR (a developer request, or these rules for deferred work)
+  also authorizes `gh issue create` or `gh pr create` under `<origin-owner>`
+  this way; do not stop to ask again.
+  This adds no merge, push or release authority.
 - **Treat GitHub issue dates as UTC.** For a rolling recent-issue review, use
   `updated:>=YYYY-MM-DD` or an exact timestamp and omit a local-calendar upper
   bound. A local late-evening issue may already be dated tomorrow by GitHub;
@@ -467,3 +469,45 @@ Two focused release-report behavior tests passed, including assertions that read
 #### Follow-up
 At a separately scoped consolidation, fold this pending update into AGENTS.md and assess other pending records in the same document. No other repository is identified or cited.
 <!-- /glp-update:v1 id=862700f1-84a3-428c-b798-a76a2b4011c3 -->
+<!-- glp-update:v1 id=1551e0ef-00ba-4066-8e1d-b497a74c0491 -->
+<a id="glp-1551e0ef-00ba-4066-8e1d-b497a74c0491"></a>
+### GLP Update: Owner-pinned gh is the default fallback for authorized issues and PRs
+
+- Update-ID: 1551e0ef-00ba-4066-8e1d-b497a74c0491
+- Recorded-UTC: 2026-10-09T20:02:39Z
+- Kind: correction
+- Topics: GitHub writes, account selection, issue creation, PR creation
+- Workstream: orchestration after 6.9.4 publication
+- Target: AGENTS.md, Rules, owner-account GitHub writes; compared origin/main a4ddc81
+- Source-Session: Copilot app session 2026-10-09 (harness history)
+- Evidence-Basis: user_direction
+- Application: applied
+- Consolidation: pending
+
+#### Change
+When the app's issue or PR tool returns the enterprise-account 403, any
+existing authority to file that issue or open that PR also authorizes the
+owner-pinned `gh issue create` or `gh pr create`. Clear both `GH_TOKEN` and
+`GITHUB_TOKEN`, switch and verify the login in the same process. No separate
+fallback approval is required, and no merge, push or release authority is added.
+
+#### Evidence
+- Observation, 2026-10-09: the earlier rule required explicit direction for
+  the fallback, so agents stalled on authorized issue and PR creation: a child
+  session declined to open its PR, and an issue draft waited for approval.
+- User direction, 2026-10-09: AGENTS.md should tell agents how to set the
+  user properly for `gh` issue writes.
+- The owner-pinned sequence created a PR and an issue that day after the
+  app tool returned 403.
+
+#### Previous Knowledge
+The rule already described clearing `GH_TOKEN` and switching accounts, but it
+gated the fallback on explicit developer direction and did not mention
+`GITHUB_TOKEN` or login verification.
+
+#### Verification and Limits
+Documentation only. Checked by the pre-release audit and `git diff --check`.
+
+#### Follow-up
+Fold into the Rules bullet at the next consolidation of this document.
+<!-- /glp-update:v1 id=1551e0ef-00ba-4066-8e1d-b497a74c0491 -->
