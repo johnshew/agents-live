@@ -7310,14 +7310,28 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 "ACTIVE_ATTEMPT": record, "_git": git, "_run": run,
                 "_gate_commands": lambda: [["build", "--build-artifacts"], ["ready"]],
             }):
-                with self.assertRaisesRegex(script["ReleaseError"], "readiness failed"):
+                with self.assertRaisesRegex(script["ReleaseError"], "readiness failed"), \
+                        contextlib.redirect_stdout(io.StringIO()) as failed_output:
                     prepare()
+                self.assertRegex(
+                    failed_output.getvalue(),
+                    r"failed .*other: ready \(ReleaseError: readiness failed\)")
                 original = script["_candidate_wheel"](record["version"]).read_bytes()
                 self.assertEqual("", git("tag", "--list"))
                 self.assertIn("## Unreleased\n\n- fix:", changelog.read_text())
                 ready = True
                 prepare()
-                prepare()
+                timings = json.loads(script["_preparation_path"](record["version"])
+                                     .read_text(encoding="utf-8"))["stage_timings"]
+                self.assertEqual("warm", timings["path"])
+                self.assertEqual(
+                    [("artifact build", "reused"), ("ready", "passed")],
+                    [(stage["name"], stage["outcome"]) for stage in timings["stages"]])
+                self.assertIn("immutable artifacts", timings["stages"][0]["reason"])
+                with contextlib.redirect_stdout(io.StringIO()) as reused_output:
+                    prepare()
+                self.assertIn("reused", reused_output.getvalue())
+                self.assertIn("exact preparation receipt is valid", reused_output.getvalue())
                 self.assertEqual(1, len(builds))
                 self.assertEqual(original, script["_candidate_wheel"](record["version"]).read_bytes())
                 script["_candidate_wheel"](record["version"]).write_bytes(b"changed")
@@ -7325,6 +7339,36 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     prepare()
                 self.assertEqual(1, len(builds))
                 self.assertEqual("", git("tag", "--list"))
+
+    def test_release_stage_timer_distinguishes_ran_reused_and_failed(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        ticks = iter([0.0, 1.0, 3.5, 3.5, 3.75, 4.0, 10.0, 10.0])
+        timer = script["StageTimer"](clock=lambda: next(ticks))
+        with timer.stage("seam tests", "source checks"):
+            pass
+        with timer.stage("artifact build", "build") as entry:
+            timer.reuse(entry, "retained build record matches")
+        with self.assertRaises(ValueError), timer.stage("readiness", "package checks"):
+            raise ValueError("port closed")
+        record = timer.record()
+        self.assertEqual(1, record["schema"])
+        self.assertEqual("warm", record["path"])
+        self.assertEqual(10.0, record["total_seconds"])
+        self.assertEqual(
+            [("seam tests", "passed", 2.5, None),
+             ("artifact build", "reused", 0.25, "retained build record matches"),
+             ("readiness", "failed", 6.0, "ValueError: port closed")],
+            [(stage["name"], stage["outcome"], stage["seconds"], stage.get("reason"))
+             for stage in record["stages"]])
+        cold = script["StageTimer"](clock=iter([0.0, 0.0, 1.0, 1.0, 1.0]).__next__)
+        with cold.stage("artifact build", "build"):
+            pass
+        self.assertEqual("cold", cold.record()["path"])
+        self.assertIn("cold path", cold.summary("Stages"))
+        self.assertEqual(("behavior tests", "source checks"), script["_gate_stage"](
+            ["uv", "run", "--with-editable", ".", "--script", "tests/test_behaviors.py"]))
+        self.assertEqual(("packaged dashboard readiness", "package checks"), script["_gate_stage"](
+            ["uv", "run", "--script", "C:\\evidence\\validators\\abc\\dashboard-readiness.py"]))
 
     def test_final_attempt_requires_rc_approval_before_tag(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -8043,7 +8087,15 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 prepare()
                 self.assertEqual([audit, build], commands)
                 preserved.assert_called_once()
-                sealed.assert_called_once_with("1.2.3", wheel, readiness_recovery=None)
+                self.assertEqual(("1.2.3", wheel), sealed.call_args.args)
+                self.assertIsNone(sealed.call_args.kwargs["readiness_recovery"])
+                timings = sealed.call_args.kwargs["stage_timings"]
+                self.assertEqual("cold", timings["path"])
+                self.assertEqual(
+                    [("export audit", "source checks", "passed"),
+                     ("artifact build", "build", "passed")],
+                    [(stage["name"], stage["category"], stage["outcome"])
+                     for stage in timings["stages"]])
                 sealed.reset_mock()
                 commands.clear()
                 prepare()
@@ -8051,6 +8103,10 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 self.assertEqual(b"retained stable bytes", wheel.read_bytes())
                 preserved.assert_called_once()
                 sealed.assert_called_once()
+                timings = sealed.call_args.kwargs["stage_timings"]
+                self.assertEqual("warm", timings["path"])
+                self.assertEqual("reused", timings["stages"][1]["outcome"])
+                self.assertIn("retained build record", timings["stages"][1]["reason"])
 
     def test_final_source_allows_reviewed_local_deploy_tooling_only(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -10156,7 +10212,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     "local-deploy.py", "--repo", str(root), "--rc", "6.9.2rc2",
                 ]), self.assertRaisesRegex(script["LocalDeployError"], "reached preparation"):
                     script["main"]()
-                prepare.assert_called_once_with("commit", "6.9.2rc2")
+                prepare.assert_called_once()
+                self.assertEqual(("commit", "6.9.2rc2"), prepare.call_args.args[:2])
 
     def test_release_report_keeps_all_work_and_publication_evidence_separate(self) -> None:
         script = runpy.run_path(str(REPOSITORY / "tools" / "release-report.py"))
@@ -10700,7 +10757,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
     def test_local_deploy_accepts_instruction_only_drift_with_candidate_provenance(self) -> None:
         with self._retained_local_deployment(".agents/testing.md") as fixture:
             root, script, source, tool, prepare, preparation, upgrade, unchanged = fixture
-            receipt = script["deploy"](root, rc="1.2.3rc1")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                receipt = script["deploy"](root, rc="1.2.3rc1")
             payload = json.loads(receipt.read_text(encoding="utf-8"))
             self.assertEqual(source, payload["commit"])
             self.assertEqual(tool, payload["tool_commit"])
@@ -10710,6 +10768,36 @@ class TestCrossModuleAgreements(unittest.TestCase):
             preparation.assert_called_once_with({"source_commit": source})
             upgrade.assert_called_once()
             unchanged.assert_called_once_with(tool)
+            timings = payload["stage_timings"]
+            self.assertEqual("warm", timings["path"])
+            self.assertEqual(
+                ["source synchronization", "candidate artifact",
+                 "baseline status and doctor", "dashboard stop", "runtime upgrade",
+                 "dashboard restoration", "post-activation verification"],
+                [stage["name"] for stage in timings["stages"]])
+            candidate = timings["stages"][1]
+            self.assertEqual("reused", candidate["outcome"])
+            self.assertIn("package inputs unchanged", candidate["reason"])
+            self.assertNotIn("preparation", candidate)
+            self.assertTrue(all(stage["outcome"] == "passed"
+                                for stage in timings["stages"] if stage is not candidate))
+            self.assertIn("Local deployment stages (warm path", output.getvalue())
+            self.assertIn("reused", output.getvalue())
+
+    def test_local_deploy_timing_reports_failed_stage_and_rollback(self) -> None:
+        with self._retained_local_deployment(".agents/testing.md") as fixture:
+            root, script, _source, _tool, _prepare, _preparation, upgrade, _unchanged = fixture
+            upgrade.side_effect = script["LocalDeployError"]("upgrade refused")
+            with contextlib.redirect_stdout(io.StringIO()) as output, \
+                    self.assertRaisesRegex(script["LocalDeployError"], "upgrade refused"):
+                script["deploy"](root, rc="1.2.3rc1")
+            self.assertFalse((root / "deployment" / "receipt.json").exists())
+            summary = output.getvalue()
+            self.assertRegex(
+                summary, r"failed .*installation: runtime upgrade \(LocalDeployError: upgrade refused\)")
+            self.assertRegex(
+                summary, r"passed .*service restoration: rollback and dashboard restoration")
+            self.assertNotIn("post-activation verification", summary)
 
     def test_local_deploy_refuses_package_input_drift_without_activation(self) -> None:
         for path in (
@@ -10741,14 +10829,22 @@ class TestCrossModuleAgreements(unittest.TestCase):
 
     def test_local_deploy_prepares_missing_attempt_from_head(self) -> None:
         with self._retained_local_deployment(existing_attempt=False) as fixture:
-            root, script, source, tool, prepare, _preparation, upgrade, unchanged = fixture
-            receipt = script["deploy"](root, rc="1.2.3rc1")
+            root, script, source, tool, prepare, preparation, upgrade, unchanged = fixture
+            prepared = {"schema": 1, "path": "cold", "total_seconds": 1.0, "stages": []}
+            preparation.return_value["stage_timings"] = prepared
+            with contextlib.redirect_stdout(io.StringIO()):
+                receipt = script["deploy"](root, rc="1.2.3rc1")
             payload = json.loads(receipt.read_text(encoding="utf-8"))
             self.assertEqual(source, payload["commit"])
             self.assertEqual(tool, payload["tool_commit"])
             prepare.assert_called_once_with(rc="1.2.3rc1")
             upgrade.assert_called_once()
             unchanged.assert_called_once_with(tool)
+            self.assertEqual("cold", payload["stage_timings"]["path"])
+            candidate = payload["stage_timings"]["stages"][1]
+            self.assertEqual(("candidate artifact", "passed"),
+                             (candidate["name"], candidate["outcome"]))
+            self.assertEqual(prepared, candidate["preparation"])
 
     def test_requalified_deploy_rejects_runtime_drift_before_activation(self) -> None:
         script = runpy.run_path(str(REPOSITORY / "tools" / "local-deploy.py"))
