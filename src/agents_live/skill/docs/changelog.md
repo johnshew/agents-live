@@ -13,6 +13,12 @@ history is retained in the source repository.
 
 ### 6.9.5 (Unreleased)
 
+- feat: record agent start and stop as administrative events. ([#591](https://github.com/johnshew/agents-live/issues/591))
+  `start`, `start --all` and `stop` write one `agent-start` or `agent-stop`
+  event per affected agent with its name, identifier, repository, previous and
+  new started state, outcome and redacted command. Refusals and failed
+  convergence carry an error category. `logs --agent` and `logs timeline`
+  surface these events for the named agent. Dry runs record nothing.
 - fix: reuse prepared candidates after later instruction-only source advances. (#578)
   Deployment accepts an ancestor candidate when package inputs are unchanged,
   retaining its exact bytes and recording the newer tooling identity separately.

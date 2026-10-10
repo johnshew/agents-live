@@ -267,7 +267,8 @@ def main() -> int:
     for ev in all_entries:
         phase = ev.get("phase", "")
         status = ev.get("status", "")
-        key = (ev.get("ts", ""), ev.get("agent_name", ""), phase, status)
+        key = (ev.get("ts", ""), ev.get("agent_name", ""), phase, status,
+               ev.get("target_agent", ""))
         if key in seen:
             continue
         seen.add(key)

@@ -6,7 +6,7 @@ import sys
 
 from ... import agent, paths, state
 from ...state import ownership, registry as repos
-from .. import lifecycle, resolve
+from .. import intent_events, lifecycle, resolve
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
         print("--transfer-here and --transfer-to act on one agent; use --name",
               file=sys.stderr)
         return 2
+    correlation_id = intent_events.correlation()
+    specs: tuple = ()
+    previous: frozenset[str] | None = None
+    converging = False
     try:
         if args.all:
             if args.dry_run:
@@ -61,13 +65,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.transfer_here or args.transfer_to:
             return _transfer(root, specs[0], args)
         identifiers = [spec.identifier for spec in specs]
+        previous = intent_events.started(root)
+        converging = True
         result = lifecycle.converge(
             additions={root: set(identifiers)}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,
             ownership.OwnershipUnavailableError,
             state.StartedStateUnavailable, ValueError) as exc:
         print(str(exc), file=sys.stderr)
+        if not args.dry_run:
+            _record_error(root, args, specs, previous, exc,
+                          converging=converging, correlation_id=correlation_id)
         return 1
+    if not args.dry_run:
+        intent_events.record_converged(
+            "start", root=root,
+            agents=[(spec.name, spec.identifier) for spec in specs],
+            previous=previous,
+            failures=(f"{operation.key}: {message}"
+                      for operation, message in result.failed),
+            correlation_id=correlation_id)
+        for item in unloadable:
+            intent_events.record(
+                "start", root=root, name=item.name, identifier=None,
+                previous=intent_events.UNKNOWN, outcome="refused",
+                category="unloadable", detail=item.message,
+                correlation_id=correlation_id)
     verb = "Would start" if args.dry_run else "Started"
     for spec in specs:
         print(f"{verb} '{spec.name}' ({spec.identifier}).")
@@ -82,6 +105,21 @@ def main(argv: list[str] | None = None) -> int:
     for operation, message in result.failed:
         print(f"{operation.key}: {message}", file=sys.stderr)
     return 1 if result.failed or unloadable else 0
+
+
+def _record_error(root, args, specs, previous, exc, *, converging: bool,
+                  correlation_id: str) -> None:
+    """One admin event per agent the refused or failed start named."""
+    outcome = "failed" if converging else "refused"
+    targets = [(spec.name, spec.identifier) for spec in specs] or [
+        (args.name or "--all", None)]
+    for name, identifier in targets:
+        intent_events.record(
+            "start", root=root, name=name, identifier=identifier,
+            previous=intent_events.label(previous, identifier),
+            outcome=outcome, category=type(exc).__name__, detail=str(exc),
+            correlation_id=correlation_id)
+
 
 def _transfer(root, spec, args) -> int:
     """Move one agent's ownership, then converge what that implies."""

@@ -6,7 +6,7 @@ import sys
 
 from ... import agent, paths, state
 from ...state import registry as repos
-from .. import lifecycle, resolve
+from .. import intent_events, lifecycle, resolve
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,6 +15,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", "-n", action="store_true")
     args = parser.parse_args(argv)
     root = paths.resolve_root()
+    correlation_id = intent_events.correlation()
+    identifier = None
+    previous: frozenset[str] | None = None
+    converging = False
     try:
         root, identifier = _select(args.name, root)
         if args.dry_run:
@@ -23,12 +27,28 @@ def main(argv: list[str] | None = None) -> int:
             warning = resolve.collision_warning(args.name, root=root)
             if warning:
                 print(warning, file=sys.stderr)
+        previous = intent_events.started(root)
+        converging = True
         result = lifecycle.converge(
             removals={root: {identifier}}, dry_run=args.dry_run)
     except (agent.DefinitionError, lifecycle.CollectionUnavailable,
             state.StartedStateUnavailable, ValueError) as exc:
         print(str(exc), file=sys.stderr)
+        if not args.dry_run:
+            intent_events.record(
+                "stop", root=root, name=args.name, identifier=identifier,
+                previous=intent_events.label(previous, identifier),
+                outcome="failed" if converging else "refused",
+                category=type(exc).__name__, detail=str(exc),
+                correlation_id=correlation_id)
         return 1
+    if not args.dry_run:
+        intent_events.record_converged(
+            "stop", root=root, agents=[(args.name, identifier)],
+            previous=previous,
+            failures=(f"{operation.key}: {message}"
+                      for operation, message in result.failed),
+            correlation_id=correlation_id)
     verb = "Would stop" if args.dry_run else "Stopped"
     print(f"{verb} '{args.name}' ({identifier}).")
     for operation, message in result.failed:
