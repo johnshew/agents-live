@@ -30,13 +30,15 @@ from agents_live.runtime import (
 from agents_live.runtime.hosts.memory import MemoryHost
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tests.host_safety import allow_native_runtime, isolated_host, native_guard
+from tests.host_safety import (
+    allow_native_runtime, assert_real_host_state_untouched, isolated_host, native_guard)
 
 
 def setUpModule() -> None:
     guard = native_guard()
     guard.__enter__()
     unittest.addModuleCleanup(guard.__exit__, None, None, None)
+    unittest.addModuleCleanup(assert_real_host_state_untouched)
 
 
 class RecordingRunner:

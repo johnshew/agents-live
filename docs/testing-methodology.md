@@ -199,7 +199,12 @@ roots, and restores the adapter and environment even after an exception. All
 portable suites enable `native_guard()`: an audit hook rejects native scheduler
 writes and watcher launches before subprocess execution. The hook protects the
 test interpreter, not arbitrary child interpreters; subprocess fixtures must
-also import and enable it or isolate their OS effects explicitly. A negative probe must remain harmless even if its guard fails:
+also import and enable it or isolate their OS effects explicitly. Importing
+`tests.host_safety` also points `XDG_STATE_HOME` at a session temporary
+directory for the test process and its children, so host logs such as the admin
+log never resolve to the developer's real state home. Module cleanup
+`assert_real_host_state_untouched()` fails the suite if any test still opened
+a file for writing under the real state home; the write itself is blocked. A negative probe must remain harmless even if its guard fails:
 target a disposable resource, cover every constructor, alias and child-process
 path, pin storage and configuration defaults before imports, and assert an
 observable no-write postcondition.

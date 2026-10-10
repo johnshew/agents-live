@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-09
+ms.date: 2026-10-10
 ms.topic: reference
 ---
 
@@ -19,6 +19,12 @@ history is retained in the source repository.
   new started state, outcome and redacted command. Refusals and failed
   convergence carry an error category. `logs --agent` and `logs timeline`
   surface these events for the named agent. Dry runs record nothing.
+- fix: keep source test runs out of the real host state directory. ([#590](https://github.com/johnshew/agents-live/issues/590))
+  The test harness redirects the host state home to a session temporary
+  directory for every test process and its children, so uninstall, ownership,
+  doctor and maintenance tests no longer append admin events, lock records or
+  run locks to live operational history. A guard blocks and reports any test
+  write under the real host state home.
 - fix: reuse prepared candidates after later instruction-only source advances. (#578)
   Deployment accepts an ancestor candidate when package inputs are unchanged,
   retaining its exact bytes and recording the newer tooling identity separately.
