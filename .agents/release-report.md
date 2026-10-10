@@ -137,6 +137,11 @@ deferred until the next package change. Retain the merged #556, #538, #560 and
 #566, #567 and #582 remain deferred. RC5 is not publication-approved.
 The additive #540 and #542 controls merit a semantic-version review without
 automatically changing the requested 6.9.4 target.
+The 6.9.5 cycle is the default development cycle on `main`. Its planned scope is
+#582 lock, timing, runtime-identity and watcher-exit evidence, #591 named agent
+start/stop admin events and the #590 test isolation fix, all merged to main
+before RC1. #588 is on hold until evidence shows it is needed; #566 and #567
+remain deferred. The next numbered RC is `6.9.5rc1`.
 
 Use the primary checkout only when clean and already on the intended branch;
 otherwise use an isolated worktree. Verify ancestry before committing or pushing.

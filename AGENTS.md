@@ -272,6 +272,11 @@ deferred to the next package change. Do not reuse consumed RC1 through RC6. Reta
 merged #556, #538, #560 and #561 work and the dashboard responsiveness
 follow-up. Issues #565, #572, #574 and #578 are delivered; #566, #567 and #582
 remain deferred. RC5 is not publication-approved.
+The 6.9.5 cycle is the default development cycle on `main`. Its planned scope is
+#582 lock, timing, runtime-identity and watcher-exit evidence, #591 named agent
+start/stop admin events and the #590 test isolation fix, all merged to main
+before RC1. #588 is on hold until evidence shows it is needed; #566 and #567
+remain deferred. The next numbered RC is `6.9.5rc1`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
