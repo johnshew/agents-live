@@ -12844,5 +12844,83 @@ class TestCrossRepositoryResolution(TempRepository):
         self.assertEqual(messages[0], messages[1])
 
 
+class TestSteeringHook(unittest.TestCase):
+    """The repository hooks that keep the CDL steering line from being skipped."""
+
+    def setUp(self) -> None:
+        self.hook = runpy.run_path(str(REPOSITORY / "tools" / "steering-hook.py"))
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def transcript(self, *events: dict) -> str:
+        path = Path(self.directory.name) / "events.jsonl"
+        path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events) + "not json\n",
+            encoding="utf-8")
+        return str(path)
+
+    @staticmethod
+    def user(content: str) -> dict:
+        return {"type": "user.message", "data": {"content": content}}
+
+    @staticmethod
+    def reply(content: str) -> dict:
+        return {"type": "assistant.message", "data": {"content": content}}
+
+    def test_transform_appends_reminder_once(self) -> None:
+        transform = self.hook["transform"]
+        output = transform({"transformedPrompt": "do the thing"})
+        modified = output["modifiedTransformedPrompt"]
+        self.assertTrue(modified.startswith("do the thing\n\n"))
+        self.assertIn(self.hook["REMINDER"], modified)
+        self.assertEqual(transform({"transformedPrompt": modified}), {})
+        self.assertEqual(transform({"transformedPrompt": "  "}), {})
+
+    def test_stop_blocks_first_reply_without_steering_line(self) -> None:
+        path = self.transcript(
+            self.user("earlier"), self.reply("Steering: earlier; done."),
+            self.user("file two issues"), self.reply(""),
+            self.reply("I'll file both issues first."),
+            self.reply("Steering: late line does not count."))
+        output = self.hook["stop"]({"transcriptPath": path})
+        self.assertEqual(output["decision"], "block")
+        self.assertIn("Steering:", output["reason"])
+
+    def test_stop_allows_reply_that_begins_with_steering_line(self) -> None:
+        path = self.transcript(
+            self.user("status"), self.reply(""),
+            self.reply("\n**Steering:** question; new goals: none; still open: "
+                       "none; continue until: answered.\n\nAll green."))
+        self.assertEqual(self.hook["stop"]({"transcriptPath": path}), {})
+
+    def test_stop_fails_open_and_allows_one_correction(self) -> None:
+        stop = self.hook["stop"]
+        missing = self.transcript(self.user("go"), self.reply("No line."))
+        self.assertEqual(stop({"transcriptPath": missing,
+                               "stop_hook_active": True}), {})
+        self.assertEqual(stop({"transcriptPath": str(
+            Path(self.directory.name) / "absent.jsonl")}), {})
+        self.assertEqual(stop({}), {})
+        no_reply = self.transcript(self.user("go"))
+        self.assertEqual(stop({"transcriptPath": no_reply}), {})
+
+    def test_hook_configs_invoke_existing_modes(self) -> None:
+        copilot = json.loads(
+            (REPOSITORY / ".github" / "hooks" / "steering.json").read_text(
+                encoding="utf-8"))
+        claude = json.loads(
+            (REPOSITORY / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        commands = [entry["command"] for entries in copilot["hooks"].values()
+                    for entry in entries]
+        commands += [hook["command"]
+                     for group in claude["hooks"]["UserPromptSubmit"]
+                     for hook in group["hooks"]]
+        self.assertEqual(set(copilot["hooks"]), {"userPromptTransformed", "agentStop"})
+        for command in commands:
+            mode = command.split()[-1]
+            self.assertIn("tools/steering-hook.py", command)
+            self.assertIn(mode, self.hook["MODES"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "userPromptTransformed": [
+      {
+        "type": "command",
+        "command": "uv run --quiet --script tools/steering-hook.py transform",
+        "cwd": ".",
+        "timeoutSec": 15
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "uv run --quiet --script tools/steering-hook.py stop",
+        "cwd": ".",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}
