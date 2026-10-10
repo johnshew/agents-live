@@ -1470,6 +1470,130 @@ def prepare_cycle(*, rc: str | None = None, from_rc: str | None = None) -> None:
     print(f"Reserved {identifier}; retained worktree: {checkout}", flush=True)
     _run(["uv", "run", "--directory", str(checkout), "--script",
           str(checkout / "tools" / "release.py"), "--prepare-attempt", identifier, "--yes"])
+    if rc:
+        for retired in _retire_candidate_branches(identifier):
+            print(f"Replaced {retired} with its rc tag; its retained worktree is detached", flush=True)
+
+
+def _rc_tag(identifier: str) -> str:
+    return f"rc/{identifier}"
+
+
+def _annotated_tag(tag: str) -> tuple[str, str]:
+    """Return the annotated tag object and peeled commit, or empty strings."""
+    line = _git("for-each-ref", "--format=%(objecttype) %(objectname) %(*objectname)",
+                f"refs/tags/{tag}")
+    fields = line.split()
+    if len(fields) == 3 and fields[0] == "tag":
+        return fields[1], fields[2]
+    if fields:
+        raise ReleaseError(f"{tag} must be an annotated tag")
+    return "", ""
+
+
+def _retain_rc_tag(record: dict, commit: str) -> None:
+    """Keep an RC attempt reachable from origin without its candidate branch."""
+    tag = _rc_tag(record["id"])
+    tag_object, tagged = _annotated_tag(tag)
+    if not tag_object:
+        _run(["git", "tag", "-a", tag, commit, "-m", f"agents-live {record['id']} attempt"])
+        tag_object, tagged = _annotated_tag(tag)
+    if tagged != commit:
+        raise ReleaseError(f"{tag} conflicts with the retained attempt commit")
+    remote = _git("ls-remote", "--tags", "origin", f"refs/tags/{tag}").split()
+    if not remote:
+        _run(["git", "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}"])
+    elif remote[0] != tag_object:
+        raise ReleaseError(f"origin {tag} conflicts with the retained attempt tag")
+
+
+def _git_common_dir() -> Path:
+    common = Path(_git("rev-parse", "--git-common-dir"))
+    return (common if common.is_absolute() else ROOT / common).resolve()
+
+
+def _retire_candidate_branches(current: str) -> list[str]:
+    """Replace superseded RC candidate branches with their rc/<attempt> tags.
+
+    Only a clean retained worktree whose branch and tag both point at the
+    recorded attempt commit is detached; anything else is kept and reported.
+    """
+    retired = []
+    for path in sorted((_git_common_dir() / "agents-live-release").glob("cycle-*/*/attempt.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            identifier = record["id"]
+            branch = record["branch"]
+            if record["kind"] != "rc" or identifier == current or path.parent.name != identifier \
+                    or not _git("for-each-ref", "--format=%(objectname)", f"refs/heads/{branch}"):
+                continue
+            commit = json.loads((path.parent / "commit.json").read_text(encoding="utf-8"))["commit"]
+            checkout = path.parent.parent / "worktrees" / identifier
+            if _annotated_tag(_rc_tag(identifier))[1] != commit \
+                    or _git("rev-parse", f"refs/heads/{branch}") != commit:
+                raise ReleaseError("its rc tag or branch does not match the attempt commit")
+            if checkout.is_dir():
+                if _git("-C", str(checkout), "status", "--porcelain"):
+                    raise ReleaseError("its retained worktree is not clean")
+                _run(["git", "-C", str(checkout), "switch", "--quiet", "--detach",
+                      f"refs/tags/{_rc_tag(identifier)}"])
+            _run(["git", "branch", "-D", branch])
+            retired.append(branch)
+        except (OSError, ValueError, KeyError, TypeError, ReleaseError,
+                subprocess.CalledProcessError) as exc:
+            print(f"Kept candidate branch for {path.parent.name}: {exc}", flush=True)
+    return retired
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def retention_plan() -> dict:
+    """Report release refs outside the retention policy without changing them."""
+    configuration = _cycle_configuration()
+    with (ROOT / ".github" / "release-cycles.toml").open("rb") as stream:
+        cycles = tomllib.load(stream)["cycles"]
+    stable = sorted((tag.removeprefix("v") for tag in _git(
+        "for-each-ref", "--format=%(refname:short)", "refs/tags/v*").splitlines()
+        if re.fullmatch(r"v\d+\.\d+\.\d+", tag)), key=_version_key)
+    released = set(stable)
+    active = {version for version in cycles if version not in released}
+    keep = {"main", configuration["branch"], *(cycles[version]["branch"] for version in active),
+            *(f"release/{version}" for version in stable[-2:])}
+    candidates = []
+    for ref in _git("for-each-ref", "--format=%(refname)", "refs/heads/release/",
+                    "refs/remotes/origin/release/").splitlines():
+        branch = ref.split("/", 3 if ref.startswith("refs/remotes/") else 2)[-1]
+        match = re.fullmatch(r"release/v((\d+\.\d+\.\d+)rc([1-9]\d*))-candidate", branch)
+        if match and match.group(2) in active:
+            candidates.append((_version_key(match.group(2)), int(match.group(3)), match.group(1)))
+        final = re.fullmatch(r"release/v(\d+\.\d+\.\d+)-final-[1-9]\d*-candidate", branch)
+        if final and (final.group(1) in active or final.group(1) in stable[-1:]):
+            keep.add(branch)
+    if candidates:
+        keep.add(f"release/v{max(candidates)[2]}-candidate")
+    plan = {"keep": sorted(keep), "prune": [], "blocked": []}
+    for ref in _git("for-each-ref", "--format=%(refname) %(objectname)",
+                    "refs/heads/release/", "refs/remotes/origin/release/").splitlines():
+        name, tip = ref.split()
+        remote = name.startswith("refs/remotes/origin/")
+        branch = name.removeprefix("refs/remotes/origin/" if remote else "refs/heads/")
+        if branch in keep:
+            continue
+        retained_by = _git("tag", "--contains", tip, "--list", "v*", "rc/*", "archive/*").split()
+        if not retained_by and subprocess.run(
+                ["git", "merge-base", "--is-ancestor", tip, "refs/remotes/origin/main"],
+                cwd=ROOT, capture_output=True).returncode == 0:
+            retained_by = ["origin/main"]
+        item = {"branch": branch, "location": "origin" if remote else "local", "commit": tip}
+        if retained_by:
+            item.update(retained_by=retained_by[0], command=(
+                f"git push origin --delete {branch}" if remote else f"git branch -D {branch}"))
+            plan["prune"].append(item)
+        else:
+            plan["blocked"].append({**item, "reason": "no tag or origin/main retains this commit"})
+    return plan
 
 
 def _check_attempt_checkout() -> None:
@@ -1478,8 +1602,11 @@ def _check_attempt_checkout() -> None:
     record = ACTIVE_ATTEMPT
     _check_accepted_rc(record)
     commit = json.loads((_attempt_path() / "commit.json").read_text(encoding="utf-8"))["commit"]
+    branch = _git("branch", "--show-current")
+    retired = not branch and record["kind"] == "rc" \
+        and _annotated_tag(_rc_tag(record["id"]))[1] == commit
     if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != commit \
-            or _git("branch", "--show-current") != record["branch"]:
+            or (branch != record["branch"] and not retired):
         raise ReleaseError("attempt requires its clean, exact retained checkout")
     if _git("rev-parse", "HEAD^") != record["source_commit"]:
         raise ReleaseError("attempt source ancestry changed")
@@ -1509,6 +1636,8 @@ def _prepare_attempt(timer: StageTimer, *, readiness_recovery: dict | None = Non
         with timer.stage("release metadata commit", "build"):
             _commit_attempt_metadata(record, commit_path)
     _check_attempt_checkout()
+    if record["kind"] == "rc":
+        _retain_rc_tag(record, json.loads(commit_path.read_text(encoding="utf-8"))["commit"])
     if _preparation_path(version).exists():
         with timer.stage("preparation", "evidence") as entry:
             _check_preparation(version)
@@ -2636,6 +2765,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--migrate-legacy-tag", metavar="TAG")
     parser.add_argument("--verify-publication-assets", metavar="TAG")
     parser.add_argument("--cycle-status", action="store_true")
+    parser.add_argument("--retention-plan", action="store_true",
+                        help="Report release branches outside the retention policy; changes nothing")
     parser.add_argument("--verify-publication", metavar="TAG",
                         help="Verify stable-only workflow publication prerequisites")
     parser.add_argument(
@@ -2716,7 +2847,8 @@ def main(argv: list[str] | None = None) -> int:
                     args.requalify_attempt is not None,
                     args.finalize, args.reject_attempt is not None,
                     args.migrate_legacy_tag is not None,
-                    args.verify_publication_assets is not None, args.cycle_status))
+                    args.verify_publication_assets is not None, args.cycle_status,
+                    args.retention_plan))
     if selected != 1:
         parser.error("choose exactly one release operation; see --help")
     cycle_write = (args.prepare_rc or args.prepare_final or args.prepare_attempt or args.requalify_attempt
@@ -2772,6 +2904,11 @@ def main(argv: list[str] | None = None) -> int:
             with contextlib.redirect_stdout(sys.stderr):
                 status = cycle_status()
             print(json.dumps(status, indent=2))
+            return 0
+        if args.retention_plan:
+            with contextlib.redirect_stdout(sys.stderr):
+                plan = retention_plan()
+            print(json.dumps(plan, indent=2))
             return 0
         if args.verify_publication:
             verify_publication(args.verify_publication)

@@ -197,6 +197,11 @@ There is no bake branch, bake worktree, or bake-to-main promotion stage.
 Short-lived development worktrees are cleaned up after integration. Retained
 numbered-attempt worktrees under the common Git directory are immutable release
 evidence, not development or bake worktrees; preserve them with their receipts.
+Release refs are retained as tags: `rc/<attempt>` for each prepared RC,
+`v<version>` for stable finals and `archive/...` for retired legacy attempts.
+Branches kept are `main`, release branches for the last two official releases,
+the active cycle's branch and only the current RC's candidate branch; see
+`.agents/release.md` for the retention plan.
 The report must show all active cycles, open work, retained candidate attempts,
 the selected local runtime, and independent publication evidence.
 
@@ -281,7 +286,7 @@ locally activated on 2026-10-10; it is not publication-approved. Do not reuse
 consumed RC1. The next numbered RC is `6.9.5rc2`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
-receipts and refs, including the rejected unpublished stable-tag conflict.
+receipts and tags, including the rejected unpublished stable-tag conflict.
 
 Record explicit publication approval in `[cycles."<target>".approval]`, binding
 `decision = "approved"`, the RC `attempt`, full source `commit`, `wheel_sha256`,

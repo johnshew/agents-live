@@ -111,14 +111,43 @@ and origin refs. It creates a dedicated `release/v<attempt>-candidate` worktree
 and retains evidence under the common Git directory's
 `agents-live-release/cycle-<target>/<attempt>/`. Preparation commits release
 metadata, preserves `Unreleased` for RCs, builds once, and runs the source and
-packaged gates. No tag is created. Run subsequent commands from the printed
-retained worktree, using its script, not a different checkout's version.
+packaged gates. Once the attempt commit is recorded, an RC preparation creates
+the annotated `rc/<attempt>` tag at it and pushes only that tag to origin, so
+the attempt stays reachable and consumed without a branch; a conflicting local
+or remote tag stops preparation. Stable finals keep `v<version>` from
+finalization. Run subsequent commands from the printed retained worktree,
+using its script, not a different checkout's version.
 
 These are immutable numbered-attempt snapshots, not bake worktrees. Develop
 on `main` through short-lived reviewed changes; do not create a bake branch or
 an additional promotion stage. Clean up merged development worktrees after
 preserving useful changes. Keep numbered-attempt worktrees, artifacts and
 receipts because supported retry and recovery commands still use them.
+
+#### Ref retention
+
+After a new RC prepares successfully, `--prepare-rc` replaces each earlier RC's
+local candidate branch with its tag: the clean retained worktree is detached at
+`rc/<attempt>` and the branch is deleted. An attempt is skipped and reported
+when its tag is missing, lightweight or at a different commit, its branch moved,
+or its worktree is dirty. Retry, acceptance, requalification and finalization
+accept either the attempt's candidate branch or, for an RC, a detached
+retained worktree at its `rc/<attempt>` tag. Consumed-identity detection still
+counts local and origin `rc/*` tags.
+
+Keep `main`, release branches for the last two official releases, the active
+cycle's branch and only the current RC's candidate branch. Pruning other release
+branches, and any remote branch deletion, stays manual. After
+`git fetch origin --prune`, review the read-only plan:
+
+```bash
+uv run --script tools/release.py --retention-plan
+```
+
+It lists kept branches, prunable local and origin `release/*` branches with the
+tag (or `origin/main`) that retains each tip and the command to remove it, and
+blocked branches whose tip nothing else retains. Tag a blocked attempt before
+removing its branch, and review each prunable entry before running its command.
 
 ```bash
 uv run --script tools/release.py --accept-candidate --attempt <rc> --yes

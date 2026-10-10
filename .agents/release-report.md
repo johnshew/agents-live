@@ -148,7 +148,11 @@ consumed RC1. The next numbered RC is `6.9.5rc2`.
 Use the primary checkout only when clean and already on the intended branch;
 otherwise use an isolated worktree. Verify ancestry before committing or pushing.
 Remove task worktrees after delivery, preserving retained attempt worktrees and
-their immutable receipts. Never discard another writer's changes.
+their immutable receipts. Preserved refs are tags (`rc/<attempt>`, `v<version>`,
+`archive/...`); keep only `main`, the last two official release branches, the
+active cycle branch and the current RC candidate branch, reviewing
+`tools/release.py --retention-plan` before any manual pruning. Never discard
+another writer's changes.
 
 ## Evidence and report contents
 

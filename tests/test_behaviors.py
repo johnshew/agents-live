@@ -7279,6 +7279,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             git("add", ".")
             git("commit", "-m", "fixture")
             source = git("rev-parse", "HEAD")
+            origin = root / ".git" / "test-origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+            git("remote", "add", "origin", str(origin))
             record = {"id": "1.2.3rc1", "version": "1.2.3rc1", "target": "1.2.3",
                       "source_commit": source, "kind": "rc",
                       "branch": "release/v1.2.3rc1-candidate"}
@@ -7317,7 +7320,8 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     failed_output.getvalue(),
                     r"failed .*other: ready \(ReleaseError: readiness failed\)")
                 original = script["_candidate_wheel"](record["version"]).read_bytes()
-                self.assertEqual("", git("tag", "--list"))
+                self.assertEqual("rc/1.2.3rc1", git("tag", "--list"))
+                self.assertIn("refs/tags/rc/1.2.3rc1", git("ls-remote", "--tags", "origin"))
                 self.assertIn("## Unreleased\n\n- fix:", changelog.read_text())
                 ready = True
                 prepare()
@@ -7338,7 +7342,7 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 with self.assertRaises(script["ReleaseError"]):
                     prepare()
                 self.assertEqual(1, len(builds))
-                self.assertEqual("", git("tag", "--list"))
+                self.assertEqual("rc/1.2.3rc1", git("tag", "--list"))
 
     def test_release_stage_timer_distinguishes_ran_reused_and_failed(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
@@ -7524,8 +7528,6 @@ class TestCrossModuleAgreements(unittest.TestCase):
                 shutil.copy2(REPOSITORY / "tools" / name, root / "tools" / name)
 
             def git(*arguments):
-                if arguments[0] == "ls-remote":
-                    return ""
                 return subprocess.run(["git", *arguments], cwd=root, check=True,
                                       capture_output=True, text=True).stdout.strip()
 
@@ -7536,6 +7538,9 @@ class TestCrossModuleAgreements(unittest.TestCase):
             git("commit", "-m", "fixture")
             source = git("rev-parse", "HEAD")
             (root / ".git" / "info" / "exclude").write_text("dist/\n")
+            origin = root / ".git" / "test-origin.git"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+            git("remote", "add", "origin", str(origin))
 
             def run(command, **_kwargs):
                 if command in script["_gate_commands"]() and "--build-artifacts" not in command:
@@ -7589,7 +7594,11 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     script["_write_once"](script["_attempt_path"]() / "attempt.json", record)
                     git("switch", "-c", record["branch"])
                     script["prepare_attempt"]()
-                    self.assertEqual("", git("tag", "--list"))
+                    self.assertEqual("", git("tag", "--list", "v*"))
+                    if kind == "rc":
+                        self.assertIn(f"rc/{identifier}", git("tag", "--list").splitlines())
+                        self.assertIn(f"refs/tags/rc/{identifier}",
+                                      git("ls-remote", "--tags", "origin"))
                     if identifier in ("1.2.3rc1", "1.2.3-final-1"):
                         if kind == "final":
                             final_paths.append(script["_candidate_wheel"]("1.2.3"))
@@ -7869,6 +7878,130 @@ class TestCrossModuleAgreements(unittest.TestCase):
                     with self.assertRaises(script["ReleaseError"]):
                         prepare(rc="1.2.3rc2")
                     self.assertFalse(any(command[:2] == ["git", "worktree"] for command in commands))
+
+    def test_rc_tags_retain_attempts_and_replace_superseded_candidate_branches(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        scope = script["_retain_rc_tag"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            origin = base / "origin.git"
+            root = base / "checkout"
+            subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True,
+                           capture_output=True)
+            root.mkdir()
+
+            def git(*arguments, cwd=root):
+                return subprocess.run(["git", *arguments], cwd=cwd, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / ".github").mkdir()
+            (root / ".github" / "release-cycles.toml").write_text(
+                'schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "main"\n')
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            git("remote", "add", "origin", str(origin))
+            git("push", "-q", "-u", "origin", "main")
+            cycle = root / ".git" / "agents-live-release" / "cycle-1.2.3"
+            records = {}
+            for identifier in ("1.2.3rc1", "1.2.3rc2", "1.2.3rc3"):
+                record = {"schema": 1, "id": identifier, "target": "1.2.3", "kind": "rc",
+                          "version": identifier, "branch": f"release/v{identifier}-candidate",
+                          "source_commit": git("rev-parse", "HEAD")}
+                checkout = cycle / "worktrees" / identifier
+                git("worktree", "add", "-q", "-b", record["branch"], str(checkout), "main")
+                git("commit", "-q", "--allow-empty", "-m", f"prepare {identifier}", cwd=checkout)
+                (cycle / identifier).mkdir(parents=True)
+                (cycle / identifier / "attempt.json").write_text(json.dumps(record))
+                (cycle / identifier / "commit.json").write_text(json.dumps(
+                    {"commit": git("rev-parse", "HEAD", cwd=checkout)}))
+                records[identifier] = record
+            first = json.loads((cycle / "1.2.3rc1" / "commit.json").read_text())["commit"]
+            third = json.loads((cycle / "1.2.3rc3" / "commit.json").read_text())["commit"]
+            with mock.patch.dict(scope, {"ROOT": root, "ACTIVE_ATTEMPT": None}):
+                script["_retain_rc_tag"](records["1.2.3rc1"], first)
+                tag_object = git("rev-parse", "refs/tags/rc/1.2.3rc1")
+                script["_retain_rc_tag"](records["1.2.3rc1"], first)
+                self.assertEqual("tag", git("cat-file", "-t", tag_object))
+                self.assertEqual(first, git("rev-parse", "rc/1.2.3rc1^{commit}"))
+                self.assertIn(tag_object, git("ls-remote", "origin", "refs/tags/rc/1.2.3rc1"))
+                git("tag", "rc/1.2.3rc2", "main")
+                with self.assertRaisesRegex(script["ReleaseError"], "annotated"):
+                    script["_retain_rc_tag"](records["1.2.3rc2"], first)
+                script["_retain_rc_tag"](records["1.2.3rc3"], third)
+
+                retired = script["_retire_candidate_branches"]("1.2.3rc3")
+                self.assertEqual(["release/v1.2.3rc1-candidate"], retired)
+                self.assertEqual("", git("branch", "--list", "release/v1.2.3rc1-candidate"))
+                self.assertNotEqual("", git("branch", "--list", "release/v1.2.3rc2-candidate"))
+                self.assertNotEqual("", git("branch", "--list", "release/v1.2.3rc3-candidate"))
+                detached = cycle / "worktrees" / "1.2.3rc1"
+                self.assertEqual("", git("branch", "--show-current", cwd=detached))
+                self.assertEqual(first, git("rev-parse", "HEAD", cwd=detached))
+
+                with mock.patch.dict(scope, {
+                    "ROOT": detached, "ACTIVE_ATTEMPT": records["1.2.3rc1"],
+                    "_check_accepted_rc": lambda record: None,
+                    "_attempt_path": lambda: cycle / "1.2.3rc1",
+                    "_current_version": lambda: "1.2.3rc1",
+                    "RELEASE_FILES": (),
+                }):
+                    script["_check_attempt_checkout"]()
+                    scope["ACTIVE_ATTEMPT"] = {**records["1.2.3rc1"], "kind": "final"}
+                    with self.assertRaisesRegex(script["ReleaseError"], "exact retained checkout"):
+                        script["_check_attempt_checkout"]()
+
+    def test_retention_plan_keeps_recent_releases_and_never_prunes_unretained_commits(self):
+        script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
+        scope = script["retention_plan"].__globals__
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            origin = base / "origin.git"
+            root = base / "checkout"
+            subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True,
+                           capture_output=True)
+            root.mkdir()
+
+            def git(*arguments):
+                return subprocess.run(["git", *arguments], cwd=root, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / ".github").mkdir()
+            (root / ".github" / "release-cycles.toml").write_text(
+                'schema = 2\ndefault_cycle = "1.2.3"\n[cycles."1.2.3"]\nbranch = "release/1.2.3"\n')
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            for version in ("1.2.0", "1.2.1", "1.2.2"):
+                git("commit", "-q", "--allow-empty", "-m", version)
+                git("tag", "-a", f"v{version}", "-m", version)
+                git("branch", f"release/{version}")
+            git("branch", "release/1.2.3")
+            for number in (1, 2):
+                git("branch", f"release/v1.2.3rc{number}-candidate")
+            git("remote", "add", "origin", str(origin))
+            git("push", "-q", "origin", "main", "release/1.2.0")
+            git("fetch", "-q", "origin")
+            git("switch", "-q", "--orphan", "unretained")
+            git("commit", "-q", "--allow-empty", "-m", "unretained")
+            git("branch", "release/1.1.9")
+            git("switch", "-q", "main")
+            with mock.patch.dict(scope, {"ROOT": root, "ACTIVE_ATTEMPT": None}):
+                plan = script["retention_plan"]()
+            self.assertEqual(["main", "release/1.2.1", "release/1.2.2", "release/1.2.3",
+                              "release/v1.2.3rc2-candidate"], plan["keep"])
+            pruned = {(item["branch"], item["location"]): item for item in plan["prune"]}
+            self.assertEqual({("release/1.2.0", "local"), ("release/1.2.0", "origin"),
+                              ("release/v1.2.3rc1-candidate", "local")}, set(pruned))
+            self.assertEqual("v1.2.0", pruned[("release/1.2.0", "local")]["retained_by"])
+            self.assertEqual("git push origin --delete release/1.2.0",
+                             pruned[("release/1.2.0", "origin")]["command"])
+            self.assertEqual(["release/1.1.9"], [item["branch"] for item in plan["blocked"]])
+            self.assertEqual(7, len(git("branch", "--list", "release/*").splitlines()))
 
     def test_release_report_retained_final_is_approved(self):
         script = runpy.run_path(str(REPOSITORY / "tools" / "release.py"))
