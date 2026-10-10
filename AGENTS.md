@@ -22,6 +22,14 @@ not optional reference links or background automation.
 
 Assess every steering input before acting: acknowledge its classification, new
 goals (or none), current goals, continuation conditions and workstream states.
+Begin the first reply to every user message, in every harness, with one line:
+`Steering: <classification>; new goals: <list or none>; still open: <list or
+none>; continue until: <condition>.` Repository hooks enforce this:
+[.github/hooks/steering.json](.github/hooks/steering.json) appends a reminder
+to each prompt and forces one correction turn when the line is missing, and
+[.claude/settings.json](.claude/settings.json) adds the reminder for Claude
+Code. Both run [tools/steering-hook.py](tools/steering-hook.py) and load only in
+a trusted checkout.
 Preserve compatible unfinished goals and explicit sequencing dependencies. A
 question or status request does not pause work. Continue authorized, unblocked
 work until acceptance, an explicit pause/stop, or a genuine boundary prevents it.
@@ -64,7 +72,8 @@ prevail; CDL/GLP add no write, integration, release or deployment authority.
   and code names unless requested or needed for a technical handoff.
 - **Harness-aware bookkeeping:** in the GitHub Copilot app or Copilot CLI, the
   harness already records session history, so do not create a local `logs/cdl/`
-  session log or print the per-update single-line checklist. Still provide the
+  session log or print the per-update single-line checklist. Still begin each
+  reply to a user message with the steering line and provide the
   answer-first final accounting of every goal and workstream, outstanding checks,
   learning, publication and open decisions before stopping; include evidence in
   delegate handoffs; and run the GLP learning pass with independent readback. Other
@@ -511,3 +520,49 @@ Documentation only. Checked by the pre-release audit and `git diff --check`.
 #### Follow-up
 Fold into the Rules bullet at the next consolidation of this document.
 <!-- /glp-update:v1 id=1551e0ef-00ba-4066-8e1d-b497a74c0491 -->
+
+<!-- glp-update:v1 id=92849b4c-bd2f-4370-9c67-3333a0ef95e4 -->
+<a id="glp-92849b4c-bd2f-4370-9c67-3333a0ef95e4"></a>
+### GLP Update: Enforce the steering line with repository hooks
+
+- Update-ID: 92849b4c-bd2f-4370-9c67-3333a0ef95e4
+- Recorded-UTC: 2026-10-10T16:49:11Z
+- Kind: addition
+- Topics: steering classification, hooks, harness bookkeeping
+- Workstream: steering-line enforcement
+- Target: AGENTS.md, Continuous Development and Learning and Local Policy; compared origin/main 230a039
+- Source-Session: CDL session 2026-10-10 (harness history only)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Every first reply to a user message begins with a fixed `Steering:` line.
+Repository hooks append a reminder to each prompt and force one correction
+turn when the line is missing, because written instructions alone did not
+hold.
+
+#### Evidence
+- User direction, 2026-10-10: the developer observed that the agent kept
+  skipping steering classification despite the written rule, and asked for a
+  durable crutch found through research.
+- Observation: removing the per-update checklist in the Copilot harness also
+  removed the cue that prompted classification.
+- Observation: a trusted standalone test repository showed the
+  `userPromptTransformed` reminder injected and the `agentStop` hook forcing
+  one correction turn that began with the steering line. Repository hooks did
+  not load in an untrusted linked worktree.
+
+#### Previous Knowledge
+The steering rule required classification but gave no fixed format and no
+enforcement, and the harness exception had removed the visible checklist.
+
+#### Verification and Limits
+Behavior tests cover reminder injection, blocking, allowance and fail-open
+paths. The stop hook checks only the first reply text after the latest user
+message, allows one correction per turn, and runs only where the CLI trusts
+the checkout. Claude Code receives the reminder without the stop backstop.
+
+#### Follow-up
+Fold into the steering guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=92849b4c-bd2f-4370-9c67-3333a0ef95e4 -->

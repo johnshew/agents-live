@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --quiet --script tools/steering-hook.py claude-prompt"
+          }
+        ]
+      }
+    ]
+  }
+}
