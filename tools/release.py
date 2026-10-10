@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import tomllib
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -64,11 +65,101 @@ TYPE_ORDER = ("feat", "fix", "perf", "refactor", "docs", "test", "build", "chore
 ACCEPTANCE_SCHEMA = 2
 PREPARATION_SCHEMA = 2
 CHECKPOINT_SCHEMA = 1
+STAGE_TIMING_SCHEMA = 1
 ACTIVE_ATTEMPT: dict | None = None
 
 
 class ReleaseError(RuntimeError):
     """A release precondition or operation failed."""
+
+
+class StageTimer:
+    """Wall-clock stage durations and evidence-reuse reasons for one run.
+
+    A stage is ``passed`` when its work ran in this invocation, ``reused``
+    when retained evidence replaced it (with the reason) and ``failed`` when
+    it raised. Reused stages never claim that cached work ran again. The run
+    is ``warm`` when any stage was reused and ``cold`` otherwise.
+    """
+
+    def __init__(self, clock=time.perf_counter) -> None:
+        self._clock = clock
+        self._started = clock()
+        self._open: tuple[dict, float] | None = None
+        self.stages: list[dict] = []
+
+    def start(self, name: str, category: str) -> dict:
+        """Close any open stage as passed and open the next one."""
+        self.finish()
+        entry: dict = {"name": name, "category": category}
+        self._open = (entry, self._clock())
+        return entry
+
+    def finish(self, error: BaseException | None = None) -> None:
+        if self._open is None:
+            return
+        entry, started = self._open
+        self._open = None
+        if error is not None:
+            entry["outcome"] = "failed"
+            entry["reason"] = f"{type(error).__name__}: {error}"[:200]
+        else:
+            entry.setdefault("outcome", "passed")
+        entry["seconds"] = round(self._clock() - started, 3)
+        self.stages.append(entry)
+
+    @contextlib.contextmanager
+    def stage(self, name: str, category: str):
+        entry = self.start(name, category)
+        try:
+            yield entry
+        except BaseException as exc:
+            self.finish(exc)
+            raise
+        self.finish()
+
+    @staticmethod
+    def reuse(entry: dict, reason: str) -> None:
+        entry["outcome"] = "reused"
+        entry["reason"] = reason
+
+    def record(self) -> dict:
+        reused = any(stage["outcome"] == "reused" for stage in self.stages)
+        return {
+            "schema": STAGE_TIMING_SCHEMA,
+            "path": "warm" if reused else "cold",
+            "total_seconds": round(self._clock() - self._started, 3),
+            "stages": [dict(stage) for stage in self.stages],
+        }
+
+    def summary(self, title: str) -> str:
+        record = self.record()
+        lines = [f"{title} ({record['path']} path, {record['total_seconds']:.1f}s total):"]
+        for stage in record["stages"]:
+            line = (f"  {stage['outcome']:<7} {stage['seconds']:>8.1f}s  "
+                    f"{stage['category']}: {stage['name']}")
+            if stage.get("reason"):
+                line += f" ({stage['reason']})"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+def _gate_stage(command: list[str]) -> tuple[str, str]:
+    """Name and category of a preparation gate for stage timing."""
+    labels = (
+        ("pre-release-audit.py", "export audit", "source checks"),
+        ("test_smoke.py", "smoke tests", "source checks"),
+        ("test_seams.py", "seam tests", "source checks"),
+        ("test_behaviors.py", "behavior tests", "source checks"),
+        ("smoketest", "framework smoketest", "source checks"),
+        ("--build-artifacts", "artifact build", "build"),
+        ("dashboard-readiness.py", "packaged dashboard readiness", "package checks"),
+    )
+    for marker, name, category in labels:
+        if any(argument == marker or argument.endswith(("/" + marker, "\\" + marker))
+               for argument in command):
+            return name, category
+    return shlex.join(command), "other"
 
 
 def _run(argv: list[str], *, capture: bool = False) -> str:
@@ -1402,32 +1493,26 @@ def _check_attempt_checkout() -> None:
 def prepare_attempt(*, readiness_recovery: dict | None = None) -> None:
     if ACTIVE_ATTEMPT is None:
         raise ReleaseError("select an attempt explicitly")
+    timer = StageTimer()
+    try:
+        _prepare_attempt(timer, readiness_recovery=readiness_recovery)
+    finally:
+        print(timer.summary(f"Preparation stages for {ACTIVE_ATTEMPT['id']}"), flush=True)
+
+
+def _prepare_attempt(timer: StageTimer, *, readiness_recovery: dict | None = None) -> None:
     record = ACTIVE_ATTEMPT
     directory = _attempt_path()
     version = record["version"]
     commit_path = directory / "commit.json"
     if not commit_path.exists():
-        _check_accepted_rc(record)
-        if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != record["source_commit"] \
-                or _git("branch", "--show-current") != record["branch"]:
-            raise ReleaseError("uncommitted attempt changed; retain it for inspection")
-        current = _current_version()
-        if record["kind"] == "final":
-            _update_versions(current, version)
-        else:
-            _run(["uv", "version", version, "--no-sync"])
-            _replace_once(VERSION_FILES[0], f'__version__ = "{current}"', f'__version__ = "{version}"')
-            _replace_once(VERSION_FILES[1], f"{current}\n", f"{version}\n")
-        validated = {path: path.read_bytes() for path in RELEASE_FILES}
-        _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
-        _run(["git", "commit", "-m", f"chore(build): prepare {record['id']}"])
-        for path, content in validated.items():
-            if _git("rev-parse", f"HEAD:{path.relative_to(ROOT).as_posix()}") != _blob_id(path, content):
-                raise ReleaseError("release metadata changed during commit")
-        _write_once(commit_path, {"commit": _git("rev-parse", "HEAD")})
+        with timer.stage("release metadata commit", "build"):
+            _commit_attempt_metadata(record, commit_path)
     _check_attempt_checkout()
     if _preparation_path(version).exists():
-        _check_preparation(version)
+        with timer.stage("preparation", "evidence") as entry:
+            _check_preparation(version)
+            timer.reuse(entry, "exact preparation receipt is valid for this attempt")
         print(f"Reused exact preparation for {record['id']}")
         return
     build_record = directory / "build.json"
@@ -1435,32 +1520,57 @@ def prepare_attempt(*, readiness_recovery: dict | None = None) -> None:
                                   "wheel": str(_candidate_wheel(version)),
                                   "readiness_recovery": readiness_recovery}, record) if readiness_recovery else _attempt_gate_commands(record)
     for command in commands:
-        if "--build-artifacts" in command:
-            if build_record.exists():
-                retained = json.loads(build_record.read_text(encoding="utf-8"))
-                if retained != _release_identity(version, _candidate_wheel(version)):
-                    raise ReleaseError("retained build identity changed; never rebuild this attempt")
-                (ROOT / "dist").mkdir(exist_ok=True)
-                for path in _artifact_store_dir(version).iterdir():
-                    shutil.copy2(path, ROOT / "dist" / path.name)
-                continue
-            if _artifact_store_dir(version).exists() or any((ROOT / "dist").glob("*.whl")):
-                raise ReleaseError("unreceipted build bytes exist; retain them and allocate a new attempt")
-            _run(command)
-            wheel = _preserve_release_artifacts(version, ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl")
-            _write_once(build_record, _release_identity(version, wheel))
-        else:
-            _run(command)
-        _check_attempt_checkout()
+        with timer.stage(*_gate_stage(command)) as entry:
+            if "--build-artifacts" in command:
+                if build_record.exists():
+                    retained = json.loads(build_record.read_text(encoding="utf-8"))
+                    if retained != _release_identity(version, _candidate_wheel(version)):
+                        raise ReleaseError("retained build identity changed; never rebuild this attempt")
+                    (ROOT / "dist").mkdir(exist_ok=True)
+                    for path in _artifact_store_dir(version).iterdir():
+                        shutil.copy2(path, ROOT / "dist" / path.name)
+                    timer.reuse(entry, "retained build record matches the immutable artifacts")
+                    continue
+                if _artifact_store_dir(version).exists() or any((ROOT / "dist").glob("*.whl")):
+                    raise ReleaseError("unreceipted build bytes exist; retain them and allocate a new attempt")
+                _run(command)
+                wheel = _preserve_release_artifacts(version, ROOT / "dist" / f"agents_live-{version}-py3-none-any.whl")
+                _write_once(build_record, _release_identity(version, wheel))
+            else:
+                _run(command)
+            _check_attempt_checkout()
     wheel = _candidate_wheel(version)
     if json.loads(build_record.read_text(encoding="utf-8")) != _release_identity(version, wheel):
         raise ReleaseError("attempt artifacts changed during readiness")
-    _write_preparation(version, wheel, readiness_recovery=readiness_recovery)
+    _write_preparation(version, wheel, readiness_recovery=readiness_recovery,
+                       stage_timings=timer.record())
     print(f"Prepared {record['id']} without a tag. Retained exact wheel: {wheel}")
     if record["kind"] == "rc":
         print(f"Run RC checks with --accept-candidate --attempt {record['id']} --yes; optionally supply --agency-plugin <source>.")
     else:
         print(f"RC approval retained; finalize {record['id']} and publish without functional retesting.")
+
+
+def _commit_attempt_metadata(record: dict, commit_path: Path) -> None:
+    version = record["version"]
+    _check_accepted_rc(record)
+    if _git("status", "--porcelain") or _git("rev-parse", "HEAD") != record["source_commit"] \
+            or _git("branch", "--show-current") != record["branch"]:
+        raise ReleaseError("uncommitted attempt changed; retain it for inspection")
+    current = _current_version()
+    if record["kind"] == "final":
+        _update_versions(current, version)
+    else:
+        _run(["uv", "version", version, "--no-sync"])
+        _replace_once(VERSION_FILES[0], f'__version__ = "{current}"', f'__version__ = "{version}"')
+        _replace_once(VERSION_FILES[1], f"{current}\n", f"{version}\n")
+    validated = {path: path.read_bytes() for path in RELEASE_FILES}
+    _run(["git", "add", *[str(path.relative_to(ROOT)) for path in RELEASE_FILES]])
+    _run(["git", "commit", "-m", f"chore(build): prepare {record['id']}"])
+    for path, content in validated.items():
+        if _git("rev-parse", f"HEAD:{path.relative_to(ROOT).as_posix()}") != _blob_id(path, content):
+            raise ReleaseError("release metadata changed during commit")
+    _write_once(commit_path, {"commit": _git("rev-parse", "HEAD")})
 
 
 def _release_identity(version: str, wheel: Path) -> dict[str, object]:
@@ -1493,7 +1603,8 @@ def _release_identity(version: str, wheel: Path) -> dict[str, object]:
     }
 
 
-def _write_preparation(version: str, wheel: Path, *, readiness_recovery: dict | None = None) -> Path:
+def _write_preparation(version: str, wheel: Path, *, readiness_recovery: dict | None = None,
+                       stage_timings: dict | None = None) -> Path:
     destination = _preparation_path(version)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1504,6 +1615,9 @@ def _write_preparation(version: str, wheel: Path, *, readiness_recovery: dict | 
         **_evidence_identity(),
         "gates": _attempt_gate_commands(ACTIVE_ATTEMPT),
     }
+    if stage_timings is not None:
+        # Additive diagnostics; receipt validation never requires this field.
+        payload["stage_timings"] = stage_timings
     if ACTIVE_ATTEMPT is not None:
         payload["checkout"] = str(ROOT)
         if readiness_recovery is not None:

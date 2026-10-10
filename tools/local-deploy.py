@@ -245,9 +245,12 @@ def _prepare_artifact(commit: str, version: str) -> tuple[Path, str]:
         lock.unlink()
 
 
-def _prepare_candidate(tool_commit: str, version: str) -> tuple[str, Path, str]:
+def _prepare_candidate(
+    tool_commit: str, version: str, stage: dict | None = None,
+) -> tuple[str, Path, str]:
     directory = RELEASE["_cycle_directory"](version.split("rc", 1)[0]) / version
-    if not (directory / "attempt.json").exists():
+    prepared_now = not (directory / "attempt.json").exists()
+    if prepared_now:
         RELEASE["prepare_cycle"](rc=version)
     record = RELEASE["_load_attempt"](version)
     commit = record["source_commit"]
@@ -260,6 +263,16 @@ def _prepare_candidate(tool_commit: str, version: str) -> tuple[str, Path, str]:
                 "retained source is not an ancestor of deployment tooling; use the next RC")
         _require_unchanged_package_inputs(commit, tool_commit)
     preparation = RELEASE["_retained_preparation"](record)
+    if stage is not None:
+        if prepared_now:
+            timings = preparation.get("stage_timings")
+            if isinstance(timings, dict):
+                stage["preparation"] = timings
+        else:
+            reason = "retained prepared attempt validated; not rebuilt"
+            if commit != tool_commit:
+                reason += "; later commits leave package inputs unchanged"
+            RELEASE["StageTimer"].reuse(stage, reason)
     return commit, Path(preparation["wheel"]), preparation["wheel_sha256"]
 
 
@@ -684,9 +697,10 @@ def _write_receipt(
     baseline: tuple[tuple[object, ...], ...],
     watchers: tuple[tuple[str, str], ...],
     dashboards: tuple[Dashboard, ...],
+    stage_timings: dict | None = None,
 ) -> Path:
     destination = _preparation_directory(version) / "receipt.json"
-    _atomic_json(destination, {
+    payload = {
         "schema": LOCAL_DEPLOYMENT_SCHEMA,
         "deployed": True,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
@@ -703,7 +717,11 @@ def _write_receipt(
         "contract": [list(row) for row in baseline],
         "watchers": [list(row) for row in watchers],
         "dashboards": [asdict(dashboard) for dashboard in dashboards],
-    })
+    }
+    if stage_timings is not None:
+        # Additive diagnostics; older receipts without timings stay readable.
+        payload["stage_timings"] = stage_timings
+    _atomic_json(destination, payload)
     return destination
 
 
@@ -712,10 +730,30 @@ def deploy(
     recover_provider_readiness: bool = False,
     requalified: bool = False,
 ) -> Path:
+    timer = RELEASE["StageTimer"]()
+    try:
+        return _deploy(
+            timer, repo, allow_downgrade=allow_downgrade, rc=rc,
+            recover_provider_readiness=recover_provider_readiness,
+            requalified=requalified)
+    except BaseException as exc:
+        timer.finish(exc)
+        raise
+    finally:
+        timer.finish()
+        if timer.stages:
+            print(timer.summary("Local deployment stages"), flush=True)
+
+
+def _deploy(
+    timer, repo: Path, *, allow_downgrade: bool, rc: str | None,
+    recover_provider_readiness: bool, requalified: bool,
+) -> Path:
     if rc is None:
         raise LocalDeployError("local deployment requires an explicit numbered --rc")
     if requalified and recover_provider_readiness:
         raise LocalDeployError("readiness requalification cannot bypass provider health")
+    timer.start("source synchronization", "source checks")
     tool_commit = _synchronize()
     commit = tool_commit
     _branch, target = _release_configuration()
@@ -731,6 +769,7 @@ def deploy(
     root = repo.expanduser().resolve()
     if not root.is_dir():
         raise LocalDeployError(f"repository does not exist: {root}")
+    candidate_stage = timer.start("candidate artifact", "build")
     if recover_provider_readiness:
         try:
             preparation = json.loads((
@@ -748,6 +787,7 @@ def deploy(
         if prepared is None:
             raise LocalDeployError("recovery requires matching successful packaged readiness")
         wheel, digest = prepared
+        timer.reuse(candidate_stage, "retained packaged readiness evidence; recovery does not rebuild")
     elif requalified:
         record = RELEASE["_load_attempt"](version)
         commit = record["source_commit"]
@@ -759,9 +799,11 @@ def deploy(
         if not validator or _git("merge-base", validator["tool_commit"], tool_commit) != validator["tool_commit"]:
             raise LocalDeployError("deployment requires reviewed readiness requalification")
         wheel, digest = Path(preparation["wheel"]), preparation["wheel_sha256"]
+        timer.reuse(candidate_stage, "requalified retained bytes; not rebuilt")
     else:
-        commit, wheel, digest = _prepare_candidate(tool_commit, version)
+        commit, wheel, digest = _prepare_candidate(tool_commit, version, candidate_stage)
     _require_unchanged_checkout(tool_commit)
+    timer.start("baseline status and doctor", "activation checks")
     with ThreadPoolExecutor(max_workers=3) as pool:
         status_future = pool.submit(RELEASE["_installed_all_json"], "status")
         doctor_future = pool.submit(
@@ -821,14 +863,20 @@ def deploy(
     dashboards = _running_dashboards()
     stopped: list[Dashboard] = []
     try:
+        timer.start("dashboard stop", "installation")
         for dashboard in dashboards:
             _stop_dashboard(dashboard)
             stopped.append(dashboard)
+        timer.start("runtime upgrade", "installation")
         _upgrade(root, wheel, digest)
+        timer.start("dashboard restoration", "service restoration")
         _restart_dashboards(tuple(stopped))
+        timer.start("post-activation verification", "service restoration")
         _postcheck(
             wheel, version, baseline, all_watchers, tuple(stopped))
-    except BaseException:
+    except BaseException as exc:
+        timer.finish(exc)
+        timer.start("rollback and dashboard restoration", "service restoration")
         try:
             if RELEASE["_installed_version"]() != previous_version:
                 for dashboard in stopped:
@@ -844,12 +892,15 @@ def deploy(
                     raise LocalDeployError("rollback did not restore the agent-state baseline")
         finally:
             _restart_dashboards(tuple(stopped))
+        timer.finish()
         raise
+    timer.finish()
     receipt = _write_receipt(
         commit=commit, tool_commit=tool_commit,
         version=version, previous_version=previous_version,
         wheel=wheel, wheel_sha256=digest, operation_id=None,
-        baseline=baseline, watchers=all_watchers, dashboards=tuple(stopped))
+        baseline=baseline, watchers=all_watchers, dashboards=tuple(stopped),
+        stage_timings=timer.record())
     if recovery is not None:
         payload = json.loads(receipt.read_text(encoding="utf-8"))
         payload["recovery"] = recovery

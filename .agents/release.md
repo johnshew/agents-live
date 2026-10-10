@@ -196,6 +196,14 @@ and `--yes` only when a matching upgrade checkpoint exists. Cycle mutation and
 allocation locks refuse concurrent operations; after a crash, verify no operation
 is active before removing only the stale lock directory. Never delete receipts.
 
+Numbered preparation and local deployment print a short stage summary on success
+and failure. Each stage (build, source checks, package checks, installation,
+service restoration) is marked passed, reused with the reason, or failed with
+the error. The path is labelled warm when any evidence was reused and cold
+otherwise. New preparation and deployment receipts record the same data in an
+additive `stage_timings` field. Older receipts without it remain valid, and
+failed runs print timings without persisting them.
+
 If a committed dashboard validator defect blocked an already recorded build,
 run the following from clean, reviewed tooling that contains the correction:
 
