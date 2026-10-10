@@ -276,7 +276,9 @@ The 6.9.5 cycle is the default development cycle on `main`. Its planned scope is
 #582 lock, timing, runtime-identity and watcher-exit evidence, #591 named agent
 start/stop admin events and the #590 test isolation fix, all merged to main
 before RC1. #588 is on hold until evidence shows it is needed; #566 and #567
-remain deferred. The next numbered RC is `6.9.5rc1`.
+remain deferred. 6.9.5rc1 was prepared from `98b4b4d`, passed isolated acceptance and was
+locally activated on 2026-10-10; it is not publication-approved. Do not reuse
+consumed RC1. The next numbered RC is `6.9.5rc2`.
 Retained 6.9.2 RC6 does not supersede the approved 6.9.2 RC5 selection. Preserve
 all historical packages,
 receipts and refs, including the rejected unpublished stable-tag conflict.
