@@ -202,8 +202,9 @@ evidence = "Prepared and consumed from main on 2026-10-08; packaged readiness an
 
 [cycles."6.9.5"]
 branch = "main"
-next_rc = "6.9.5rc1"
-recommendation = "Prepare and locally activate 6.9.5rc1 from main to evaluate the #582 lock, timing, runtime-identity and watcher-exit diagnostics, #591 named start/stop admin events and the #590 test isolation fix in situ. Source tests are not artifact, installed or operational acceptance. Activation from installed 6.9.4rc6 already includes #574, so in-flight agent runs do not block it; #588 is on hold until evidence shows remaining refusals matter."
+next_rc = "6.9.5rc2"
+selected_rc = "6.9.5rc1"
+recommendation = "6.9.5rc1 was prepared from main, passed isolated acceptance and was locally activated on 2026-10-10; observe it in operation before any approval decision. It evaluates the #582 lock, timing, runtime-identity and watcher-exit diagnostics, #591 named start/stop admin events and the #590 test isolation fix in situ. Source tests are not artifact, installed or operational acceptance. #588 stays on hold until evidence shows remaining activation refusals matter. Changed source must use 6.9.5rc2."
 
 [cycles."6.9.5".approval]
 decision = "testing"
@@ -217,3 +218,13 @@ deferred = [588, 566, 567]
 "591" = "Developer requested named agent start/stop admin events for the next RC on 2026-10-10; merged to main in PR #594."
 "590" = "Developer requested the test leak into the live admin log be fixed for the next RC on 2026-10-10; merged to main in PR #596."
 "588" = "Developer directed on 2026-10-10 not to implement waiting activation until evidence shows it is needed; #574 already removes the in-flight run refusal."
+
+[cycles."6.9.5".history."6.9.5rc1"]
+status = "prepared"
+kind = "numbered-rc"
+artifact_version = "6.9.5rc1"
+commit = "580708d91d0f9f600a687dd9b4ed384db2ee01bc"
+source_commit = "98b4b4dfcb892f5d104e5ea1891e94326000aec7"
+wheel_sha256 = "95d427ff9e76eaeea46f23524a961a6ed3dd625b3b1e85227be4ac5665f8353f"
+sdist_sha256 = "dd67ce163c495635fcba8c504c90fc10980c63d06a8c85b6a48db51aaec49e9c"
+evidence = "Prepared and consumed on 2026-10-10 from main with #582, #591 and #590; packaged readiness passed. Isolated hello-world acceptance passed. Locally activated from 6.9.4rc6 the same day; doctor --all-repos exit 0, the note-index watcher was restored, and logs show runtime_version 6.9.5rc1 with lock hold and wait fields and no errors. This history is not publication approval; changed source must use RC2."
