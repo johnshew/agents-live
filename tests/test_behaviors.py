@@ -1505,6 +1505,200 @@ class TestFailuresAreVisible(TempRepository):
         self.assertEqual({self.IDENTIFIER: "test-model-1"}, models)
         self.assertEqual({"state": "available", "detail": None}, evidence)
 
+    def test_dashboard_activity_recovers_when_first_log_event_arrives_during_read(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "new.jsonl"
+        log.touch()
+        event = {
+            "log_schema": 5, "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_name": self.IDENTIFIER, "phase": "done", "status": "error",
+            "model": "test-model", "message": "failed",
+        }
+        first_connection = qlog.duckdb.connect(":memory:")
+        next_connection = qlog.duckdb.connect(":memory:")
+
+        class AppendAfterDescribe:
+            appended = False
+
+            def sql(self, sql):
+                result = first_connection.sql(sql)
+                if not self.appended and sql.startswith(
+                        "DESCRIBE SELECT * FROM read_json_auto"):
+                    columns = result.fetchall()
+                    with log.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(event) + "\n")
+                    self.appended = True
+                    return mock.Mock(fetchall=mock.Mock(return_value=columns))
+                return result
+
+            def close(self):
+                first_connection.close()
+
+        raced_connection = AppendAfterDescribe()
+        dashboard = self._dashboard()
+        with mock.patch.object(
+            qlog.duckdb, "connect",
+            side_effect=(raced_connection, next_connection),
+        ):
+            _, _, first_evidence = dashboard._structured_log_snapshot(
+                {self.IDENTIFIER: "failing-agent"}, directory)
+            errors, models, next_evidence = dashboard._structured_log_snapshot(
+                {self.IDENTIFIER: "failing-agent"}, directory)
+
+        self.assertTrue(raced_connection.appended)
+        self.assertEqual("partial", first_evidence["state"])
+        self.assertEqual("available", next_evidence["state"])
+        self.assertEqual({"failing-agent": 1}, errors)
+        self.assertEqual({self.IDENTIFIER: "test-model"}, models)
+
+    def test_log_query_recovers_when_a_file_changes_after_raw_view_binding(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "new.jsonl"
+        log.touch()
+        event = {
+            "log_schema": 5, "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_name": self.IDENTIFIER, "phase": "done", "status": "error",
+            "model": "test-model", "message": "failed",
+        }
+        connection = qlog.duckdb.connect(":memory:")
+
+        class AppendAfterBinding:
+            appended = False
+
+            def sql(self, sql):
+                result = connection.sql(sql)
+                if not self.appended and sql.startswith("CREATE VIEW _log_raw"):
+                    log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+                    self.appended = True
+                return result
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        raced = AppendAfterBinding()
+        try:
+            qlog.build_view(raced, [str(log)])
+            connection.sql("SELECT agent_name, status FROM log").fetchall()
+            self.assertTrue(raced.appended)
+        finally:
+            connection.close()
+        with qlog.duckdb.connect(":memory:") as next_connection:
+            qlog.build_view(next_connection, [str(log)])
+            self.assertEqual(
+                [(self.IDENTIFIER, "error")],
+                next_connection.sql("SELECT agent_name, status FROM log").fetchall())
+
+    def test_public_log_queries_work_while_records_are_appended(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "active.jsonl"
+        stopped = threading.Event()
+        started = threading.Event()
+        counts = []
+        failures = []
+
+        def append_records() -> None:
+            try:
+                with log.open("a", encoding="utf-8") as stream:
+                    index = 0
+                    while not stopped.is_set():
+                        record = {
+                            "log_schema": 5,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "agent_name": self.IDENTIFIER,
+                            "run_id": f"concurrent-{index}",
+                            "phase": "done",
+                            "status": "ok",
+                            "message": "synthetic concurrent record",
+                        }
+                        if index:
+                            record["attributes"] = {"synthetic": "added after startup"}
+                        stream.write(json.dumps(record) + "\n")
+                        stream.flush()
+                        counts.append(index)
+                        started.set()
+                        index += 1
+                        stopped.wait(0.05)
+            except OSError as exc:
+                failures.append(exc)
+                started.set()
+
+        writer = threading.Thread(target=append_records)
+        writer.start()
+        try:
+            self.assertTrue(started.wait(10), "the synthetic writer did not start")
+            self.assertFalse(failures, failures)
+            results = []
+            argv = [
+                "--repo", str(self.root), "logs", "--sql",
+                f"SELECT count(*) AS records FROM log WHERE agent_name = '{self.IDENTIFIER}'",
+                "--format", "jsonl",
+            ]
+            for _ in range(3):
+                before = len(counts)
+                completed = subprocess.run(
+                    [sys.executable, "-c",
+                     f"from agents_live.cli import main; raise SystemExit(main({argv!r}))"],
+                    cwd=self.root, capture_output=True, text=True, timeout=90,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW}
+                       if os.name == "nt" else {}),
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertFalse(failures, failures)
+                self.assertGreater(len(counts), before, "the writer did not overlap the query")
+                results.append(json.loads(completed.stdout)["records"])
+            self.assertGreater(results[0], 0)
+            self.assertEqual(sorted(results), results)
+        finally:
+            stopped.set()
+            writer.join(timeout=10)
+        self.assertFalse(writer.is_alive(), "the synthetic writer did not stop")
+
+    def test_dashboard_error_window_expires_without_new_log_writes(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        records = [
+            {
+                "log_schema": 5, "ts": (now - timedelta(minutes=age)).isoformat(),
+                "agent_name": self.IDENTIFIER, "phase": "done",
+                "status": "error", "run_id": "same-run", "event_id": "same-event",
+                "message": "failed",
+            }
+            for age in (59, 30)
+        ]
+        records.append({
+            **records[0], "ts": (now - timedelta(minutes=75)).isoformat(),
+            "run_id": "older-run", "event_id": "older-event",
+        })
+        (directory / "errors.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8")
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current.astimezone(tz) if tz else cls.current
+
+        Clock.current = now
+        dashboard = self._dashboard()
+        names = {self.IDENTIFIER: "failing-agent"}
+        with mock.patch.object(dashboard, "datetime", Clock):
+            first, _, _ = dashboard._structured_log_snapshot(names, directory)
+            Clock.current += timedelta(minutes=2)
+            still_recent, _, _ = dashboard._structured_log_snapshot(names, directory)
+            Clock.current += timedelta(minutes=29)
+            expired, _, _ = dashboard._structured_log_snapshot(names, directory)
+            Clock.current = now - timedelta(minutes=30)
+            after_clock_rollback, _, _ = dashboard._structured_log_snapshot(names, directory)
+
+        self.assertEqual({"failing-agent": 1}, first)
+        self.assertEqual({"failing-agent": 1}, still_recent)
+        self.assertEqual({}, expired)
+        self.assertEqual({"failing-agent": 2}, after_clock_rollback)
+
     def test_the_header_reads_both_log_suffixes(self) -> None:
         """A run's outcome is written to <identifier>.jsonl. A *.log glob
         counted zero with failed runs on the screen."""
@@ -1616,6 +1810,44 @@ class TestFailuresAreVisible(TempRepository):
             json.loads(row[0]) if row[0] is not None else None for row in rows
         ])
         self.assertEqual([1.25] * (2 * len(values)), [row[1] for row in rows])
+
+    def test_log_query_reads_legacy_attribute_maps_and_duplicate_keys(self) -> None:
+        directory = self.root / "legacy-attributes"
+        directory.mkdir()
+        for name, attributes in (
+            ("map", {"first": ["duration_s", 4.25]}),
+            ("duplicate", [["duration_s", 1.25], ["duration_s", 9.0]]),
+        ):
+            (directory / f"{name}.jsonl").write_text(json.dumps({
+                "ts": "2026-09-11T00:00:00Z", "agent_name": name,
+                "log_schema": 5, "attributes": attributes,
+            }) + "\n", encoding="utf-8")
+        with qlog.duckdb.connect(":memory:") as connection:
+            qlog.build_view(connection, [str(directory / "*.jsonl")])
+            rows = connection.sql(
+                "SELECT agent_name, duration_s FROM log ORDER BY agent_name").fetchall()
+        self.assertEqual([("duplicate", 1.25), ("map", 4.25)], rows)
+
+    def test_dashboard_activity_reads_parquet_only_history(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        archive = directory / "archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        source = directory / "source.jsonl"
+        source.write_text(json.dumps({
+            "log_schema": 5, "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_name": self.IDENTIFIER, "phase": "done", "status": "error",
+            "run_id": "archived-run", "model": "archived-model",
+        }) + "\n", encoding="utf-8")
+        with qlog.duckdb.connect(":memory:") as connection:
+            connection.sql(
+                f"COPY (SELECT * FROM read_json_auto('{source}')) "
+                f"TO '{archive / 'old.parquet'}' (FORMAT PARQUET)")
+        source.unlink()
+        errors, models, evidence = self._dashboard()._structured_log_snapshot(
+            {self.IDENTIFIER: "failing-agent"}, directory)
+        self.assertEqual({"failing-agent": 1}, errors)
+        self.assertEqual({self.IDENTIFIER: "archived-model"}, models)
+        self.assertEqual("available", evidence["state"])
 
     def test_schema_check_names_where_a_handler_record_is_invalid(self) -> None:
         """A count alone cannot tell a handler author what to fix."""
@@ -2090,6 +2322,40 @@ class TestWatcherInventory(TempRepository):
 
 class TestWindowsDetachedProcess(unittest.TestCase):
     """Detached watchers outlive maintenance without opening a terminal."""
+
+    @unittest.skipUnless(os.name == "nt", "Windows launcher process policy")
+    def test_dashboard_collector_cleanup_stops_its_entire_process_tree(self) -> None:
+        from agents_live.cli.scripts.dashboard_collection import DashboardCollector
+
+        script = """
+import json, os, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    creationflags=subprocess.CREATE_NO_WINDOW)
+print(json.dumps([os.getpid(), child.pid]), flush=True)
+time.sleep(60)
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        collector = DashboardCollector()
+        collector._process = process
+        owned = []
+        try:
+            assert process.stdout is not None
+            owned = json.loads(process.stdout.readline())
+            self.assertTrue(all(hostruntime.is_alive(pid) for pid in owned))
+            collector.close()
+            self.assertFalse(any(hostruntime.is_alive(pid) for pid in owned))
+        finally:
+            for pid in reversed(owned):
+                if hostruntime.is_alive(pid):
+                    hostruntime.terminate(pid, grace_s=2)
+            if process.poll() is None:
+                hostruntime.terminate(process.pid, grace_s=2)
+            collector.close()
 
     def test_owned_watchers_use_hidden_process_discovery(self) -> None:
         metadata = artifacts.encode(artifacts.InvocationMetadata(
@@ -2581,7 +2847,7 @@ class TestWatcherExitEvidence(TempRepository):
                 paths.repo_state_dir(self.root) / "logs")])
             self.assertEqual((7, "unexpected_exit", True), connection.sql(
                 "SELECT exit_code, stop_reason, stderr_truncated FROM log "
-                "WHERE phase = 'watcher' AND status = 'exited'").fetchone())
+                "WHERE phase = 'watcher' AND status = 'exited'").fetchall()[0])
         self.assertTrue((session / "exit.json").is_file())
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
@@ -2970,7 +3236,7 @@ class TestRunTimingObservability(TempRepository):
             waited = con.sql(
                 "SELECT gate_wait_s, fire_status FROM log "
                 "WHERE run_id = ? AND phase = 'done'", params=[outcome.run_id]
-            ).fetchone()
+            ).fetchall()[0]
             self.assertGreaterEqual(waited[0], 0.07)
             self.assertEqual("launched", waited[1])
             summary = con.sql(
@@ -2982,7 +3248,7 @@ class TestRunTimingObservability(TempRepository):
             self.assertEqual(("skipped", "not-started"), con.sql(
                 "SELECT fire_status, message FROM log "
                 "WHERE run_id = ? AND phase = 'firing'", params=[skipped.run_id]
-            ).fetchone())
+            ).fetchall()[0])
 
     def test_known_clock_intent_reports_missed_slots_and_stops_at_withdrawal(self):
         from agents_live.obs import clock
@@ -3010,10 +3276,10 @@ class TestRunTimingObservability(TempRepository):
             ], rows)
             self.assertGreaterEqual(con.sql(
                 "SELECT launch_lag_s FROM clock_fires WHERE fire_status = 'launched'"
-            ).fetchone()[0], 20)
+            ).fetchall()[0][0], 20)
             self.assertEqual(1, con.sql(
                 "SELECT count(*) FROM clock_fires WHERE run_id = ?", params=[outcome.run_id]
-            ).fetchone()[0])
+            ).fetchall()[0][0])
             self.assertEqual([], con.sql(
                 "SELECT * FROM clock_fires WHERE planned_at < ?", params=[baseline]
             ).fetchall())
@@ -3042,7 +3308,7 @@ class TestRunTimingObservability(TempRepository):
                             sql="SELECT * FROM clock_fires")
             self.assertEqual(0, con.sql(
                 "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'"
-            ).fetchone()[0])
+            ).fetchall()[0][0])
 
     def test_dashboard_timing_uses_public_query_projection_and_loaded_identity(self):
         nicegui = mock.MagicMock()
@@ -3158,17 +3424,17 @@ class TestRunTimingObservability(TempRepository):
             qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
                             sql="SELECT * FROM clock_fires")
             self.assertEqual(("unavailable",), con.sql(
-                "SELECT status FROM clock_coverage").fetchone())
+                "SELECT status FROM clock_coverage").fetchall()[0])
             self.assertEqual(0, con.sql(
-                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchone()[0])
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchall()[0][0])
         log.unlink()
         with mock.patch.object(clock, "timezone_signature", return_value="synthetic-changed-timezone"), qlog.duckdb.connect(":memory:") as con:
             qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
                             sql="SELECT * FROM clock_fires")
             self.assertEqual(("partial",), con.sql(
-                "SELECT status FROM clock_coverage").fetchone())
+                "SELECT status FROM clock_coverage").fetchall()[0])
             self.assertEqual(0, con.sql(
-                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchone()[0])
+                "SELECT count(*) FROM clock_fires WHERE fire_status = 'missed'").fetchall()[0][0])
 
     def test_loaded_generation_survives_selection_change_in_run_and_pipeline_events(self):
         source = REPOSITORY / "src" / "agents_live"
@@ -3313,7 +3579,7 @@ print(json.dumps({
         ):
             qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
                             sql="SELECT 'clock_fires' FROM log")
-            self.assertEqual((10,), con.sql("SELECT count(*) FROM log").fetchone())
+            self.assertEqual((10,), con.sql("SELECT count(*) FROM log").fetchall()[0])
             projection.assert_not_called()
         sql = ('WITH slots AS (SELECT * FROM "clock_fires") '
                "SELECT count(*) FROM slots WHERE fire_status = 'missed'")
@@ -3323,7 +3589,7 @@ print(json.dumps({
             qlog.duckdb.connect(":memory:") as con,
         ):
             qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)], sql=sql)
-            self.assertEqual((600,), con.sql(sql).fetchone())
+            self.assertEqual((600,), con.sql(sql).fetchall()[0])
             self.assertLessEqual(len(calls), 10 * 60 * 2)
         calls.clear()
         sql = "SELECT epoch(planned_at) FROM query_table('clock_fires')"
@@ -3346,7 +3612,7 @@ print(json.dumps({
         ):
             qlog.build_view(con, qlog.all_log_globs(), repositories=[str(self.root)],
                             sql="SELECT * FROM clock_coverage")
-            self.assertEqual(("retained",), con.sql("SELECT status FROM clock_coverage").fetchone())
+            self.assertEqual(("retained",), con.sql("SELECT status FROM clock_coverage").fetchall()[0])
         nicegui = mock.MagicMock()
         nicegui.app.get.side_effect = lambda _path: lambda function: function
         nicegui.ui.refreshable.side_effect = lambda function: function
@@ -3544,10 +3810,10 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             self.assertEqual((2, True, "disabled"), con.sql(
                 "SELECT attempt, model_called, transcript_state FROM log "
                 "WHERE run_id = 'timed'"
-            ).fetchone())
+            ).fetchall()[0])
             self.assertIsNone(con.sql(
                 "SELECT duration_s FROM log WHERE run_id = 'unknown'"
-            ).fetchone()[0])
+            ).fetchall()[0][0])
 
     def test_copilot_shutdown_preserves_disjoint_token_counters(self) -> None:
         summary = {"totalNanoAiu": 22715200000, "tokenDetails": {
@@ -3793,6 +4059,182 @@ class TestRunsRecordWhatTheySpent(TempRepository):
             dashboard._scan()
             dashboard._scan()
         self.assertEqual(1, load.call_count)
+
+    def test_dashboard_reloads_only_the_history_file_that_changed(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        first, second = directory / "first.jsonl", directory / "second.jsonl"
+        for path, name in ((first, "first"), (second, "second")):
+            obs.record(path, obs.create(
+                "done", "ok", repository=str(self.root), agent=name,
+                run_id=f"{name}-initial", origin="manual",
+                usage=(("list_cost_usd", "0.10"),)))
+        dashboard = self._dashboard()
+        with (
+            mock.patch.object(dashboard, "LOGS_DIR", directory),
+            mock.patch.object(
+                dashboard.obs, "load", side_effect=dashboard.obs.load) as load,
+        ):
+            dashboard._scan()
+            load.reset_mock()
+            obs.record(first, obs.create(
+                "done", "error", repository=str(self.root), agent="first",
+                run_id="first-new", origin="manual",
+                usage=(("list_cost_usd", "0.20"),)))
+            runs, costs = dashboard._scan()
+        self.assertEqual([(first,)], [call.args[0] for call in load.call_args_list])
+        self.assertEqual("error", runs["first"][2])
+        self.assertAlmostEqual(0.30, costs["first"][0])
+        self.assertEqual((0.10, 0.10), costs["second"])
+
+    def test_dashboard_detects_same_size_history_rewrite_with_preserved_mtime(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "changed.jsonl"
+        event = {
+            "log_schema": 5, "ts": datetime.now(timezone.utc).isoformat(),
+            "agent_name": "changed", "phase": "done", "status": "ok",
+            "usage": {"list_cost_usd": "0.10"},
+        }
+        log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+        dashboard = self._dashboard()
+        self.assertEqual((0.10, 0.10), dashboard._scan(logs_dir=directory)[1]["changed"])
+        original = log.stat()
+        event["usage"]["list_cost_usd"] = "0.20"
+        log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+        os.utime(log, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertEqual(original.st_size, log.stat().st_size)
+        self.assertEqual(original.st_mtime_ns, log.stat().st_mtime_ns)
+        self.assertEqual((0.20, 0.20), dashboard._scan(logs_dir=directory)[1]["changed"])
+
+    def test_dashboard_surfaces_lost_access_to_cached_history(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "cached.jsonl"
+        obs.record(log, obs.create(
+            "done", "ok", repository=str(self.root), agent="cached",
+            run_id="run-1", origin="manual"))
+        dashboard = self._dashboard()
+        dashboard._scan(logs_dir=directory)
+        original_open = Path.open
+
+        def denied(path, *args, **kwargs):
+            if path == log:
+                raise PermissionError("synthetic read denial")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", denied):
+            with self.assertRaisesRegex(PermissionError, "synthetic read denial"):
+                dashboard._scan(logs_dir=directory)
+
+    def test_dashboard_tracks_partial_appends_rotation_and_expiry(self) -> None:
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        archive = directory / "archive"
+        archive.mkdir()
+        active = directory / "active.jsonl"
+        now = datetime.now(timezone.utc)
+        success = {
+            "log_schema": 5, "ts": (now - timedelta(minutes=2)).isoformat(),
+            "agent_name": "legacy", "phase": "done", "status": "ok",
+            "usage": {"list_cost_usd": "0.10"},
+        }
+        failure = {
+            **success, "ts": (now - timedelta(minutes=1)).isoformat(),
+            "agent_name": "canonical", "status": "error",
+            "usage": {"list_cost_usd": "0.20"},
+        }
+        failure_text = json.dumps(failure)
+        active.write_text(json.dumps(success) + "\n" + failure_text[:-2], encoding="utf-8")
+        aliases = {"legacy": "canonical", "canonical": "canonical"}
+        dashboard = self._dashboard()
+        runs, costs, failures = dashboard._history_scan(aliases, directory)
+        self.assertEqual("ok", runs["canonical"][2])
+        self.assertEqual((0.10, 0.10), costs["canonical"])
+        self.assertEqual({}, failures)
+        with active.open("a", encoding="utf-8") as stream:
+            stream.write(failure_text[-2:] + "\n")
+        runs, costs, failures = dashboard._history_scan(aliases, directory)
+        self.assertEqual("error", runs["canonical"][2])
+        self.assertAlmostEqual(0.30, costs["canonical"][0])
+        self.assertEqual({"canonical": 1}, failures)
+        active.rename(archive / "old.jsonl")
+        newer = {
+            **success, "ts": now.isoformat(), "agent_name": "canonical",
+            "usage": {"list_cost_usd": "0.40"},
+        }
+        active.write_text(json.dumps(newer) + "\n", encoding="utf-8")
+        runs, costs, failures = dashboard._history_scan(aliases, directory)
+        self.assertEqual("ok", runs["canonical"][2])
+        self.assertAlmostEqual(0.70, costs["canonical"][0])
+        self.assertEqual({}, failures)
+        (archive / "old.jsonl").unlink()
+        active.write_text(json.dumps(failure) + "\n", encoding="utf-8")
+        runs, costs, failures = dashboard._history_scan(aliases, directory)
+        self.assertEqual("error", runs["canonical"][2])
+        self.assertEqual((0.20, 0.20), costs["canonical"])
+        self.assertEqual({"canonical": 1}, failures)
+
+    def test_dashboard_reports_log_read_failures_as_unavailable(self) -> None:
+        self.skill("sample", ['agents-live.selector: "fake/echo"'])
+        repos._add(str(self.root))
+        directory = paths.repo_state_dir(self.root) / "logs"
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "sample.jsonl"
+        log.write_text("{}\n", encoding="utf-8")
+        original_read = Path.read_text
+
+        def denied(path, *args, **kwargs):
+            if path == log:
+                raise PermissionError("synthetic read denial")
+            return original_read(path, *args, **kwargs)
+
+        dashboard = self._dashboard()
+        with mock.patch.object(Path, "read_text", denied):
+            snapshot = dashboard.operational_snapshot(
+                settings={"repo": "All", "sort_by": "name", "descending": False})
+        group = snapshot["repository_groups"][0]
+        self.assertFalse(group["available"])
+        self.assertEqual("unavailable", group["collection"]["state"])
+        self.assertIn("synthetic read denial", group["error"])
+
+    def test_dashboard_cost_windows_expire_without_new_log_writes(self) -> None:
+        self.skill("cost-clock", ['agents-live.selector: "copilot"'])
+        identifier = agent.load("cost-clock", root=self.root).identifier
+        directory = paths.repo_state_dir(self.root) / "logs"
+        now = datetime(2026, 8, 8, 12, tzinfo=timezone.utc)
+        for run, age, amount in (
+            ("recent", timedelta(hours=23), "0.10"),
+            ("week-old", timedelta(days=6, hours=23), "0.20"),
+        ):
+            event = obs.create(
+                "run", "success", repository=str(self.root),
+                agent=identifier, run_id=run, origin="manual",
+                usage=(("list_cost_usd", amount),))
+            obs.record(
+                directory / "cost-clock.jsonl",
+                replace(event, timestamp=(now - age).isoformat()))
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current.astimezone(tz) if tz else cls.current
+
+        Clock.current = now
+        dashboard = self._dashboard()
+        agents = [
+            dashboard._agent_view_dict(row)
+            for row in dashboard.agent_view.repository_agents(self.root)
+        ]
+        with mock.patch.object(dashboard, "datetime", Clock):
+            first = dashboard._agent_rows_for(self.root, agents)[0]
+            Clock.current += timedelta(hours=2)
+            later = dashboard._agent_rows_for(self.root, agents)[0]
+
+        self.assertEqual(("0.10", "0.30"),
+                         (first["cost_day"], first["cost_week"]))
+        self.assertEqual(("0.00", "0.10"),
+                         (later["cost_day"], later["cost_week"]))
 
     def test_dashboard_agent_collection_never_pulls_ownership(self) -> None:
         dashboard = self._dashboard()
@@ -12437,6 +12879,47 @@ class TestCrossModuleAgreements(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, gate)
         self.assertIn("tools/dashboard-readiness.py", self._gate_text())
+
+    @unittest.skipUnless(os.name == "nt", "Windows console control events")
+    def test_dashboard_readiness_clears_inherited_ctrl_c_ignore(self) -> None:
+        gate = REPOSITORY / "tools" / "dashboard-readiness.py"
+        probe = r'''
+import ctypes
+import runpy
+import subprocess
+import sys
+
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+if not kernel.SetConsoleCtrlHandler(None, True):
+    raise ctypes.WinError(ctypes.get_last_error())
+readiness = runpy.run_path(sys.argv[1])
+readiness.get("_enable_windows_ctrl_c", lambda: None)()
+startup = subprocess.STARTUPINFO()
+startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+startup.wShowWindow = subprocess.SW_HIDE
+child = subprocess.Popen(
+    [sys.executable, "-u", "-c",
+     "import signal, sys, time; "
+     "signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0)); "
+     "print('ready', flush=True); time.sleep(60)"],
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=startup)
+try:
+    if child.stdout.readline().strip() != "ready":
+        raise RuntimeError("interrupt probe did not start")
+    readiness["_assert_interrupt_shutdown"](
+        child, readiness["_free_port"](), "interrupt probe")
+finally:
+    if child.poll() is None:
+        child.kill()
+        child.wait(timeout=10)
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(gate)],
+            capture_output=True, text=True, timeout=45,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_dashboard_readiness_plans_release_and_focused_ux_evidence(self) -> None:
         gate = REPOSITORY / "tools" / "dashboard-readiness.py"

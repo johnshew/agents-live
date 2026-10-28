@@ -1072,6 +1072,17 @@ def _terminate(process: subprocess.Popen) -> None:
             process.wait(timeout=SHUTDOWN_GRACE_S)
 
 
+def _enable_windows_ctrl_c() -> None:
+    """Prevent child consoles from inheriting an ignored Ctrl+C disposition."""
+    import ctypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    kernel.SetConsoleCtrlHandler.restype = ctypes.c_int
+    if not kernel.SetConsoleCtrlHandler(None, False):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _assert_interrupt_shutdown(process: subprocess.Popen, port: int, mode: str,
                                capture=None) -> None:
     if os.name == "nt":
@@ -1301,6 +1312,9 @@ def main() -> int:
     if args.plan:
         print(json.dumps(plan, indent=2))
         return 0
+
+    if os.name == "nt":
+        _enable_windows_ctrl_c()
 
     # A Windows handle can outlive the tree kill by a moment; a lingering
     # file must not fail a check that already passed.

@@ -1,7 +1,7 @@
 ---
 title: Dashboard Implementation Plan
 description: Current dashboard state, delivery sequence, release boundaries, dependencies, and risks
-ms.date: 2026-10-04
+ms.date: 2026-10-28
 ms.topic: concept
 ---
 
@@ -43,12 +43,23 @@ are absent until there is an operation for a selected set of rows.
 The toolbar exposes grouping, removable active filters, and one sort
 order, with responsive tracks rather than overflowing minimum widths.
 
-The page renders a loading shell before collecting inventory and history in
-a worker thread. Restoring saved preferences does not run a second initial
-scan. Scope and refresh controls wait for that first scan; failure exposes
-the error and enables a retry. NiceGUI announces the startup URL once.
-Subsequent manual, scope, periodic, and action-completion scans also run in
-workers, with serialized refreshes per page. Repository registration, plugin
+The page renders a loading shell and then the first available repository
+while the remaining inventory is collected. Repositories not yet discovered
+are labeled as loading, and history-dependent fields stay explicitly unknown
+until their evidence is ready. Scope and refresh controls wait for the full
+initial inventory; failures expose the error and enable retry.
+
+History and host-service snapshots run in a separate worker process,
+separate from the websocket event loop. Manual, scope, periodic, and
+action-completion refreshes retain the last coherent snapshot, report
+progress, and expose failures as stale data. Per-repository in-memory caches
+reuse unchanged run and cost summaries, and an append reparses only the
+changed history file for those summaries. The structured activity query still
+rechecks the affected repository when its files change. Cache entries are
+bounded and expire with the process; retained logs are not shortened or
+deleted. NiceGUI announces the startup URL once.
+
+Repository registration, plugin
 validation, and other settings mutations leave the websocket loop responsive;
 rendering resumes in the owning page context even if its initiating control
 was replaced during collection. The repository-path draft belongs to page state,
@@ -195,10 +206,12 @@ single server snapshot. Refresh failure retains that last coherent snapshot,
 marks it stale with the failure reason, and recovers on the next successful
 refresh. Per-repository collection failures remain confined to their group.
 
-Quasar virtual scrolling bounds active row elements, and repository settings
-derive from the same collected groups used by the operational page instead of
-running a second agent discovery pass. The adjustable separator supports
-pointer, Arrow Up, Arrow Down, Home, and End operation at short desktop
+Quasar virtual scrolling bounds active row elements, and off-screen repository
+tables are unmounted until they enter the inventory viewport. Their reserved
+height preserves scrolling and they are reconstructed from the current snapshot
+when visible. Repository settings derive from the same collected groups used by
+the operational page instead of running a second agent discovery pass. The
+adjustable separator supports pointer, Arrow Up, Arrow Down, Home, and End operation at short desktop
 heights. Health, eligibility, progress, and failures retain textual
 labels in addition to color.
 

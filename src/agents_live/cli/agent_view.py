@@ -87,15 +87,20 @@ def runtime_observations(
     specs: tuple[agent.AgentSpec, ...],
     started: frozenset[str],
     is_owner: dict[str, bool],
+    *,
+    failure_streaks: dict[str, int] | None = None,
+    include_failure_history: bool = True,
 ) -> dict[str, tuple[int | None, str, str | None]]:
     """Canonical failure and watcher state for status consumers."""
     observation_error = None
-    try:
-        failures = obs.consecutive_failures(
-            obs.files(paths.repo_state_dir(root) / "logs"))
-    except OSError as exc:
-        failures = {}
-        observation_error = str(exc)
+    if include_failure_history and failure_streaks is None:
+        try:
+            failure_streaks = obs.consecutive_failures(
+                obs.files(paths.repo_state_dir(root) / "logs", strict=True),
+                strict=True)
+        except OSError as exc:
+            failure_streaks = {}
+            observation_error = str(exc)
     liveness = {spec.identifier: "not-required" for spec in specs}
     watched = [
         spec for spec in specs
@@ -141,7 +146,8 @@ def runtime_observations(
                 liveness[spec.identifier] = "unavailable"
     return {
         spec.identifier: (
-            failures.get(spec.identifier, 0),
+            failure_streaks.get(spec.identifier, 0)
+            if failure_streaks is not None else None,
             liveness[spec.identifier], observation_error)
         for spec in specs
     }
@@ -151,6 +157,7 @@ def repository_agents(
     root: Path,
     *,
     ownership_rate_limit_secs: int = 60,
+    include_failure_history: bool = True,
 ) -> tuple[AgentView, ...]:
     """Return one fail-closed view of every loadable agent in *root*."""
     try:
@@ -195,6 +202,7 @@ def repository_agents(
     observations = runtime_observations(
         root, specs, started_identifiers,
         is_owner_by_identifier,
+        include_failure_history=include_failure_history,
     )
     rows = []
     for spec in specs:

@@ -1138,10 +1138,12 @@ def simulate_firings(
     """
     due: list[datetime] = []
     curr = start
-    while curr <= end:
-        if triggers.schedule_matches(schedule, curr):
-            due.append(curr)
-        curr += timedelta(minutes=1)
+    if curr <= end:
+        matches = triggers._schedule_matcher(schedule)
+        while curr <= end:
+            if matches(curr):
+                due.append(curr)
+            curr += timedelta(minutes=1)
 
     native: list[datetime] = []
     day_step = timedelta(days=1)
