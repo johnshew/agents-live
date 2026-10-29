@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import atexit
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -22,14 +21,13 @@ class DashboardCollector:
             if self._process is None or self._process.poll() is not None:
                 if self._process is not None:
                     self.close()
-                options = (
-                    {"creationflags": subprocess.CREATE_NO_WINDOW}
-                    if os.name == "nt" else {"start_new_session": True}
-                )
-                self._process = subprocess.Popen(
+                from agents_live.runtime.hosts import system as hostruntime
+                # Its own group keeps console Ctrl+C for the dashboard, which
+                # stops the worker through close(); EOF on stdin also ends it.
+                self._process = hostruntime.spawn_detached(
                     [sys.executable, "-u", str(Path(__file__).resolve())],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    text=True, encoding="utf-8", **options)
+                    stderr=None, text=True)
             process = self._process
             assert process.stdin is not None and process.stdout is not None
             try:

@@ -206,10 +206,9 @@ single server snapshot. Refresh failure retains that last coherent snapshot,
 marks it stale with the failure reason, and recovers on the next successful
 refresh. Per-repository collection failures remain confined to their group.
 
-Quasar virtual scrolling bounds active row elements, and off-screen repository
-tables are unmounted until they enter the inventory viewport. Their reserved
-height preserves scrolling and they are reconstructed from the current snapshot
-when visible. Repository settings derive from the same collected groups used by
+Quasar virtual scrolling bounds active row elements. A repository table is
+created only once its group has rows, so groups still loading render a label
+instead of an empty table. Repository settings derive from the same collected groups used by
 the operational page instead of running a second agent discovery pass. The
 adjustable separator supports pointer, Arrow Up, Arrow Down, Home, and End operation at short desktop
 heights. Health, eligibility, progress, and failures retain textual

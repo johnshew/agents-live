@@ -60,26 +60,6 @@ from agents_live.state import ownership, registry as repos  # noqa: E402
 from nicegui import app, ui  # noqa: E402
 from nicegui import run as ng_run  # noqa: E402
 
-if os.name == "nt":
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    class _FileBasicInformation(ctypes.Structure):
-        _fields_ = [
-            ("creation_time", ctypes.c_longlong),
-            ("access_time", ctypes.c_longlong),
-            ("write_time", ctypes.c_longlong),
-            ("change_time", ctypes.c_longlong),
-            ("attributes", wintypes.DWORD),
-        ]
-
-    _get_file_information = ctypes.WinDLL(
-        "kernel32", use_last_error=True).GetFileInformationByHandleEx
-    _get_file_information.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-    _get_file_information.restype = wintypes.BOOL
-
 try:
     # Read-only, and useless without a project: the dashboard is the
     # caller the registry fallback exists for (issue #173).
@@ -368,15 +348,7 @@ def _scan_signature(files: tuple[Path, ...],
     for path in files:
         with path.open("rb") as stream:
             stat = os.fstat(stream.fileno())
-            change_time = stat.st_ctime_ns
-            if os.name == "nt":
-                info = _FileBasicInformation()
-                if not _get_file_information(
-                    msvcrt.get_osfhandle(stream.fileno()), 0,
-                    ctypes.byref(info), ctypes.sizeof(info),
-                ):
-                    raise ctypes.WinError(ctypes.get_last_error())
-                change_time = info.change_time
+            change_time = hostruntime.change_time_ns(stream)
         signatures.append((
             str(path), stat.st_dev, stat.st_ino, stat.st_size,
             stat.st_mtime_ns, change_time))
@@ -2096,9 +2068,19 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
     def confirm_unregister(row: dict) -> None:
         async def unregister() -> None:
             confirmation.close()
-            await mutate({"action": "remove", "repo": row["name"]})
+            try:
+                await mutate({"action": "remove", "repo": row["name"]})
+            finally:
+                confirmation.delete()
 
-        with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
+        def cancel() -> None:
+            confirmation.close()
+            confirmation.delete()
+
+        # A background refresh rebuilds this panel; a dialog created inside
+        # it would vanish under the user, so it belongs to the page layout.
+        with ui.context.client.layout, ui.dialog() as confirmation, \
+                ui.card().classes("max-w-lg"):
             ui.label(f"Unregister {row['name']}?").classes(
                 "text-base font-medium")
             ui.label(
@@ -2107,7 +2089,7 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                 "not be deleted."
             ).classes("text-sm")
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("Cancel", on_click=confirmation.close).props(
+                ui.button("Cancel", on_click=cancel).props(
                     "flat no-caps")
                 ui.button(
                     "Unregister",
@@ -3027,7 +3009,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 detail = ui.label().classes("text-sm text-orange-600 px-1")
                 empty = ui.label("No matching agents.").classes("text-sm text-gray-500 px-1")
         return dict(section=section, name=name, path=path, status=status,
-                    detail=detail, empty=empty, table=None, intersection=None)
+                    detail=detail, empty=empty, table=None)
 
     def create_inventory_table(view: dict, grouped: bool):
         columns = _AGGREGATE_COLUMNS if grouped else [
@@ -3035,19 +3017,17 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             *_AGGREGATE_COLUMNS,
         ]
         with view["section"]:
-            with ui.element("q-intersection").props("margin=200px").classes(
-                    "w-full") as intersection:
-                table = ui.table(
-                    columns=[{**column, "sortable": False} for column in columns],
-                    rows=[], row_key="repository_identifier",
-                    pagination={"rowsPerPage": 0},
-                ).classes("virtualized-agent-table w-full").props(
-                    "flat dense hide-bottom separator=none "
-                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
-                    ":virtual-scroll-target=\"'.agent-table-scroll'\"")
-                _add_agent_information_slots(table)
-                _add_agent_action_slots(table, aggregate=True)
-        return table, intersection
+            table = ui.table(
+                columns=[{**column, "sortable": False} for column in columns],
+                rows=[], row_key="repository_identifier",
+                pagination={"rowsPerPage": 0},
+            ).classes("virtualized-agent-table w-full").props(
+                "flat dense hide-bottom separator=none "
+                f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
+                ":virtual-scroll-target=\"'.agent-table-scroll'\"")
+            _add_agent_information_slots(table)
+            _add_agent_action_slots(table, aggregate=True)
+        return table
 
     def render_inventory(current: dict) -> None:
         active_filters = 0
@@ -3114,12 +3094,9 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             view["empty"].set_visibility(not group["rows"])
             table = view["table"]
             if table is None and group["rows"]:
-                table, intersection = create_inventory_table(view, grouped)
-                view["table"], view["intersection"] = table, intersection
+                table = view["table"] = create_inventory_table(view, grouped)
             if table is not None:
-                view["intersection"].style(
-                    f"min-height:{(len(group['rows']) + 1) * VIRTUAL_ROW_SIZE}px")
-                view["intersection"].set_visibility(bool(group["rows"]))
+                table.set_visibility(bool(group["rows"]))
                 table.rows = group["rows"]
                 table.update()
         persist_view()
@@ -3154,7 +3131,8 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 observed = collected
                 if observed is None:
                     with page_client:
-                        refresh_button.disable()
+                        # Disabling the button would drop keyboard focus;
+                        # refresh_lock already serializes repeated clicks.
                         health_label.text = (
                             f"Refreshing data; host {snapshot['health']['text']}")
                         if announce:
@@ -3188,9 +3166,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                         _push_log(
                             f"{source} failed; showing the last coherent snapshot: {exc}")
                 return
-            finally:
-                if collected is None:
-                    _safe_ui(refresh_button.enable)
             with page_client:
                 snapshot = refreshed
                 loading = False
