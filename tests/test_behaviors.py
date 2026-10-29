@@ -3183,7 +3183,9 @@ class TestRunTimingObservability(TempRepository):
         from agents_live.runtime import handoff
 
         with handoff.gate(operation="synthetic-maintenance", run_id="holder"):
-            time.sleep(0.02)
+            # Hold well past the 0.02s assertion: Windows time.monotonic()
+            # advances in ticks of about 16ms.
+            time.sleep(0.05)
         outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
                            runner=self.runner)
         self.assertEqual("success", outcome.status)
