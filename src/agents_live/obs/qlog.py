@@ -140,6 +140,10 @@ def _expand(patterns: list[str]) -> list[str]:
     return sorted(f for f in files if Path(f).is_file())
 
 
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _is_jsonl(path: str) -> bool:
     """True when the file's first non-blank line looks like a JSON object.
 
@@ -181,76 +185,121 @@ def build_view(
     # session to UTC before ingestion to preserve aware instants and give
     # offset-free legacy rows a deterministic UTC interpretation.
     con.sql("SET TimeZone='UTC'")
-    files = _expand(patterns)
     archive_paths = (
         ()
         if archives is None
         else (archives,) if isinstance(archives, Path)
         else tuple(archives)
     )
-    archived_logs = sorted({
-        str(item)
-        for directory in archive_paths
-        if directory.is_dir()
-        for pattern in ("*.jsonl", "*.log")
-        for item in directory.glob(pattern)
-    })
-    selects = []
-    for f in [*files, *archived_logs]:
-        read_expr = (
-            f"read_json_auto('{f}', format='newline_delimited', "
-            f"ignore_errors=true, maximum_object_size=16777216)"
+    def sources() -> tuple[list[str], list[str], list[Path]]:
+        return (
+            _expand(patterns),
+            sorted({
+                str(item)
+                for directory in archive_paths
+                if directory.is_dir()
+                for pattern in ("*.jsonl", "*.log")
+                for item in directory.glob(pattern)
+            }),
+            sorted({
+                item
+                for directory in archive_paths
+                if directory.is_dir()
+                for item in directory.glob("*.parquet")
+            }),
         )
-        # DuckDB infers all-null columns as JSON. After UNION ALL BY NAME
-        # that JSON typing leaks into other files where the same column
-        # holds bare strings (e.g. "start"), and `rel.show()` then raises
-        # `Malformed JSON at byte 0`. Cast any per-file JSON column to
-        # VARCHAR at the source so the union sees consistent text.
-        per_file_cols = con.sql(f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
-        projection_parts: list[str] = []
-        for name, dtype, *_ in per_file_cols:
-            if name in {"usage", "attributes", "attempts"}:
-                projection_parts.append(
-                    f'CAST(to_json("{name}") AS VARCHAR) AS "{name}"')
-            elif dtype == "JSON":
-                projection_parts.append(f'CAST("{name}" AS VARCHAR) AS "{name}"')
+
+    def signature(items: tuple[list[str], list[str], list[Path]]) -> tuple:
+        result = []
+        for item in (*items[0], *items[1], *items[2]):
+            try:
+                stat = Path(item).stat()
+            except FileNotFoundError:
+                result.append((str(item), None))
             else:
-                projection_parts.append(f'"{name}"')
-        cols_sql = ", ".join(projection_parts) if projection_parts else "*"
-        jsonl_sql = "TRUE" if _is_jsonl(f) else "FALSE"
-        archive_sql = "TRUE" if f in archived_logs else "FALSE"
-        selects.append(
-            f"SELECT {cols_sql}, '{Path(f).name}' AS _src, "
-            f"{jsonl_sql} AS _jsonl, {archive_sql} AS _archive FROM {read_expr}"
-        )
-    # Include current unified monthly Parquet archives if any exist.
-    # Archives are produced from JSONL sources only, so they are always
-    # in scope for schema validation.
-    unified_files = sorted({
-        item
-        for directory in archive_paths
-        if directory.is_dir()
-        for item in directory.glob("*.parquet")
-    })
-    for parquet in unified_files:
-        read_expr = f"read_parquet('{parquet}')"
-        replacements = [
-            f'CAST(to_json("{name}") AS VARCHAR) AS "{name}"'
-            for name, dtype, *_ in con.sql(
-                f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
-            if name in {"usage", "attributes", "attempts"} and dtype != "VARCHAR"
-        ]
-        projection = "*"
-        if replacements:
-            projection += f" REPLACE ({', '.join(replacements)})"
-        selects.append(
-            f"SELECT {projection}, TRUE AS _jsonl, TRUE AS _archive "
-            f"FROM {read_expr}"
-        )
-    if not selects:
-        raise SystemExit(f"no log files matched: {patterns}")
-    union = " UNION ALL BY NAME ".join(selects)
-    con.sql(f"CREATE VIEW _log_raw AS {union}")
+                result.append((str(item), stat.st_dev, stat.st_ino,
+                               stat.st_size, stat.st_mtime_ns))
+        return tuple(result)
+
+    for attempt in range(3):
+        current_sources = sources()
+        before = signature(current_sources)
+        files, archived_logs, unified_files = current_sources
+        selects = []
+        try:
+            for f in [*files, *archived_logs]:
+                options = (
+                    "format='newline_delimited', ignore_errors=true, "
+                    "maximum_object_size=16777216"
+                )
+                read_expr = (
+                    f"read_json_auto({_sql_string(f)}, {options})"
+                )
+                # Normalize inferred JSON columns before unioning schema drift.
+                per_file_cols = con.sql(
+                    f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
+                if per_file_cols:
+                    columns = ", ".join(
+                        f"{_sql_string(name)}: {_sql_string(dtype)}"
+                        for name, dtype, *_ in per_file_cols)
+                    read_expr = (
+                        f"read_json_auto({_sql_string(f)}, {options}, "
+                        f"columns={{{columns}}})")
+                projection_parts: list[str] = []
+                for name, dtype, *_ in per_file_cols:
+                    identifier = '"' + name.replace('"', '""') + '"'
+                    if name in {"usage", "attributes", "attempts"}:
+                        projection_parts.append(
+                            f"CAST(to_json({identifier}) AS VARCHAR) AS {identifier}")
+                    elif dtype == "JSON":
+                        projection_parts.append(
+                            f"CAST({identifier} AS VARCHAR) AS {identifier}")
+                    else:
+                        projection_parts.append(identifier)
+                cols_sql = ", ".join(projection_parts) if projection_parts else "*"
+                jsonl_sql = "TRUE" if _is_jsonl(f) else "FALSE"
+                archive_sql = "TRUE" if f in archived_logs else "FALSE"
+                selects.append(
+                    f"SELECT {cols_sql}, {_sql_string(Path(f).name)} AS _src, "
+                    f"{jsonl_sql} AS _jsonl, {archive_sql} AS _archive FROM {read_expr}"
+                )
+            for parquet in unified_files:
+                read_expr = f"read_parquet({_sql_string(str(parquet))})"
+                parquet_columns = con.sql(
+                    f"DESCRIBE SELECT * FROM {read_expr}").fetchall()
+                replacements = []
+                for name, dtype, *_ in parquet_columns:
+                    if name not in {"usage", "attributes", "attempts"} or dtype == "VARCHAR":
+                        continue
+                    identifier = '"' + name.replace('"', '""') + '"'
+                    value = identifier
+                    if dtype == "VARCHAR[][]":
+                        value = (
+                            "[[COALESCE(TRY_CAST(item AS JSON), to_json(item)) "
+                            f"FOR item IN pair] FOR pair IN {identifier}]")
+                    replacements.append(
+                        f"CAST(to_json({value}) AS VARCHAR) AS {identifier}")
+                projection = "*"
+                if replacements:
+                    projection += f" REPLACE ({', '.join(replacements)})"
+                source = (
+                    f", {_sql_string(parquet.name)} AS _src"
+                    if not files and not archived_logs
+                    and not any(name == "_src" for name, *_ in parquet_columns)
+                    else "")
+                selects.append(
+                    f"SELECT {projection}{source}, TRUE AS _jsonl, TRUE AS _archive "
+                    f"FROM {read_expr}"
+                )
+            if not selects:
+                raise SystemExit(f"no log files matched: {patterns}")
+            union = " UNION ALL BY NAME ".join(selects)
+            con.sql(f"CREATE VIEW _log_raw AS {union}")
+        except duckdb.Error:
+            if attempt == 2 or before == signature(sources()):
+                raise
+        else:
+            break
 
     # DuckDB's read_json_auto types all-null columns as JSON. When the
     # union spans heterogeneous logs (some with values, some all-null),
@@ -312,9 +361,7 @@ def build_view(
     timestamp = source("ts", "timestamp")
     for name, dtype in accounting_types.items():
         attribute = (
-            "(SELECT json_extract_string(item.value, '$[1]') "
-            "FROM json_each(TRY_CAST(attributes AS JSON)) AS item "
-            f"WHERE json_extract_string(item.value, '$[0]') = '{name}' LIMIT 1)"
+            f"json_extract_string(_agent_live_attributes.attribute_map, '$.{name}')"
             if "attributes" in raw_names else "NULL"
         )
         projections.append(
@@ -346,7 +393,7 @@ def build_view(
         projections.append(
             "CASE WHEN changed_files IS NOT NULL "
             "THEN array_to_string("
-            "list_transform(changed_files, x -> regexp_replace(x, '^.*/', '')), "
+            "[regexp_replace(x, '^.*/', '') FOR x IN changed_files], "
             "', ') ELSE NULL END AS _files"
         )
     else:
@@ -374,7 +421,24 @@ def build_view(
             target_type = NORMALIZED_COLUMN_TYPES.get(col, "VARCHAR")
             projections.append(f'CAST(NULL AS {target_type}) AS "{col}"')
 
-    con.sql(f"CREATE VIEW log AS SELECT {', '.join(projections)} FROM _log_raw")
+    attribute_join = (
+        " LEFT JOIN LATERAL ("
+        "SELECT json_group_object(pair_key, pair_value) AS attribute_map FROM ("
+        "SELECT json_extract_string(item.value, '$[0]') AS pair_key, "
+        "first(json_extract(item.value, '$[1]')) AS pair_value "
+        "FROM unnest(COALESCE(TRY_CAST(_log_raw.attributes AS JSON[]), "
+        "[json_extract(_log_raw.attributes, "
+        "'/' || replace(replace(key, '~', '~0'), '/', '~1')) "
+        "FOR key IN json_keys(TRY_CAST(_log_raw.attributes AS JSON))])) "
+        "AS item(value) "
+        "WHERE json_extract_string(item.value, '$[0]') IS NOT NULL "
+        "GROUP BY pair_key)"
+        ") AS _agent_live_attributes ON TRUE"
+        if "attributes" in raw_names else ""
+    )
+    con.sql(
+        f"CREATE VIEW log AS SELECT {', '.join(projections)} "
+        f"FROM _log_raw{attribute_join}")
     # Use DuckDB's parser rather than SQL text matching: CTEs, quoted names,
     # joins and query_table all retain the public arbitrary-SQL contract.
     try:
@@ -400,7 +464,7 @@ def _clock_view(con, repositories: tuple[str, ...], *, since=None, until=None,
     damaged = con.sql(
         "SELECT count(*) FROM log WHERE _jsonl AND "
         "(ts IS NULL OR agent_name IS NULL)"
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     con.sql(
         "CREATE TABLE clock_coverage (repository VARCHAR, status VARCHAR, "
         "known_from TIMESTAMP WITH TIME ZONE, detail VARCHAR)"
@@ -466,7 +530,7 @@ def _insert_expected(con, batch) -> None:
         "json_extract_string(value, '$[0]'), json_extract_string(value, '$[1]'), "
         "TRY_CAST(json_extract_string(value, '$[2]') AS TIMESTAMP WITH TIME ZONE), "
         "json_extract_string(value, '$[3]'), json_extract_string(value, '$[4]') "
-        "FROM json_each(?)",
+        "FROM unnest(TRY_CAST(? AS JSON[])) AS item(value)",
         [json.dumps([[repository, identifier, planned.isoformat(), version, generation]
                      for repository, identifier, planned, version, generation in batch])],
     )
@@ -530,7 +594,7 @@ def check_schema(con: duckdb.DuckDBPyConnection,
             "SELECT count(*) FROM log "
             "WHERE _archive AND _jsonl AND (ts IS NULL OR agent_name IS NULL "
             "OR log_schema IS NULL OR log_schema NOT IN (1, 5))"
-        ).fetchone()[0]
+        ).fetchall()[0][0]
         invalid_count = live_invalid_count + archive_invalid_count
         if invalid_count:
             detail = (

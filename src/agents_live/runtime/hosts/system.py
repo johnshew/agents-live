@@ -1147,6 +1147,37 @@ if _IS_WINDOWS:
             return
         atexit.register(_kernel32.SetConsoleOutputCP, current)
 
+    class _FileBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_longlong),
+            ("access_time", ctypes.c_longlong),
+            ("write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("attributes", wintypes.DWORD),
+        ]
+
+    _get_file_information = _kernel32.GetFileInformationByHandleEx
+    _get_file_information.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    _get_file_information.restype = wintypes.BOOL
+
+    def change_time_ns(stream) -> int:
+        """When an open file's content or metadata last changed.
+
+        Windows ``st_ctime`` is the creation time, so it misses an
+        in-place rewrite that restores the modification time; NTFS
+        ChangeTime does not.
+        """
+        import msvcrt
+
+        info = _FileBasicInformation()
+        if not _get_file_information(
+            msvcrt.get_osfhandle(stream.fileno()), 0,
+            ctypes.byref(info), ctypes.sizeof(info),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info.change_time
+
 else:
     import fcntl
     import signal
@@ -1242,6 +1273,10 @@ else:
 
     def _detached_popen_kwargs() -> dict:
         return {"start_new_session": True}
+
+    def change_time_ns(stream) -> int:
+        """When an open file's content or metadata last changed."""
+        return os.fstat(stream.fileno()).st_ctime_ns
 
 
 # ---------------------------------------------------------------------------

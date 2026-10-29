@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
 from typing import Mapping
@@ -79,7 +80,7 @@ class AgentSpec:
     def name(self) -> str:
         return self.properties.name
 
-    @property
+    @cached_property
     def identifier(self) -> str:
         return identifier_for(self.root, self.prompt_path, self.name)
 

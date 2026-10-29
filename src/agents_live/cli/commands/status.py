@@ -45,7 +45,8 @@ def _policy(spec: agent.AgentSpec) -> dict[str, object] | None:
 
 def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     logs = paths.repo_state_dir(root) / "logs"
-    failure_streaks = obs.consecutive_failures(obs.files(logs))
+    failure_streaks = obs.consecutive_failures(
+        obs.files(logs, strict=True), strict=True)
     try:
         started = state.load(root)
         started_names = started.agents if started.initialized else frozenset()
@@ -86,6 +87,7 @@ def _rows(root: Path, selected: str | None = None) -> list[dict[str, object]]:
     observations = agent_view.runtime_observations(
         root, tuple(discovered.values()), started_names,
         is_owner_by_identifier,
+        failure_streaks=failure_streaks,
     )
     identifiers = set(discovered) | set(started_names)
     if selected:

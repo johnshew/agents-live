@@ -7510,8 +7510,14 @@ class TestDashboardRepositorySurface(TempRepository):
             self.assertEqual(1, rows[0]["agent_count"])
             self.assertEqual(self.root.name, rows[0]["name"])
 
-        with mock.patch.object(
-                dashboard.ng_run, "io_bound", side_effect=asyncio.to_thread):
+        with (
+            mock.patch.object(
+                dashboard.ng_run, "io_bound", side_effect=asyncio.to_thread),
+            mock.patch.object(
+                dashboard._COLLECTOR, "collect",
+                side_effect=lambda previous, settings, _running:
+                dashboard.collect_snapshot(previous, settings)),
+        ):
             asyncio.run(exercise())
 
     def test_registration_preserves_draft_during_fast_scope_refresh(self) -> None:
@@ -7858,6 +7864,10 @@ class TestDashboardRepositorySurface(TempRepository):
         with (
             mock.patch.object(dashboard, "_push_log") as activity,
             mock.patch.object(
+                dashboard._COLLECTOR, "collect",
+                side_effect=lambda previous, settings, _running:
+                dashboard.collect_snapshot(previous, settings)),
+            mock.patch.object(
                 dashboard.agent_view, "repository_agents",
                 wraps=dashboard.agent_view.repository_agents,
             ) as collect_agents,
@@ -7918,12 +7928,15 @@ class TestDashboardRepositorySurface(TempRepository):
 
             asyncio.run(complete_action())
 
-        self.assertEqual(4, collect_agents.call_count)
+        self.assertEqual(6, collect_agents.call_count)
 
         summaries = [
             call.args[0] for call in activity.call_args_list
             if "Snapshot for" in call.args[0]
         ]
+        self.assertTrue(any(
+            line.startswith("startup inventory: Snapshot for ")
+            and "history loading for" in line for line in summaries), summaries)
         for source in (
                 "startup", "periodic refresh", "manual refresh",
                 "action completion"):
@@ -8345,6 +8358,141 @@ class TestDashboardRepositorySurface(TempRepository):
 
 
 class TestWindowsTaskScheduling(unittest.TestCase):
+    def test_diagnostics_preserve_results_with_bounded_schedule_parsing(self) -> None:
+        now = datetime(2026, 9, 8, 12, tzinfo=timezone(timedelta(hours=-4)))
+        calendar_reason = (
+            "combined day-of-month and day-of-week restrictions cannot be "
+            "represented in a single calendar trigger; covered with daily trigger "
+            "and dispatch filtering"
+        )
+        minute_reason = (
+            "non-divisor minute step drifts across hours; covered with safe divisor step"
+        )
+        cases = (
+            ("@monthly", "0 0 1 * *", "monthly", None, None,
+             "2026-10-01T00:00:00-04:00", True, None, 12, 12, "year",
+             "exact translation with 12 native firing(s) per year"),
+            ("0 0 29 FEB *", "0 0 29 FEB *", "monthly", None, None,
+             "2028-02-29T00:00:00-04:00", True, None, 0, 0, "year",
+             "exact translation with 0 native firing(s) per year"),
+            ("*/10 9-17 * * MON-FRI", "*/10 9-17 * * MON-FRI", "weekly",
+             "PT10M", "PT8H51M", "2026-09-08T09:00:00-04:00", True, None,
+             270, 270, "week",
+             "exact translation with 270 native firing(s) per week"),
+            ("0 0 1,15 * MON", "0 0 1,15 * MON", "daily", None, None,
+             "2026-09-09T00:00:00-04:00", False, calendar_reason, 1, 0, "day",
+             "covering translation with 1 native firing(s) per day (0 due): "
+             + calendar_reason),
+            ("*/7 * * * *", "*/7 * * * *", "daily", "PT1M", "P1D",
+             "2026-09-08T00:00:00-04:00", False, minute_reason, 1440, 216, "day",
+             "covering translation with 1440 native firing(s) per day (216 due): "
+             + minute_reason),
+            ("@reboot", "@reboot", "boot", None, None, "on logon", True, None,
+             1, 1, "boot", "exact logon trigger"),
+        )
+        parse_fields = triggers.schedule_fields
+        for (expression, canonical, kind, interval, duration, boundary, exact,
+             reason, native, due, period, summary) in cases:
+            with self.subTest(expression=expression):
+                count = 0
+
+                def parse_with_budget(text: str) -> tuple[set[int], ...]:
+                    nonlocal count
+                    count += 1
+                    if count > 3:
+                        raise AssertionError("diagnostics repeatedly parsed the schedule")
+                    return parse_fields(text)
+
+                with mock.patch.object(triggers, "schedule_fields", side_effect=parse_with_budget):
+                    result = task_scheduler.diagnostics(expression, now)
+                self.assertEqual({
+                    "canonical": canonical,
+                    "native_trigger": {
+                        "kind": kind, "interval": interval, "duration": duration,
+                        "boundary": boundary,
+                    },
+                    "exact": exact,
+                    "fallback_reason": reason,
+                    "estimated_native_firings": native,
+                    "estimated_due_firings": due,
+                    "period": period,
+                    "summary": summary,
+                }, result)
+
+    def test_schedule_simulation_preserves_calendar_and_clock_boundaries(self) -> None:
+        cases = (
+            ("0 0 1,15 * MON", datetime(2026, 8, 31), datetime(2026, 9, 16),
+             [datetime(2026, 8, 31), datetime(2026, 9, 1), datetime(2026, 9, 7),
+              datetime(2026, 9, 14), datetime(2026, 9, 15)]),
+            ("0 0 * * MON", datetime(2026, 8, 31), datetime(2026, 9, 16),
+             [datetime(2026, 8, 31), datetime(2026, 9, 7), datetime(2026, 9, 14)]),
+            ("0 0 */1 * MON", datetime(2026, 9, 1), datetime(2026, 9, 3),
+             [datetime(2026, 9, 1), datetime(2026, 9, 2), datetime(2026, 9, 3)]),
+            ("0 0 * * 7", datetime(2026, 12, 31), datetime(2027, 1, 5),
+             [datetime(2027, 1, 3)]),
+            ("0 0 29 FEB *", datetime(2028, 2, 28), datetime(2028, 3, 1),
+             [datetime(2028, 2, 29)]),
+            ("@yearly", datetime(2026, 12, 31), datetime(2027, 1, 2),
+             [datetime(2027, 1, 1)]),
+            ("0 * * * *", datetime(2026, 12, 31, 23, 59, 37),
+             datetime(2027, 1, 1, 0, 1, 37), [datetime(2027, 1, 1, 0, 0, 37)]),
+        )
+        for expression, start, end, expected in cases:
+            with self.subTest(expression=expression):
+                trigger = task_scheduler.translate(expression)[0]
+                due, _native = task_scheduler.simulate_firings(trigger, expression, start, end)
+                self.assertEqual(expected, due)
+        trigger = task_scheduler.translate("@daily")[0]
+        start = datetime(2026, 1, 2)
+        end = datetime(2026, 1, 1)
+        self.assertEqual(([], []), task_scheduler.simulate_firings(trigger, "invalid", start, end))
+        with self.assertRaises(triggers.ScheduleSyntaxError):
+            task_scheduler.simulate_firings(trigger, "invalid", end, start)
+
+    def test_schedule_simulation_preserves_dst_wall_clock_behavior(self) -> None:
+        class FixtureTimeZone(tzinfo):
+            def utcoffset(self, moment: datetime | None) -> timedelta:
+                if moment is None:
+                    return timedelta(hours=-5)
+                wall = moment.replace(tzinfo=None)
+                if datetime(2026, 3, 8, 2) <= wall < datetime(2026, 3, 8, 3):
+                    return timedelta(hours=-4 if moment.fold else -5)
+                if datetime(2026, 11, 1, 1) <= wall < datetime(2026, 11, 1, 2):
+                    return timedelta(hours=-5 if moment.fold else -4)
+                daylight = datetime(2026, 3, 8, 2) <= wall < datetime(2026, 11, 1, 2)
+                return timedelta(hours=-4 if daylight else -5)
+
+            def dst(self, moment: datetime | None) -> timedelta:
+                return self.utcoffset(moment) - timedelta(hours=-5)
+
+        zone = FixtureTimeZone()
+        expression = "*/30 * * * *"
+        trigger = task_scheduler.translate(expression)[0]
+        for start, end, expected_due, expected_native in (
+            (datetime(2026, 3, 8, 1, 45, tzinfo=zone),
+             datetime(2026, 3, 8, 3, 15, tzinfo=zone),
+             [(2, 0, -5, 0), (2, 30, -5, 0), (3, 0, -4, 0)],
+             [(2, 0, -5, 0), (2, 30, -5, 0), (3, 0, -4, 0)]),
+            (datetime(2026, 11, 1, 0, 45, tzinfo=zone),
+             datetime(2026, 11, 1, 2, 15, tzinfo=zone),
+             [(1, 0, -4, 0), (1, 30, -4, 0), (2, 0, -5, 0)],
+             [(1, 0, -4, 0), (1, 30, -4, 0), (2, 0, -5, 0)]),
+            (datetime(2026, 11, 1, 1, 0, tzinfo=zone, fold=1),
+             datetime(2026, 11, 1, 2, 0, tzinfo=zone),
+             [(1, 0, -5, 1), (1, 30, -4, 0), (2, 0, -5, 0)],
+             [(1, 0, -4, 0), (1, 30, -4, 0), (2, 0, -5, 0)]),
+        ):
+            with self.subTest(start=start):
+                due, native = task_scheduler.simulate_firings(trigger, expression, start, end)
+                def clock_values(moments: list[datetime]) -> list[tuple[int, int, int, int]]:
+                    return [
+                        (moment.hour, moment.minute,
+                         int(moment.utcoffset().total_seconds() // 3600), moment.fold)
+                        for moment in moments
+                    ]
+                self.assertEqual(expected_due, clock_values(due))
+                self.assertEqual(expected_native, clock_values(native))
+
     def test_repeating_calendar_keeps_today_when_future_slots_remain(self) -> None:
         from xml.etree import ElementTree as ET
 

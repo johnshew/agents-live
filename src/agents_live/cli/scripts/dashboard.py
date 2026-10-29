@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["duckdb", "nicegui>=2.0", "PyYAML", "pywebview", "uvicorn>=0.36"]
+# dependencies = ["duckdb", "nicegui>=2.0", "pytz", "PyYAML", "pywebview", "uvicorn>=0.36"]
 # ///
 """Interactive agents-live control panel (single host).
 
@@ -36,9 +36,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
-from collections import deque
+from collections import Counter, OrderedDict, deque
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -51,6 +53,7 @@ from agents_live import agent, obs, paths, plugins, preflight, runtime, state  #
 from agents_live.cli import agent_view, identity, lifecycle  # noqa: E402
 from agents_live.cli.commands import repos as repo_commands  # noqa: E402
 from agents_live.cli.scripts import dashboards  # noqa: E402
+from agents_live.cli.scripts.dashboard_collection import DashboardCollector  # noqa: E402
 from agents_live.obs import query as obs_query  # noqa: E402
 from agents_live.runtime.hosts import system as hostruntime  # noqa: E402
 from agents_live.state import ownership, registry as repos  # noqa: E402
@@ -127,16 +130,44 @@ STATE: dict = {
     "models": {},
     "health_check_running": False,
 }
-_SCAN_CACHE: tuple[
-    tuple[object, ...],
-    tuple[
+_SCAN_CACHE: OrderedDict[
+    str, tuple[
+        tuple[object, ...],
         dict[str, tuple[str | None, str | None, str]],
-        dict[str, tuple[float, float]],
-    ],
-] | None = None
+        tuple[tuple[str, datetime, float], ...],
+        dict[str, int],
+    ]
+] = OrderedDict()
+_SCAN_CACHE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _HistoryFile:
+    runs: dict[str, dict[str, tuple[datetime, object, str, int]]]
+    costs: tuple[tuple[str, datetime, float], ...]
+    resets: dict[str, tuple[datetime, str]]
+    errors: dict[str, Counter[datetime]]
+
+
+_FILE_SCAN_CACHE: OrderedDict[
+    str, dict[str, tuple[tuple[object, ...], _HistoryFile]]
+] = OrderedDict()
+_STRUCTURED_CACHE: OrderedDict[
+    str, tuple[
+        tuple[object, ...], datetime,
+        tuple[tuple[object, datetime], ...], dict[str, str],
+    ]
+] = OrderedDict()
+_STRUCTURED_CACHE_LOCK = threading.Lock()
 _PAGE_REFRESHES: dict[str, object] = {}
 _PAGE_LOGS: dict[str, object] = {}
 _REPOSITORY_MUTATION_LOCK = asyncio.Lock()
+_COLLECTOR = DashboardCollector()
+_LOADING_SERVICE = {
+    "state": "checking", "label": "Checking host services",
+    "schedule": "checking", "smoketest": {"status": "checking"},
+    "can_run": False,
+}
 
 
 def _client_key() -> str | None:
@@ -315,11 +346,12 @@ def _scan_signature(files: tuple[Path, ...],
                     aliases: dict[str, str]) -> tuple[object, ...]:
     signatures = []
     for path in files:
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        signatures.append((str(path), stat.st_size, stat.st_mtime_ns))
+        with path.open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            change_time = hostruntime.change_time_ns(stream)
+        signatures.append((
+            str(path), stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, change_time))
     return (tuple(signatures), tuple(sorted(aliases.items())))
 
 
@@ -327,32 +359,26 @@ def _scan(aliases: dict[str, str] | None = None,
           logs_dir: Path | None = None,
           ) -> tuple[dict[str, tuple[str | None, str | None, str]],
                      dict[str, tuple[float, float]]]:
-    """Return run/cost indexes, reusing them while the log set is unchanged."""
-    global _SCAN_CACHE
-    aliases = aliases or {}
-    files = obs.files(_require_repo_path(logs_dir or LOGS_DIR))
-    signature = _scan_signature(files, aliases)
-    if _SCAN_CACHE is not None and _SCAN_CACHE[0] == signature:
-        return _SCAN_CACHE[1]
-    now = datetime.now(timezone.utc)
-    day_cutoff = now - timedelta(days=1)
-    week_cutoff = now - timedelta(days=7)
-    newest: dict[str, dict[str, tuple[datetime, object, str]]] = {}
-    totals: dict[str, list[float]] = {}
-    for entry in obs.load(files):
-        raw_identifier = entry.get("agent_name")
-        if not isinstance(raw_identifier, str):
+    runs, costs, _failures = _history_scan(aliases, logs_dir)
+    return runs, costs
+
+
+def _read_history_file(path: Path) -> _HistoryFile:
+    newest: dict[str, dict[str, tuple[datetime, object, str, int]]] = {}
+    costs: list[tuple[str, datetime, float]] = []
+    resets: dict[str, tuple[datetime, str]] = {}
+    errors: dict[str, Counter[datetime]] = {}
+    for sequence, entry in enumerate(obs.load((path,), strict=True)):
+        identifier = entry.get("agent_name")
+        timestamp = entry.get("ts")
+        if not isinstance(identifier, str):
             continue
-        identifier = aliases.get(raw_identifier, raw_identifier)
-        moment = _moment(entry.get("ts"))
+        moment = _moment(timestamp)
         if moment is None:
             continue
         usd = _entry_cost_usd(entry)
-        if usd is not None and moment >= week_cutoff:
-            running = totals.setdefault(identifier, [0.0, 0.0])
-            running[1] += usd
-            if moment >= day_cutoff:
-                running[0] += usd
+        if usd is not None:
+            costs.append((identifier, moment, usd))
         if entry.get("phase") != "done":
             continue
         status = str(entry.get("status", "")).lower()
@@ -362,7 +388,124 @@ def _scan(aliases: dict[str, str] | None = None,
         for slot in ("any", status):
             current = slots.get(slot)
             if current is None or moment > current[0]:
-                slots[slot] = (moment, entry.get("ts"), status)
+                slots[slot] = (moment, timestamp, status, sequence)
+        try:
+            original_moment = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if original_moment.tzinfo is None:
+            continue
+        if status == "error":
+            errors.setdefault(identifier, Counter())[original_moment] += 1
+        else:
+            outcome = (original_moment, status)
+            if identifier not in resets or outcome > resets[identifier]:
+                resets[identifier] = outcome
+    for identifier, outcomes in errors.items():
+        reset = resets.get(identifier)
+        if reset is not None:
+            errors[identifier] = Counter({
+                moment: count for moment, count in outcomes.items()
+                if (moment, "error") > reset
+            })
+    return _HistoryFile(newest, tuple(costs), resets, errors)
+
+
+def _history_scan(
+    aliases: dict[str, str] | None = None,
+    logs_dir: Path | None = None,
+) -> tuple[dict[str, tuple[str | None, str | None, str]],
+           dict[str, tuple[float, float]], dict[str, int]]:
+    """Return run/cost indexes, reusing unchanged per-file history."""
+    aliases = aliases or {}
+    directory = _require_repo_path(logs_dir or LOGS_DIR)
+    files = obs.files(directory, strict=True)
+    signature = _scan_signature(files, aliases)
+    cache_key = str(directory)
+    with _SCAN_CACHE_LOCK:
+        cached = _SCAN_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            _SCAN_CACHE.move_to_end(cache_key)
+            if cache_key in _FILE_SCAN_CACHE:
+                _FILE_SCAN_CACHE.move_to_end(cache_key)
+        else:
+            cached = None
+    now = datetime.now(timezone.utc)
+    day_cutoff = now - timedelta(days=1)
+    week_cutoff = now - timedelta(days=7)
+    if cached is not None:
+        runs, cost_events = cached[1], cached[2]
+        totals: dict[str, list[float]] = {}
+        for identifier, moment, usd in cost_events:
+            if moment < week_cutoff:
+                continue
+            running = totals.setdefault(identifier, [0.0, 0.0])
+            running[1] += usd
+            if moment >= day_cutoff:
+                running[0] += usd
+        return runs, {
+            identifier: (day, week)
+            for identifier, (day, week) in totals.items()
+        }, cached[3]
+    with _SCAN_CACHE_LOCK:
+        previous_files = dict(_FILE_SCAN_CACHE.get(cache_key, {}))
+    for attempt in range(3):
+        signatures = {item[0]: item for item in signature[0]}
+        current_files: dict[str, tuple[tuple[object, ...], _HistoryFile]] = {}
+        for path in files:
+            name = str(path)
+            file_signature = signatures[name]
+            prior = previous_files.get(name)
+            history = (
+                prior[1] if prior is not None and prior[0] == file_signature
+                else _read_history_file(path))
+            current_files[name] = file_signature, history
+        next_files = obs.files(directory, strict=True)
+        next_signature = _scan_signature(next_files, aliases)
+        if next_signature == signature:
+            break
+        previous_files = current_files
+        files, signature = next_files, next_signature
+    else:
+        raise OSError("Log files kept changing during history collection; refresh to retry")
+
+    newest: dict[str, dict[str, tuple[datetime, object, str, int, int]]] = {}
+    totals: dict[str, list[float]] = {}
+    cost_events: list[tuple[str, datetime, float]] = []
+    resets: dict[str, tuple[datetime, str]] = {}
+    errors: dict[str, Counter[datetime]] = {}
+    for file_order, path in enumerate(files):
+        history = current_files[str(path)][1]
+        for raw_identifier, raw_slots in history.runs.items():
+            identifier = aliases.get(raw_identifier, raw_identifier)
+            slots = newest.setdefault(identifier, {})
+            for slot, (moment, timestamp, status, sequence) in raw_slots.items():
+                candidate = (moment, timestamp, status, file_order, sequence)
+                current = slots.get(slot)
+                if (current is None or moment > current[0]
+                        or moment == current[0]
+                        and (file_order, sequence) < (current[3], current[4])):
+                    slots[slot] = candidate
+        for raw_identifier, moment, usd in history.costs:
+            identifier = aliases.get(raw_identifier, raw_identifier)
+            cost_events.append((identifier, moment, usd))
+            if moment >= week_cutoff:
+                running = totals.setdefault(identifier, [0.0, 0.0])
+                running[1] += usd
+                if moment >= day_cutoff:
+                    running[0] += usd
+        for identifier, reset in history.resets.items():
+            if identifier not in resets or reset > resets[identifier]:
+                resets[identifier] = reset
+        for identifier, outcomes in history.errors.items():
+            errors.setdefault(identifier, Counter()).update(outcomes)
+    failures = {
+        identifier: count
+        for identifier, outcomes in errors.items()
+        if (count := sum(
+            number for moment, number in outcomes.items()
+            if identifier not in resets or (moment, "error") > resets[identifier]))
+    }
     runs = {
         identifier: (
             slots["ok"][1] if "ok" in slots else None,
@@ -373,9 +516,16 @@ def _scan(aliases: dict[str, str] | None = None,
     }
     costs = {
         identifier: (day, week) for identifier, (day, week) in totals.items()}
-    result = runs, costs
-    _SCAN_CACHE = signature, result
-    return result
+    with _SCAN_CACHE_LOCK:
+        _SCAN_CACHE[cache_key] = signature, runs, tuple(cost_events), failures
+        _SCAN_CACHE.move_to_end(cache_key)
+        _FILE_SCAN_CACHE[cache_key] = current_files
+        _FILE_SCAN_CACHE.move_to_end(cache_key)
+        while len(_SCAN_CACHE) > 32:
+            _SCAN_CACHE.popitem(last=False)
+        while len(_FILE_SCAN_CACHE) > 32:
+            _FILE_SCAN_CACHE.popitem(last=False)
+    return runs, costs, failures
 
 
 def _running_version() -> str:
@@ -415,72 +565,123 @@ def _structured_log_snapshot(agent_names: dict[str, str] | set[str],
     # Both suffixes: a run's outcome is written to <identifier>.jsonl, so
     # a *.log glob counted zero errors with failed runs on the screen.
     patterns = [str(logs_dir / "*.jsonl"), str(logs_dir / "*.log")]
-    files = obs.files(logs_dir)
-    if not files:
-        return {}, {}, {"state": "available", "detail": None}
-    damaged = obs_query.damaged(files)
-    connection = structured_qlog.duckdb.connect(":memory:")
+    archive = logs_dir / "archive"
     try:
-        structured_qlog.build_view(connection, patterns,
-                                   archives=logs_dir / "archive")
-        columns = {
-            row[0] for row in connection.sql("DESCRIBE log").fetchall()
-        }
-        if "run_id" in columns and "event_id" in columns:
-            event_identity = "CASE WHEN run_id IS NULL THEN event_id ELSE run_id END"
-        elif "event_id" in columns:
-            event_identity = "event_id"
-        else:
-            event_identity = "concat(_src, CAST(ts AS VARCHAR))"
-        error_rows = connection.sql(
-            "SELECT agent_name, count(*) FROM ("
-            "SELECT agent_name, phase, status, level, message "
-            "FROM log WHERE ts >= now() - INTERVAL 1 HOUR "
-            "AND (level = 'error' OR status = 'error') "
-            "QUALIFY row_number() OVER (PARTITION BY "
-            f"{event_identity}, "
-            "agent_name, phase, status, level, message ORDER BY ts) = 1"
-            ") errors "
-            "GROUP BY agent_name ORDER BY agent_name NULLS LAST"
-        ).fetchall()
-        model_rows = []
-        if "model" in columns:
-            model_rows = connection.sql(
-                "SELECT agent_name, model FROM log "
-                "WHERE agent_name IS NOT NULL AND model IS NOT NULL "
-                "QUALIFY row_number() OVER ("
-                "PARTITION BY agent_name ORDER BY ts DESC) = 1"
-            ).fetchall()
-    except (OSError, structured_qlog.duckdb.Error) as exc:
+        files = obs.files(logs_dir, strict=True)
+        parquet_files = tuple(sorted(archive.glob("*.parquet"))) if archive.is_dir() else ()
+        if not files and not parquet_files:
+            with _STRUCTURED_CACHE_LOCK:
+                _STRUCTURED_CACHE.pop(str(logs_dir), None)
+            return {}, {}, {"state": "available", "detail": None}
+        signature = _scan_signature((*files, *parquet_files), {})
+    except OSError as exc:
         return {}, {}, {
-            "state": "unavailable",
-            "detail": f"Structured activity query failed: {exc}",
+            "state": "unavailable", "detail": f"Cannot inspect log history: {exc}"}
+    now = datetime.now(timezone.utc)
+    cache_key = str(logs_dir)
+    with _STRUCTURED_CACHE_LOCK:
+        cached = _STRUCTURED_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature and now >= cached[1]:
+            _STRUCTURED_CACHE.move_to_end(cache_key)
+        else:
+            cached = None
+    damaged = 0
+    if cached is None:
+        try:
+            connection = structured_qlog.duckdb.connect(":memory:")
+        except structured_qlog.duckdb.Error as exc:
+            return {}, {}, {
+                "state": "unavailable",
+                "detail": f"Structured activity query failed: {exc}",
+            }
+        try:
+            damaged = obs_query.damaged(files, strict=True)
+            structured_qlog.build_view(connection, patterns, archives=archive)
+            columns = {
+                row[0] for row in connection.sql("DESCRIBE log").fetchall()
+            }
+            if "run_id" in columns and "event_id" in columns:
+                event_identity = "CASE WHEN run_id IS NULL THEN event_id ELSE run_id END"
+            elif "event_id" in columns:
+                event_identity = "event_id"
+            else:
+                event_identity = "concat(_src, CAST(ts AS VARCHAR))"
+            raw_errors = connection.sql(
+                "SELECT agent_name, CAST(max(ts) AS VARCHAR) FROM log "
+                f"WHERE ts >= CAST('{(now - timedelta(hours=1)).isoformat()}' "
+                "AS TIMESTAMP WITH TIME ZONE) "
+                "AND (level = 'error' OR status = 'error') "
+                f"GROUP BY {event_identity}, agent_name, phase, status, level, message"
+            ).fetchall()
+            error_rows = []
+            for name, timestamp in raw_errors:
+                moment = _moment(timestamp)
+                if moment is None:
+                    raise ValueError(f"invalid structured error timestamp: {timestamp!r}")
+                error_rows.append((name, moment))
+            error_rows = tuple(error_rows)
+            model_rows = []
+            if "model" in columns:
+                model_rows = connection.sql(
+                    "SELECT agent_name, model FROM log "
+                    "WHERE agent_name IS NOT NULL AND model IS NOT NULL "
+                    "QUALIFY row_number() OVER ("
+                    "PARTITION BY agent_name ORDER BY ts DESC) = 1"
+                ).fetchall()
+        except (OSError, ValueError, SystemExit, structured_qlog.duckdb.Error) as exc:
+            return {}, {}, {
+                "state": "unavailable",
+                "detail": f"Structured activity query failed: {exc}",
+            }
+        finally:
+            connection.close()
+        models = {
+            str(name): str(model)
+            for name, model in model_rows
+            if name and model
         }
-    finally:
-        connection.close()
+        try:
+            current_files = obs.files(logs_dir, strict=True)
+            current_parquet = (
+                tuple(sorted(archive.glob("*.parquet"))) if archive.is_dir() else ())
+            changed = _scan_signature(
+                (*current_files, *current_parquet), {}) != signature
+        except OSError as exc:
+            return {}, {}, {
+                "state": "unavailable", "detail": f"Cannot inspect log history: {exc}"}
+        if not damaged and not changed:
+            with _STRUCTURED_CACHE_LOCK:
+                _STRUCTURED_CACHE[cache_key] = signature, now, error_rows, models
+                _STRUCTURED_CACHE.move_to_end(cache_key)
+                while len(_STRUCTURED_CACHE) > 32:
+                    _STRUCTURED_CACHE.popitem(last=False)
+    else:
+        error_rows, models = cached[2], cached[3]
+        changed = False
 
     errors: dict[str, int] = {}
     framework_errors = 0
-    for raw_name, count in error_rows:
+    cutoff = now - timedelta(hours=1)
+    for raw_name, moment in error_rows:
+        if moment < cutoff:
+            continue
         display = display_label(str(raw_name or ""))
         if display is not None:
-            errors[display] = errors.get(display, 0) + int(count)
+            errors[display] = errors.get(display, 0) + 1
         else:
-            framework_errors += int(count)
+            framework_errors += 1
     if framework_errors:
         errors["framework"] = framework_errors
-    models = {
-        str(name): str(model)
-        for name, model in model_rows
-        if name and model
-    }
-    evidence = {
-        "state": "partial" if damaged else "available",
-        "detail": (
+    details = []
+    if damaged:
+        details.append(
             f"{damaged} malformed structured log record"
-            f"{'s were' if damaged != 1 else ' was'} omitted"
-            if damaged else None
-        ),
+            f"{'s were' if damaged != 1 else ' was'} omitted")
+    if changed:
+        details.append("Log files changed during collection; refresh to retry")
+    evidence = {
+        "state": "partial" if details else "available",
+        "detail": "; ".join(details) if details else None,
     }
     return errors, models, evidence
 
@@ -1004,14 +1205,23 @@ def agent_rows() -> list[dict]:
 
 
 def _agent_rows_for(root: Path, agents: list[dict],
-                    reported_models: dict[str, str] | None = None
+                    reported_models: dict[str, str] | None = None, *,
+                    history_loading: bool = False,
+                    history_incomplete: bool = False,
+                    indexes: tuple[
+                        dict[str, tuple[str | None, str | None, str]],
+                        dict[str, tuple[float, float]],
+                    ] | None = None,
                     ) -> list[dict]:
     """Shared informational row model for single and aggregate dashboards."""
     rows: list[dict] = []
     host = ownership.current_label()
     ownership_mode = ownership.mode(root)
     logs_dir = paths.repo_state_dir(root) / "logs"
-    runs, costs = _scan(_history_aliases(agents), logs_dir=logs_dir)
+    runs, costs = (
+        ({}, {}) if history_loading else
+        indexes if indexes is not None else
+        _scan(_history_aliases(agents), logs_dir=logs_dir))
     for agent in agents:
         name = agent["name"]
         identifier = agent["identifier"]
@@ -1025,6 +1235,8 @@ def _agent_rows_for(root: Path, agents: list[dict],
             "-" if ownership_available else "Unavailable"
         )
         ok_ago, err_ago, last_status = last_runs(identifier, runs)
+        if history_loading:
+            ok_ago, err_ago = "Loading", "Loading"
         unhealthy = last_status == "error"
         watcher_liveness = str(agent.get("watcherLiveness", "not-required"))
         observations_available = agent.get("observationsAvailable", True)
@@ -1042,6 +1254,8 @@ def _agent_rows_for(root: Path, agents: list[dict],
             ) if reason
         ]
         health_reasons = list(partial_reasons)
+        if history_incomplete:
+            health_reasons.append("Run history incomplete")
         if last_status == "error":
             health_reasons.append("Failing: newest run")
         watcher_reason = {
@@ -1052,13 +1266,15 @@ def _agent_rows_for(root: Path, agents: list[dict],
         if watcher_reason:
             health_reasons.append(watcher_reason)
         health_text = "; ".join(health_reasons) or (
+            "History loading" if history_loading else
             "Healthy" if last_status == "ok" else "No completed runs")
         unhealthy = unhealthy or bool(partial_reasons)
         local = _is_local(agent)
         runtime = agent.get("runtime") or "agency copilot"
         agent_display = runtime if runtime != "none" else "handler"
         cost_day, cost_week = (
-            agent_cost(identifier, costs) if runtime != "none"
+            ("Loading", "Loading") if history_loading and runtime != "none"
+            else agent_cost(identifier, costs) if runtime != "none"
             else ("-", "-"))
         cost_values = costs.get(identifier)
         model = _agent_model(agent)
@@ -1067,7 +1283,8 @@ def _agent_rows_for(root: Path, agents: list[dict],
         model_tip = (
             f"Configured model: {agent.get('model') or 'provider default'}; "
             f"effort: {agent.get('effort') or 'provider default'}; "
-            f"last reported model: {reported_model or 'unknown'}")
+            f"last reported model: "
+            f"{'loading' if history_loading else reported_model or 'unknown'}")
         if agent.get("runtime") == "none":
             model_tip = "No provider"
         elif not agent.get("runtime"):
@@ -1851,9 +2068,19 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
     def confirm_unregister(row: dict) -> None:
         async def unregister() -> None:
             confirmation.close()
-            await mutate({"action": "remove", "repo": row["name"]})
+            try:
+                await mutate({"action": "remove", "repo": row["name"]})
+            finally:
+                confirmation.delete()
 
-        with ui.dialog() as confirmation, ui.card().classes("max-w-lg"):
+        def cancel() -> None:
+            confirmation.close()
+            confirmation.delete()
+
+        # A background refresh rebuilds this panel; a dialog created inside
+        # it would vanish under the user, so it belongs to the page layout.
+        with ui.context.client.layout, ui.dialog() as confirmation, \
+                ui.card().classes("max-w-lg"):
             ui.label(f"Unregister {row['name']}?").classes(
                 "text-base font-medium")
             ui.label(
@@ -1862,7 +2089,7 @@ def repository_settings_panel(rows: list[dict] | None = None, *,
                 "not be deleted."
             ).classes("text-sm")
             with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("Cancel", on_click=confirmation.close).props(
+                ui.button("Cancel", on_click=cancel).props(
                     "flat no-caps")
                 ui.button(
                     "Unregister",
@@ -2090,7 +2317,9 @@ def _repository_mutation(payload: dict, *, page_state: dict | None = None) -> di
     return result
 
 
-def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
+def _all_repos_groups(previous_groups: list[dict] | None = None, *,
+                      include_history: bool = True,
+                      initial_repository: str | None = None) -> list[dict]:
     previous = {
         (str(group.get("name")), str(group.get("path"))): group
         for group in (previous_groups or [])
@@ -2130,18 +2359,40 @@ def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
                     "detail": detail,
                 },
             })
+        if error is None and initial_repository is not None and alias != initial_repository:
+            group["activity"] = {
+                "state": "loading", "detail": "Run history is loading"}
+            group["collection"] = {
+                "state": "loading", "valid_agents": 0,
+                "detail": "Agent inventory is loading",
+            }
+            groups.append(group)
+            continue
         if error is None:
             root = Path(path)
             try:
                 agents = [
                     _agent_view_dict(row)
                     for row in agent_view.repository_agents(
-                        root, ownership_rate_limit_secs=10**9)
+                        root, ownership_rate_limit_secs=10**9,
+                        include_failure_history=False)
                 ]
                 group["collection"] = _collection_status(agents)
                 names = {row["identifier"]: row["name"] for row in agents}
-                errors, models, activity = _structured_log_snapshot(
-                    names, paths.repo_state_dir(root) / "logs")
+                if include_history:
+                    runs, costs, failures = _history_scan(
+                        _history_aliases(agents),
+                        paths.repo_state_dir(root) / "logs")
+                    for row in agents:
+                        if row["identifier"]:
+                            row["consecutiveFailures"] = failures.get(
+                                row["identifier"], 0)
+                    errors, models, activity = _structured_log_snapshot(
+                        names, paths.repo_state_dir(root) / "logs")
+                else:
+                    runs, costs = {}, {}
+                    errors, models = {}, {}
+                    activity = {"state": "loading", "detail": "Run history is loading"}
                 group["errors"] = errors
                 group["activity"] = activity
                 group["rows"] = [
@@ -2152,7 +2403,10 @@ def _all_repos_groups(previous_groups: list[dict] | None = None) -> list[dict]:
                         "repository_identifier": f"{alias}/{row['identifier']}",
                     }
                     for row in _agent_rows_for(
-                        root, agents, reported_models=models)
+                        root, agents, reported_models=models,
+                        history_loading=not include_history,
+                        history_incomplete=activity["state"] in {"partial", "unavailable"},
+                        indexes=(runs, costs))
                 ]
             except (OSError, ValueError, agent.DefinitionError,
                     state.StartedStateUnavailable,
@@ -2241,13 +2495,16 @@ def all_repo_groups(settings: dict | None = None) -> list[dict]:
 
 
 def operational_snapshot(previous_snapshot: dict | None = None, *,
-                         settings: dict | None = None) -> dict:
+                         settings: dict | None = None,
+                         include_history: bool = True,
+                         initial_repository: str | None = None) -> dict:
     """One coherent model for header, inventory, filters, and actions."""
     settings = STATE["all_repos"] if settings is None else settings
     selected = settings.get("repo", "All")
     repository_groups = _all_repos_groups(
         previous_snapshot.get("repository_groups", [])
-        if previous_snapshot else None)
+        if previous_snapshot else None, include_history=include_history,
+        initial_repository=initial_repository)
     for group in repository_groups:
         group["rows"] = _sorted_agent_rows(
             group["rows"],
@@ -2277,6 +2534,28 @@ def operational_snapshot(previous_snapshot: dict | None = None, *,
     }
 
 
+def collect_snapshot(previous: dict, settings: dict,
+                     include_history: bool = True,
+                     initial_inventory: bool = False) -> tuple[dict, dict]:
+    with hostruntime.enumeration_pass():
+        entries = repos.entries(repos.load())
+        registered = [alias for alias, _path, _error in entries]
+        if settings.get("repo") not in ["All", *registered]:
+            settings["repo"] = "All"
+        initial_repository = None
+        if initial_inventory:
+            selected = settings.get("repo", "All")
+            initial_repository = (
+                selected if selected != "All" else next(
+                    (alias for alias, _path, error in entries if error is None), ""))
+        return (
+            operational_snapshot(
+                previous, settings=settings, include_history=include_history,
+                initial_repository=initial_repository),
+            host_service_status() if include_history else _LOADING_SERVICE,
+        )
+
+
 def _registered_repository_names() -> list[str]:
     """Read selector names without repeating agent discovery."""
     return [alias for alias, _path, _error in repos.entries(repos.load())]
@@ -2295,7 +2574,7 @@ def _repository_rows_from_groups(groups: list[dict]) -> list[dict]:
             "error": group["error"] or collection["detail"],
             "agent_count": (
                 collection["valid_agents"]
-                if collection["state"] not in {"unavailable", "stale"}
+                if collection["state"] not in {"unavailable", "stale", "loading"}
                 else None),
             "discovery_state": (
                 "failed" if collection["state"] == "stale" else
@@ -2366,17 +2645,27 @@ def _operational_summary(snapshot: dict, *, source: str | None = None) -> str:
         name for name, evidence in snapshot["activity"].items()
         if evidence["state"] == "partial"
     ]
+    loading_activity = [
+        name for name, evidence in snapshot["activity"].items()
+        if evidence["state"] == "loading"
+    ]
     errors = ", ".join(
         f"{name} {count}" for name, count in snapshot["errors"].items()) or "none"
     if unavailable_activity:
         errors += "; unavailable for " + ", ".join(unavailable_activity)
     if partial_activity:
         errors += "; partial for " + ", ".join(partial_activity)
+    if loading_activity:
+        errors += "; history loading for " + ", ".join(loading_activity)
+    failing_label = (
+        f"at least {failing} failing"
+        if unavailable_activity or partial_activity or loading_activity
+        else f"{failing} failing")
     prefix = f"{source}: " if source else ""
     return (
         prefix +
         f"Snapshot for {scope}: {len(groups)} repositories, {len(rows)} agents, "
-        f"{failing} failing, {unavailable} unavailable, {partial} partial; "
+        f"{failing_label}, {unavailable} unavailable, {partial} partial; "
         f"errors in last hour: {errors}; {_attention_summary(snapshot)}"
     )
 
@@ -2391,13 +2680,17 @@ def _attention_summary(snapshot: dict) -> str:
         group["available"]
         and group["collection"]["state"] != "available"
         for group in groups)
+    unknown_history = sum(
+        evidence["state"] != "available"
+        for evidence in snapshot.get("activity", {}).values())
     host_issue = snapshot["health"].get("level") not in {"healthy", "checking"}
-    if not (failing or unavailable or partial or host_issue):
+    if not (failing or unavailable or partial or host_issue or unknown_history):
         return f"No items need attention in {scope}."
     return (
         f"Attention in {scope}: {failing} failing agents, "
         f"{unavailable} unavailable repositories, {partial} partial repositories, "
-        f"{int(host_issue)} host issues."
+        f"{int(host_issue)} host issues, "
+        f"{unknown_history} repositories with incomplete run history."
     )
 
 
@@ -2513,7 +2806,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     ui.button(
                         icon="close", on_click=settings_dialog.close
                     ).props("flat round dense autofocus aria-label=Close-settings")
-                host_service_panel()
+                host_service_panel(_LOADING_SERVICE)
                 repository_settings_panel(
                     _repository_rows_from_groups(
                         snapshot["repository_groups"]),
@@ -2715,22 +3008,26 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 heading.set_visibility(grouped)
                 detail = ui.label().classes("text-sm text-orange-600 px-1")
                 empty = ui.label("No matching agents.").classes("text-sm text-gray-500 px-1")
-                columns = _AGGREGATE_COLUMNS if grouped else [
-                    {"name": "repository", "label": "Repository", "field": "repository"},
-                    *_AGGREGATE_COLUMNS,
-                ]
-                table = ui.table(
-                    columns=[{**column, "sortable": False} for column in columns],
-                    rows=[], row_key="repository_identifier",
-                    pagination={"rowsPerPage": 0},
-                ).classes("virtualized-agent-table w-full").props(
-                    "flat dense hide-bottom separator=none "
-                    f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
-                    ":virtual-scroll-target=\"'.agent-table-scroll'\"")
-                _add_agent_information_slots(table)
-                _add_agent_action_slots(table, aggregate=True)
         return dict(section=section, name=name, path=path, status=status,
-                    detail=detail, empty=empty, table=table)
+                    detail=detail, empty=empty, table=None)
+
+    def create_inventory_table(view: dict, grouped: bool):
+        columns = _AGGREGATE_COLUMNS if grouped else [
+            {"name": "repository", "label": "Repository", "field": "repository"},
+            *_AGGREGATE_COLUMNS,
+        ]
+        with view["section"]:
+            table = ui.table(
+                columns=[{**column, "sortable": False} for column in columns],
+                rows=[], row_key="repository_identifier",
+                pagination={"rowsPerPage": 0},
+            ).classes("virtualized-agent-table w-full").props(
+                "flat dense hide-bottom separator=none "
+                f"virtual-scroll virtual-scroll-item-size={VIRTUAL_ROW_SIZE} "
+                ":virtual-scroll-target=\"'.agent-table-scroll'\"")
+            _add_agent_information_slots(table)
+            _add_agent_action_slots(table, aggregate=True)
+        return table
 
     def render_inventory(current: dict) -> None:
         active_filters = 0
@@ -2757,6 +3054,9 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         inventory_summary.text = (
             f"{visible_rows} of {len(current['rows'])} agents in "
             f"{len(visible_groups)} repositories")
+        if any(group["collection"]["state"] == "loading"
+               for group in current["groups"]):
+            inventory_summary.text += " (inventory loading)"
         grouped = state_settings.get("grouped", True)
         mounted, deferred = _repository_window(
             visible_groups, state_settings.get("expanded_repositories", [])) if grouped else ([], [])
@@ -2787,11 +3087,18 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     f"{group['collection']['state'].title()} | {len(group['rows'])} agents")
                 view["detail"].text = group["error"] or group["collection"]["detail"] or ""
             view["detail"].set_visibility(bool(view["detail"].text))
+            view["empty"].text = (
+                "Loading agents..." if grouped
+                and group["collection"]["state"] == "loading"
+                else "No matching agents.")
             view["empty"].set_visibility(not group["rows"])
             table = view["table"]
-            table.rows = group["rows"]
-            table.set_visibility(bool(group["rows"]))
-            table.update()
+            if table is None and group["rows"]:
+                table = view["table"] = create_inventory_table(view, grouped)
+            if table is not None:
+                table.set_visibility(bool(group["rows"]))
+                table.rows = group["rows"]
+                table.update()
         persist_view()
 
     def update_labels(current: dict) -> None:
@@ -2813,15 +3120,6 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             f"Refresh failed; showing the last coherent snapshot. {refresh_error}"
             if refresh_error else health["tip"])
 
-    def collect_snapshot(previous: dict, settings: dict) -> tuple[dict, dict]:
-        with hostruntime.enumeration_pass():
-            if settings.get("repo") not in ["All", *_registered_repository_names()]:
-                settings["repo"] = "All"
-            return (
-                operational_snapshot(previous, settings=settings),
-                host_service_status(),
-            )
-
     async def rebuild(*, announce: bool = True,
             source: str = "manual refresh",
             collected: tuple[dict, dict] | None = None) -> None:
@@ -2832,9 +3130,17 @@ def _build_operational_page(page_state: dict | None = None) -> None:
             try:
                 observed = collected
                 if observed is None:
+                    with page_client:
+                        # Disabling the button would drop keyboard focus;
+                        # refresh_lock already serializes repeated clicks.
+                        health_label.text = (
+                            f"Refreshing data; host {snapshot['health']['text']}")
+                        if announce:
+                            _push_log(f"{source}: Refreshing data")
                     observed = await ng_run.io_bound(
-                        collect_snapshot, copy.deepcopy(snapshot),
-                        copy.deepcopy(state_settings))
+                        _COLLECTOR.collect, copy.deepcopy(snapshot),
+                        copy.deepcopy(state_settings),
+                        bool(STATE.get("health_check_running")))
                 if observed is None:
                     raise asyncio.CancelledError
                 refreshed, service = observed
@@ -2844,11 +3150,18 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                     state_settings["repo"] = "All"
                 if refreshed["scope"] != state_settings["repo"]:
                     return
-            except (OSError, ValueError, agent.DefinitionError,
+            except (OSError, ValueError, RuntimeError, agent.DefinitionError,
                     state.StartedStateUnavailable) as exc:
                 with page_client:
                     snapshot = {**snapshot, "refresh_error": str(exc)}
                     update_labels(snapshot)
+                    _safe_ui(host_service_panel.refresh, {
+                        "state": "unavailable",
+                        "label": "Host service status unavailable",
+                        "schedule": "unknown",
+                        "smoketest": {"status": "unknown", "reason": str(exc)},
+                        "can_run": False,
+                    })
                     if announce:
                         _push_log(
                             f"{source} failed; showing the last coherent snapshot: {exc}")
@@ -3027,7 +3340,7 @@ def _build_operational_page(page_state: dict | None = None) -> None:
                 })();
     '''
     async def restore_view() -> None:
-        nonlocal continuity_ready, loading
+        nonlocal continuity_ready, loading, snapshot
         saved = await ui.run_javascript(continuity_script)
         if isinstance(saved, dict):
             for key in filters:
@@ -3043,21 +3356,38 @@ def _build_operational_page(page_state: dict | None = None) -> None:
         try:
             collected = await ng_run.io_bound(
                 collect_snapshot, copy.deepcopy(snapshot),
-                copy.deepcopy(state_settings))
+                copy.deepcopy(state_settings), False, True)
             if collected is None:
                 raise asyncio.CancelledError
         except Exception as exc:
             loading = False
             empty_inventory.text = f"Could not load agents: {exc}"
-            return
-        finally:
             refresh_button.enable()
             repo_select.enable()
+            return
         await rebuild(announce=False, collected=collected)
         continuity_ready = True
         persist_view()
         _safe_ui(ui.run_javascript, "window.agentsLiveContinuity.restore()")
-        _push_log(_operational_summary(snapshot, source="startup"))
+        _push_log(_operational_summary(snapshot, source="startup inventory"))
+        await asyncio.sleep(0.1)
+        try:
+            collected = await ng_run.io_bound(
+                collect_snapshot, copy.deepcopy(snapshot),
+                copy.deepcopy(state_settings), False)
+            if collected is None:
+                raise asyncio.CancelledError
+            await rebuild(announce=False, collected=collected)
+        except Exception as exc:
+            with page_client:
+                snapshot = {**snapshot, "refresh_error": str(exc)}
+                update_labels(snapshot)
+                _push_log(f"Inventory refresh failed: {exc}")
+            return
+        finally:
+            refresh_button.enable()
+            repo_select.enable()
+        await rebuild(source="startup")
 
     ui.timer(0.1, restore_view, once=True)
     tick_age()

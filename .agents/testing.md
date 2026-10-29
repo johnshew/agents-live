@@ -460,6 +460,11 @@ Run action runs once in all-repositories mode, and reload-worker mode proves
 packaged startup without replaying the UX matrix. Each scenario reports elapsed
 time so a slow or late failure identifies the responsible boundary.
 
+On Windows the readiness runner clears any inherited Ctrl+C ignore setting
+before launching the dashboard. The normal-mode check still sends Ctrl+C and
+requires the dashboard process tree to exit, release the port, and avoid a
+shutdown traceback.
+
 On a Microsoft-managed host whose proxy does not yet expose the candidate,
 install the local wheel by path and let the proxy resolve only its
 dependencies. Follow the Windows and WSL procedure in

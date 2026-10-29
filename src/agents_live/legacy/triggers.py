@@ -16,6 +16,7 @@ build a line.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -153,6 +154,29 @@ def schedule_fields(expression: str) -> tuple[set[int], ...]:
     return parsed[:4] + (weekday,)
 
 
+def _schedule_matcher(expression: str) -> Callable[[datetime], bool]:
+    """Parse a schedule once for repeated firing-time checks."""
+    text = _SPECIAL_SCHEDULES.get(expression.strip().lower(), expression.strip())
+    fields = text.split()
+    minutes, hours, days, months, weekdays = schedule_fields(text)
+    day_restricted = fields[2] != "*"
+    weekday_restricted = fields[4] != "*"
+
+    def matches(moment: datetime) -> bool:
+        if moment.minute not in minutes or moment.hour not in hours:
+            return False
+        if moment.month not in months:
+            return False
+        day_ok = moment.day in days
+        # Python's Monday=0 against cron's Sunday=0.
+        weekday_ok = ((moment.weekday() + 1) % 7) in weekdays
+        if day_restricted and weekday_restricted:
+            return day_ok or weekday_ok
+        return day_ok and weekday_ok
+
+    return matches
+
+
 def schedule_matches(expression: str, moment: datetime) -> bool:
     """Whether *expression* names *moment* as a firing time.
 
@@ -160,21 +184,7 @@ def schedule_matches(expression: str, moment: datetime) -> bool:
     ANDed otherwise, which is cron's rule and the one surprise in the
     language worth stating out loud.
     """
-    text = _SPECIAL_SCHEDULES.get(expression.strip().lower(), expression.strip())
-    fields = text.split()
-    minutes, hours, days, months, weekdays = schedule_fields(text)
-    if moment.minute not in minutes or moment.hour not in hours:
-        return False
-    if moment.month not in months:
-        return False
-    day_restricted = fields[2] != "*"
-    weekday_restricted = fields[4] != "*"
-    day_ok = moment.day in days
-    # Python's Monday=0 against cron's Sunday=0.
-    weekday_ok = ((moment.weekday() + 1) % 7) in weekdays
-    if day_restricted and weekday_restricted:
-        return day_ok or weekday_ok
-    return day_ok and weekday_ok
+    return _schedule_matcher(expression)(moment)
 
 
 def schedule_minutes(expression: str) -> set[int]:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import fnmatch
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,7 +57,19 @@ def resolve_since(value: str | None) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def files(directory: Path) -> tuple[Path, ...]:
+def files(directory: Path, *, strict: bool = False) -> tuple[Path, ...]:
+    if strict:
+        found: set[Path] = set()
+        for folder in (directory, directory / "archive"):
+            try:
+                with os.scandir(folder) as entries:
+                    found.update(
+                        Path(entry.path) for entry in entries
+                        if fnmatch.fnmatch(entry.name, "*.jsonl")
+                        or fnmatch.fnmatch(entry.name, "*.log"))
+            except FileNotFoundError:
+                continue
+        return tuple(sorted(found))
     if not directory.is_dir():
         return ()
     archive = directory / "archive"
@@ -67,7 +81,7 @@ def files(directory: Path) -> tuple[Path, ...]:
     }))
 
 
-def is_jsonl(path: Path) -> bool:
+def is_jsonl(path: Path, *, strict: bool = False) -> bool:
     """Whether a log is expected to contain newline-delimited JSON."""
     if path.suffix.casefold() == ".jsonl":
         return True
@@ -78,7 +92,8 @@ def is_jsonl(path: Path) -> bool:
                 if stripped:
                     return stripped.startswith("{")
     except OSError:
-        pass
+        if strict:
+            raise
     return False
 
 
@@ -87,6 +102,7 @@ def load(
     *,
     text_filter: str | None = None,
     since: str | None = None,
+    strict: bool = False,
 ) -> tuple[dict[str, object], ...]:
     since = resolve_since(since)
     records: list[dict[str, object]] = []
@@ -94,6 +110,8 @@ def load(
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
+            if strict:
+                raise
             continue
         for line in lines:
             try:
@@ -117,10 +135,16 @@ def load(
     return tuple(records)
 
 
-def consecutive_failures(paths: Iterable[Path]) -> dict[str, int]:
+def consecutive_failures(paths: Iterable[Path], *,
+                         strict: bool = False) -> dict[str, int]:
     """Newest consecutive terminal failures for each canonical agent ID."""
+    return failure_streaks(load(paths, strict=strict))
+
+
+def failure_streaks(records: Iterable[dict[str, object]]) -> dict[str, int]:
+    """Calculate terminal failure streaks from already decoded records."""
     terminal: dict[str, list[tuple[datetime, str]]] = {}
-    for record in load(paths):
+    for record in records:
         if record.get("phase") != "done":
             continue
         identifier = record.get("agent_name")
@@ -149,7 +173,7 @@ def consecutive_failures(paths: Iterable[Path]) -> dict[str, int]:
     return streaks
 
 
-def damaged(paths: Iterable[Path]) -> int:
+def damaged(paths: Iterable[Path], *, strict: bool = False) -> int:
     """How many lines no reader can decode.
 
     Skipping them silently is what let 11,577 torn records accumulate
@@ -158,12 +182,14 @@ def damaged(paths: Iterable[Path]) -> int:
     """
     total = 0
     for path in paths:
-        if not is_jsonl(path):
+        if not is_jsonl(path, strict=strict):
             continue
         try:
             lines = path.read_text(
                 encoding="utf-8", errors="replace").splitlines()
         except OSError:
+            if strict:
+                raise
             continue
         for line in lines:
             if not line.strip():
