@@ -753,10 +753,13 @@ def _assert_operational_viewport(
             if "Discovery failed" not in empty_row.inner_text():
                 raise ReadinessError(f"{mode}: discovery failure is not explicit")
             empty_row.get_by_role("button", name="Unregister").click()
-            confirmation = page.get_by_text(
-                "This removes only the registry entry.", exact=False)
-            confirmation.wait_for()
-            page.get_by_role("button", name="Unregister", exact=True).last.click()
+            # Scope to the confirmation: the settings dialog's row buttons share
+            # the name, and DOM order between the two dialogs is not stable.
+            confirmation = page.get_by_role("dialog").filter(
+                has_text="Unregister empty-repository?")
+            confirmation.get_by_text(
+                "This removes only the registry entry.", exact=False).wait_for()
+            confirmation.get_by_role("button", name="Unregister", exact=True).click()
             page.get_by_role("status").get_by_text(
                 "Repository files, definitions, logs, triggers, and runtime "
                 "state were not deleted.", exact=False).wait_for()
@@ -1140,6 +1143,8 @@ def _check(launcher: list[str], directory: Path, environment: dict[str, str],
         argv.append("--dev")
     options = {"start_new_session": True}
     if os.name == "nt":
+        # The new console inherits this process's Ctrl+C disposition.
+        _enable_windows_ctrl_c()
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = subprocess.SW_HIDE
@@ -1312,9 +1317,6 @@ def main() -> int:
     if args.plan:
         print(json.dumps(plan, indent=2))
         return 0
-
-    if os.name == "nt":
-        _enable_windows_ctrl_c()
 
     # A Windows handle can outlive the tree kill by a moment; a lingering
     # file must not fail a check that already passed.
