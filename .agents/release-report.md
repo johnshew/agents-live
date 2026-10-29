@@ -143,7 +143,12 @@ start/stop admin events and the #590 test isolation fix, all merged to main
 before RC1. #588 is on hold until evidence shows it is needed; #566 and #567
 remain deferred. 6.9.5rc1 was prepared from `98b4b4d`, passed isolated acceptance and was
 locally activated on 2026-10-10; it is not publication-approved. Do not reuse
-consumed RC1. The next numbered RC is `6.9.5rc2`.
+consumed RC1. 6.9.5rc2 was prepared from `7743abd` with the dashboard and
+status responsiveness work (#601, #602, #603, #539), passed isolated acceptance
+and was activated locally on 2026-10-29. A watcher observer start-up timeout
+during activation left no local-deploy receipt; see its cycle history. It is not
+publication-approved. Do not reuse consumed RC2. The next numbered RC is
+`6.9.5rc3`.
 
 Use the primary checkout only when clean and already on the intended branch;
 otherwise use an isolated worktree. Verify ancestry before committing or pushing.
