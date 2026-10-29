@@ -1,7 +1,7 @@
 ---
 title: Changelog
 description: Reverse-chronological log of significant Agents Live changes
-ms.date: 2026-10-10
+ms.date: 2026-10-29
 ms.topic: reference
 ---
 
@@ -13,6 +13,21 @@ history is retained in the source repository.
 
 ### 6.9.5 (Unreleased)
 
+- perf: keep the dashboard and `status` responsive on hosts with long run history. ([#601](https://github.com/johnshew/agents-live/issues/601), [#602](https://github.com/johnshew/agents-live/issues/602), [#603](https://github.com/johnshew/agents-live/issues/603))
+  The dashboard renders agent rows before run history is collected and labels
+  history as loading until it arrives. History and host-service collection
+  run in a separate worker process, so log parsing no longer stalls sorting,
+  filtering, scrolling or refresh. Run and cost summaries are cached per log
+  file, so an append reparses only the changed file. Agent definitions parse
+  with libyaml when it is available. `status` avoids duplicate failure-streak
+  work, and Windows schedule diagnostics parse each expression once. The
+  readiness runner clears an inherited Ctrl+C ignore setting, so its Windows
+  shutdown check tests real interrupt handling.
+- fix: keep the repository Unregister confirmation open while the dashboard refreshes.
+  The confirmation was built inside the refreshable settings panel, so a
+  background refresh could remove it before it was answered. It now belongs
+  to the page and is removed once answered, and the Refresh button keeps
+  keyboard focus while data is collected.
 - feat: record agent start and stop as administrative events. ([#591](https://github.com/johnshew/agents-live/issues/591))
   `start`, `start --all` and `stop` write one `agent-start` or `agent-stop`
   event per affected agent with its name, identifier, repository, previous and
