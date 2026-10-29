@@ -77,7 +77,12 @@ class UnsupportedSchemaVersion(DefinitionError):
     """
 
 
-class _UniqueLoader(yaml.SafeLoader):
+# Discovery reparses every definition on each dashboard refresh; libyaml
+# parses several times faster than the pure-Python loader.
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class _UniqueLoader(_SafeLoader):
     pass
 
 
@@ -246,7 +251,7 @@ def _is_flat_definition(prompt: Path) -> bool:
     except DefinitionError:
         return False
     try:
-        candidate = yaml.safe_load(frontmatter)
+        candidate = yaml.load(frontmatter, Loader=_SafeLoader)
     except yaml.YAMLError:
         if _has_execution_metadata(frontmatter):
             _parse(frontmatter, prompt)
