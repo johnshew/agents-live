@@ -3183,7 +3183,9 @@ class TestRunTimingObservability(TempRepository):
         from agents_live.runtime import handoff
 
         with handoff.gate(operation="synthetic-maintenance", run_id="holder"):
-            time.sleep(0.02)
+            # Hold well past the 0.02s assertion: Windows time.monotonic()
+            # advances in ticks of about 16ms.
+            time.sleep(0.05)
         outcome = dispatch(Firing(self.identifier, str(self.root), "clock"),
                            runner=self.runner)
         self.assertEqual("success", outcome.status)
@@ -4100,6 +4102,10 @@ class TestRunsRecordWhatTheySpent(TempRepository):
         dashboard = self._dashboard()
         self.assertEqual((0.10, 0.10), dashboard._scan(logs_dir=directory)[1]["changed"])
         original = log.stat()
+        # NTFS stamps ChangeTime from the system clock, which advances in
+        # ticks of up to about 16ms; a rewrite inside the first write's tick
+        # is indistinguishable, so let the clock move first.
+        time.sleep(0.05)
         event["usage"]["list_cost_usd"] = "0.20"
         log.write_text(json.dumps(event) + "\n", encoding="utf-8")
         os.utime(log, ns=(original.st_atime_ns, original.st_mtime_ns))
