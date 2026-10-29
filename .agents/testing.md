@@ -709,3 +709,53 @@ follow this append; no installed-runtime or native-provider acceptance is claime
 Fold this addition and the preceding correction into the testing policy during a
 separately authorized consolidation pass.
 <!-- /glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
+
+<!-- /glp-update:v1 id=35c61767-9990-4e35-bb6a-467a56ff8633 -->
+
+<!-- glp-update:v1 id=5543f6ff-7b34-42f7-93b2-c60ee1039247 -->
+<a id="glp-5543f6ff-7b34-42f7-93b2-c60ee1039247"></a>
+### GLP Update: Name the timed runtime and profile the real configuration
+
+- Update-ID: 5543f6ff-7b34-42f7-93b2-c60ee1039247
+- Recorded-UTC: 2026-10-29T05:22:31Z
+- Kind: addition
+- Topics: performance measurement, installed runtime identity, plugins, profiling
+- Workstream: dashboard and status responsiveness (#601, #602, #603)
+- Target: .agents/testing.md; compared origin/main 7743abd
+- Source-Session: CDL session 2026-10-29 (local log only)
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Before timing an installed command, invoke the selected installation's launcher
+by absolute path and record its `--version` output with every measurement. An
+editor terminal can carry an activated virtual environment whose `Scripts` or
+`bin` directory precedes the installed launcher on `PATH`, and unsetting
+`VIRTUAL_ENV` does not remove it. For performance work, profile the real
+command on the affected host (`cProfile` through `uv run --with-editable .`)
+before changing code. Repeat the measurement with declared-plugin loading
+disabled, so a plugin's own import cost is separated from Agents Live cost.
+
+#### Evidence
+- Observation: a baseline labelled "installed" ran an older 6.8.0 from a
+  stale virtual environment on `PATH` while the selected runtime was 6.9.5rc1.
+  The comparison was wrong until `Get-Command -All` and `--version` exposed it,
+  and the generated release report also showed the stale version as the local
+  selection.
+- Observation: on the affected host, about 6.5s of an 8.5s `status` was one
+  declared plugin's import. `status --all-repos` took 10.2s with plugins and
+  2.2s without, with identical output. Earlier source-only timing on another
+  host had not shown this.
+
+#### Previous Knowledge
+This guide separates source, wheel and installed execution modes, but it did
+not require proving which executable a timing used or separating plugin cost.
+
+#### Verification and Limits
+Two observations in one session on one Windows host. #604 tracks the runtime
+side of slow plugins.
+
+#### Follow-up
+Fold into the installed-runtime measurement guidance at the next consolidation.
+<!-- /glp-update:v1 id=5543f6ff-7b34-42f7-93b2-c60ee1039247 -->

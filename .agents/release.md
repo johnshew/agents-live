@@ -646,3 +646,55 @@ decided.
 Consider having release tooling report an unrecorded consumed RC (related
 to #562). Fold into Numbered RC lifecycle at the next consolidation.
 <!-- /glp-update:v1 id=44e97798-a467-4dd5-a714-5195a7aedd5c -->
+
+<!-- glp-update:v1 id=ec8c594d-1999-4213-8ca2-cde4ade4643a -->
+<a id="glp-ec8c594d-1999-4213-8ca2-cde4ade4643a"></a>
+### GLP Update: Verify the runtime before acting on a failed activation
+
+- Update-ID: ec8c594d-1999-4213-8ca2-cde4ade4643a
+- Recorded-UTC: 2026-10-29T05:55:00Z
+- Kind: lesson
+- Topics: local deployment, activation, rollback, watchers, plugins
+- Workstream: 6.9.5rc2 preparation and activation
+- Target: .agents/release.md, Numbered RC lifecycle; compared origin/main 7743abd
+- Source-Session: CDL session 2026-10-29 (local log only)
+- Evidence-Basis: observation
+- Application: applied
+- Consolidation: pending
+
+#### Change
+When `local-deploy` reports a failed runtime upgrade followed by "rollback needs
+operator attention", read the actual runtime state before acting. Check which
+version `current` selects, `agents-live --version`, `doctor --all-repos`, the
+admin events around the activation, and which generation the started watchers
+run from. Activation can succeed while a watcher handoff fails afterwards. The
+rollback's `versions activate` is refused while scheduled maintenance holds the
+gate, and maintenance can then repair the watcher on the new generation.
+Record the verified state and the missing receipt in the cycle history. Do not
+retry activation while the cause, such as a slow declared-plugin import beyond
+the 5s watcher observer start-up deadline, is still present.
+
+#### Evidence
+- Observation 2026-10-29: the 6.9.5rc2 `generation.activate` event succeeded.
+  About 12s later the note-index watcher exited with `startup_timeout`, and the
+  upgrade logged "watcher observer startup timed out". `local-deploy` then
+  reported rollback failure while scheduled maintenance ran. Maintenance restarted
+  the watcher on the RC2 generation and completed healthy. `doctor --all-repos`
+  exited 0 on 6.9.5rc2.
+- On the same host, one declared plugin's import cost about 6.5s per process,
+  above `OBSERVER_STARTUP_SECONDS = 5.0` in `runtime/watcher.py`. The causal
+  link is inferred from that timing, not separately reproduced.
+
+#### Previous Knowledge
+The activation GLP update above covers refusal by the previously installed
+runtime. It does not cover a successful activation whose watcher handoff fails,
+or a rollback refused by maintenance.
+
+#### Verification and Limits
+One activation on one Windows host. #604 tracks plugin start-up cost.
+
+#### Follow-up
+Consider whether the watcher observer deadline should account for plugin
+loading, or whether watcher start-up should defer plugin import (#604). Fold
+into the numbered RC guidance at the next consolidation.
+<!-- /glp-update:v1 id=ec8c594d-1999-4213-8ca2-cde4ade4643a -->
