@@ -13,6 +13,17 @@ history is retained in the source repository.
 
 ### 6.9.5 (Unreleased)
 
+- fix: keep log queries and the dashboard Filters menu working with current DuckDB and NiceGUI releases.
+  DuckDB 2.0.1 requires the `tzdata` package to resolve the `UTC` session time
+  zone on Windows, so `agents-live logs` failed there and the dashboard's
+  log-backed views could fail the same way; the log query and dashboard scripts
+  now declare `tzdata`. NiceGUI 4 positions menus with native CSS anchoring,
+  which exposed an invalid placement on the dashboard Filters menu: it could
+  open below the visible window, so its State, Owner and Runtime filters could
+  not be reached. The menu now uses Quasar's space-separated placement and
+  opens under the Filters button. The packaged dashboard readiness gate now
+  waits for the repository selector to refresh after an unregister instead of
+  sampling it once, which intermittently failed on every NiceGUI version.
 - perf: keep the dashboard and `status` responsive on hosts with long run history. ([#601](https://github.com/johnshew/agents-live/issues/601), [#602](https://github.com/johnshew/agents-live/issues/602), [#603](https://github.com/johnshew/agents-live/issues/603))
   The dashboard renders agent rows before run history is collected and labels
   history as loading until it arrives. History and host-service collection
