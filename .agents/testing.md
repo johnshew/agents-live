@@ -83,6 +83,11 @@ Do not use `uv tool install --editable .` for routine source testing. It makes
 bare `agents-live` follow the checkout and hides the distinction between source
 and released behavior.
 
+The release build (`tools/release.py`) packages `git archive HEAD`, so a wheel
+built for an experiment excludes uncommitted edits. Commit the experiment
+locally, or build with `uv build` from the working tree, before testing it as a
+wheel.
+
 Interactive commands need a readiness assertion, not only `--help`. For the
 dashboard, launch the built-wheel command against a temporary repository, wait
 for `/api/agents`, assert the expected agent row and action flags, then stop the
