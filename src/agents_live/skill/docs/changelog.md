@@ -36,6 +36,10 @@ history is retained in the source repository.
   verified. `doctor` fails a registered clock trigger that differs from the
   computed one, and `status` schedule diagnostics no longer report an exact
   match when the registered trigger differs.
+- docs: state in `--help` that `logs --sql` queries the `log` view and cannot be combined with filter flags such as `--since`, and that `status --json` reports the resolved runtime version, channel and commit.
+  The generated command reference also now lists the `versions` command and
+  the `run --timeout`, `run --no-retry`, `transcript --attempt`,
+  `transcript --attempts` and `upgrade --candidate` flags it had omitted.
 - perf: keep the dashboard and `status` responsive on hosts with long run history. ([#601](https://github.com/johnshew/agents-live/issues/601), [#602](https://github.com/johnshew/agents-live/issues/602), [#603](https://github.com/johnshew/agents-live/issues/603))
   The dashboard renders agent rows before run history is collected and labels
   history as loading until it arrives. History and host-service collection

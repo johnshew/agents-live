@@ -356,21 +356,22 @@ invocation   ::= "agents-live" pre_command* ( command post_command* | help_word 
 help_word    ::= "-h" | "--help" | "help" [ COMMAND | "--all" ] | "--version" | ""
 pre_command  ::= "--json" | "--repo" ( PATH | ALIAS )
 post_command ::= "--json" | "-h" | "--help" | "help"
-command      ::= context | run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | migrate | uninstall | repos | ownership | completions | dashboard
+command      ::= context | run | start | stop | status | logs | smoketest | doctor | lock | init | upgrade | versions | migrate | uninstall | repos | ownership | completions | dashboard
 context      ::= "context" ( NAME | "--name" NAME ) [ "--role" ( "pre" | "agent" | "post" ) ] [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ]
-run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ]
+run          ::= "run" ( NAME | "--name" NAME ) [ "--changed-files" VALUE ] [ ( "-p" | "--prompt" ) VALUE ] [ "--prompt-file" VALUE ] [ ( "-o" | "--option" ) VALUE ] [ "--quiet" ] [ "--timeout" VALUE ] [ "--no-retry" ]
 start        ::= "start" ( NAME | "--name" NAME | "--all" ) [ ( "--dry-run" | "-n" ) ] [ "--transfer-here" ] [ "--transfer-to" VALUE ]
 stop         ::= "stop" ( NAME | "--name" NAME ) [ ( "--dry-run" | "-n" ) ]
 status       ::= "status" [ NAME ] [ "--all-repos" ]
 logs         ::= "logs" ( logs_query | "transcript" transcript_args | "timeline" timeline_args )
 logs_query   ::= [ NAME ] [ "--log" VALUE ] [ "--all" ] [ "--agent" VALUE ] [ "--since" VALUE ] [ "--until" VALUE ] [ "--phase" VALUE ] [ "--status" VALUE ] [ "--trigger" VALUE ] [ "--slow" VALUE ] [ "--errors" ] [ ( "-n" | "--limit" | "--tail" ) VALUE ] [ "--columns" VALUE ] [ "--order-by" VALUE ] [ "--desc" ] [ "--asc" ] [ "--sql" VALUE ] [ "--format" ( "table" | "jsonl" | "csv" ) ] [ "--check-schema" ]
-transcript_args ::= [ RUN_ID ] [ "--agent" VALUE ] [ "--last" VALUE ] [ "--since" VALUE ] [ "--errors" ] [ "--summary" ] [ "--raw" ]
+transcript_args ::= [ RUN_ID ] [ "--agent" VALUE ] [ "--last" VALUE ] [ "--since" VALUE ] [ "--errors" ] [ "--attempt" VALUE ] [ "--attempts" ] [ "--summary" ] [ "--raw" ]
 timeline_args ::= [ FILTER ] [ "--all" ] [ "--since" VALUE ] [ "--last" VALUE ] [ "--logs" VALUE ]
 smoketest    ::= "smoketest" [ "--runtime" VALUE ] [ "--model" VALUE ]
 doctor       ::= "doctor" [ "--all-repos" ] [ "--repair" ] [ "--dry-run" ] [ "--quick" ]
 lock         ::= "lock" PATH COMMAND [ "--timeout" VALUE ]
 init         ::= "init" [ "--repo" VALUE ]
-upgrade      ::= "upgrade" [ "--from" VALUE ]
+upgrade      ::= "upgrade" [ "--from" VALUE ] [ "--candidate" ]
+versions     ::= "versions" ( "list" | "classify" VERSION ( "candidate" | "rejected" | "released" ) | "activate" VERSION | "remove" VERSION | "collect" [ "--retain" VALUE ] )
 migrate      ::= "migrate" [ PATHS ] [ "--dry-run" ] [ "--bundle" ]
 uninstall    ::= "uninstall" [ "--distro" VALUE ] [ "--retain-state" ]
 repos        ::= "repos" ( "list" | "add" PATH | "default" [ REPO ] [ "--clear" ] | "remove" REPO )
@@ -386,10 +387,10 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | command | dispatch | root | probes | JSON | all repos | name sugar | flags | summary |
 |---|---|---|---|---|---|---|---|---|
 | context | in-process | registry |  | yes |  | yes | --name, --role, --changed-files, -p, --prompt, --prompt-file, -o, --option | Inspect what one run step would receive. |
-| run | in-process | required |  | yes |  | yes | --name, --changed-files, -p, --prompt, --prompt-file, -o, --option, --quiet | Execute an agent once. |
+| run | in-process | required |  | yes |  | yes | --name, --changed-files, -p, --prompt, --prompt-file, -o, --option, --quiet, --timeout, --no-retry | Execute an agent once. |
 | start | in-process | required | schedule, watch | yes |  | yes | --name, --all, --dry-run, -n, --transfer-here, --transfer-to | Start automatic runs for an agent. |
 | stop | in-process | required | schedule | yes |  | yes | --name, --dry-run, -n | Stop automatic runs and keep the definition. |
-| status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started. |
+| status | in-process | registry |  | yes | yes |  | --all-repos | List agents and whether each is started; --json also reports the resolved runtime version, channel and commit. |
 | logs | subprocess | registry |  | yes |  |  | --log, --all, --agent, --since, --until, --phase, --status, --trigger, --slow, --errors, -n, --limit, --tail, --columns, --order-by, --desc, --asc, --sql, --format, --check-schema | Query logs and correlated event timelines. |
 | logs transcript | subprocess | registry |  | yes |  |  | --agent, --last, --since, --errors, --attempt, --attempts, --summary, --raw | Read a normalized run conversation. |
 | logs timeline | subprocess | registry |  | yes |  |  | --all, --since, --last, --logs | Show a correlated event timeline. |
@@ -397,9 +398,15 @@ stop_args ::= [ "--port" VALUE ] [ "--all" ]
 | doctor | in-process | markerless |  | yes | yes |  | --all-repos, --repair, --dry-run, --quick | Check environment and installation readiness. |
 | lock | in-process | none |  |  |  |  | --timeout | Run a command while holding a cross-platform file lock. |
 | init | in-process | none |  | yes |  |  | --repo | Initialize the global or repository workspace. |
-| upgrade | in-process | none |  | yes |  |  | --from | Upgrade runtime and project skill payloads. |
+| upgrade | in-process | none |  | yes |  |  | --from, --candidate | Upgrade runtime and project skill payloads. |
+| versions | in-process | none |  | yes |  |  |  | Manage installed runtime versions. |
+| versions list | in-process | none |  |  |  |  |  | List installed versions. |
+| versions classify | in-process | none |  |  |  |  |  | Record a version's release status. |
+| versions activate | in-process | none |  |  |  |  |  | Select an installed version. |
+| versions remove | in-process | none |  |  |  |  |  | Remove one inactive version. |
+| versions collect | in-process | none |  |  |  |  | --retain | Remove old inactive versions. |
 | migrate | in-process | required |  |  |  |  | --dry-run, --bundle | Convert 5.x flat definitions. |
-| uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the uv tool. |
+| uninstall | in-process | none |  |  |  |  | --distro, --retain-state | Remove host integrations and the installed runtime. |
 | repos | in-process | none |  | yes |  |  |  | Manage registered repositories. |
 | repos list | in-process | none |  |  |  |  |  | List registered repositories. |
 | repos add | in-process | none |  |  |  |  |  | Register a repository. |
