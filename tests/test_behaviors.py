@@ -13567,6 +13567,94 @@ class TestCrossRepositoryResolution(TempRepository):
         self.assertEqual(messages[0], messages[1])
 
 
+class TestCoordinatorCheck(unittest.TestCase):
+    """The coordinator tracker reports changes only, with bands and exit codes."""
+
+    def setUp(self) -> None:
+        self.tool = runpy.run_path(str(REPOSITORY / "tools" / "coordinator-check.py"))
+        self.now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+
+    def finding(self, key: str, band: str, text: str = "") -> object:
+        return self.tool["Finding"](key, band, text or f"{key} {band}")
+
+    def test_compare_reports_changes_only_and_reminds_unchanged_red(self) -> None:
+        compare = self.tool["compare"]
+        lines, state = compare({}, [self.finding("a", "red"), self.finding("b", "concern"),
+                                    self.finding("c", "ok")], self.now)
+        self.assertEqual(lines, ["RED a red", "CONCERN b concern"])
+
+        lines, state = compare(state, [self.finding("a", "red"), self.finding("b", "concern")],
+                               self.now + timedelta(minutes=20))
+        self.assertEqual(lines, [])
+
+        later = self.now + timedelta(hours=2, minutes=1)
+        lines, state = compare(state, [self.finding("a", "red"), self.finding("b", "ok", "b fine")],
+                               later)
+        self.assertEqual(lines, ["RED (still) a red", "CLEARED b fine"])
+        self.assertEqual(state["a"]["reported_at"], later.isoformat())
+
+        lines, state = compare(state, [self.finding("a", "carry")], later)
+        self.assertEqual((lines, list(state)), ([], ["a"]))
+        lines, _ = compare(state, [], later)
+        self.assertEqual(lines, ["CLEARED a red"])
+
+    def test_worktree_stall_hygiene_and_unpublished_commits(self) -> None:
+        tree = self.tool["Worktree"]
+        classify = self.tool["classify_worktree"]
+        stall = timedelta(minutes=20)
+        old = self.now - timedelta(hours=3)
+        recent = self.now - timedelta(minutes=5)
+        cases = [
+            (tree("w", "b", True, False, 0, old), None, "concern", "STALLED"),
+            (tree("w", "b", False, False, 1, old), {"number": 1}, "concern", "STALLED"),
+            (tree("w", "b", True, False, 0, recent), None, "ok", "active"),
+            (tree("w", "b", False, True, 0, old), None, "concern", "removable"),
+            (tree("w", "b", False, True, 0, recent), None, "ok", "quiet"),
+            (tree("w", "b", False, False, 2, recent), None, "concern", "2 commit(s) on no open PR"),
+        ]
+        for worktree, pr, band, text in cases:
+            finding = classify(worktree, pr, self.now, stall)
+            self.assertEqual(finding.band, band, worktree)
+            self.assertIn(text, finding.text)
+
+    def test_pr_bands(self) -> None:
+        classify = self.tool["classify_pr"]
+        failing = {"number": 1, "mergeStateStatus": "CLEAN",
+                   "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}]}
+        self.assertEqual(classify(failing).band, "red")
+        self.assertEqual(classify({"number": 2, "mergeStateStatus": "DIRTY"}).band, "red")
+        self.assertEqual(classify({"number": 3, "mergeStateStatus": "DIRTY", "isDraft": True}).band,
+                         "concern")
+        self.assertEqual(classify({"number": 4, "mergeStateStatus": "UNKNOWN"}).band, "carry")
+        ready = classify({"number": 5, "mergeStateStatus": "CLEAN",
+                          "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]})
+        self.assertIn("ready for a merge decision", ready.text)
+
+    def test_main_exit_codes_state_and_path_masking(self) -> None:
+        tool = self.tool
+        home = str(Path.home())
+        results = iter([
+            ([self.finding("x", "concern", f"edits in {home}\\repo")], ["MAIN-NEW 1 commit(s)"], {}, False),
+            ([self.finding("x", "concern", "same")], [], {}, False),
+            ([self.finding("x", "unknown", "lookup failed")], [], {}, True),
+        ])
+        main = tool["main"]
+        main.__globals__["collect"] = lambda *_args: next(results)
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            with contextlib.redirect_stdout(io.StringIO()) as first:
+                self.assertEqual(main(["--state", str(state)]), 1)
+            self.assertNotIn(home, first.getvalue())
+            self.assertIn("~", first.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as second:
+                self.assertEqual(main(["--state", str(state)]), 0)
+            self.assertEqual(second.getvalue(), "")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--state", str(state)]), 2)
+            self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["findings"]["x"]["band"],
+                             "unknown")
+
+
 class TestSteeringHook(unittest.TestCase):
     """The repository hooks that keep the CDL steering line from being skipped."""
 

@@ -148,6 +148,7 @@ uv run --with-editable . agents-live smoketest          # framework smoke
 uv run --with-editable . agents-live --help              # CLI from source
 uv run --script tools/pre-release-audit.py               # release audit
 uv run --script tools/release.py --cycle-status          # retained attempts
+uv run --script tools/coordinator-check.py               # what changed since last check
 uv run --script tools/local-deploy.py --repo <live-repository> --rc <next-rc>
 uv run --script tools/release.py --publish --attempt <final-attempt> --yes
 ```
@@ -639,3 +640,53 @@ The guide adds no write, release or runtime authority.
 Fold this and update 3ab5dbe2 into the steering guidance, pointing to
 `.agents/decisions.md`, at the next consolidation of this document.
 <!-- /glp-update:v1 id=d2899645-a3e2-4a3d-8149-d7f76623ad80 -->
+
+<!-- glp-update:v1 id=0d5cac9f-a8f8-4213-98a4-1e4422c0ed36 -->
+<a id="glp-0d5cac9f-a8f8-4213-98a4-1e4422c0ed36"></a>
+### GLP Update: Deterministic coordinator check and short coordinator turns
+
+- Update-ID: 0d5cac9f-a8f8-4213-98a4-1e4422c0ed36
+- Recorded-UTC: 2026-11-22T10:41:51Z
+- Kind: addition
+- Topics: coordination, progress tracking, harness behavior, delegation
+- Workstream: coordinator harness learnings
+- Target: .agents/development.md, Orchestrating delegates and child sessions; tools/coordinator-check.py; AGENTS.md Quick commands; compared origin/main 8da3b58
+- Source-Session: Copilot app session 2026-11-22 (harness history)
+- Evidence-Basis: mixed
+- Application: applied
+- Consolidation: pending
+
+#### Change
+Coordinators track progress with `tools/coordinator-check.py`, a one-shot,
+change-only check with severity bands and exit codes, and run it first on each
+self-wake tick. A coordinator turn dispatches, records and ends; long work runs
+in detached child sessions or processes, and children report only outcomes,
+blockers and decisions. The guide also describes how to start a background
+worker as a child session (isolated worktree, short brief, read-back, push
+before ending, steer or queue messages, fresh session per slice) and how to
+run the heartbeat as its own worker when no automation is available.
+
+#### Evidence
+- User direction, 2026-11-22: keep work moving and adopt a deterministic status
+  tracker that ensures progress is being made, using Copilot harness learnings
+  from another repository maintained by the developer.
+- User direction, 2026-11-22: the harness and delegation guidance should
+  describe how to set up a background worker.
+- Observation, 2026-11-22: two in-session background subagents were cancelled
+  with no completed turns when the coordinator session was interrupted; one
+  lost all work and the other left partial, untested edits.
+- Observation: the check's first live runs reported a held worktree as stalled
+  and a draft PR's conflicts, then printed nothing on unchanged repeat runs.
+
+#### Previous Knowledge
+The self-wake step list checked PRs, runtime errors and worktrees by hand each
+tick, with no record of what had already been reported and no stall detection.
+
+#### Verification and Limits
+Focused behavior tests cover change-only reporting, reminders, bands, exit
+codes and path masking. Stall detection reads file and Git timestamps, so a
+worker that only reads files for 20 minutes is also reported as stalled.
+
+#### Follow-up
+Fold into the orchestration guidance at the next consolidation of this document.
+<!-- /glp-update:v1 id=0d5cac9f-a8f8-4213-98a4-1e4422c0ed36 -->

@@ -120,32 +120,89 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   developer input is not blocked. While the developer is active, report and
   take steering before starting another batch. Run status checks with explicit
   repository paths so a delegate's working directory cannot mislead the report.
+- **A coordinator turn dispatches, records and ends.** Use the coordinator only
+  for commands that finish in seconds, decisions and verification of delegate
+  evidence; delegate tests, builds and implementation. Long work belongs in
+  detached child sessions or detached processes, not in-session background
+  subagents: an interrupted coordinator session cancels its in-session
+  subagents and loses their unfinished work. End the turn promptly so queued
+  developer messages arrive.
+- **Track progress with the deterministic check.** Run
+  `uv run --script tools/coordinator-check.py` (about 10 seconds, read-only
+  apart from its gitignored state under `.reports/`). It prints only changes:
+  new `origin/main` commits, new runtime errors and runtime version changes,
+  and findings that appear, change band or clear: a worktree with uncommitted
+  edits or an open PR but no activity for 20 minutes (`STALLED`), a merged clean
+  worktree (`HYGIENE`), commits on no open PR (`UNPUBLISHED`), failing or
+  conflicting PRs, PRs ready for a merge decision and a primary checkout that is
+  off main, dirty or behind. Unchanged red or unknown findings repeat every two
+  hours. Exit 0 means no change, 1 means something changed and 2 means a lookup
+  failed. Treat every `STALLED` or `UNKNOWN` line as a prompt to investigate
+  the owning worker now, not at the next report. Empty output is the evidence
+  that nothing changed; do not re-check the same items by hand.
 - **Attach one self-wake automation while coordinating active work.** In the
   GitHub Copilot app, attach a single 11-minute same-session automation to the
   orchestrator and clear it on explicit shutdown with a final handoff. Use this
   step list as its prompt template, in order:
-  0. Preflight: `git fetch origin --prune`. Before any `gh` write, clear
-     `GH_TOKEN` and `GITHUB_TOKEN`, run
+  0. Preflight: before any `gh` write, clear `GH_TOKEN` and `GITHUB_TOKEN`, run
      `gh auth switch --hostname github.com --user <origin-owner>` in the same
      process, and verify `gh api user --jq .login`.
-  1. Unblock: read session status; answer every owned child awaiting input or
+  1. Check: run `uv run --script tools/coordinator-check.py`. When it prints
+     nothing and no child is waiting, end the tick silently.
+  2. Unblock: read session status; answer every owned child awaiting input or
      plan approval within existing authority and resume interrupted children.
-     Escalate only new scope or authority, with options and a recommendation.
-  2. Pull requests: check owned open PRs for state, checks and behind-main.
-     Merge only a PR the developer authorized, one head at a time with the
-     full-SHA guard, then read the result back; otherwise report it ready for
-     review.
-  3. Runtime health: `agents-live logs --all --since 15m --errors`. Report new
-     errors, non-ok statuses and runs slower than their recent p95; investigate
-     through a delegate and never change the live runtime without authority.
-  4. Release state: when release-relevant state changed, run
+     Investigate each `STALLED` worker. Escalate only new scope or authority,
+     with options and a recommendation.
+  3. Pull requests: for each PR the check reports ready, merge only a PR the
+     developer authorized, one head at a time with the full-SHA guard, then
+     read the result back; otherwise report it ready for review.
+  4. Runtime health: for reported runtime errors, query detail with
+     `agents-live logs --all --since 15m --errors`; investigate through a
+     delegate and never change the live runtime without authority.
+  5. Release state: when release-relevant state changed, run
      `uv run --script tools/release-report.py` and note changes in readiness,
      blockers or next action.
-  5. Cleanup: archive finished owned children (see below), preserving needed
-     artifacts first. Remove only clean worktrees whose HEAD is on origin,
-     without `--force`.
-  6. Report: message the creator only when something changed or needs a
+  6. Cleanup: archive finished owned children (see below), preserving needed
+     artifacts first. Remove only clean worktrees the check reports as
+     `HYGIENE`, without `--force`.
+  7. Report: message the creator only when something changed or needs a
      decision, in plain language. Silence is fine on a no-change tick.
+- **Start a background worker as a child session.** For any slice longer than
+  a few minutes (implementation, a test run, RC preparation or an
+  investigation):
+  1. Create it with `create_session` and a clear title (for example
+     `Fix: <topic>`). In the app, pass the repository as `workspace` with
+     `worktree: true`; if that fails, start it without isolation and have its
+     first step be `git worktree add <worktree> -b <branch> origin/main` under
+     the repository's worktree folder. Post the returned chat link in your
+     reply.
+  2. Keep the prompt short (about 1,500 characters) and state the goal and
+     acceptance check, quoting the developer's request; the exact worktree,
+     branch and owned paths; the paths and runtime it must not touch; its
+     authority (for example commit and push its branch, open a PR, but no
+     merge); the ban on checkout, reset, restore, stash and `ask_user`; and the
+     expected return: changed paths, check results, blockers and next action.
+     Put longer standing detail in a gitignored file the prompt points to.
+  3. Read the session back to confirm its model and working directory; a
+     session that failed startup is recreated, not revived by message.
+  4. Require work on the remote before the session ends: the branch pushed
+     with a continuation note in its PR (a draft if unfinished). Local edits
+     are invisible to a successor.
+  5. Talk to it with `send_message` using the full chat link: `steer` for a
+     correction or blocker mid-turn, `queue` for an idle worker. Read its state
+     with `get_session_context` on each heartbeat instead of interrupting it.
+  6. Keep slices under about 45 minutes; when one merges, start the next in a
+     fresh session from current `origin/main` rather than reusing the old one.
+  A long command with no reasoning needed (a build or gate run) can instead
+  run as a detached hidden process (the agent shell's async detached mode),
+  writing its result to a gitignored file. Use in-session task subagents only
+  for short, bounded checks whose verdict is all that matters.
+- **Run the heartbeat as its own worker.** Use a same-session automation where
+  the harness offers one. Otherwise start a `Heartbeat` child session whose
+  only job is to run `uv run --script tools/coordinator-check.py` every 15 to
+  20 minutes and message the coordinator with its output, only when it prints
+  something. It never acts; to change what it checks, change the script.
+  Retire it when the goals are met.
 - **Name the workspace in every brief.** State the exact worktree and tested
   head the delegate may read, edit or test, and the excluded locations (for
   example the primary checkout and the live runtime). Repeat the repository's
@@ -155,6 +212,10 @@ or app child sessions. They add no commit, merge, release or runtime authority.
   approvals. Answer them within the developer's goals and recorded authority,
   give a next action, and escalate to the developer only a genuinely new
   authority or scope decision, framed with options and a recommendation.
+- **Children report only on outcomes.** Brief each child to message its
+  supervisor only at a merge-ready result, a blocker or a decision it cannot
+  make, never through a blocking dialog, and to state its next action whenever
+  it pauses. Progress between those points is visible to the check.
 - **Carry plan conditions into review.** When approving a child's plan with
   conditions, copy them verbatim into the reviewer's or tester's brief as
   pass/fail checks.
