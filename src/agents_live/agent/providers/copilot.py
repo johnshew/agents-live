@@ -270,19 +270,21 @@ def _json_completion(stdout: str) -> Completion | None:
             content = data.get("content")
             if isinstance(content, str) and content.strip():
                 phase = data.get("phase")
+                tool_requests = data.get("toolRequests")
+                completes_task = isinstance(tool_requests, list) and any(
+                    isinstance(request, dict)
+                    and request.get("name") == "task_complete"
+                    for request in tool_requests
+                )
                 if phase == "final_answer":
                     final_answers.append(content.strip())
-                elif phase is None:
-                    tool_requests = data.get("toolRequests")
-                    completes_task = isinstance(tool_requests, list) and any(
-                        isinstance(request, dict)
-                        and request.get("name") == "task_complete"
-                        for request in tool_requests
-                    )
-                    if completes_task:
-                        completion_messages.append(content.strip())
-                    else:
-                        assistant_messages.append(content.strip())
+                elif phase is None and not completes_task:
+                    assistant_messages.append(content.strip())
+                # Some models deliver the answer as commentary in the same
+                # message that completes the task (#616); other commentary
+                # stays excluded as progress narration.
+                elif phase in {None, "commentary"} and completes_task:
+                    completion_messages.append(content.strip())
         elif event_type == "session.task_complete" and isinstance(data, dict):
             recognized = True
             summary = data.get("summary")

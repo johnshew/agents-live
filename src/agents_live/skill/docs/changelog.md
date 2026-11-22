@@ -40,6 +40,12 @@ history is retained in the source repository.
   The generated command reference also now lists the `versions` command and
   the `run --timeout`, `run --no-retry`, `transcript --attempt`,
   `transcript --attempts` and `upgrade --candidate` flags it had omitted.
+- fix: keep a Copilot answer sent as commentary in the message that completes the task. ([#616](https://github.com/johnshew/agents-live/issues/616))
+  Some models send their final JSON in a `commentary` message that also calls
+  `task_complete`. The parser ignored all commentary and fell back to the
+  prose completion summary, so structured-output runs failed with no JSON
+  extracted. Commentary that completes the task is now a candidate answer;
+  other commentary remains excluded as progress narration.
 - perf: keep the dashboard and `status` responsive on hosts with long run history. ([#601](https://github.com/johnshew/agents-live/issues/601), [#602](https://github.com/johnshew/agents-live/issues/602), [#603](https://github.com/johnshew/agents-live/issues/603))
   The dashboard renders agent rows before run history is collected and labels
   history as loading until it arrives. History and host-service collection
