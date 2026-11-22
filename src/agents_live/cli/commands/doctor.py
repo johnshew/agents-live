@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from ... import agent, deploy, paths, plugins, runtime, state
@@ -149,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
                         "detail": f"on-demand launch {ready}; {check['detail']}",
                     }
                 checks.append(check)
+            if collected is not None:
+                checks.extend(_schedule_trigger_checks(collected.subscriptions))
         health_payload = _health_payload(paths.health_beacon_path())
         if health_payload is not None:
             checks.extend(_agent_failure_checks(health_payload))
@@ -167,6 +170,48 @@ def main(argv: list[str] | None = None) -> int:
                 "detail": f"{len(result.done)} changes, {len(result.failed)} failures",
             })
     return _finish(checks)
+
+
+def _schedule_trigger_checks(
+    subscriptions: Iterable[runtime.Subscription],
+) -> list[dict[str, object]]:
+    """Registered clock triggers that will not fire as their schedules ask.
+
+    A task whose boundary is pinned to a UTC offset keeps firing at the
+    old instant after a daylight saving or time zone change, and dispatch
+    then skips every firing as not due without failing anything (#609).
+    """
+    read = getattr(runtime.current().trigger_store, "registered_definition", None)
+    if read is None:
+        return []
+    from ...runtime.hosts import task_scheduler
+    checks: list[dict[str, object]] = []
+    compared = 0
+    for item in subscriptions:
+        if item.kind != "schedule" or item.trigger.strip() == "@reboot":
+            continue
+        label = item.target.removeprefix("agent:")
+        try:
+            document = read(item.key)
+        except (OSError, RuntimeError, ValueError) as exc:
+            checks.append({"check": f"schedule trigger {label}", "ok": False,
+                           "detail": f"registered trigger cannot be read: {exc}"})
+            continue
+        if document is None:
+            continue
+        compared += 1
+        drift = task_scheduler.trigger_drift(document, [item.trigger])
+        if drift is not None:
+            checks.append({
+                "check": f"schedule trigger {label}", "ok": False,
+                "detail": (
+                    f"{item.trigger}: {drift}; automatic maintenance "
+                    "re-registers it, or run `agents-live doctor --repair`"),
+            })
+    if compared and not checks:
+        checks.append({"check": "schedule triggers", "ok": True,
+                       "detail": f"{compared} registered on local time"})
+    return checks
 
 
 def _configured_provider_names(

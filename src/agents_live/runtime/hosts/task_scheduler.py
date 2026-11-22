@@ -30,6 +30,7 @@ Two Windows facts shape the rest:
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import shutil
@@ -38,7 +39,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from hashlib import sha256
 from math import gcd
 from pathlib import Path, PureWindowsPath
@@ -607,11 +608,32 @@ def _covering_interval(minutes: set[int]) -> dict[str, object]:
     return {"kind": "interval", "minutes": step, "anchor_minute": anchor % step}
 
 
+def _wall_clock(moment: datetime) -> str:
+    """*moment* as local wall-clock text with no UTC offset.
+
+    Task Scheduler pins a boundary that carries an offset to that UTC
+    instant forever, while dispatch checks the cron against current local
+    time, so a daylight saving or time zone change turns every firing of
+    an hour-aligned schedule into a silent ``not-due`` skip (#609). A
+    boundary without an offset is evaluated in the computer's current
+    zone, which is the basis the due check uses. *moment* is local time
+    in the zone it carries; only its wall-clock fields are written.
+    """
+    return moment.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
 def _boundary(trigger: dict[str, object], now: datetime) -> str:
-    """Keep an active calendar period's phase, otherwise choose a future start."""
+    """Keep an active calendar period's phase, otherwise choose a future start.
+
+    Returned as local wall-clock time (see :func:`_wall_clock`).
+    """
+    return _wall_clock(_boundary_moment(trigger, now))
+
+
+def _boundary_moment(trigger: dict[str, object], now: datetime) -> datetime:
     start = now.replace(second=0, microsecond=0)
     if trigger["kind"] == "boot":
-        return start.isoformat(timespec="seconds")
+        return start
     target_hour = int(trigger["hour"])
     target_minute = int(trigger["minute"])
     start = start.replace(hour=target_hour, minute=target_minute)
@@ -629,16 +651,16 @@ def _boundary(trigger: dict[str, object], now: datetime) -> str:
             or trigger["kind"] == "monthly" and start.day in days and start.month in months
         )
         if eligible and following < duration:
-            return start.isoformat(timespec="seconds")
+            return start
     if trigger["kind"] == "daily":
         if start <= now:
             start += timedelta(days=1)
-        return start.isoformat(timespec="seconds")
+        return start
     if trigger["kind"] == "weekly":
         weekdays = set(trigger.get("weekdays") or [int(trigger["weekday"])])
         while start <= now or ((start.weekday() + 1) % 7) not in weekdays:
             start += timedelta(days=1)
-        return start.isoformat(timespec="seconds")
+        return start
     if trigger["kind"] == "monthly":
         days = set(trigger.get("days") or [int(trigger["day"])])
         months = set(trigger.get("months") or list(range(1, 13)))
@@ -646,13 +668,13 @@ def _boundary(trigger: dict[str, object], now: datetime) -> str:
         while (start <= now or start.month not in months or start.day not in days) and attempts < 1461:
             start += timedelta(days=1)
             attempts += 1
-        return start.isoformat(timespec="seconds")
+        return start
     step = int(trigger.get("minutes") or trigger.get("interval_minutes") or 60)
     anchor = int(trigger.get("anchor_minute") or target_minute)
     start = start.replace(minute=0) + timedelta(minutes=anchor)
     while start <= now:
         start += timedelta(minutes=step)
-    return start.isoformat(timespec="seconds")
+    return start
 
 
 # ---------------------------------------------------------------------------
@@ -1064,16 +1086,30 @@ def _interval_minutes(interval: str) -> int | None:
     return total or None
 
 
-def _definition_signature(document: str) -> list[tuple]:
-    """The same signature, read back out of a registered definition."""
+def _trigger_elements(document: str) -> list[ET.Element] | None:
     body = document.split("?>", 1)[-1].strip()
     try:
         task = ET.fromstring(body)
     except ET.ParseError:
-        return []
-    found: list[tuple] = []
+        return None
     parent = task.find(f"{{{_NS}}}Triggers")
-    for element in ([] if parent is None else list(parent)):
+    return [] if parent is None else list(parent)
+
+
+def _definition_signature(document: str, *,
+                          zone: tzinfo | None = None) -> list[tuple]:
+    """The same signature, read back out of a registered definition.
+
+    A boundary without an offset is local wall-clock time, which is how
+    Task Scheduler evaluates it, so its fields are read as written (#397).
+    A boundary with an offset is a fixed instant; it is read in *zone*
+    (the current local zone by default), so one pinned before a daylight
+    saving or time zone change reads as firing at a different local time
+    than its schedule asks for (#609).
+    """
+    elements = _trigger_elements(document)
+    found: list[tuple] = []
+    for element in elements or []:
         tag = element.tag.rsplit("}", 1)[-1]
         if tag == "LogonTrigger":
             found.append(("logon",))
@@ -1082,7 +1118,7 @@ def _definition_signature(document: str) -> list[tuple]:
         try:
             start = datetime.fromisoformat(boundary)
             if start.tzinfo is not None:
-                start = start.astimezone()
+                start = start.astimezone(zone)
         except ValueError:
             continue
         if tag == "TimeTrigger":
@@ -1124,6 +1160,90 @@ def _definition_signature(document: str) -> list[tuple]:
             continue
         found.append(("daily", start.hour, start.minute, *rep_part))
     return sorted(found)
+
+
+# How a registered clock trigger keeps time: on the local wall clock, or
+# pinned to the UTC instant its boundary named when it was written.
+LOCAL = "local"
+PINNED = "pinned"
+
+
+def boundary_form(document: str) -> str | None:
+    """LOCAL, PINNED, or None for a definition with no clock boundary.
+
+    One pinned boundary pins the task: that trigger stops following the
+    computer's zone, which is the whole defect (#609).
+    """
+    form = None
+    for element in _trigger_elements(document) or []:
+        boundary = element.findtext(f"{{{_NS}}}StartBoundary")
+        if boundary is None:
+            continue
+        try:
+            start = datetime.fromisoformat(boundary.strip())
+        except ValueError:
+            return PINNED
+        if start.tzinfo is not None:
+            return PINNED
+        form = LOCAL
+    return form
+
+
+def _trigger_identity(form: str, signature: list[tuple]) -> str:
+    material = json.dumps([form, signature], separators=(",", ":"))
+    return f"{form}:{sha256(material.encode()).hexdigest()[:16]}"
+
+
+def desired_trigger_identity(schedules: Sequence[str]) -> str | None:
+    """A comparable token for the clock triggers *schedules* register.
+
+    None when nothing in *schedules* has a clock boundary (``@reboot``
+    alone), so a logon-only task keeps the identity it always had.
+    """
+    signature = trigger_signature(schedules)
+    if all(entry == ("logon",) for entry in signature):
+        return None
+    return _trigger_identity(LOCAL, signature)
+
+
+def registered_trigger_identity(document: str, *,
+                                zone: tzinfo | None = None) -> str | None:
+    """The same token, read back out of a registered definition.
+
+    Both halves are normalized readings (the signature through
+    :func:`_interval_minutes`, the form through :func:`boundary_form`), so
+    a definition the store reshapes on export still compares equal and a
+    converged task is not rewritten on every maintenance pass.
+    """
+    form = boundary_form(document)
+    if form is None:
+        return None
+    return _trigger_identity(form, _definition_signature(document, zone=zone))
+
+
+def trigger_drift(document: str, schedules: Sequence[str], *,
+                  zone: tzinfo | None = None) -> str | None:
+    """Why a registered definition will not fire as *schedules* ask, or None."""
+    if boundary_form(document) == PINNED:
+        return ("start boundary is pinned to a UTC offset, so it will not "
+                "follow daylight saving or time zone changes")
+    registered = _definition_signature(document, zone=zone)
+    desired = trigger_signature(schedules)
+    if registered != desired:
+        return (f"registered trigger fires on {_describe(registered)}, "
+                f"but {', '.join(schedules)} asks for {_describe(desired)}")
+    return None
+
+
+def _describe(signature: list[tuple]) -> str:
+    return " ".join(":".join(str(part) for part in entry)
+                    for entry in signature) or "nothing"
+
+
+def registered_boundaries(document: str) -> list[str]:
+    """Every clock boundary a definition holds, as registered."""
+    return [boundary.strip() for element in _trigger_elements(document) or []
+            if (boundary := element.findtext(f"{{{_NS}}}StartBoundary"))]
 
 
 def simulate_firings(
@@ -1182,18 +1302,22 @@ def simulate_firings(
     return due, native
 
 
-def diagnostics(schedule: str, now: datetime | None = None) -> dict[str, object]:
+def diagnostics(schedule: str, now: datetime | None = None, *,
+                registered: str | None = None) -> dict[str, object]:
     """Expose translation details for a cron expression on Windows.
 
     Reports:
     - canonical: the normalized cron expression
-    - native_trigger: kind, interval, duration, and boundary
-    - exact: whether native firings match cron without extra wake-ups
+    - native_trigger: kind, interval, duration, and boundary (local wall clock)
+    - exact: whether native firings match cron without extra wake-ups;
+      false whenever *registered* does not fire as the schedule asks
     - fallback_reason: why covering was chosen if not exact
     - estimated_native_firings: estimated native firings over representative period
     - estimated_due_firings: estimated due firings over representative period
     - period: description of representative period (day, week, month, year)
     - summary: readable one-line explanation
+    - registered_trigger: only with *registered*, the task definition Task
+      Scheduler holds: its boundaries, whether it matches, and why not
     """
     now = now or datetime.now().astimezone()
     text = schedule.strip()
@@ -1248,7 +1372,7 @@ def diagnostics(schedule: str, now: datetime | None = None) -> dict[str, object]
             f"({due_count} due){reason_text}"
         )
 
-    return {
+    result: dict[str, object] = {
         "canonical": canonical,
         "native_trigger": {
             "kind": kind,
@@ -1263,6 +1387,19 @@ def diagnostics(schedule: str, now: datetime | None = None) -> dict[str, object]
         "period": period_name,
         "summary": summary,
     }
+    if registered is not None:
+        drift = trigger_drift(registered, [schedule])
+        result["registered_trigger"] = {
+            "boundary": registered_boundaries(registered),
+            "matches": drift is None,
+            "drift": drift,
+        }
+        if drift is not None:
+            # What would be registered now is not what Task Scheduler
+            # holds, so nothing about the computed trigger is exact.
+            result["exact"] = False
+            result["summary"] = f"registered trigger differs from the computed one: {drift}"
+    return result
 
 
 def install(spec: triggers.TriggerSpec) -> str:
@@ -1375,7 +1512,9 @@ def registered_tasks() -> list[dict[str, str]]:
     carries a digest of the root, and a root nobody can name cannot be
     digested. So this reads the folder rather than asking for a name,
     and reports what each task would run: ``{"name", "command",
-    "arguments", "working_dir", "principal"}``.
+    "arguments", "working_dir", "principal", "trigger"}``, where
+    ``trigger`` is :func:`registered_trigger_identity` (None for a task
+    with no clock boundary).
     """
     try:
         code, out, _err = _run(["/Query", "/TN", f"{TASK_FOLDER}\\", "/FO",
@@ -1407,7 +1546,8 @@ def registered_tasks() -> list[dict[str, str]]:
         command, arguments, working_dir = action
         tasks.append({"name": leaf, "command": command,
                       "arguments": arguments, "working_dir": working_dir,
-                      "principal": principal_of_definition(document)})
+                      "principal": principal_of_definition(document),
+                      "trigger": registered_trigger_identity(document)})
     return tasks
 
 

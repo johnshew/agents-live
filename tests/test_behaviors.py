@@ -513,6 +513,55 @@ class TestOwnershipEnforcement(TempRepository):
                 if not duplicate:
                     self.assertFalse(state.load(self.root).initialized)
 
+    def test_doctor_fails_a_clock_trigger_pinned_to_a_stale_utc_offset(self):
+        """doctor reports a registered boundary that no longer fires on the cron (#609)."""
+        from agents_live.runtime.hosts import task_scheduler
+        self.skill("twice-daily", [
+            'agents-live.selector: "claude"',
+            'agents-live.schedule: "0 */12 * * *"',
+        ])
+        spec = agent.load("twice-daily", root=self.root)
+        state.replace(self.root, {spec.identifier})
+        previous = runtime.current()
+        host = MemoryHost()
+        runtime.configure(host)
+        self.addCleanup(runtime.configure, previous)
+        key = Subscription.create(
+            scope=f"repo:{self.root.resolve()}", target=f"agent:{spec.identifier}",
+            kind="schedule", trigger="0 */12 * * *").key
+        current = task_scheduler.build_task_xml(
+            command="agents-live.exe", arguments="run", working_dir=str(self.root),
+            schedules=["0 */12 * * *"], description="fixture", uri="fixture",
+            user_id="user",
+            now=datetime(2026, 10, 29, 10, tzinfo=timezone(timedelta(hours=-4))))
+        stale = current.replace(
+            "<StartBoundary>2026-10-29T00:00:00</StartBoundary>",
+            "<StartBoundary>2026-10-29T00:00:00-04:00</StartBoundary>")
+        for document, healthy in ((stale, False), (current, True)):
+            with self.subTest(healthy=healthy):
+                host.trigger_store.registered_definition = {key: document}.get
+                output = io.StringIO()
+                with (
+                    mock.patch.object(repos, "load", return_value={
+                        "repos": {"test": str(self.root)}}),
+                    mock.patch.object(hostruntime, "id", return_value="windows"),
+                    mock.patch.object(doctor, "_provider_cli_checks", return_value=[]),
+                    mock.patch.object(doctor, "_git_index_check", return_value=None),
+                    mock.patch.object(doctor, "_health_payload", return_value=None),
+                    mock.patch.object(doctor.update_check, "interactive", return_value=False),
+                    contextlib.redirect_stdout(output),
+                ):
+                    code = doctor.main([])
+                text = output.getvalue()
+                if healthy:
+                    self.assertEqual(0, code, text)
+                    self.assertIn("ok: schedule triggers: 1 registered on local time", text)
+                else:
+                    self.assertEqual(1, code, text)
+                    self.assertIn(
+                        f"ERROR: schedule trigger {spec.identifier}: 0 */12 * * *: "
+                        "start boundary is pinned to a UTC offset", text)
+
 
 class TestCrontabTriggerStore(TempRepository):
     """What the POSIX store does to a table it shares with other writers.

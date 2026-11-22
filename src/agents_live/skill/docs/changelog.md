@@ -24,6 +24,18 @@ history is retained in the source repository.
   opens under the Filters button. The packaged dashboard readiness gate now
   waits for the repository selector to refresh after an unregister instead of
   sampling it once, which intermittently failed on every NiceGUI version.
+- fix: keep Windows schedules on local time across daylight-saving and time zone changes. ([#609](https://github.com/johnshew/agents-live/issues/609))
+  Task Scheduler triggers were registered with a start boundary pinned to the
+  UTC offset in effect at registration. After a daylight-saving change every
+  hour-aligned firing arrived an hour off and was skipped as not due. Triggers
+  now register local wall-clock time, which Task Scheduler follows through
+  offset changes, and read-back treats a boundary without an offset as local
+  time, never UTC. Automatic maintenance compares the registered trigger with
+  the computed one and re-registers an offset-pinned or drifted trigger once,
+  so existing hosts recover after upgrade; each install is read back and
+  verified. `doctor` fails a registered clock trigger that differs from the
+  computed one, and `status` schedule diagnostics no longer report an exact
+  match when the registered trigger differs.
 - perf: keep the dashboard and `status` responsive on hosts with long run history. ([#601](https://github.com/johnshew/agents-live/issues/601), [#602](https://github.com/johnshew/agents-live/issues/602), [#603](https://github.com/johnshew/agents-live/issues/603))
   The dashboard renders agent rows before run history is collected and labels
   history as loading until it arrives. History and host-service collection

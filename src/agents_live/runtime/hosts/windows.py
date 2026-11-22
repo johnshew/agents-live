@@ -58,6 +58,27 @@ class WindowsTriggerStore:
         if code != 0:
             raise wintasks.TaskError(
                 error.strip() or f"Task Scheduler refused to register {path}")
+        # Read back what the store now holds. A definition that does not
+        # read back as the trigger just written would compare as changed on
+        # every maintenance pass and be rewritten forever; failing here
+        # reports that instead of hiding it (#609).
+        registered = wintasks.read_definition(path)
+        if registered is None:
+            raise wintasks.TaskError(f"{path} was registered but cannot be read back")
+        expected = wintasks.desired_trigger_identity([data["schedule"]])
+        if wintasks.registered_trigger_identity(registered) != expected:
+            drift = wintasks.trigger_drift(registered, [data["schedule"]])
+            raise wintasks.TaskError(
+                f"{path} was registered but reads back firing differently than "
+                f"{data['schedule']}: {drift or 'trigger form changed'}")
+
+    def registered_definition(self, key: str) -> str | None:
+        """The task definition held for subscription *key*, or None."""
+        try:
+            return wintasks.read_definition(
+                f"{wintasks.TASK_FOLDER}\\{self._PREFIX}{key}")
+        except wintasks.TaskSchedulerUnavailable:
+            return None
 
     def remove(self, key: str) -> None:
         path = f"{wintasks.TASK_FOLDER}\\{self._PREFIX}{key}"
@@ -80,7 +101,9 @@ class WindowsTriggerStore:
                     metadata.id,
                     metadata.scope,
                     "watch" if {"watch-loop", "watch-supervise"}.intersection(argv) else "schedule",
-                    _action_fingerprint(argv, task["working_dir"]),
+                    _trigger_fingerprint(
+                        _action_fingerprint(argv, task["working_dir"]),
+                        task.get("trigger")),
                     json.dumps(task, sort_keys=True, default=str),
                     metadata.target,
                 ))
@@ -256,11 +279,15 @@ class WindowsHost:
             sort_keys=True,
             separators=(",", ":"),
         )
+        fingerprint = _action_fingerprint(argv, root)
+        if subscription.kind == "schedule":
+            fingerprint = _trigger_fingerprint(
+                fingerprint, wintasks.desired_trigger_identity([schedule]))
         return RenderedSubscription(
             subscription.key,
             subscription.scope,
             subscription.kind,
-            _action_fingerprint(argv, root),
+            fingerprint,
             rendered,
             watcher_argv,
             subscription.target,
@@ -302,6 +329,20 @@ def _action_fingerprint(argv: Sequence[str], root: str) -> str:
         separators=(",", ":"),
     )
     return artifacts.PREFIX + sha256(material.encode()).hexdigest()
+
+
+def _trigger_fingerprint(action: str, trigger: str | None) -> str:
+    """An action fingerprint extended by how its clock trigger keeps time.
+
+    The subscription key already changes with the schedule text, but not
+    with how a registered task holds it: a boundary pinned to a UTC offset
+    drifts an hour at every daylight saving change while the action and
+    key stay equal (#609). Folding the read-back trigger in makes such a
+    task compare as changed, so convergence re-registers it once. A task
+    with no clock boundary (a logon trigger) keeps its action fingerprint,
+    which a watcher process also carries.
+    """
+    return f"{action}#{trigger}" if trigger else action
 
 
 def _process_markers(argv: Sequence[str]) -> dict[str, str] | None:
